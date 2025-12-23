@@ -1,13 +1,19 @@
-from enum import Enum
-from datetime import datetime, time, date, timedelta
-import json
-import time as t  # For sleep functionality
+"""Event scheduling and trigger runner.
 
-import os
+This module defines event data structures, utilities to load/save events
+from JSON, and a minimal clock scheduler that watches the events file for
+changes and executes triggers at the right time.
+"""
+
 import heapq
+import json
+import os
 import threading
+import time as t  # For sleep functionality
 from dataclasses import dataclass, field
-from typing import Optional, List
+from datetime import date, datetime, time, timedelta
+from enum import Enum
+from typing import List, Optional
 
 
 EVENTS_FILE = "chat_events.json"
@@ -29,24 +35,40 @@ class WeekDay(Enum):
     Sunday = 7
 
 
-class Event:  # Create Event, Add Times
-    def __init__(self, name: str, day: WeekDay, event_date: date, event_time: time, repeating: bool, times):
+class Event:
+    """An event with optional weekly repetition and one or more triggers."""
+
+    def __init__(
+        self,
+        name: str,
+        day: WeekDay,
+        event_date: date,
+        event_time: time,
+        repeating: bool,
+        times: List["TimeOfTrigger"],
+    ) -> None:
         self.name = name
         self.day = day
-        self.date = event_date  # Start date of the series (for repeating), or actual date (for non-repeating)
-        self.time = event_time  # datetime.time object
-        self.repeating = repeating  # True => repeats weekly on self.day at self.time
+        # Start date of the series (for repeating) or actual date (non-repeating)
+        self.date = event_date
+        # Time of day the event starts
+        self.time = event_time
+        # True => repeats weekly on `self.day` at `self.time`
+        self.repeating = repeating
         self.times = times
 
-        # Ensure triggers are in chronological order relative to event start (BEFORE negative first, AFTER positive last)
+        # Ensure triggers are in chronological order relative to event start
+        # (BEFORE negative first, AFTER positive last)
         self.times.sort()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"   {self.name}   \n" + (len(self.name) + 6) * "-" + "\n"
 
 
 class TimeOfTrigger:
-    def __init__(self, minutes, typeOfTrigger: TypeofTime, buttonURL: str):
+    """A trigger offset relative to an event start time."""
+
+    def __init__(self, minutes: int, typeOfTrigger: TypeofTime, buttonURL: str) -> None:
         self.minutes = minutes
         self.typeOfTrigger = typeOfTrigger
         self.buttonURL = buttonURL
@@ -60,10 +82,10 @@ class TimeOfTrigger:
         else:
             raise ValueError("Impossible Selection")
 
-    def __lt__(self, other):
+    def __lt__(self, other: "TimeOfTrigger") -> bool:
         return self.timer < other.timer
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.timer)
 
 
@@ -119,13 +141,12 @@ def load_events_safe(path: str = EVENTS_FILE, retries: int = 10, delay: float = 
 
 
 def load_events() -> List[Event]:
+    """Load events from the default events file."""
     return load_events_safe(EVENTS_FILE)
 
 
-def save_events():
-    """
-    PATCHED: saves buttonURL as well (so it doesn't get lost on write).
-    """
+def save_events() -> None:
+    """Persist in-memory events to disk, preserving trigger button URLs."""
     with open(EVENTS_FILE, "w") as file:
         events_data = []
         for event in events:
@@ -190,16 +211,19 @@ def next_weekly_occurrence(event: Event, now: datetime) -> Optional[datetime]:
 class TriggerJob:
     due: datetime
     event: Event = field(compare=False)
-    occurrence: datetime = field(compare=False)   # event start datetime for this occurrence
+    # Event start datetime for this occurrence
+    occurrence: datetime = field(compare=False)
     trigger_index: int = field(compare=False)
     trigger: TimeOfTrigger = field(compare=False)
 
 
-def push_triggers_for_occurrence(heap: list, event: Event, occurrence: datetime, now: datetime) -> None:
-    """
-    Expands one event occurrence into multiple TriggerJobs (one per trigger),
-    using trigger.timer (signed minutes) relative to occurrence.
-    """
+def push_triggers_for_occurrence(
+    heap: List["TriggerJob"],
+    event: Event,
+    occurrence: datetime,
+    now: datetime,
+) -> None:
+    """Expand one event occurrence into multiple TriggerJobs (one per trigger)."""
     for idx, trig in enumerate(event.times):
         due = (occurrence + timedelta(minutes=trig.timer)).replace(microsecond=0)
 
@@ -212,7 +236,9 @@ def push_triggers_for_occurrence(heap: list, event: Event, occurrence: datetime,
 # Clock scheduler (watches file + executes triggers)
 # ----------------------------
 class ClockScheduler:
-    def __init__(self, events_file: str = EVENTS_FILE, poll_interval: float = 1.0):
+    """Watches the events file and executes due triggers."""
+
+    def __init__(self, events_file: str = EVENTS_FILE, poll_interval: float = 1.0) -> None:
         self.events_file = events_file
         self.poll_interval = poll_interval
 
@@ -220,7 +246,7 @@ class ClockScheduler:
         self._stop = threading.Event()
         self._reload_needed = True
 
-        self._heap: list[TriggerJob] = []
+        self._heap: List[TriggerJob] = []
         self._last_mtime: Optional[float] = None
 
     def start(self) -> None:
@@ -332,6 +358,16 @@ class ClockScheduler:
                         with self._cv:
                             push_triggers_for_occurrence(self._heap, job.event, next_occ, datetime.now())
                             heapq.heapify(self._heap)
+
+
+
+# ----------------------------
+# Companion
+# ----------------------------
+from companion import Companion
+
+c = Companion("127.0.0.1", 8000)
+
 
 
 # ----------------------------

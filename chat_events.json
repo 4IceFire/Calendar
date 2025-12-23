@@ -1,14 +1,67 @@
 [
   {
-    "name": "Test Event",
+    "name": "Test Event 1",
     "day": "Tuesday",
-    "date": "2025-12-24",
-    "time": "09:40:00",
+    "date": "2025-12-23",
+    "time": "19:00:00",
     "repeating": false,
     "times": [
-      {"minutes": 2, "typeOfTrigger": "BEFORE", "buttonURL":"1/0/1"},
-      {"minutes": 0, "typeOfTrigger": "AT", "buttonURL":"1/0/2"},
-      {"minutes": 1, "typeOfTrigger": "AFTER", "buttonURL":"1/0/3"}
+      {"minutes": 15, "typeOfTrigger": "BEFORE", "buttonURL":"1/0/1"},
+      {"minutes": 5, "typeOfTrigger": "BEFORE", "buttonURL":"1/0/2"},
+      {"minutes": 0, "typeOfTrigger": "AT", "buttonURL":"1/0/3"},
+      {"minutes": 10, "typeOfTrigger": "AFTER", "buttonURL":"1/0/4"}
+    ]
+  },
+  {
+    "name": "Test Event 2",
+    "day": "Tuesday",
+    "date": "2025-12-23",
+    "time": "19:15:00",
+    "repeating": false,
+    "times": [
+      {"minutes": 2, "typeOfTrigger": "BEFORE", "buttonURL":"1/1/1"},
+      {"minutes": 0, "typeOfTrigger": "AT", "buttonURL":"1/1/2"},
+      {"minutes": 10, "typeOfTrigger": "AFTER", "buttonURL":"1/1/3"},
+      {"minutes": 14, "typeOfTrigger": "AFTER", "buttonURL":"1/1/3"}
+    ]
+  },
+  {
+    "name": "Test Event 3",
+    "day": "Tuesday",
+    "date": "2025-12-20",
+    "time": "19:30:00",
+    "repeating": true,
+    "times": [
+      {"minutes": 10, "typeOfTrigger": "BEFORE", "buttonURL":"1/2/1"},
+      {"minutes": 5, "typeOfTrigger": "BEFORE", "buttonURL":"1/2/1"},
+      {"minutes": 1, "typeOfTrigger": "AT", "buttonURL":"1/2/2"},
+      {"minutes": 10, "typeOfTrigger": "AFTER", "buttonURL":"1/2/3"}
+    ]
+  },
+    {
+    "name": "Test Event 4",
+    "day": "Tuesday",
+    "date": "2025-12-16",
+    "time": "19:31:00",
+    "repeating": true,
+    "times": [
+      {"minutes": 10, "typeOfTrigger": "BEFORE", "buttonURL":"1/2/1"},
+      {"minutes": 5, "typeOfTrigger": "BEFORE", "buttonURL":"1/2/1"},
+      {"minutes": 1, "typeOfTrigger": "AT", "buttonURL":"1/2/2"},
+      {"minutes": 10, "typeOfTrigger": "AFTER", "buttonURL":"1/2/3"}
+    ]
+  },
+    {
+    "name": "Test Event 5",
+    "day": "Tuesday",
+    "date": "2025-12-16",
+    "time": "19:31:00",
+    "repeating": true,
+    "times": [
+      {"minutes": 10, "typeOfTrigger": "BEFORE", "buttonURL":"1/2/1"},
+      {"minutes": 5, "typeOfTrigger": "BEFORE", "buttonURL":"1/2/1"},
+      {"minutes": 1, "typeOfTrigger": "AT", "buttonURL":"1/2/2"},
+      {"minutes": 10, "typeOfTrigger": "AFTER", "buttonURL":"1/2/3"}
     ]
   }
 ]

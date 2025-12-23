@@ -1,7 +1,10 @@
-from enum import Enum
-from datetime import datetime, time, date, timedelta
+"""Simple event loader and polling monitor."""
+
 import json
 import time as t  # For sleep functionality
+from enum import Enum
+from datetime import date, datetime, time
+from typing import List
 
 EVENTS_FILE = 'events.json'
 
@@ -19,8 +22,16 @@ class WeekDay(Enum):
     Saturday = 6
     Sunday = 7
 
-class Event(): # Create Event, Add Times
-    def __init__(self, name: str, day: WeekDay, event_date: date, event_time: time, repeating: bool, times):
+class Event:  # Create Event, Add Times
+    def __init__(
+        self,
+        name: str,
+        day: WeekDay,
+        event_date: date,
+        event_time: time,
+        repeating: bool,
+        times: List["TimeOfTrigger"],
+    ) -> None:
         self.name = name
         self.day = day
         self.date = event_date  # New date variable
@@ -30,35 +41,38 @@ class Event(): # Create Event, Add Times
 
         self.times.sort()
 
-    def __str__(self):
-        return(f"   {self.name}   \n" + (len(self.name) + 6) * "-" + f"\n")
+    def __str__(self) -> str:
+        return f"   {self.name}   \n" + (len(self.name) + 6) * "-" + "\n"
 
 
 
-class TimeOfTrigger():
-    def __init__(self, minutes, typeOfTrigger:TypeofTime, buttonURL):
+class TimeOfTrigger:
+    def __init__(self, minutes: int, typeOfTrigger: TypeofTime, buttonURL: str) -> None:
         self.minutes = minutes
         self.typeOfTrigger = typeOfTrigger
         self.buttonURL = buttonURL
 
-        if(typeOfTrigger == TypeofTime.BEFORE):
+        if typeOfTrigger == TypeofTime.BEFORE:
             self.timer = -minutes
-        elif(typeOfTrigger == TypeofTime.AT):
+        elif typeOfTrigger == TypeofTime.AT:
             self.timer = 0
-        elif(typeOfTrigger == TypeofTime.AFTER):
+        elif typeOfTrigger == TypeofTime.AFTER:
             self.timer = minutes
         else:
-            print("Impossibe Selection")
+            raise ValueError("Impossible Selection")
 
-    def __lt__(self, other):
+    def __lt__(self, other: "TimeOfTrigger") -> bool:
         return self.timer < other.timer
     
-    def __str__(self):
-        return self.timer
+    def __str__(self) -> str:
+        return str(self.timer)
 
 
-events = []
-def load_events():
+events: List[Event] = []
+
+
+def load_events() -> List[Event]:
+    """Load events from the JSON file on disk."""
     try:
         with open(EVENTS_FILE, 'r') as file:
             events_data = json.load(file)
@@ -86,7 +100,8 @@ def load_events():
     except FileNotFoundError:
         return []
 
-def save_events():
+def save_events() -> None:
+    """Persist current in-memory events to disk."""
     with open(EVENTS_FILE, 'w') as file:
         events_data = []
         for event in events:
@@ -144,7 +159,7 @@ def monitor_events():
             print("No upcoming events, sleeping for 60 seconds")
             t.sleep(60)
 
-# Uncomment the following line to start monitoring events
-monitor_events()
-
-# TestingGround()
+if __name__ == "__main__":
+    # Uncomment the following line to start monitoring events
+    monitor_events()
+    # TestingGround()
