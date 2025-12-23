@@ -1,0 +1,4 @@
+# Local environment variables
+.venv
+test_events.json
+test_events copy.json

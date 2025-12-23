@@ -16,7 +16,104 @@ from enum import Enum
 from typing import List, Optional
 
 
-EVENTS_FILE = "chat_events.json"
+# Defaults and configuration
+DEFAULT_EVENTS_FILE = "events.json"
+DEFAULT_COMPANION_IP = "127.0.0.1"
+DEFAULT_COMPANION_PORT = 8000
+DEFAULT_POLL_INTERVAL = 1.0
+CONFIG_FILE = "config.json"
+
+def _dbg(msg: str) -> None:
+    if get_debug():
+        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+
+def load_config(path: str = CONFIG_FILE) -> dict:
+    """Load JSON config. If missing, create with defaults and return it.
+
+    Known keys:
+      - EVENTS_FILE (str)
+      - companion_ip (str)
+      - companion_port (int)
+      - poll_interval (float)
+    """
+    defaults = {
+        "EVENTS_FILE": DEFAULT_EVENTS_FILE,
+        "companion_ip": DEFAULT_COMPANION_IP,
+        "companion_port": DEFAULT_COMPANION_PORT,
+        "poll_interval": DEFAULT_POLL_INTERVAL,
+        "debug": False,
+    }
+
+    try:
+        with open(path, "r") as f:
+            data = json.load(f) or {}
+    except FileNotFoundError:
+        _dbg(f"Config not found; creating default at {path}")
+        save_config(defaults, path)
+        return defaults.copy()
+    except json.JSONDecodeError:
+        _dbg(f"Config invalid JSON; recreating defaults at {path}")
+        save_config(defaults, path)
+        return defaults.copy()
+
+    # Merge any missing defaults and persist
+    changed = False
+    for k, v in defaults.items():
+        if k not in data:
+            data[k] = v
+            changed = True
+    if changed:
+        _dbg("Config missing keys; writing merged defaults")
+        save_config(data, path)
+
+    return data
+
+
+def save_config(cfg: dict, path: str = CONFIG_FILE) -> None:
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+# Load configuration and materialize runtime variables
+_CONFIG = load_config(CONFIG_FILE)
+EVENTS_FILE = _CONFIG.get("EVENTS_FILE", DEFAULT_EVENTS_FILE)
+companion_ip = _CONFIG.get("companion_ip", DEFAULT_COMPANION_IP)
+companion_port = int(_CONFIG.get("companion_port", DEFAULT_COMPANION_PORT))
+POLL_INTERVAL = float(_CONFIG.get("poll_interval", DEFAULT_POLL_INTERVAL))
+_RUNTIME_DEBUG = bool(_CONFIG.get("debug", False))
+_debug_lock = threading.Lock()
+
+
+def get_debug() -> bool:
+    with _debug_lock:
+        return _RUNTIME_DEBUG
+
+
+def set_debug(value: bool, persist: bool = True) -> None:
+    """Set runtime debug flag and optionally persist to config.json.
+
+    For future UI control. Immediately affects logging and scheduler/companion.
+    """
+    global _RUNTIME_DEBUG
+    with _debug_lock:
+        _RUNTIME_DEBUG = bool(value)
+    state = "ON" if _RUNTIME_DEBUG else "OFF"
+    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Debug toggled {state}")
+
+    if persist:
+        _CONFIG["debug"] = _RUNTIME_DEBUG
+        save_config(_CONFIG, CONFIG_FILE)
+
+    # Propagate to Companion client if available
+    try:
+        if 'c' in globals():
+            c.debug = _RUNTIME_DEBUG
+    except Exception:
+        pass
+_dbg(
+    f"Configuration: EVENTS_FILE='{EVENTS_FILE}', companion={companion_ip}:{companion_port}, poll={POLL_INTERVAL}s"
+)
 
 
 class TypeofTime(Enum):
@@ -135,6 +232,15 @@ def load_events_safe(path: str = EVENTS_FILE, retries: int = 10, delay: float = 
             t.sleep(delay)
 
         except FileNotFoundError:
+            # If the events file doesn't exist, create an empty one and use it
+            try:
+                with open(path, "w") as nf:
+                    json.dump([], nf, indent=2)
+                if get_debug():
+                    print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Created missing events file: {path}")
+            except Exception as e:
+                # If we fail to create, propagate the error
+                raise e
             return []
 
     raise last_err
@@ -238,9 +344,10 @@ def push_triggers_for_occurrence(
 class ClockScheduler:
     """Watches the events file and executes due triggers."""
 
-    def __init__(self, events_file: str = EVENTS_FILE, poll_interval: float = 1.0) -> None:
+    def __init__(self, events_file: str = EVENTS_FILE, poll_interval: float = 1.0, *, debug: bool = False) -> None:
         self.events_file = events_file
         self.poll_interval = poll_interval
+        self.debug = debug
 
         self._cv = threading.Condition()
         self._stop = threading.Event()
@@ -249,7 +356,26 @@ class ClockScheduler:
         self._heap: List[TriggerJob] = []
         self._last_mtime: Optional[float] = None
 
+    def _dbg(self, msg: str) -> None:
+        if self.debug:
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+    def _refresh_debug_dynamic(self) -> None:
+        """Adopt latest debug flag from runtime setting (for future UI changes)."""
+        new_flag = get_debug()
+        if new_flag != self.debug:
+            self.debug = new_flag
+            state = "ON" if self.debug else "OFF"
+            print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Debug toggled {state}")
+            try:
+                # Propagate to Companion client if available
+                if 'c' in globals():
+                    c.debug = self.debug
+            except Exception:
+                pass
+
     def start(self) -> None:
+        self._dbg(f"Scheduler starting (file={self.events_file}, poll={self.poll_interval}s)")
         threading.Thread(target=self._watch_file, daemon=True).start()
         self._run_forever()
 
@@ -257,6 +383,7 @@ class ClockScheduler:
         self._stop.set()
         with self._cv:
             self._cv.notify_all()
+        self._dbg("Scheduler stopped")
 
     def _watch_file(self) -> None:
         """
@@ -274,12 +401,14 @@ class ClockScheduler:
                 with self._cv:
                     self._reload_needed = True
                     self._cv.notify()
+                self._dbg("Detected change in events file; scheduling reload")
 
             t.sleep(self.poll_interval)
 
     def _rebuild_schedule(self) -> None:
         now = datetime.now()
         loaded = load_events_safe(self.events_file)
+        self._dbg(f"Reloaded events file: {len(loaded)} event(s)")
 
         heap: list[TriggerJob] = []
         for ev in loaded:
@@ -289,6 +418,14 @@ class ClockScheduler:
 
         heapq.heapify(heap)
         self._heap = heap
+        if self.debug:
+            upcoming = sorted(self._heap)
+            self._dbg(f"Scheduled {len(upcoming)} trigger(s)")
+            for i, job in enumerate(upcoming[:20]):
+                self._dbg(
+                    f"#{i+1:02d} due={job.due.strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"event='{job.event.name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
+                )
 
     def _handle_trigger(self, job: TriggerJob) -> None:
         """
@@ -301,9 +438,18 @@ class ClockScheduler:
 
         # TODO: Call your real function here
         # e.g. trigger_action(event=job.event, trigger=job.trigger, due_time=job.due, event_start=job.occurrence)
+        #global c
+        if c.connected:
+            ok = c.post_command(job.trigger.buttonURL)
+            self._dbg(f"Companion POST '{job.trigger.buttonURL}' -> {'OK' if ok else 'FAIL'}")
+        else:
+            self._dbg("Companion not connected; skipping POST")
+
 
     def _run_forever(self) -> None:
         while not self._stop.is_set():
+            # Refresh debug mode dynamically each loop
+            self._refresh_debug_dynamic()
             # Rebuild schedule if needed
             with self._cv:
                 if self._reload_needed:
@@ -327,6 +473,10 @@ class ClockScheduler:
                 # Wait in short chunks to stay responsive to file edits,
                 # while still being accurate near the due time.
                 timeout = max(0.0, min(seconds, 1.0))
+                if self.debug and seconds > 0:
+                    self._dbg(
+                        f"Next trigger in {seconds:.1f}s at {next_job.due.strftime('%H:%M:%S')} for '{next_job.event.name}'"
+                    )
                 self._cv.wait(timeout=timeout)
 
                 # If file changed during wait, rebuild next loop
@@ -358,6 +508,9 @@ class ClockScheduler:
                         with self._cv:
                             push_triggers_for_occurrence(self._heap, job.event, next_occ, datetime.now())
                             heapq.heapify(self._heap)
+                        self._dbg(
+                            f"Rescheduled weekly event '{job.event.name}' for {next_occ.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
 
 
 
@@ -366,7 +519,10 @@ class ClockScheduler:
 # ----------------------------
 from companion import Companion
 
-c = Companion("127.0.0.1", 8000)
+companion_ip = "127.0.0.1"
+companion_port = 8000
+
+c = Companion(companion_ip, companion_port)
 
 
 
@@ -374,7 +530,7 @@ c = Companion("127.0.0.1", 8000)
 # Entrypoint
 # ----------------------------
 if __name__ == "__main__":
-    scheduler = ClockScheduler(EVENTS_FILE, poll_interval=1.0)
+    scheduler = ClockScheduler(EVENTS_FILE, poll_interval=POLL_INTERVAL, debug=get_debug())
     try:
         scheduler.start()
     except KeyboardInterrupt:
