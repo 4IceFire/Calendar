@@ -1,6 +1,7 @@
 {
-  "EVENTS_FILE": "events.json",
+  "EVENTS_FILE": "test_events.json",
   "companion_ip": "127.0.0.1",
   "companion_port": 8000,
-  "poll_interval": 1.0
+  "poll_interval": 1.0,
+  "debug":true
 }

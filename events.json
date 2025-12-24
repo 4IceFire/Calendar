@@ -5,6 +5,7 @@
     "date": "2025-12-21",
     "time": "08:00:00",
     "repeating": true,
+    "active": true,
     "times": [
       {"minutes": 30, "typeOfTrigger": "BEFORE", "buttonURL":"1/0/1"},
       {"minutes": 0, "typeOfTrigger": "AT", "buttonURL":"1/0/2"},
@@ -17,6 +18,7 @@
     "date": "2025-12-30",
     "time": "20:00:00",
     "repeating": true,
+    "active": true,
     "times": [
       {"minutes": 20, "typeOfTrigger": "BEFORE", "buttonURL":"1/1/1"},
       {"minutes": 0, "typeOfTrigger": "AT", "buttonURL":"1/1/2"},

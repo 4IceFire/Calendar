@@ -143,6 +143,7 @@ class Event:
         event_time: time,
         repeating: bool,
         times: List["TimeOfTrigger"],
+        active: bool = True,
     ) -> None:
         self.name = name
         self.day = day
@@ -152,6 +153,8 @@ class Event:
         self.time = event_time
         # True => repeats weekly on `self.day` at `self.time`
         self.repeating = repeating
+        # Whether this event is active and should be scheduled
+        self.active = active
         self.times = times
 
         # Ensure triggers are in chronological order relative to event start
@@ -214,6 +217,10 @@ def load_events_safe(path: str = EVENTS_FILE, retries: int = 10, delay: float = 
                     for trig in ev["times"]
                 ]
 
+                # Ensure event dict contains expected optional keys and fill defaults
+                # (this keeps the on-disk file up-to-date when fields are added later)
+                # We'll fill missing 'active' and missing trigger 'buttonURL's.
+                # Track whether we changed the raw data so we can persist it back.
                 loaded_events.append(
                     Event(
                         ev["name"],
@@ -221,9 +228,33 @@ def load_events_safe(path: str = EVENTS_FILE, retries: int = 10, delay: float = 
                         datetime.strptime(ev["date"], "%Y-%m-%d").date(),
                         datetime.strptime(ev["time"], "%H:%M:%S").time(),
                         ev["repeating"],
-                        times
+                        times,
+                        ev.get("active", True),
                     )
                 )
+
+            # Merge defaults back into the file if necessary (add missing optional keys)
+            changed = False
+            for ev in events_data:
+                if "active" not in ev:
+                    ev["active"] = True
+                    changed = True
+
+                # Ensure each trigger has a buttonURL key
+                for trig in ev.get("times", []):
+                    if "buttonURL" not in trig:
+                        trig["buttonURL"] = ""
+                        changed = True
+
+            if changed:
+                try:
+                    with open(path, "w") as wf:
+                        json.dump(events_data, wf, indent=2)
+                    if get_debug():
+                        print(f"[DEBUG {datetime.now().strftime('%H:%M:%S')}] Updated events file with defaults: {path}")
+                except Exception:
+                    # Non-fatal: if we can't persist defaults, continue without failing load
+                    pass
 
             return loaded_events
 
@@ -262,6 +293,7 @@ def save_events() -> None:
                 "date": event.date.strftime("%Y-%m-%d"),
                 "time": event.time.strftime("%H:%M:%S"),
                 "repeating": event.repeating,
+                "active": getattr(event, "active", True),
                 "times": [
                     {
                         "minutes": trig.minutes,
@@ -412,6 +444,12 @@ class ClockScheduler:
 
         heap: list[TriggerJob] = []
         for ev in loaded:
+            # Skip events that are not active
+            if not getattr(ev, "active", True):
+                if self.debug:
+                    self._dbg(f"Skipping inactive event '{ev.name}'")
+                continue
+
             occ = next_weekly_occurrence(ev, now)
             if occ is not None:
                 push_triggers_for_occurrence(heap, ev, occ, now)
