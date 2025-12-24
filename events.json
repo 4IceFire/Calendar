@@ -3,26 +3,59 @@
     "name": "Sunday 8AM",
     "day": "Sunday",
     "date": "2025-12-21",
-    "time": "08:00:00",
+    "time": "08:10:00",
     "repeating": true,
     "active": true,
     "times": [
-      {"minutes": 30, "typeOfTrigger": "BEFORE", "buttonURL":"1/0/1"},
-      {"minutes": 0, "typeOfTrigger": "AT", "buttonURL":"1/0/2"},
-      {"minutes": 15, "typeOfTrigger": "AFTER", "buttonURL":"1/0/3"}
+      {
+        "minutes": 30,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "1/0/1"
+      },
+      {
+        "minutes": 0,
+        "typeOfTrigger": "AT",
+        "buttonURL": "1/0/2"
+      },
+      {
+        "minutes": 15,
+        "typeOfTrigger": "AFTER",
+        "buttonURL": "1/0/3"
+      }
     ]
   },
   {
-    "name": "Wednesday Bible Study",
+    "name": "Test Event 1",
     "day": "Wednesday",
-    "date": "2025-12-30",
-    "time": "20:00:00",
+    "date": "2025-12-24",
+    "time": "22:35:00",
     "repeating": true,
     "active": true,
     "times": [
-      {"minutes": 20, "typeOfTrigger": "BEFORE", "buttonURL":"1/1/1"},
-      {"minutes": 0, "typeOfTrigger": "AT", "buttonURL":"1/1/2"},
-      {"minutes": 10, "typeOfTrigger": "AFTER", "buttonURL":"1/1/3"}
+      {
+        "minutes": 4,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/0/1/press"
+      },
+      {
+        "minutes": 0,
+        "typeOfTrigger": "AT",
+        "buttonURL": "location/1/0/1/press"
+      },
+      {
+        "minutes": 4,
+        "typeOfTrigger": "AFTER",
+        "buttonURL": "location/1/0/1/press"
+      }
     ]
+  },
+  {
+    "name": "Test Event 2",
+    "day": "Wednesday",
+    "date": "2025-12-24",
+    "time": "23:10:00",
+    "repeating": false,
+    "active": false,
+    "times": []
   }
 ]
