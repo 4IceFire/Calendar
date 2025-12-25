@@ -96,9 +96,15 @@ def kill_pid(pid: int) -> bool:
 
 
 def _find_event(events: List, ident: str):
-    # numeric index (1-based)
+    # numeric id or numeric index (id preferred)
     try:
-        idx = int(ident) - 1
+        num = int(ident)
+        # try match by id first
+        for e in events:
+            if getattr(e, "id", None) == num:
+                return e
+        # fallback: treat as 1-based index
+        idx = num - 1
         if 0 <= idx < len(events):
             return events[idx]
         return None
@@ -107,9 +113,7 @@ def _find_event(events: List, ident: str):
 
     # match by name substring (case-insensitive)
     matches = [e for e in events if ident.lower() in e.name.lower()]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
+    if len(matches) >= 1:
         return matches[0]
     return None
 
@@ -119,9 +123,9 @@ def cmd_list_events(args):
     if not events:
         print("No events")
         return
-    for i, e in enumerate(events, start=1):
+    for e in events:
         when = f"{e.day.name} {e.date.strftime('%Y-%m-%d')} {e.time.strftime('%H:%M:%S')}"
-        print(f"{i:2d}: {e.name} | {when} | repeating={e.repeating} | active={getattr(e,'active',True)}")
+        print(f"{getattr(e,'id',0):3d}: {e.name} | {when} | repeating={e.repeating} | active={getattr(e,'active',True)}")
 
 
 def cmd_show(args):
@@ -131,6 +135,7 @@ def cmd_show(args):
         print("Event not found")
         return
     print({
+        "id": getattr(ev, "id", None),
         "name": ev.name,
         "day": ev.day.name,
         "date": ev.date.strftime("%Y-%m-%d"),
@@ -322,7 +327,7 @@ def main(argv=None):
                 due = job.due.strftime("%Y-%m-%d %H:%M:%S")
                 now = datetime.now()
                 secs = int((job.due - now).total_seconds())
-                print(f"{i:3d}: due={due} (+{secs}s) | event='{job.event.name}' | trigger={job.trigger_index+1}/{len(job.event.times)} | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'")
+                print(f"{i:3d}: due={due} (+{secs}s) | event=#{getattr(job.event,'id',0)} '{job.event.name}' | trigger={job.trigger_index+1}/{len(job.event.times)} | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'")
             return 0
 
         # Fall back to reading the persistent snapshot written by the
@@ -342,7 +347,10 @@ def main(argv=None):
                 return 0
 
             for i, j in enumerate(data, start=1):
-                print(f"{i:3d}: due={j['due']} (+{j['seconds_until']}s) | event='{j['event']}' | trigger_index={j['trigger_index']+1} | offset={j['offset_min']}min | url='{j['url']}'")
+                # snapshot format may include event_id as 'event_id' or include id in event string
+                event_id = j.get("event_id") or j.get("id") or None
+                eid = f"#{event_id} " if event_id is not None else ""
+                print(f"{i:3d}: due={j['due']} (+{j['seconds_until']}s) | event={eid}'{j['event']}' | trigger_index={j['trigger_index']+1} | offset={j['offset_min']}min | url='{j['url']}'")
             return 0
         except Exception:
             print("Scheduler is not running. No scheduled triggers available.")
@@ -363,8 +371,17 @@ def main(argv=None):
                     url = parts[2] if len(parts) > 2 else ""
                     times.append(TimeOfTrigger(minutes, typ, url))
             from datetime import datetime
+            # determine new unique id
+            max_id = 0
+            for ev in events:
+                if isinstance(getattr(ev, "id", None), int) and ev.id > max_id:
+                    max_id = ev.id
+
+            new_id = max_id + 1
+
             event = __import__("package.apps.calendar.models", fromlist=["Event"]).Event(
                 args.name,
+                new_id,
                 WeekDay[args.day],
                 datetime.strptime(args.date, "%Y-%m-%d").date(),
                 datetime.strptime(args.time, "%H:%M:%S").time(),

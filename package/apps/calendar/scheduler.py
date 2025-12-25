@@ -127,6 +127,7 @@ class ClockScheduler:
                         "due": job.due.strftime("%Y-%m-%d %H:%M:%S"),
                         "seconds_until": int((job.due - now).total_seconds()),
                         "event": job.event.name,
+                        "event_id": getattr(job.event, "id", None),
                         "trigger_index": job.trigger_index,
                         "offset_min": job.trigger.timer,
                         "url": job.trigger.buttonURL,
@@ -146,12 +147,12 @@ class ClockScheduler:
             for i, job in enumerate(upcoming[:20]):
                 self._dbg(
                     f"#{i+1:02d} due={job.due.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    f"event='{job.event.name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
+                    f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
                 )
 
     def _handle_trigger(self, job: TriggerJob) -> None:
         print(
-            f"[TRIGGER] {job.due} | Event='{job.event.name}' | "
+            f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
             f"offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
         )
 
@@ -164,7 +165,7 @@ class ClockScheduler:
                     logger.info("Companion reconnected")
                     self._companion_down = False
 
-                logger.info(f"POST {job.trigger.buttonURL} OK | event='{job.event.name}' | due={job.due}")
+                logger.info(f"POST {job.trigger.buttonURL} OK | event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}")
                 self._dbg(f"Companion POST '{job.trigger.buttonURL}' -> OK")
             else:
                 # POST failed: mark as down and print a short summary to stdout
@@ -173,13 +174,13 @@ class ClockScheduler:
                     logger.warning("Companion POST failed; marking as down")
                     self._companion_down = True
 
-                logger.error(f"POST {job.trigger.buttonURL} FAIL | event='{job.event.name}' | due={job.due}")
+                logger.error(f"POST {job.trigger.buttonURL} FAIL | event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}")
                 self._dbg(f"Companion POST '{job.trigger.buttonURL}' -> FAIL")
         else:
             # Companion not connected: print a short summary once and log it
             if not self._companion_down:
                 print(f"[COMPANION] Companion not connected at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}; scheduled POST skipped; see calendar.log")
-                logger.warning(f"Companion not connected; would POST {job.trigger.buttonURL} | event='{job.event.name}' | due={job.due}")
+                logger.warning(f"Companion not connected; would POST {job.trigger.buttonURL} | event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}")
                 self._companion_down = True
 
             self._dbg("Companion not connected; skipping POST")
@@ -218,7 +219,7 @@ class ClockScheduler:
                     # Alert thresholds in seconds (announce once each)
                     for thr in (30, 15, 5):
                         if seconds <= thr and thr not in self._announced_thresholds:
-                            print(f"[ALERT] {int(seconds)}s until next trigger at {next_job.due.strftime('%Y-%m-%d %H:%M:%S')} for '{next_job.event.name}'")
+                            print(f"[ALERT] {int(seconds)}s until next trigger at {next_job.due.strftime('%Y-%m-%d %H:%M:%S')} for #{getattr(next_job.event,'id',None)} '{next_job.event.name}'")
                             self._announced_thresholds.add(thr)
                 self._cv.wait(timeout=timeout)
 
@@ -263,9 +264,9 @@ class ClockScheduler:
                         with self._cv:
                             push_triggers_for_occurrence(self._heap, job.event, next_occ, datetime.now())
                             heapq.heapify(self._heap)
-                        self._dbg(
-                            f"Rescheduled weekly event '{job.event.name}' for {next_occ.strftime('%Y-%m-%d %H:%M:%S')}"
-                        )
+                            self._dbg(
+                                f"Rescheduled weekly event #{getattr(job.event,'id',None)} '{job.event.name}' for {next_occ.strftime('%Y-%m-%d %H:%M:%S')}"
+                            )
 
 
 # Helper scheduling functions

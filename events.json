@@ -1,5 +1,6 @@
 [
   {
+    "id": 1,
     "name": "Sunday 8AM",
     "day": "Sunday",
     "date": "2025-12-21",
@@ -25,6 +26,7 @@
     ]
   },
   {
+    "id": 2,
     "name": "Test Event 1",
     "day": "Wednesday",
     "date": "2025-12-24",
@@ -50,6 +52,7 @@
     ]
   },
   {
+    "id": 3,
     "name": "Test Event 2",
     "day": "Wednesday",
     "date": "2025-12-24",

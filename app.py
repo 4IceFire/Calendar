@@ -133,11 +133,15 @@ class WeekDay(Enum):
 
 
 class Event:
-    """An event with optional weekly repetition and one or more triggers."""
+    """An event with optional weekly repetition and one or more triggers.
+
+    Includes a primary key `id` used to reference events.
+    """
 
     def __init__(
         self,
         name: str,
+        id: int | None,
         day: WeekDay,
         event_date: date,
         event_time: time,
@@ -146,6 +150,7 @@ class Event:
         active: bool = True,
     ) -> None:
         self.name = name
+        self.id = id
         self.day = day
         # Start date of the series (for repeating) or actual date (non-repeating)
         self.date = event_date
@@ -162,7 +167,8 @@ class Event:
         self.times.sort()
 
     def __str__(self) -> str:
-        return f"   {self.name}   \n" + (len(self.name) + 6) * "-" + "\n"
+        idpart = f"#{self.id} " if getattr(self, "id", None) is not None else ""
+        return f"   {idpart}{self.name}   \n" + (len(self.name) + 6) * "-" + "\n"
 
 
 class TimeOfTrigger:
@@ -207,6 +213,11 @@ def load_events_safe(path: str = EVENTS_FILE, retries: int = 10, delay: float = 
                 events_data = json.load(f)
 
             loaded_events: List[Event] = []
+            max_id = 0
+            for ev in events_data:
+                if isinstance(ev.get("id", None), int) and ev.get("id", 0) > max_id:
+                    max_id = ev.get("id")
+
             for ev in events_data:
                 times = [
                     TimeOfTrigger(
@@ -214,16 +225,24 @@ def load_events_safe(path: str = EVENTS_FILE, retries: int = 10, delay: float = 
                         TypeofTime[trig["typeOfTrigger"]],
                         trig.get("buttonURL", "")
                     )
-                    for trig in ev["times"]
+                    for trig in ev.get("times", [])
                 ]
 
                 # Ensure event dict contains expected optional keys and fill defaults
                 # (this keeps the on-disk file up-to-date when fields are added later)
                 # We'll fill missing 'active' and missing trigger 'buttonURL's.
                 # Track whether we changed the raw data so we can persist it back.
+                # assign id if missing
+                ev_id = ev.get("id")
+                if not isinstance(ev_id, int):
+                    max_id += 1
+                    ev_id = max_id
+                    ev["id"] = ev_id
+
                 loaded_events.append(
                     Event(
                         ev["name"],
+                        ev_id,
                         WeekDay[ev["day"]],
                         datetime.strptime(ev["date"], "%Y-%m-%d").date(),
                         datetime.strptime(ev["time"], "%H:%M:%S").time(),
@@ -245,6 +264,11 @@ def load_events_safe(path: str = EVENTS_FILE, retries: int = 10, delay: float = 
                     if "buttonURL" not in trig:
                         trig["buttonURL"] = ""
                         changed = True
+                # ensure id exists
+                if "id" not in ev or not isinstance(ev.get("id"), int):
+                    max_id += 1
+                    ev["id"] = max_id
+                    changed = True
 
             if changed:
                 try:
@@ -288,6 +312,7 @@ def save_events() -> None:
         events_data = []
         for event in events:
             event_dict = {
+                "id": getattr(event, "id", None),
                 "name": event.name,
                 "day": event.day.name,
                 "date": event.date.strftime("%Y-%m-%d"),

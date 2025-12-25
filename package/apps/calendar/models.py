@@ -46,6 +46,7 @@ class Event:
     def __init__(
         self,
         name: str,
+        id: int | None,
         day: WeekDay,
         event_date: date,
         event_time: time,
@@ -54,6 +55,8 @@ class Event:
         active: bool = True,
     ) -> None:
         self.name = name
+        # primary key id (may be None for older records until storage assigns one)
+        self.id = id
         self.day = day
         self.date = event_date
         self.time = event_time
@@ -63,7 +66,8 @@ class Event:
         self.times.sort()
 
     def __str__(self) -> str:
-        return f"   {self.name}   \n" + (len(self.name) + 6) * "-" + "\n"
+        idpart = f"#{self.id} " if getattr(self, "id", None) is not None else ""
+        return f"   {idpart}{self.name}   \n" + (len(self.name) + 6) * "-" + "\n"
 
 
 @dataclass(order=True)

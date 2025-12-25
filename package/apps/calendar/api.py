@@ -37,6 +37,7 @@ class EventSpec(BaseModel):
 
 def event_to_dict(ev: Event) -> Dict[str, Any]:
     return {
+        "id": getattr(ev, "id", None),
         "name": ev.name,
         "day": ev.day.name,
         "date": ev.date.strftime("%Y-%m-%d"),
@@ -65,7 +66,8 @@ def parse_event_spec(spec: EventSpec) -> Event:
     date_obj = datetime.strptime(spec.date, "%Y-%m-%d").date()
     time_obj = datetime.strptime(spec.time, "%H:%M:%S").time()
 
-    return Event(spec.name, WeekDay[spec.day], date_obj, time_obj, bool(spec.repeating), times, bool(spec.active))
+    # id will be assigned by the caller when persisting
+    return Event(spec.name, None, WeekDay[spec.day], date_obj, time_obj, bool(spec.repeating), times, bool(spec.active))
 
 
 @app.get("/api/events", response_model=List[Dict[str, Any]])
@@ -86,6 +88,14 @@ def create_event(spec: EventSpec):
     cfg = utils.get_config()
     events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
     events = storage.load_events(events_file)
+    # determine new unique id
+    max_id = 0
+    for e in events:
+        if isinstance(getattr(e, "id", None), int) and e.id > max_id:
+            max_id = e.id
+
+    new_id = max_id + 1
+    ev.id = new_id
     events.append(ev)
     storage.save_events(events, events_file)
     return event_to_dict(ev)
@@ -93,17 +103,20 @@ def create_event(spec: EventSpec):
 
 @app.put("/api/events/{ident}", response_model=Dict[str, Any])
 def update_event(ident: int, spec: EventSpec):
-    # ident is 1-based to match CLI
     cfg = utils.get_config()
     events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
     events = storage.load_events(events_file)
-    idx = ident - 1
-    if idx < 0 or idx >= len(events):
+    # find by primary key id
+    matching = [e for e in events if getattr(e, "id", None) == ident]
+    if not matching:
         raise HTTPException(status_code=404, detail="Event not found")
+    idx = events.index(matching[0])
     try:
         ev = parse_event_spec(spec)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # preserve primary key
+    ev.id = ident
     events[idx] = ev
     storage.save_events(events, events_file)
     return event_to_dict(ev)
@@ -114,10 +127,11 @@ def delete_event(ident: int):
     cfg = utils.get_config()
     events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
     events = storage.load_events(events_file)
-    idx = ident - 1
-    if idx < 0 or idx >= len(events):
+    matching = [e for e in events if getattr(e, "id", None) == ident]
+    if not matching:
         raise HTTPException(status_code=404, detail="Event not found")
-    ev = events.pop(idx)
+    ev = matching[0]
+    events.remove(ev)
     storage.save_events(events, events_file)
     return {"removed": True, "name": ev.name}
 
@@ -131,10 +145,10 @@ def trigger_event(ident: int, body: TriggerBody):
     cfg = utils.get_config()
     events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
     events = storage.load_events(events_file)
-    idx = ident - 1
-    if idx < 0 or idx >= len(events):
+    matching = [e for e in events if getattr(e, "id", None) == ident]
+    if not matching:
         raise HTTPException(status_code=404, detail="Event not found")
-    ev = events[idx]
+    ev = matching[0]
     which = (body.which - 1) if body.which and body.which > 0 else 0
     if which < 0 or which >= len(ev.times):
         raise HTTPException(status_code=400, detail="Invalid trigger index")

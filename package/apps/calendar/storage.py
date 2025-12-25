@@ -31,6 +31,12 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
             # Do the conversion without importing TypeofTime here to avoid circulars; import locally
             from package.apps.calendar.models import TypeofTime, WeekDay
             loaded_events = []
+            # determine next id to assign when missing
+            max_id = 0
+            for ev in events_data:
+                if isinstance(ev.get("id", None), int) and ev.get("id", 0) > max_id:
+                    max_id = ev.get("id")
+
             for ev in events_data:
                 times = [
                     TimeOfTrigger(
@@ -41,9 +47,17 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                     for trig in ev.get("times", [])
                 ]
 
+                # assign id if missing
+                ev_id = ev.get("id")
+                if not isinstance(ev_id, int):
+                    max_id += 1
+                    ev_id = max_id
+                    ev["id"] = ev_id
+
                 loaded_events.append(
                     Event(
                         ev.get("name", ""),
+                        ev_id,
                         WeekDay[ev.get("day", "Monday")],
                         datetime.strptime(ev.get("date", "1970-01-01"), "%Y-%m-%d").date(),
                         datetime.strptime(ev.get("time", "00:00:00"), "%H:%M:%S").time(),
@@ -59,10 +73,16 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                 if "active" not in ev:
                     ev["active"] = True
                     changed = True
+                # ensure buttonURL exists on triggers
                 for trig in ev.get("times", []):
                     if "buttonURL" not in trig:
                         trig["buttonURL"] = ""
                         changed = True
+                # ensure id exists
+                if "id" not in ev or not isinstance(ev.get("id"), int):
+                    max_id += 1
+                    ev["id"] = max_id
+                    changed = True
 
             if changed:
                 try:
@@ -97,6 +117,7 @@ def save_events(events_list: List[Event], path: str = DEFAULT_EVENTS_FILE) -> No
     events_data = []
     for event in events_list:
         event_dict = {
+            "id": getattr(event, "id", None),
             "name": event.name,
             "day": event.day.name,
             "date": event.date.strftime("%Y-%m-%d"),
