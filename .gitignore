@@ -1,4 +1,10 @@
 # Local environment variables
 .venv
-test_events.json
-test_events copy.json
+
+# Python bytecode / caches
+__pycache__/
+*.pyc
+
+# Runtime artifacts
+calendar.log
+calendar.pid

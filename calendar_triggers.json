@@ -1,9 +1,18 @@
 [
   {
-    "due": "2025-12-26 01:46:00",
-    "seconds_until": 22,
-    "event": "Sprint 1",
-    "event_id": 3,
+    "due": "2025-12-26 02:07:00",
+    "seconds_until": 8,
+    "event": "Sunday 10AM",
+    "event_id": 1,
+    "trigger_index": 1,
+    "offset_min": -1,
+    "url": "location/1/2/3/press"
+  },
+  {
+    "due": "2025-12-26 02:08:00",
+    "seconds_until": 68,
+    "event": "Sunday 10AM",
+    "event_id": 1,
     "trigger_index": 2,
     "offset_min": 0,
     "url": "location/3/2/1/press"

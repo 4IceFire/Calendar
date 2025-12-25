@@ -5,7 +5,7 @@ This document describes the `calendarctl` CLI available in this workspace and ex
 **Usage**
 - Run: `python cli.py <command> [args]`
 - Config: `config.json` controls `EVENTS_FILE`, `poll_interval`, and `debug`.
-- Log file: `calendar.log` contains persistent info/warnings about Companion connectivity and POST results.
+- Log file: `calendar.log` is created at runtime (and is gitignored) and contains info/warnings about Companion connectivity and POST results.
 
 **Commands**
 

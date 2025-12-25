@@ -160,6 +160,19 @@ def _start_on_server_start() -> None:
     threading.Thread(target=_start_all_apps, daemon=True).start()
 
 
+def _poll_interval_seconds(cfg: dict) -> float:
+    try:
+        v = float(cfg.get('poll_interval', 1.0))
+    except Exception:
+        v = 1.0
+    # Keep the watcher responsive but avoid pathological values
+    if v < 0.2:
+        return 0.2
+    if v > 60.0:
+        return 60.0
+    return v
+
+
 # Config watcher: restart server when `webserver_port` changes in config.json
 def _config_watcher():
     try:
@@ -174,7 +187,7 @@ def _config_watcher():
     cfg = utils.get_config()
     prev_port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
     while True:
-        time.sleep(1)
+        time.sleep(_poll_interval_seconds(cfg))
         try:
             changed = utils.reload_config()
         except Exception:
@@ -188,6 +201,13 @@ def _config_watcher():
                 except Exception:
                     pass
                 prev_port = new_port
+        else:
+            # still refresh local cfg snapshot so poll_interval updates from other
+            # code paths (or failed reloads) can take effect eventually
+            try:
+                cfg = utils.get_config()
+            except Exception:
+                pass
 
 
 # start config watcher thread
@@ -544,7 +564,7 @@ def api_set_config():
 def api_delete_event_ui(ident: int):
     """Allow the web UI to delete an event from the configured EVENTS_FILE.
 
-    This mirrors the FastAPI delete behavior so the UI can operate without
+    This mirrors the CLI delete behavior so the UI can operate without
     running the separate API server.
     """
     try:
