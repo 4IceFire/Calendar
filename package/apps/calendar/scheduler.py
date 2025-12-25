@@ -3,6 +3,8 @@ import threading
 import time as t
 from datetime import datetime, timedelta
 from typing import List, Optional
+import json
+from pathlib import Path
 
 from package.apps.calendar.models import Event, TimeOfTrigger, TriggerJob
 from package.apps.calendar import storage, utils
@@ -26,6 +28,9 @@ class ClockScheduler:
         self.c = utils.get_companion()
         # track last-known companion connectivity to avoid noisy prints
         self._companion_down = False
+        # Track next-job alerts to avoid repeating threshold notices
+        self._next_due = None
+        self._announced_thresholds = set()
 
     def _dbg(self, msg: str) -> None:
         if self.debug:
@@ -91,7 +96,10 @@ class ClockScheduler:
     def _rebuild_schedule(self) -> None:
         now = datetime.now()
         loaded = storage.load_events_safe(self.events_file)
-        self._dbg(f"Reloaded events file: {len(loaded)} event(s)")
+        # Always show a short feedback message when the events file is reloaded
+        # so operators get confirmation even when debug is disabled.
+        print(f"[CLOCK] Reloaded events file: {len(loaded)} event(s)")
+        self._dbg(f"(debug) detailed reload: {len(loaded)} event(s) loaded from {self.events_file}")
 
         heap: list[TriggerJob] = []
         for ev in loaded:
@@ -106,6 +114,32 @@ class ClockScheduler:
 
         heapq.heapify(heap)
         self._heap = heap
+        # Persist a concise snapshot of upcoming triggers so external CLI
+        # processes can inspect the scheduled jobs even when running in a
+        # different process (background scheduler). Write atomically.
+        try:
+            out = []
+
+            now = datetime.now()
+            for job in sorted(self._heap):
+                out.append(
+                    {
+                        "due": job.due.strftime("%Y-%m-%d %H:%M:%S"),
+                        "seconds_until": int((job.due - now).total_seconds()),
+                        "event": job.event.name,
+                        "trigger_index": job.trigger_index,
+                        "offset_min": job.trigger.timer,
+                        "url": job.trigger.buttonURL,
+                    }
+                )
+
+            path = Path.cwd() / "calendar_triggers.json"
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+            tmp.replace(path)
+        except Exception:
+            pass
         if self.debug:
             upcoming = sorted(self._heap)
             self._dbg(f"Scheduled {len(upcoming)} trigger(s)")
@@ -174,10 +208,18 @@ class ClockScheduler:
                 seconds = (next_job.due - now).total_seconds()
 
                 timeout = max(0.0, min(seconds, 1.0))
+                # In debug mode, emit sparse alerts for upcoming trigger times
                 if self.debug and seconds > 0:
-                    self._dbg(
-                        f"Next trigger in {seconds:.1f}s at {next_job.due.strftime('%H:%M:%S')} for '{next_job.event.name}'"
-                    )
+                    # If we've switched to a new next job, reset announced thresholds
+                    if self._next_due is None or self._next_due != getattr(next_job, 'due', None):
+                        self._next_due = getattr(next_job, 'due', None)
+                        self._announced_thresholds.clear()
+
+                    # Alert thresholds in seconds (announce once each)
+                    for thr in (30, 15, 5):
+                        if seconds <= thr and thr not in self._announced_thresholds:
+                            print(f"[ALERT] {int(seconds)}s until next trigger at {next_job.due.strftime('%Y-%m-%d %H:%M:%S')} for '{next_job.event.name}'")
+                            self._announced_thresholds.add(thr)
                 self._cv.wait(timeout=timeout)
 
                 if self._reload_needed:
@@ -200,6 +242,21 @@ class ClockScheduler:
                 except Exception as e:
                     print(f"[CLOCK] Trigger handler error: {e}")
 
+                # After firing due jobs, if debug is enabled, announce the time until next job (single concise message)
+                if self.debug:
+                    with self._cv:
+                        if self._heap:
+                            nxt = self._heap[0]
+                            secs = (nxt.due - datetime.now()).total_seconds()
+                            if secs > 0:
+                                print(f"[NEXT] Next trigger in {int(secs)}s at {nxt.due.strftime('%Y-%m-%d %H:%M:%S')} for '{nxt.event.name}'")
+                                # Reset thresholds tracking for the newly reported next job
+                                self._next_due = getattr(nxt, 'due', None)
+                                self._announced_thresholds.clear()
+                        else:
+                            # no upcoming jobs
+                            self._next_due = None
+                            self._announced_thresholds.clear()
                 if job.event.repeating and job.trigger_index == (len(job.event.times) - 1):
                     next_occ = next_weekly_occurrence(job.event, job.occurrence + timedelta(seconds=1))
                     if next_occ is not None:

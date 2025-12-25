@@ -223,6 +223,9 @@ def main(argv=None):
     trig_p.add_argument("ident", help="Event id or name substring")
     trig_p.add_argument("--which", type=int, default=1, help="Which trigger (1-based)")
 
+    # Show currently scheduled trigger jobs
+    sub.add_parser("triggers", help="List scheduled trigger jobs (if scheduler running)")
+
     # Event editing commands
     add_p = sub.add_parser("add", help="Add a new event")
     add_p.add_argument("--name", required=True, help="Event name")
@@ -294,6 +297,56 @@ def main(argv=None):
     if args.cmd == "list":
         cmd_list_events(args)
         return 0
+
+    if args.cmd == "triggers":
+        app_inst = get_app("calendar")
+        # Access the scheduler instance if running
+        sched = getattr(app_inst, "_scheduler", None)
+        if sched is not None:
+            # Copy heap under the scheduler condition to avoid races
+            try:
+                with sched._cv:
+                    heap_copy = list(sched._heap)
+            except Exception:
+                heap_copy = list(getattr(sched, "_heap", []))
+
+            if not heap_copy:
+                print("No scheduled triggers")
+                return 0
+
+            # Sort by due time
+            heap_copy.sort()
+            from datetime import datetime
+
+            for i, job in enumerate(heap_copy, start=1):
+                due = job.due.strftime("%Y-%m-%d %H:%M:%S")
+                now = datetime.now()
+                secs = int((job.due - now).total_seconds())
+                print(f"{i:3d}: due={due} (+{secs}s) | event='{job.event.name}' | trigger={job.trigger_index+1}/{len(job.event.times)} | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'")
+            return 0
+
+        # Fall back to reading the persistent snapshot written by the
+        # background scheduler process (if available).
+        try:
+            import json
+            from pathlib import Path
+
+            path = Path.cwd() / "calendar_triggers.json"
+            if not path.exists():
+                print("Scheduler is not running. No scheduled triggers available.")
+                return 0
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not data:
+                print("No scheduled triggers")
+                return 0
+
+            for i, j in enumerate(data, start=1):
+                print(f"{i:3d}: due={j['due']} (+{j['seconds_until']}s) | event='{j['event']}' | trigger_index={j['trigger_index']+1} | offset={j['offset_min']}min | url='{j['url']}'")
+            return 0
+        except Exception:
+            print("Scheduler is not running. No scheduled triggers available.")
+            return 0
 
     if args.cmd == "add":
         cfg = utils.get_config()
