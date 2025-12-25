@@ -1,0 +1,80 @@
+[
+  {
+    "id": 1,
+    "name": "Daniel Edwards",
+    "day": "Monday",
+    "date": "2025-12-26",
+    "time": "01:34:00",
+    "repeating": false,
+    "active": true,
+    "times": [
+      {
+        "minutes": 1,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/0/1/press"
+      },
+      {
+        "minutes": 0,
+        "typeOfTrigger": "AT",
+        "buttonURL": "location/1/0/1/press"
+      },
+      {
+        "minutes": 1,
+        "typeOfTrigger": "AFTER",
+        "buttonURL": "location/1/0/1/press"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Test 3",
+    "day": "Monday",
+    "date": "2025-12-26",
+    "time": "01:44:00",
+    "repeating": false,
+    "active": true,
+    "times": [
+      {
+        "minutes": 2,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/0/1/press"
+      },
+      {
+        "minutes": 1,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/2/3/press"
+      },
+      {
+        "minutes": 0,
+        "typeOfTrigger": "AT",
+        "buttonURL": "location/3/2/1/press"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Sprint 1",
+    "day": "Monday",
+    "date": "2025-12-26",
+    "time": "01:46:00",
+    "repeating": false,
+    "active": true,
+    "times": [
+      {
+        "minutes": 2,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/0/1/press"
+      },
+      {
+        "minutes": 1,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/2/3/press"
+      },
+      {
+        "minutes": 0,
+        "typeOfTrigger": "AT",
+        "buttonURL": "location/3/2/1/press"
+      }
+    ]
+  }
+]

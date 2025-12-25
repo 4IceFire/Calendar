@@ -1,0 +1,152 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h1>Calendar</h1>
+<p class="text-muted">List of scheduled events. Click refresh to reload.</p>
+<div class="mb-3">
+  <button id="refresh-events" class="btn btn-sm btn-secondary">Refresh</button>
+  <button id="add-event" class="btn btn-sm btn-success ms-2">Add Event</button>
+</div>
+
+<table class="table table-striped">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Name</th>
+      <th>Date</th>
+      <th>Time</th>
+      <th>Repeating</th>
+      <th>Active</th>
+      <th>Triggers</th>
+    </tr>
+  </thead>
+  <tbody id="events-body">
+    <tr><td colspan="7" class="text-center text-muted">Loading…</td></tr>
+  </tbody>
+</table>
+
+<script>
+async function loadEvents(){
+  const tbody = document.getElementById('events-body');
+  tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Loading…</td></tr>';
+  try{
+    // fetch events and templates so we can display template labels when available
+    const [resp, tplResp] = await Promise.all([
+      fetch('/api/ui/events?_ts=' + Date.now(), {cache: 'no-store'}),
+      fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'})
+    ]);
+    const data = await resp.json();
+    const tplData = await tplResp.json().catch(()=>({buttons:[]}));
+    const buttons = Array.isArray(tplData.buttons) ? tplData.buttons : [];
+    // build mapping of buttonURL and short-pattern -> label
+    const btnMap = {};
+    for(const b of buttons){
+      const bu = b.buttonURL || (b.pattern ? `location/${b.pattern}/press` : null);
+      if(!bu) continue;
+      btnMap[bu] = b.label;
+      // also map the short form if possible
+      const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+      if(m && m[1]) btnMap[m[1]] = b.label;
+    }
+    if(!Array.isArray(data) || data.length===0){
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center">No events</td></tr>';
+      return;
+    }
+    tbody.innerHTML = '';
+    function friendlyTrigger(t){
+      const typeMap = { 'BEFORE': 'Before', 'AT': 'At', 'AFTER': 'After' };
+      const typeLabel = typeMap[String(t.typeOfTrigger).toUpperCase()] || String(t.typeOfTrigger);
+      const mins = Number(t.minutes) || 0;
+      let timePart = mins === 0 && typeLabel === 'At' ? 'At time' : `${mins} mins ${typeLabel}`;
+
+      // normalize short and full button forms
+      const raw = t.buttonURL || '';
+      let shortBtn = '';
+      try{
+        const m = /([0-9]+\/[0-9]+\/[0-9]+)/.exec(raw || '');
+        if(m && m[1]) shortBtn = m[1];
+        else {
+          const parts = (raw || '').split('/').filter(Boolean);
+          if(parts.length >= 3) shortBtn = parts.slice(-3).join('/');
+          else shortBtn = raw || '';
+        }
+      }catch(e){ shortBtn = raw || ''; }
+
+      const fullBtn = /^location\/.+/.test(raw) ? raw : ( /^\d+\/\d+\/\d+$/.test(shortBtn) ? `location/${shortBtn}/press` : shortBtn );
+
+      // prefer showing a template label when available
+      const label = btnMap[fullBtn] || btnMap[shortBtn];
+      const btnPart = label ? `Template: ${label}` : (shortBtn ? `Button: ${shortBtn}` : '');
+      return `${timePart}${btnPart ? '. ' + btnPart : ''}`;
+    }
+
+    for(const e of data){
+      const tr = document.createElement('tr');
+      const triggersHtml = (e.times || []).map(t => friendlyTrigger(t)).join('<br>') || '';
+      tr.innerHTML = `
+        <td>${e.id ?? ''}</td>
+        <td>${e.name}</td>
+        <td>${e.date}</td>
+        <td>${e.time}</td>
+        <td>${e.repeating ? 'Yes' : 'No'}</td>
+        <td>${e.active ? 'Yes' : 'No'}</td>
+        <td>${triggersHtml}</td>
+        <td>
+          <div class="btn-group" role="group">
+            <button class="btn btn-sm btn-outline-primary edit-event" data-id="${e.id}">Edit</button>
+            <button class="btn btn-sm btn-outline-danger delete-event" data-id="${e.id}">Delete</button>
+          </div>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }catch(err){
+    tbody.innerHTML = `<tr><td colspan="7" class="text-danger">Error loading events</td></tr>`;
+    console.error(err);
+  }
+}
+
+document.getElementById('refresh-events').addEventListener('click', loadEvents);
+
+// Add event button (placeholder: navigate to a create page or open editor)
+document.getElementById('add-event').addEventListener('click', async ()=>{
+  // TODO: replace with a proper create-event flow / modal
+  try{
+    window.location.href = '/calendar/new';
+  }catch(e){console.error(e)}
+});
+
+// Delegate edit/delete button handlers
+document.getElementById('events-body').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button');
+  if(!btn) return;
+  if(btn.classList.contains('edit-event')){
+    const id = btn.getAttribute('data-id');
+    // TODO: implement edit UI
+    window.location.href = `/calendar/edit/${encodeURIComponent(id)}`;
+    return;
+  }
+  if(btn.classList.contains('delete-event')){
+    const id = btn.getAttribute('data-id');
+    if(!id) return;
+    if(!confirm('Delete event ID ' + id + '? This cannot be undone.')) return;
+    try{
+      const resp = await fetch(`/api/events/${encodeURIComponent(id)}`, {method: 'DELETE'});
+      if(resp.ok){
+        await loadEvents();
+      }else{
+        const txt = await resp.text();
+        alert('Failed to delete event: ' + txt);
+      }
+    }catch(e){
+      console.error(e);
+      alert('Error deleting event: ' + e.message);
+    }
+  }
+});
+
+// initial load
+loadEvents();
+</script>
+
+{% endblock %}

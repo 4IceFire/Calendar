@@ -23,6 +23,8 @@ class ClockScheduler:
 
         self._heap: List[TriggerJob] = []
         self._last_mtime: Optional[float] = None
+        # track config.json mtime so we can react to config changes at runtime
+        self._last_config_mtime: Optional[float] = None
 
         # Companion client from shared utils
         self.c = utils.get_companion()
@@ -84,12 +86,61 @@ class ClockScheduler:
             except FileNotFoundError:
                 mtime = None
 
+            # detect changes to the events file
             if mtime != self._last_mtime:
                 self._last_mtime = mtime
                 with self._cv:
                     self._reload_needed = True
                     self._cv.notify()
                 self._dbg("Detected change in events file; scheduling reload")
+
+            # detect changes to the config file and reload runtime config
+            try:
+                cfg_mtime = __import__("os").path.getmtime(utils.CONFIG_FILE)
+            except FileNotFoundError:
+                cfg_mtime = None
+
+            if cfg_mtime != self._last_config_mtime:
+                # update stored mtime first to avoid repeated reloads
+                self._last_config_mtime = cfg_mtime
+                try:
+                    reloaded = utils.reload_config()
+                except Exception:
+                    reloaded = False
+
+                if reloaded:
+                    # Pull new companion client and dynamic debug immediately
+                    try:
+                        self.c = utils.get_companion()
+                        new_debug = bool(utils.get_debug())
+                        if new_debug != self.debug:
+                            print(f"[DEBUG] Dynamic debug set to {new_debug}")
+                            self.debug = new_debug
+                            try:
+                                if self.c is not None:
+                                    self.c.debug = self.debug
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    # If events filename changed in config, adopt it and force reload
+                    try:
+                        cfg = utils.get_config()
+                        new_events = cfg.get("EVENTS_FILE", self.events_file)
+                        if new_events != self.events_file:
+                            self._dbg(f"Config changed EVENTS_FILE: '{self.events_file}' -> '{new_events}'")
+                            self.events_file = new_events
+                            # force events-file mtime refresh so loader picks up the file
+                            self._last_mtime = None
+
+                    except Exception:
+                        pass
+
+                    with self._cv:
+                        self._reload_needed = True
+                        self._cv.notify()
+                    self._dbg("Detected change in config file; scheduling reload")
 
             t.sleep(self.poll_interval)
 

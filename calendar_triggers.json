@@ -1,56 +1,11 @@
 [
   {
-    "due": "2025-12-28 07:40:00",
-    "seconds_until": 209585,
-    "event": "Sunday 8AM",
-    "event_id": 1,
-    "trigger_index": 0,
-    "offset_min": -30,
-    "url": "1/0/1"
-  },
-  {
-    "due": "2025-12-28 08:10:00",
-    "seconds_until": 211385,
-    "event": "Sunday 8AM",
-    "event_id": 1,
-    "trigger_index": 1,
-    "offset_min": 0,
-    "url": "1/0/2"
-  },
-  {
-    "due": "2025-12-28 08:25:00",
-    "seconds_until": 212285,
-    "event": "Sunday 8AM",
-    "event_id": 1,
+    "due": "2025-12-26 01:46:00",
+    "seconds_until": 22,
+    "event": "Sprint 1",
+    "event_id": 3,
     "trigger_index": 2,
-    "offset_min": 15,
-    "url": "1/0/3"
-  },
-  {
-    "due": "2025-12-31 22:31:00",
-    "seconds_until": 522245,
-    "event": "Test Event 1",
-    "event_id": 2,
-    "trigger_index": 0,
-    "offset_min": -4,
-    "url": "location/1/0/1/press"
-  },
-  {
-    "due": "2025-12-31 22:35:00",
-    "seconds_until": 522485,
-    "event": "Test Event 1",
-    "event_id": 2,
-    "trigger_index": 1,
     "offset_min": 0,
-    "url": "location/1/0/1/press"
-  },
-  {
-    "due": "2025-12-31 22:39:00",
-    "seconds_until": 522725,
-    "event": "Test Event 1",
-    "event_id": 2,
-    "trigger_index": 2,
-    "offset_min": 4,
-    "url": "location/1/0/1/press"
+    "url": "location/3/2/1/press"
   }
 ]

@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h1>App Control</h1>
+  <p>Start or stop registered apps.</p>
+  <div id="apps-container">
+    <table class="table table-sm">
+      <thead>
+        <tr><th>App</th><th>Status</th><th>Action</th></tr>
+      </thead>
+      <tbody id="apps-body"></tbody>
+    </table>
+  </div>
+{% endblock %}

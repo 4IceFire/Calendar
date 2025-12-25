@@ -1,0 +1,783 @@
+from flask import Flask, render_template, jsonify, request
+import logging
+import threading
+import os
+import time
+from pathlib import Path
+
+from werkzeug.serving import make_server
+import json
+import re
+
+from package.core import list_apps, get_app
+try:
+    from package.apps.calendar import utils
+except Exception:
+    # Fallback lightweight utils if importing the calendar utils fails (e.g., missing companion/requests)
+    import json
+
+    def _load_cfg():
+        try:
+            with open('config.json', 'r', encoding='utf-8') as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
+
+    class _StubUtils:
+        def get_config(self):
+            return _load_cfg()
+
+        def reload_config(self, force: bool = False):
+            # no-op
+            return False
+
+        def save_config(self, cfg):
+            try:
+                with open('config.json', 'w', encoding='utf-8') as f:
+                    json.dump(cfg, f, indent=2)
+            except Exception:
+                pass
+
+        def get_companion(self):
+            return None
+
+    utils = _StubUtils()
+
+app = Flask(__name__, template_folder='templates', static_folder='static')
+
+
+def _apply_logging_config():
+    """Adjust log levels for noisy servers (werkzeug) based on config debug flag.
+
+    When `debug` in config is falsey we raise the log level to WARNING so
+    frequent access logs (e.g. companion status polling) aren't printed.
+    """
+    try:
+        cfg = utils.get_config()
+        debug = bool(cfg.get('debug', False))
+    except Exception:
+        debug = False
+    level = logging.INFO if debug else logging.WARNING
+    try:
+        logging.getLogger('werkzeug').setLevel(level)
+    except Exception:
+        pass
+    try:
+        logging.getLogger('flask.app').setLevel(level)
+    except Exception:
+        pass
+
+
+# apply logging config at import/startup
+_apply_logging_config()
+
+TEMPLATES_DIR = Path.cwd()
+TRIGGER_TEMPLATES = TEMPLATES_DIR / 'trigger_templates.json'
+BUTTON_TEMPLATES = TEMPLATES_DIR / 'button_templates.json'
+
+# ensure template files exist
+for p in (TRIGGER_TEMPLATES, BUTTON_TEMPLATES):
+    if not p.exists():
+        p.write_text('[]', encoding='utf-8')
+
+
+def _start_all_apps():
+    """Start all registered apps in background threads."""
+    apps = list_apps()
+    for name in apps:
+        try:
+            app_inst = get_app(name)
+            if app_inst is None:
+                continue
+            # start non-blocking and record instance as running
+            try:
+                app_inst.start(blocking=False)
+            except TypeError:
+                # some apps may not accept blocking arg; start in a thread
+                threading.Thread(target=lambda inst=app_inst: inst.start(), daemon=True).start()
+            except Exception:
+                # best-effort: ignore start failures
+                pass
+
+            try:
+                _running_apps[name] = app_inst
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
+# Track instances started via this web UI so we can stop them later
+_running_apps: dict[str, object] = {}
+
+
+# HTTP server control so we can start/stop/restart on config changes
+_http_server = None
+_server_thread = None
+_server_lock = threading.Lock()
+
+
+def start_http_server(host: str, port: int) -> None:
+    global _http_server, _server_thread
+    with _server_lock:
+        if _http_server is not None:
+            return
+        srv = make_server(host, port, app)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        _http_server = srv
+        _server_thread = thread
+        thread.start()
+        # start apps after the server is up
+        try:
+            _start_all_apps()
+        except Exception:
+            pass
+
+
+def stop_http_server() -> None:
+    global _http_server, _server_thread
+    with _server_lock:
+        if _http_server is None:
+            return
+        try:
+            _http_server.shutdown()
+        except Exception:
+            pass
+        _http_server = None
+        _server_thread = None
+
+
+def restart_http_server(host: str, port: int) -> None:
+    stop_http_server()
+    start_http_server(host, port)
+
+
+def startup():
+    # Kick off apps once when webserver starts
+    threading.Thread(target=_start_all_apps, daemon=True).start()
+def _start_on_server_start() -> None:
+    # Kick off apps once when webserver starts
+    threading.Thread(target=_start_all_apps, daemon=True).start()
+
+
+# Config watcher: restart server when `webserver_port` changes in config.json
+def _config_watcher():
+    try:
+        utils.reload_config(force=True)
+    except Exception:
+        pass
+    # ensure logging reflects loaded config
+    try:
+        _apply_logging_config()
+    except Exception:
+        pass
+    cfg = utils.get_config()
+    prev_port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
+    while True:
+        time.sleep(1)
+        try:
+            changed = utils.reload_config()
+        except Exception:
+            changed = False
+        if changed:
+            cfg = utils.get_config()
+            new_port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
+            if new_port != prev_port:
+                try:
+                    restart_http_server('0.0.0.0', new_port)
+                except Exception:
+                    pass
+                prev_port = new_port
+
+
+# start config watcher thread
+threading.Thread(target=_config_watcher, daemon=True).start()
+
+
+@app.route('/')
+def home():
+    return render_template('home.html')
+
+
+@app.route('/apps')
+def apps_page():
+    return render_template('apps.html')
+
+
+@app.route('/calendar')
+def calendar_page():
+    return render_template('calendar.html')
+
+
+@app.route('/templates')
+def templates_page():
+    return render_template('templates.html')
+
+
+@app.route('/calendar/new')
+def calendar_new_page():
+    return render_template('calendar_new.html')
+
+
+@app.route('/calendar/edit/<int:ident>')
+def calendar_edit_page(ident: int):
+    # Render the same create page; client JS will fetch event data and switch to edit mode
+    return render_template('calendar_new.html')
+
+
+def _read_json_file(p: Path):
+    try:
+        if not p.exists():
+            return []
+        return json.loads(p.read_text(encoding='utf-8') or '[]')
+    except Exception:
+        return []
+
+
+def _write_json_file(p: Path, data):
+    try:
+        p.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        return True
+    except Exception:
+        return False
+
+
+@app.route('/api/templates')
+def api_get_templates():
+    btns = _read_json_file(BUTTON_TEMPLATES)
+    trigs = _read_json_file(TRIGGER_TEMPLATES)
+    # normalize older 'spec' entries to 'times'
+    normalized = []
+    changed = False
+    for t in trigs:
+        if not isinstance(t, dict):
+            normalized.append(t); continue
+        if 'times' not in t and 'spec' in t:
+            val = t.get('spec')
+            if isinstance(val, str):
+                try:
+                    val_parsed = json.loads(val)
+                except Exception:
+                    val_parsed = val
+            else:
+                val_parsed = val
+            t['times'] = val_parsed
+            t.pop('spec', None)
+            changed = True
+        normalized.append(t)
+    trigs = normalized
+    # if we normalized old entries, persist the normalized form back to file
+    if changed:
+        try:
+            _write_json_file(TRIGGER_TEMPLATES, trigs)
+        except Exception:
+            pass
+    return jsonify({'buttons': btns, 'triggers': trigs})
+
+
+@app.route('/api/templates/button', methods=['POST'])
+def api_add_button_template():
+    body = request.get_json() or {}
+    label = body.get('label')
+    pattern = (body.get('pattern') or '').strip()
+    if not label or not pattern:
+        return jsonify({'ok': False, 'error': 'label and pattern required'}), 400
+    # validate pattern: must be three integers separated by '/'
+    if not re.match(r'^\d+\/\d+\/\d+$', pattern):
+        return jsonify({'ok': False, 'error': 'pattern must be like "1/0/1" (three integers separated by "/")'}), 400
+
+    arr = _read_json_file(BUTTON_TEMPLATES)
+    button_url = f"location/{pattern}/press"
+    arr.append({'label': label, 'pattern': pattern, 'buttonURL': button_url})
+    ok = _write_json_file(BUTTON_TEMPLATES, arr)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    return jsonify({'ok': True, 'template': arr[-1]})
+
+
+@app.route('/api/templates/button/<int:idx>', methods=['DELETE'])
+def api_delete_button_template(idx: int):
+    arr = _read_json_file(BUTTON_TEMPLATES)
+    if idx < 0 or idx >= len(arr):
+        return jsonify({'ok': False, 'error': 'index out of range'}), 404
+    removed = arr.pop(idx)
+    ok = _write_json_file(BUTTON_TEMPLATES, arr)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    return jsonify({'ok': True, 'removed': removed})
+
+
+@app.route('/api/templates/trigger', methods=['POST'])
+def api_add_trigger_template():
+    body = request.get_json() or {}
+    label = body.get('label')
+    times = body.get('times')
+    if not label or times is None:
+        return jsonify({'ok': False, 'error': 'label and times required'}), 400
+    # normalize times to a list
+    if isinstance(times, dict):
+        times = [times]
+    if not isinstance(times, list):
+        return jsonify({'ok': False, 'error': 'times must be an object or an array of trigger specs'}), 400
+    arr = _read_json_file(TRIGGER_TEMPLATES)
+    arr.append({'label': label, 'times': times})
+    ok = _write_json_file(TRIGGER_TEMPLATES, arr)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    return jsonify({'ok': True, 'template': arr[-1]})
+
+
+@app.route('/api/templates/trigger/<int:idx>', methods=['DELETE'])
+def api_delete_trigger_template(idx: int):
+    arr = _read_json_file(TRIGGER_TEMPLATES)
+    if idx < 0 or idx >= len(arr):
+        return jsonify({'ok': False, 'error': 'index out of range'}), 404
+    removed = arr.pop(idx)
+    ok = _write_json_file(TRIGGER_TEMPLATES, arr)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    return jsonify({'ok': True, 'removed': removed})
+
+
+@app.route('/api/templates/trigger/<int:idx>', methods=['PUT'])
+def api_update_trigger_template(idx: int):
+    body = request.get_json() or {}
+    label = body.get('label')
+    times = body.get('times')
+    if not label or times is None:
+        return jsonify({'ok': False, 'error': 'label and times required'}), 400
+    if not isinstance(times, list):
+        return jsonify({'ok': False, 'error': 'times must be an array of trigger specs'}), 400
+    arr = _read_json_file(TRIGGER_TEMPLATES)
+    if idx < 0 or idx >= len(arr):
+        return jsonify({'ok': False, 'error': 'index out of range'}), 404
+    arr[idx] = {'label': label, 'times': times}
+    ok = _write_json_file(TRIGGER_TEMPLATES, arr)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    return jsonify({'ok': True, 'template': arr[idx]})
+
+
+@app.route('/api/ui/events')
+def api_ui_events():
+    # return a JSON list of events for the UI (reads the same storage the calendar app uses)
+    try:
+        from package.apps.calendar import storage
+    except Exception:
+        return jsonify([])
+
+    try:
+        cfg = utils.get_config()
+        events_file = cfg.get('EVENTS_FILE', storage.DEFAULT_EVENTS_FILE)
+        events = storage.load_events(events_file)
+        out = []
+        for e in events:
+            out.append({
+                'id': getattr(e, 'id', None),
+                'name': e.name,
+                'date': e.date.strftime('%Y-%m-%d'),
+                'time': e.time.strftime('%H:%M:%S'),
+                'repeating': e.repeating,
+                'active': getattr(e, 'active', True),
+                'times': [
+                    {'minutes': t.minutes, 'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)), 'buttonURL': t.buttonURL}
+                    for t in e.times
+                ],
+            })
+        resp = jsonify(out)
+        # prevent client-side caching so manual edits to the events file are picked up
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        return resp
+    except Exception:
+        return jsonify([])
+
+
+@app.route('/api/apps')
+def api_list_apps():
+    regs = list_apps()
+    out = []
+    for name, factory in regs.items():
+        running = False
+        # prefer asking the singleton instance for its status()
+        try:
+            inst = get_app(name)
+            if inst is not None and hasattr(inst, 'status'):
+                st = inst.status() or {}
+                # if status reports running, use that
+                running = bool(st.get('running', False))
+            else:
+                running = name in _running_apps
+        except Exception:
+            running = name in _running_apps
+
+        out.append({
+            'name': name,
+            'running': running,
+        })
+    return jsonify(out)
+
+
+@app.route('/api/apps/<name>/start', methods=['POST'])
+def api_start_app(name: str):
+    regs = list_apps()
+    if name not in regs:
+        return jsonify({'ok': False, 'error': 'unknown app'}), 404
+    # prefer the singleton instance so UI controls the same app the server uses
+    try:
+        inst = get_app(name)
+        if inst is None:
+            return jsonify({'ok': False, 'error': 'failed to construct app instance'}), 500
+
+        # if app reports it's already running, return success
+        try:
+            st = inst.status() or {}
+            if st.get('running'):
+                _running_apps[name] = inst
+                return jsonify({'ok': True, 'msg': 'already running'})
+        except Exception:
+            pass
+
+        # start non-blocking
+        try:
+            inst.start(blocking=False)
+        except TypeError:
+            threading.Thread(target=lambda inst=inst: inst.start(), daemon=True).start()
+        except Exception:
+            pass
+
+        _running_apps[name] = inst
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/apps/<name>/stop', methods=['POST'])
+def api_stop_app(name: str):
+    # prefer the singleton instance
+    try:
+        inst = get_app(name)
+        if inst is None:
+            return jsonify({'ok': False, 'error': 'unknown app'}), 404
+
+        try:
+            inst.stop()
+        except Exception:
+            pass
+
+        # ensure we remove any record in our running map
+        try:
+            _running_apps.pop(name, None)
+        except Exception:
+            pass
+
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/companion_status')
+def companion_status():
+    c = utils.get_companion()
+    status = False
+    try:
+        if c is None:
+            status = False
+        else:
+            # actively check connectivity if possible to return an up-to-date result
+            try:
+                if hasattr(c, 'check_connection'):
+                    status = bool(c.check_connection())
+                else:
+                    status = bool(getattr(c, 'connected', False))
+            except Exception:
+                # fall back to stored flag
+                status = bool(getattr(c, 'connected', False))
+    except Exception:
+        status = False
+    return jsonify({'connected': status})
+
+
+@app.route('/api/config', methods=['GET'])
+def api_get_config():
+    try:
+        cfg = utils.get_config()
+        return jsonify(cfg)
+    except Exception:
+        return jsonify({})
+
+
+@app.route('/api/config', methods=['POST'])
+def api_set_config():
+    try:
+        new = request.get_json() or {}
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid json'}), 400
+
+    try:
+        cfg = utils.get_config()
+        # merge provided values
+        cfg.update(new)
+        # persist
+        utils.save_config(cfg)
+        utils.reload_config(force=True)
+        # re-apply logging configuration in case `debug` was changed
+        try:
+            _apply_logging_config()
+        except Exception:
+            pass
+
+        # if webserver_port changed, instruct restart
+        try:
+            port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
+            # restart server on the new port
+            restart_http_server('0.0.0.0', port)
+        except Exception:
+            pass
+
+        return jsonify({'ok': True, 'config': cfg})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/events/<int:ident>', methods=['DELETE'])
+def api_delete_event_ui(ident: int):
+    """Allow the web UI to delete an event from the configured EVENTS_FILE.
+
+    This mirrors the FastAPI delete behavior so the UI can operate without
+    running the separate API server.
+    """
+    try:
+        from package.apps.calendar import storage
+    except Exception:
+        return jsonify({'ok': False, 'error': 'storage unavailable'}), 500
+
+    try:
+        cfg = utils.get_config()
+        events_file = cfg.get('EVENTS_FILE', storage.DEFAULT_EVENTS_FILE)
+        events = storage.load_events(events_file)
+        matching = [e for e in events if getattr(e, 'id', None) == ident]
+        if not matching:
+            return jsonify({'ok': False, 'error': 'Event not found'}), 404
+        ev = matching[0]
+        events.remove(ev)
+        storage.save_events(events, events_file)
+        return jsonify({'removed': True, 'id': ident, 'name': ev.name})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/events/<int:ident>', methods=['GET'])
+def api_get_event_ui(ident: int):
+    """Return a single event by id for the UI to edit."""
+    try:
+        from package.apps.calendar import storage
+    except Exception:
+        return jsonify({'ok': False, 'error': 'storage unavailable'}), 500
+
+    try:
+        cfg = utils.get_config()
+        events_file = cfg.get('EVENTS_FILE', storage.DEFAULT_EVENTS_FILE)
+        events = storage.load_events(events_file)
+        matching = [e for e in events if getattr(e, 'id', None) == ident]
+        if not matching:
+            return jsonify({'ok': False, 'error': 'Event not found'}), 404
+        e = matching[0]
+        out = {
+            'id': getattr(e, 'id', None),
+            'name': e.name,
+            'date': e.date.strftime('%Y-%m-%d'),
+            'time': e.time.strftime('%H:%M:%S'),
+            'repeating': e.repeating,
+            'active': getattr(e, 'active', True),
+            'day': getattr(e, 'day').name if getattr(e, 'day', None) is not None else 'Monday',
+            'times': [
+                {'minutes': t.minutes, 'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)), 'buttonURL': t.buttonURL}
+                for t in e.times
+            ],
+        }
+        resp = jsonify(out)
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        return resp
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/events/<int:ident>', methods=['PUT'])
+def api_update_event_ui(ident: int):
+    """Update an existing event (from the UI) and persist to EVENTS_FILE."""
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid json'}), 400
+
+    try:
+        from package.apps.calendar import storage
+        from package.apps.calendar.models import Event, TimeOfTrigger, TypeofTime, WeekDay
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'storage/models unavailable: ' + str(e)}), 500
+
+    try:
+        cfg = utils.get_config()
+        events_file = cfg.get('EVENTS_FILE', storage.DEFAULT_EVENTS_FILE)
+        events = storage.load_events(events_file)
+        matching = [e for e in events if getattr(e, 'id', None) == ident]
+        if not matching:
+            return jsonify({'ok': False, 'error': 'Event not found'}), 404
+        ev = matching[0]
+
+        name = body.get('name', ev.name)
+        day = body.get('day', ev.day.name if getattr(ev, 'day', None) is not None else 'Monday')
+        date_str = body.get('date', ev.date.strftime('%Y-%m-%d'))
+        time_str = body.get('time', ev.time.strftime('%H:%M:%S'))
+        repeating = bool(body.get('repeating', ev.repeating))
+        active = bool(body.get('active', getattr(ev, 'active', True)))
+
+        from datetime import datetime
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+        time_obj = datetime.strptime(time_str, '%H:%M:%S').time() if len(time_str.split(':'))==3 else datetime.strptime(time_str, '%H:%M').time()
+
+        times = []
+        import re as _re
+        for t in body.get('times', []):
+            try:
+                mins = int(t.get('minutes', 0) or 0)
+            except Exception:
+                return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400
+            if mins < 0:
+                return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
+
+            typ_name = t.get('typeOfTrigger', 'AT')
+            if typ_name not in TypeofTime.__members__:
+                return jsonify({'ok': False, 'error': f"Invalid typeOfTrigger: {typ_name}"}), 400
+            typ = TypeofTime[typ_name]
+
+            btn_raw = (t.get('buttonURL') or '').strip()
+            btn_final = ''
+            if btn_raw:
+                if _re.match(r'^location/\d+/\d+/\d+/press$', btn_raw):
+                    btn_final = btn_raw
+                elif _re.match(r'^\d+/\d+/\d+$', btn_raw):
+                    btn_final = f'location/{btn_raw}/press'
+                else:
+                    return jsonify({'ok': False, 'error': f"Invalid buttonURL format: {btn_raw}. Use '1/2/3' or 'location/1/2/3/press'"}), 400
+            else:
+                btn_final = ''
+
+            times.append(TimeOfTrigger(mins, typ, btn_final))
+
+        # replace fields on existing event object
+        ev.name = name
+        ev.day = WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday
+        ev.date = date_obj
+        ev.time = time_obj
+        ev.repeating = repeating
+        ev.active = active
+        ev.times = times
+        ev.times.sort()
+
+        storage.save_events(events, events_file)
+        return jsonify({'ok': True, 'id': ident})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/ui/events', methods=['POST'])
+def api_create_event_ui():
+    """Create an event from the UI and persist to the configured EVENTS_FILE."""
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid json'}), 400
+
+    try:
+        # require storage and models
+        from package.apps.calendar import storage
+        from package.apps.calendar.models import Event, TimeOfTrigger, TypeofTime, WeekDay
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'storage/models unavailable: ' + str(e)}), 500
+
+    try:
+        cfg = utils.get_config()
+        events_file = cfg.get('EVENTS_FILE', storage.DEFAULT_EVENTS_FILE)
+        events = storage.load_events(events_file)
+
+        # determine new id
+        max_id = 0
+        for e in events:
+            if isinstance(getattr(e, 'id', None), int) and e.id > max_id:
+                max_id = e.id
+        new_id = max_id + 1
+
+        name = body.get('name', '')
+        day = body.get('day', 'Monday')
+        date_str = body.get('date', '1970-01-01')
+        time_str = body.get('time', '00:00:00')
+        repeating = bool(body.get('repeating', False))
+        active = bool(body.get('active', True))
+
+        from datetime import datetime
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+        time_obj = datetime.strptime(time_str, '%H:%M:%S').time() if len(time_str.split(':'))==3 else datetime.strptime(time_str, '%H:%M').time()
+
+        times = []
+        import re as _re
+        for t in body.get('times', []):
+            # minutes must be 0 or positive integer
+            try:
+                mins = int(t.get('minutes', 0) or 0)
+            except Exception:
+                return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400
+            if mins < 0:
+                return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
+
+            # typeOfTrigger must map to TypeofTime
+            typ_name = t.get('typeOfTrigger', 'AT')
+            if typ_name not in TypeofTime.__members__:
+                return jsonify({'ok': False, 'error': f"Invalid typeOfTrigger: {typ_name}"}), 400
+            typ = TypeofTime[typ_name]
+
+            # buttonURL handling: prefer a full button URL from templates (location/x/y/z/press)
+            btn_raw = (t.get('buttonURL') or '').strip()
+            btn_final = ''
+            if btn_raw:
+                # if already a full URL like location/.../press, accept
+                if _re.match(r'^location/\d+/\d+/\d+/press$', btn_raw):
+                    btn_final = btn_raw
+                # if it's a short pattern like 1/2/3, convert
+                elif _re.match(r'^\d+/\d+/\d+$', btn_raw):
+                    btn_final = f'location/{btn_raw}/press'
+                else:
+                    return jsonify({'ok': False, 'error': f"Invalid buttonURL format: {btn_raw}. Use '1/2/3' or 'location/1/2/3/press'"}), 400
+            else:
+                btn_final = ''
+
+            times.append(TimeOfTrigger(mins, typ, btn_final))
+
+        ev = Event(name, new_id, WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday, date_obj, time_obj, repeating, times, active)
+        events.append(ev)
+        storage.save_events(events, events_file)
+        return jsonify({'ok': True, 'id': new_id})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+if __name__ == '__main__':
+    # Start server on configured port (key: `webserver_port`).
+    try:
+        utils.reload_config(force=True)
+    except Exception:
+        pass
+    cfg = utils.get_config()
+    host = cfg.get('webserver_host', '0.0.0.0')
+    port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
+    print(f'Starting web UI on {host}:{port} (from config.json)')
+    try:
+        start_http_server(host, port)
+        # keep main thread alive while server runs
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print('Shutting down web UI')
+        stop_http_server()

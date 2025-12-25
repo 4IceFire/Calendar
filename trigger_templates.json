@@ -1,0 +1,22 @@
+[
+  {
+    "label": "Test Template",
+    "times": [
+      {
+        "minutes": 2,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/0/1/press"
+      },
+      {
+        "minutes": 1,
+        "typeOfTrigger": "BEFORE",
+        "buttonURL": "location/1/2/3/press"
+      },
+      {
+        "minutes": 0,
+        "typeOfTrigger": "AT",
+        "buttonURL": "location/3/2/1/press"
+      }
+    ]
+  }
+]

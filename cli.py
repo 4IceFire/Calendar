@@ -119,7 +119,9 @@ def _find_event(events: List, ident: str):
 
 
 def cmd_list_events(args):
-    events = storage.load_events()
+    cfg = utils.get_config()
+    events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
+    events = storage.load_events(events_file)
     if not events:
         print("No events")
         return
@@ -129,7 +131,9 @@ def cmd_list_events(args):
 
 
 def cmd_show(args):
-    events = storage.load_events()
+    cfg = utils.get_config()
+    events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
+    events = storage.load_events(events_file)
     ev = _find_event(events, args.ident)
     if not ev:
         print("Event not found")
@@ -156,7 +160,9 @@ def _persist_and_touch(events):
 
 
 def _set_active(ident: str, value: bool):
-    events = storage.load_events()
+    cfg = utils.get_config()
+    events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
+    events = storage.load_events(events_file)
     ev = _find_event(events, ident)
     if not ev:
         print("Event not found")
@@ -175,7 +181,9 @@ def cmd_disable(args):
 
 
 def cmd_trigger(args):
-    events = storage.load_events()
+    cfg = utils.get_config()
+    events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
+    events = storage.load_events(events_file)
     ev = _find_event(events, args.ident)
     if not ev:
         print("Event not found")

@@ -1,0 +1,326 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h1>Create Event</h1>
+<form id="event-form">
+  <div class="mb-3">
+    <label class="form-label">Name</label>
+    <input name="name" class="form-control" required>
+  </div>
+  <div class="row">
+    <div class="col-md-3 mb-3">
+      <label class="form-label">Date</label>
+      <input type="date" name="date" class="form-control" required>
+    </div>
+    <div class="col-md-3 mb-3">
+      <label class="form-label">Time</label>
+      <input type="time" name="time" class="form-control" required>
+    </div>
+    <div class="col-md-3 mb-3">
+      <label class="form-label">Day</label>
+      <select name="day" class="form-select">
+        <option>Monday</option>
+        <option>Tuesday</option>
+        <option>Wednesday</option>
+        <option>Thursday</option>
+        <option>Friday</option>
+        <option>Saturday</option>
+        <option>Sunday</option>
+      </select>
+    </div>
+    <div class="col-md-3 mb-3">
+      <label class="form-label">Repeating</label>
+      <select name="repeating" class="form-select"><option value="false">No</option><option value="true">Yes</option></select>
+    </div>
+  </div>
+
+  <h4>Triggers</h4>
+  <div class="mb-2 d-flex gap-2 align-items-center">
+    <select id="trigger-template-select" class="form-select form-select-sm" style="max-width:360px">
+      <option value="">(select template)</option>
+    </select>
+    <button id="load-trigger-template-btn" class="btn btn-sm btn-outline-primary">Load Template</button>
+  </div>
+  <div id="triggers-container"></div>
+  <div class="mb-3 mt-2">
+    <button id="add-trigger-btn" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
+  </div>
+
+  <div class="mb-3 form-check">
+    <input class="form-check-input" type="checkbox" value="1" id="activeCheck" name="active" checked>
+    <label class="form-check-label" for="activeCheck">Active</label>
+  </div>
+  <div class="mb-3">
+    <button class="btn btn-primary" type="submit">Create Event</button>
+    <a class="btn btn-link" href="/calendar">Cancel</a>
+  </div>
+</form>
+
+<script>
+async function loadButtonTemplates(){
+  try{
+    const resp = await fetch('/api/templates');
+    const data = await resp.json();
+    return data.buttons || [];
+  }catch(e){ return []; }
+}
+
+async function loadTriggerTemplates(){
+  try{
+    const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
+    const data = await resp.json();
+    return data.triggers || [];
+  }catch(e){ return []; }
+}
+
+function newTriggerRow(templates){
+  const idx = Date.now();
+  const div = document.createElement('div');
+  div.className = 'd-flex gap-2 align-items-center mb-2';
+  div.innerHTML = `
+    <input name="minutes" placeholder="minutes" class="form-control form-control-sm" style="width:100px">
+    <select name="typeOfTrigger" class="form-select form-select-sm" style="width:140px">
+      <option value="BEFORE">Before</option>
+      <option value="AT">At</option>
+      <option value="AFTER">After</option>
+    </select>
+    <select name="buttonTemplate" class="form-select form-select-sm">
+      <option value="">(none)</option>
+      ${templates.map((t,i)=>`<option value="${i}">${t.label}</option>`).join('')}
+    </select>
+    <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
+    <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
+  `;
+  return div;
+}
+
+document.addEventListener('DOMContentLoaded', async ()=>{
+  let editId = null;
+  const templates = await loadButtonTemplates();
+  const triggerTemplates = await loadTriggerTemplates();
+  // populate trigger-template select
+  const tplSel = document.getElementById('trigger-template-select');
+  triggerTemplates.forEach((t,i)=>{ const opt = document.createElement('option'); opt.value = i; opt.text = t.label + ' — ' + (Array.isArray(t.times)?t.times.length: (t.spec? (Array.isArray(t.spec)?t.spec.length:'1'):'0')) + ' triggers'; tplSel.appendChild(opt); });
+  const container = document.getElementById('triggers-container');
+
+  // detect edit mode from URL: /calendar/edit/<id>
+  const m = window.location.pathname.match(/\/calendar\/edit\/(\d+)$/);
+  if(m){
+    editId = m[1];
+    // switch UI to edit mode and fetch event
+    document.querySelector('h1').textContent = 'Edit Event';
+    const submitBtn = document.querySelector('button[type="submit"]');
+    if(submitBtn) submitBtn.textContent = 'Save Changes';
+    try{
+      const resp = await fetch('/api/events/' + encodeURIComponent(editId) + '?_ts=' + Date.now(), {cache: 'no-store'});
+      if(resp.ok){
+        const ev = await resp.json();
+        // fill form fields
+        document.querySelector('input[name="name"]').value = ev.name || '';
+        document.querySelector('input[name="date"]').value = ev.date || '';
+        document.querySelector('input[name="time"]').value = ev.time || '';
+        const daySel = document.querySelector('select[name="day"]'); if(daySel) daySel.value = ev.day || 'Monday';
+        const repSel = document.querySelector('select[name="repeating"]'); if(repSel) repSel.value = ev.repeating ? 'true' : 'false';
+        document.getElementById('activeCheck').checked = !!ev.active;
+
+        // populate triggers
+        container.innerHTML = '';
+        for(const t of (ev.times || [])){
+          const row = newTriggerRow(templates);
+          row.querySelector('input[name="minutes"]').value = t.minutes;
+          row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
+          // attempt to match a button template
+          let matched = false;
+          for(let bi=0; bi<templates.length; bi++){
+            const b = templates[bi];
+            const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null);
+              if(bu && bu === t.buttonURL){
+                const m2 = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+                // always display the short pattern (e.g. "1/0/1") when a template is used
+                const short = m2 ? m2[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || bu);
+                row.querySelector('select[name="buttonTemplate"]').value = bi;
+                row.querySelector('input[name="buttonURL"]').value = short;
+                row.querySelector('input[name="buttonURL"]').disabled = true;
+                matched = true; break;
+              }
+          }
+          if(!matched){
+            const bu = t.buttonURL || '';
+            const m2 = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+            row.querySelector('input[name="buttonURL"]').value = m2 ? m2[1] : (/^\d+\/\d+\/\d+$/.test(bu) ? bu : '');
+          }
+          container.appendChild(row);
+        }
+      }
+    }catch(e){ console.error('Failed loading event for edit', e); }
+  }
+
+  document.getElementById('add-trigger-btn').addEventListener('click', (ev)=>{
+    ev.preventDefault();
+    const row = newTriggerRow(templates);
+    container.appendChild(row);
+  });
+
+  container.addEventListener('click', (ev)=>{
+    const btn = ev.target.closest('.remove-trigger'); if(!btn) return; btn.closest('div').remove();
+  });
+
+  // when a button template is selected, auto-fill and disable the buttonURL input
+  container.addEventListener('change', (ev)=>{
+    const sel = ev.target.closest('select[name="buttonTemplate"]');
+    if(!sel) return;
+    const row = sel.closest('div');
+    const idx = sel.value;
+    const input = row.querySelector('input[name="buttonURL"]');
+    if(idx !== ''){
+      const tpl = templates[parseInt(idx,10)];
+      if(tpl){
+          let bu = tpl.buttonURL;
+          if(!bu && tpl.pattern && /^\d+\/\d+\/\d+$/.test(tpl.pattern)) bu = `location/${tpl.pattern}/press`;
+          if(bu){
+            // show short form (e.g. "1/0/1") in the input, disable editing
+            const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+            const short = m ? m[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || '');
+            input.value = short;
+            input.disabled = true;
+          } else {
+            input.disabled = false;
+            input.value = '';
+          }
+      }
+    }else{
+      input.disabled = false;
+      input.value = '';
+    }
+  });
+
+  // load template into the triggers container (replaces current rows)
+  document.getElementById('load-trigger-template-btn').addEventListener('click', async (ev)=>{
+    ev.preventDefault();
+    const sel = document.getElementById('trigger-template-select');
+    const idx = sel.value;
+    if(!idx) return alert('Select a trigger template first');
+    // ensure we have fresh templates
+    const all = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'}).then(r=>r.json());
+    const triggers = all.triggers || [];
+    const tpl = triggers[parseInt(idx,10)];
+    if(!tpl) return alert('Template not found');
+    const times = Array.isArray(tpl.times) ? tpl.times : (tpl.times ? JSON.parse(tpl.times) : []);
+    // clear existing
+    container.innerHTML = '';
+    // for each time, create a row and populate values
+    for(const t of times){
+      const row = newTriggerRow(templates);
+      row.querySelector('input[name="minutes"]').value = t.minutes;
+      row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
+      // try to match button template
+      let matched = false;
+      for(let bi=0; bi<templates.length; bi++){
+        const b = templates[bi];
+        const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null);
+          if(bu && bu === t.buttonURL){
+            // display short form when populating from template
+            const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+            const short = m ? m[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || '');
+            row.querySelector('select[name="buttonTemplate"]').value = bi;
+            row.querySelector('input[name="buttonURL"]').value = short;
+            row.querySelector('input[name="buttonURL"]').disabled = true;
+            matched = true; break; }
+      }
+      if(!matched){
+        const bu = t.buttonURL || '';
+        const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+        row.querySelector('input[name="buttonURL"]') .value = m ? m[1] : (/^\d+\/\d+\/\d+$/.test(bu) ? bu : '');
+      }
+      container.appendChild(row);
+    }
+  });
+
+  // initialize any pre-selected templates on page load
+  (function initSelectedTemplates(){
+    for(const row of container.children){
+      const sel = row.querySelector('select[name="buttonTemplate"]');
+      const input = row.querySelector('input[name="buttonURL"]');
+      if(!sel || !input) continue;
+      const idx = sel.value;
+      if(idx !== ''){
+        const tpl = templates[parseInt(idx,10)];
+        if(tpl){
+          let bu = tpl.buttonURL;
+          if(!bu && tpl.pattern && /^\d+\/\d+\/\d+$/.test(tpl.pattern)) bu = `location/${tpl.pattern}/press`;
+          if(bu){
+            const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+            const short = m ? m[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || '');
+            input.value = short; input.disabled = true;
+          }
+        }
+      }
+    }
+  })();
+
+  document.getElementById('event-form').addEventListener('submit', async (ev)=>{
+    ev.preventDefault();
+    const form = ev.target;
+    const formData = new FormData(form);
+    const name = formData.get('name');
+    const date = formData.get('date');
+    const time = formData.get('time');
+    const day = formData.get('day');
+    const repeating = formData.get('repeating') === 'true';
+
+    const times = [];
+    for(const row of container.children){
+      let minsRaw = row.querySelector('input[name="minutes"]').value;
+      const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
+      const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
+      let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
+
+      // Minutes: required unless type==AT then default 0
+      if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
+        if(type === 'AT') minsRaw = '0';
+        else { alert('Minutes required for non-AT triggers'); return; }
+      }
+      const mins = parseInt(minsRaw,10);
+      if(Number.isNaN(mins) || mins < 0){ alert('Minutes must be a non-negative integer'); return; }
+
+      // If a template selected, use its buttonURL (and ignore user input)
+      if(tmplIdx !== ''){
+        const t = templates[parseInt(tmplIdx,10)];
+        if(t){
+          if(t.buttonURL) buttonURL = t.buttonURL;
+          else if(t.pattern && /^\d+\/\d+\/\d+$/.test(t.pattern)) buttonURL = `location/${t.pattern}/press`;
+        }
+      }
+
+      // buttonURL must be present and valid now
+      if(!buttonURL || buttonURL.trim() === ''){ alert('Each trigger must have a button template selected or a valid button URL'); return; }
+      // allow short form or full, but normalize short here into full
+      if(/^\d+\/\d+\/\d+$/.test(buttonURL)){
+        buttonURL = `location/${buttonURL}/press`;
+      } else if(!/^location\/\d+\/\d+\/\d+\/press$/.test(buttonURL)){
+        alert('buttonURL must be like "1/2/3" or "location/1/2/3/press"'); return;
+      }
+
+      times.push({minutes: mins, typeOfTrigger: type, buttonURL});
+    }
+
+    const active = document.getElementById('activeCheck').checked === true;
+    const payload = {name, date, time, day, repeating, active: active, times};
+    try{
+      let url = '/api/ui/events';
+      let method = 'POST';
+      if(typeof editId !== 'undefined' && editId){ url = '/api/events/' + encodeURIComponent(editId); method = 'PUT'; }
+      const resp = await fetch(url, {method:method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      if(resp.ok){
+        alert(editId ? 'Saved' : 'Created');
+        window.location.href = '/calendar';
+      }else{
+        const txt = await resp.text();
+        alert((editId ? 'Save' : 'Create') + ' failed: ' + txt);
+      }
+    }catch(e){ console.error(e); alert((editId ? 'Save' : 'Error creating') + ' event'); }
+  });
+});
+</script>
+
+{% endblock %}

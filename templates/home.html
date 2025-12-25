@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block content %}
+  <div class="row">
+    <div class="col-md-8">
+      <h1>Home</h1>
+      <p>Welcome to the Calendar UI. Use the links in the nav to manage apps, templates and events.</p>
+
+      <div class="list-group">
+        <a href="/apps" class="list-group-item list-group-item-action">App Control</a>
+        <a href="/calendar" class="list-group-item list-group-item-action">Calendar</a>
+        <a href="/templates" class="list-group-item list-group-item-action">Templates</a>
+
+      </div>
+    </div>
+    <div class="col-md-4">
+      <h5>Quick Status</h5>
+      <ul class="list-group">
+        <li class="list-group-item">Events file: <strong>events.json</strong></li>
+        <li class="list-group-item">Trigger templates: <strong>trigger_templates.json</strong></li>
+        <li class="list-group-item">Button templates: <strong>button_templates.json</strong></li>
+      </ul>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,234 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h1>Templates</h1>
+<div class="mb-4">
+  <h3>Button Templates</h3>
+  <div id="buttons-list" class="mb-3">Loading…</div>
+  <form id="add-button-form" class="row g-2">
+    <div class="col-md-6"><input class="form-control" name="label" placeholder="Label"></div>
+    <div class="col-md-5"><input class="form-control" name="pattern" placeholder="Pattern (e.g. 1/0/1)"></div>
+    <div class="col-md-1"><button class="btn btn-sm btn-success">Add</button></div>
+  </form>
+</div>
+
+<div>
+  <h3>Trigger Templates</h3>
+  <div id="triggers-list" class="mb-3">Loading…</div>
+
+  <!-- Compose multiple triggers, then save as a single trigger-template -->
+  <div id="add-trigger-composer" class="mb-3">
+    <div id="add-trigger-triggers-container"></div>
+    <form id="add-trigger-form" class="d-flex gap-2 align-items-center mt-2">
+      <input name="label" class="form-control" placeholder="Template Label" style="width:200px">
+      <button id="add-one-trigger" type="button" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
+      <button id="save-template-btn" class="btn btn-sm btn-success">Save Template</button>
+    </form>
+  </div>
+</div>
+
+<script>
+async function loadTemplates(){
+  try{
+    const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
+    const data = await resp.json();
+    renderButtons(data.buttons || []);
+    renderTriggers(data.triggers || []);
+  }catch(e){
+    document.getElementById('buttons-list').innerText = 'Error loading';
+    document.getElementById('triggers-list').innerText = 'Error loading';
+    console.error(e);
+  }
+}
+
+function renderButtons(btns){
+  const out = document.getElementById('buttons-list');
+  if(!btns.length){ out.innerHTML = '<div class="text-muted">No button templates</div>'; return }
+  out.innerHTML = '';
+  btns.forEach((b,i)=>{
+    const div = document.createElement('div');
+    div.className = 'd-flex align-items-center mb-1';
+    const url = b.buttonURL || (b.pattern ? `location/${b.pattern}/press` : '');
+    div.innerHTML = `<div class="flex-grow-1"><strong>${b.label}</strong> — ${b.pattern} <small class="text-muted">(${url})</small></div><div><button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="button">Delete</button></div>`;
+    out.appendChild(div);
+  });
+    // also populate buttonTemplate selects in the trigger add form
+    const btSelects = document.querySelectorAll('select[name="buttonTemplate"]');
+    btSelects.forEach(sel=>{
+      // clear existing options except first
+      const first = sel.querySelector('option[value=""]');
+      sel.innerHTML = '';
+      sel.appendChild(first || document.createElement('option'));
+      sel.querySelector('option').value = '';
+      sel.querySelector('option').text = '(none)';
+      btns.forEach((b,i)=>{
+        const opt = document.createElement('option'); opt.value = i; opt.text = `${b.label} — ${b.pattern}`; sel.appendChild(opt);
+      });
+    });
+}
+
+function renderTriggers(trigs){
+  const out = document.getElementById('triggers-list');
+  if(!trigs.length){ out.innerHTML = '<div class="text-muted">No trigger templates</div>'; return }
+  out.innerHTML = '';
+  trigs.forEach((t,i)=>{
+    const div = document.createElement('div');
+    div.className = 'd-flex gap-2 align-items-center mb-2';
+    const times = Array.isArray(t.times) ? t.times : (t.times ? JSON.parse(t.times) : []);
+    const count = times.length;
+    div.innerHTML = `
+      <div class="flex-grow-1"><strong>${t.label}</strong> — <small class="text-muted">${count} trigger${count!==1?'s':''}</small></div>
+      <div><button class="btn btn-sm btn-outline-primary ms-2" data-idx="${i}" data-type="trigger-edit">Edit</button><button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="trigger-delete">Delete</button></div>
+    `;
+    out.appendChild(div);
+  });
+}
+
+function newTriggerRow(templates){
+  const div = document.createElement('div');
+  div.className = 'd-flex gap-2 align-items-center mb-2';
+  div.innerHTML = `
+    <input name="minutes" placeholder="minutes" class="form-control form-control-sm" style="width:100px">
+    <select name="typeOfTrigger" class="form-select form-select-sm" style="width:140px">
+      <option value="BEFORE">Before</option>
+      <option value="AT">At</option>
+      <option value="AFTER">After</option>
+    </select>
+    <select name="buttonTemplate" class="form-select form-select-sm" style="min-width:200px">
+      <option value="">(none)</option>
+      ${templates.map((t,i)=>`<option value="${i}">${t.label} — ${t.pattern}</option>`).join('')}
+    </select>
+    <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
+    <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
+  `;
+  return div;
+}
+
+// handle add button
+document.getElementById('add-button-form').addEventListener('submit', async (ev)=>{
+  ev.preventDefault();
+  const form = ev.target;
+  const label = form.label.value.trim();
+  const pattern = form.pattern.value.trim();
+  if(!label || !pattern) return alert('Label and pattern required');
+  // client-side validation: ensure pattern is three integers separated by '/'
+  if(!/^\d+\/\d+\/\d+$/.test(pattern)){
+    return alert('Pattern must be like "1/0/1" (three integers separated by "/")');
+  }
+  try{
+    const resp = await fetch('/api/templates/button',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, pattern})});
+    if(resp.ok){ await loadTemplates(); form.reset(); }
+    else { alert('Failed to add'); }
+  }catch(e){ console.error(e); alert('Error adding'); }
+});
+
+// handle add trigger
+// add individual trigger row to composer
+document.getElementById('add-one-trigger').addEventListener('click', async (ev)=>{
+  ev.preventDefault();
+  const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
+  const data = await resp.json();
+  const btns = data.buttons || [];
+  const row = newTriggerRow(btns);
+  document.getElementById('add-trigger-triggers-container').appendChild(row);
+});
+
+// remove trigger delegate
+document.getElementById('add-trigger-triggers-container').addEventListener('click', (ev)=>{
+  const btn = ev.target.closest('.remove-trigger'); if(!btn) return; btn.closest('div').remove();
+});
+
+// submit composed trigger template (multiple triggers)
+document.getElementById('add-trigger-form').addEventListener('submit', async (ev)=>{
+  ev.preventDefault();
+  const form = ev.target;
+  const label = form.label.value.trim();
+  if(!label) return alert('Label required');
+  const container = document.getElementById('add-trigger-triggers-container');
+  const rows = Array.from(container.children);
+  if(rows.length === 0) return alert('Add at least one trigger to the template');
+  const specs = [];
+  // fetch latest buttons to resolve template indices
+  const respButtons = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
+  const dataAll = await respButtons.json();
+  const btns = dataAll.buttons || [];
+  for(const row of rows){
+    let minsRaw = row.querySelector('input[name="minutes"]').value;
+    const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
+    const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
+    let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
+    if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
+      if(type === 'AT') minsRaw = '0'; else { alert('Minutes required for non-AT triggers'); return; }
+    }
+    const mins = parseInt(minsRaw,10);
+    if(Number.isNaN(mins) || mins < 0){ alert('Minutes must be a non-negative integer'); return; }
+    if(tmplIdx !== ''){
+      const t = btns[parseInt(tmplIdx,10)];
+      if(t) buttonURL = t.buttonURL || (t.pattern ? `location/${t.pattern}/press` : buttonURL);
+    }
+    if(!buttonURL || String(buttonURL).trim() === ''){ alert('Each trigger must have a button template selected or a valid button URL'); return; }
+    if(/^\d+\/\d+\/\d+$/.test(buttonURL)) buttonURL = `location/${buttonURL}/press`;
+    if(!/^location\/\d+\/\d+\/\d+\/press$/.test(buttonURL)){ alert('buttonURL must be like "1/2/3" or "location/1/2/3/press"'); return; }
+    specs.push({minutes: mins, typeOfTrigger: type, buttonURL});
+  }
+  try{
+    // if editing, use PUT
+    if(window.__editingTriggerIndex !== undefined && window.__editingTriggerIndex !== null){
+      const idx = window.__editingTriggerIndex;
+      const r = await fetch('/api/templates/trigger/'+encodeURIComponent(idx),{method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, times: specs})});
+      if(r.ok){ await loadTemplates(); form.reset(); document.getElementById('add-trigger-triggers-container').innerHTML = ''; window.__editingTriggerIndex = null; document.getElementById('save-template-btn').innerText = 'Save Template'; }
+      else { alert('Failed to update'); }
+    }else{
+      const r = await fetch('/api/templates/trigger',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, times: specs})});
+      if(r.ok){ await loadTemplates(); form.reset(); document.getElementById('add-trigger-triggers-container').innerHTML = ''; }
+      else { alert('Failed to add'); }
+    }
+  }catch(e){ console.error(e); alert('Error adding'); }
+});
+
+// delegate deletes
+document.getElementById('buttons-list').addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button'); if(!btn) return; const idx = btn.getAttribute('data-idx');
+  if(!confirm('Delete button template?')) return; try{ const r = await fetch('/api/templates/button/'+encodeURIComponent(idx), {method:'DELETE'}); if(r.ok) loadTemplates(); else alert('Delete failed'); }catch(e){alert('Error');}
+});
+
+document.getElementById('triggers-list').addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button'); if(!btn) return; const idx = btn.getAttribute('data-idx'); const type = btn.getAttribute('data-type');
+  if(type === 'trigger-delete'){
+    if(!confirm('Delete trigger template?')) return; try{ const r = await fetch('/api/templates/trigger/'+encodeURIComponent(idx), {method:'DELETE'}); if(r.ok) loadTemplates(); else alert('Delete failed'); }catch(e){alert('Error');}
+  }else if(type === 'trigger-edit'){
+    // load template and populate composer for editing
+    try{
+      const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
+      const data = await resp.json();
+      const trigs = data.triggers || [];
+      const tpl = trigs[parseInt(idx,10)];
+      if(!tpl) return alert('Template not found');
+      // set edit index
+      window.__editingTriggerIndex = parseInt(idx,10);
+      const form = document.getElementById('add-trigger-form');
+      form.label.value = tpl.label || '';
+      document.getElementById('add-trigger-triggers-container').innerHTML = '';
+      const btns = data.buttons || [];
+      const times = Array.isArray(tpl.times) ? tpl.times : (tpl.times ? JSON.parse(tpl.times) : []);
+      times.forEach(s=>{
+        const row = newTriggerRow(btns);
+        // populate
+        row.querySelector('input[name="minutes"]').value = s.minutes;
+        row.querySelector('select[name="typeOfTrigger"]').value = s.typeOfTrigger;
+        // try to match a button template
+        let matched = false;
+        btns.forEach((b,bi)=>{ if(!matched){ const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null); if(bu === s.buttonURL){ row.querySelector('select[name="buttonTemplate"]').value = bi; matched = true; } }});
+        if(!matched) row.querySelector('input[name="buttonURL"]').value = s.buttonURL;
+        document.getElementById('add-trigger-triggers-container').appendChild(row);
+      });
+      document.getElementById('save-template-btn').innerText = 'Update Template';
+    }catch(e){ console.error(e); alert('Error loading template for edit'); }
+  }
+});
+
+// initial load
+loadTemplates();
+</script>
+
+{% endblock %}

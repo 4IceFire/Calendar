@@ -64,9 +64,16 @@ class CalendarApp(AppBase):
             return
         self._scheduler.stop()
         self._scheduler = None
+        # clear thread marker; the background thread will exit on its own
+        self._thread = None
 
     def status(self) -> Dict:
-        return {"running": self._thread is not None}
+        # Prefer checking the scheduler object presence which indicates the
+        # scheduler is active. Fall back to thread presence for older states.
+        running = self._scheduler is not None
+        if not running:
+            running = self._thread is not None
+        return {"running": running}
 
 
 def _factory() -> CalendarApp:
