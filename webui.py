@@ -216,7 +216,50 @@ threading.Thread(target=_config_watcher, daemon=True).start()
 
 @app.route('/')
 def home():
-    return render_template('home.html')
+    # Provide lightweight status data for the Home page.
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+
+    try:
+        events_file = str(cfg.get('EVENTS_FILE', 'events.json'))
+    except Exception:
+        events_file = 'events.json'
+
+    try:
+        companion_ip = str(cfg.get('companion_ip', '127.0.0.1'))
+    except Exception:
+        companion_ip = '127.0.0.1'
+
+    running_apps: list[str] = []
+    try:
+        regs = list_apps()
+        for name in regs.keys():
+            running = False
+            try:
+                inst = get_app(name)
+                if inst is not None and hasattr(inst, 'status'):
+                    st = inst.status() or {}
+                    running = bool(st.get('running', False))
+                else:
+                    running = name in _running_apps
+            except Exception:
+                running = name in _running_apps
+
+            if running:
+                running_apps.append(name)
+    except Exception:
+        running_apps = []
+
+    running_apps = sorted(set(running_apps))
+
+    return render_template(
+        'home.html',
+        events_file=events_file,
+        companion_ip=companion_ip,
+        running_apps=running_apps,
+    )
 
 
 @app.route('/apps')

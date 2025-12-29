@@ -1,2 +1,19 @@
 2025-12-26 02:07:00 [INFO] POST location/1/2/3/press OK | event=#1 'Sunday 10AM' | due=2025-12-26 02:07:00
 2025-12-26 02:08:00 [INFO] POST location/3/2/1/press OK | event=#1 'Sunday 10AM' | due=2025-12-26 02:08:00
+2025-12-26 08:48:00 [INFO] POST location/1/0/3/press OK | event=#2 'Event Test' | due=2025-12-26 08:48:00
+2025-12-26 08:48:00 [INFO] POST location/1/0/1/press OK | event=#2 'Event Test' | due=2025-12-26 08:48:00
+2025-12-26 08:49:00 [INFO] POST location/1/0/1/press OK | event=#2 'Event Test' | due=2025-12-26 08:49:00
+2025-12-26 08:50:00 [INFO] POST location/1/0/2/press OK | event=#2 'Event Test' | due=2025-12-26 08:50:00
+2025-12-26 08:51:00 [INFO] POST location/1/0/3/press OK | event=#2 'Event Test' | due=2025-12-26 08:51:00
+2025-12-26 08:53:00 [INFO] POST location/1/0/1/press OK | event=#2 'Event Test' | due=2025-12-26 08:53:00
+2025-12-26 08:54:00 [INFO] POST location/1/0/2/press OK | event=#2 'Event Test' | due=2025-12-26 08:54:00
+2025-12-27 22:05:00 [INFO] POST location/1/0/1/press OK | event=#1 'Test 1' | due=2025-12-27 22:05:00
+2025-12-27 22:07:00 [INFO] POST location/1/0/1/press OK | event=#1 'Test 1' | due=2025-12-27 22:07:00
+2025-12-27 22:15:00 [INFO] POST location/1/0/1/press OK | event=#2 'Test 2' | due=2025-12-27 22:15:00
+2025-12-27 22:27:00 [INFO] POST location/1/0/2/press OK | event=#1 'Test 1' | due=2025-12-27 22:27:00
+2025-12-27 22:35:00 [INFO] POST location/1/0/2/press OK | event=#2 'Test 2' | due=2025-12-27 22:35:00
+2025-12-27 22:40:00 [INFO] POST location/1/0/3/press OK | event=#2 'Test 2' | due=2025-12-27 22:40:00
+2025-12-27 22:42:00 [INFO] POST location/1/0/3/press OK | event=#1 'Test 1' | due=2025-12-27 22:42:00
+2025-12-28 09:29:00 [WARNING] Companion not connected; would POST location/1/0/1/press | event=#3 ' n,,lnmk' | due=2025-12-28 09:29:00
+2025-12-28 15:14:00 [INFO] POST location/1/0/1/press OK | event=#4 'DND' | due=2025-12-28 15:14:00
+2025-12-28 15:15:00 [INFO] POST location/1/0/2/press OK | event=#4 'DND' | due=2025-12-28 15:15:00

@@ -124,6 +124,10 @@ class Companion:
         except requests.RequestException:
             self._dbg("-> request error")
             return None
+        
+    def GetVariable(self, var) -> str:
+        return self.get_command(f"custom-variable/{var}/value")
+
 
     def close(self) -> None:
         try:

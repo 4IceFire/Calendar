@@ -15,9 +15,18 @@
     <div class="col-md-4">
       <h5>Quick Status</h5>
       <ul class="list-group">
-        <li class="list-group-item">Events file: <strong>events.json</strong></li>
-        <li class="list-group-item">Trigger templates: <strong>trigger_templates.json</strong></li>
-        <li class="list-group-item">Button templates: <strong>button_templates.json</strong></li>
+        <li class="list-group-item">Events file: <strong>{{ events_file or 'events.json' }}</strong></li>
+        <li class="list-group-item">Companion IP: <strong>{{ companion_ip or '127.0.0.1' }}</strong></li>
+        <li class="list-group-item">
+          Running apps:
+          <strong>
+            {% if running_apps and running_apps|length > 0 %}
+              {{ running_apps|join(', ') }}
+            {% else %}
+              None
+            {% endif %}
+          </strong>
+        </li>
       </ul>
     </div>
   </div>

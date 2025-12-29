@@ -3,19 +3,19 @@
     "label": "Test Template",
     "times": [
       {
-        "minutes": 2,
+        "minutes": 1,
         "typeOfTrigger": "BEFORE",
         "buttonURL": "location/1/0/1/press"
       },
       {
-        "minutes": 1,
-        "typeOfTrigger": "BEFORE",
-        "buttonURL": "location/1/2/3/press"
-      },
-      {
         "minutes": 0,
         "typeOfTrigger": "AT",
-        "buttonURL": "location/3/2/1/press"
+        "buttonURL": "location/1/0/2/press"
+      },
+      {
+        "minutes": 1,
+        "typeOfTrigger": "AFTER",
+        "buttonURL": "location/1/0/3/press"
       }
     ]
   }
