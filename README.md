@@ -222,14 +222,16 @@ Endpoint (Web UI):
 - URL: `http://<app_host>:<webserver_port>/api/timers/apply`
 - Header: `Content-Type: application/json`
 - Body:
-
 ```json
-{"preset": 1}
+{"TimerIndex": 1}
 ```
 
 Notes:
 - `preset` is ALWAYS 1-based (`1` selects the first preset).
 - You can also send it as a query param (still using POST): `.../api/timers/apply?preset=1`
+- For compatibility with some Companion setups, the API also accepts `TimerIndex` (case-insensitive):
+  - body: `{"TimerIndex": 1}`
+  - query: `.../api/timers/apply?TimerIndex=1`
 
 Quick test from PowerShell:
 

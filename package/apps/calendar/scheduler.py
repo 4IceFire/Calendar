@@ -6,7 +6,7 @@ from typing import List, Optional
 import json
 from pathlib import Path
 
-from package.apps.calendar.models import Event, TimeOfTrigger, TriggerJob
+from package.apps.calendar.models import Event, TriggerJob
 from package.apps.calendar import storage, utils
 logger = utils.get_logger()
 
@@ -323,7 +323,6 @@ class ClockScheduler:
 
 
 # Helper scheduling functions
-from package.apps.calendar.models import WeekDay
 
 
 def next_weekly_occurrence(event: Event, now: datetime) -> Optional[datetime]:

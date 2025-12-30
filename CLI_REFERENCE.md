@@ -53,8 +53,10 @@ This document describes the `calendarctl` CLI available in this workspace and ex
     - Example: `python cli.py timers add 08:45`
     - Example: `python cli.py timers add 09:05 --at 1`
   - `timers remove INDEX`: Remove a preset by index (0-based)
+    - Note: `timers list` displays 1-based numbers, but `remove` uses 0-based indices (`0` is the first preset).
     - Example: `python cli.py timers remove 0`
   - `timers move SRC DST`: Reorder presets (0-based indices)
+    - Note: `timers list` displays 1-based numbers, but `move` uses 0-based indices.
     - Example: `python cli.py timers move 3 1`
   - `timers set HH:MM HH:MM ...`: Replace the entire preset list
     - Example: `python cli.py timers set 08:15 08:30 09:10 09:30`

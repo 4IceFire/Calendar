@@ -1,7 +1,6 @@
 from flask import Flask, render_template, jsonify, request
 import logging
 import threading
-import os
 import time
 from pathlib import Path
 import sys
@@ -15,7 +14,6 @@ import re
 from datetime import datetime
 
 from package.core import list_apps, get_app
-import package.apps  # noqa: F401  # register apps
 try:
     from package.apps.calendar import utils
 except Exception:
@@ -278,13 +276,6 @@ def restart_http_server(host: str, port: int) -> None:
     stop_http_server()
     start_http_server(host, port)
 
-
-def startup():
-    # Kick off apps once when webserver starts
-    threading.Thread(target=_start_all_apps, daemon=True).start()
-def _start_on_server_start() -> None:
-    # Kick off apps once when webserver starts
-    threading.Thread(target=_start_all_apps, daemon=True).start()
 
 
 def _poll_interval_seconds(cfg: dict) -> float:
@@ -1076,10 +1067,40 @@ def api_apply_timer_preset():
         return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
 
     body = request.get_json(silent=True) or {}
+
+    def _get_body_value_ci(d: dict, *keys: str):
+        try:
+            for k in keys:
+                if k in d:
+                    return d.get(k)
+            lower = {str(k).lower(): v for k, v in d.items()}
+            for k in keys:
+                lk = str(k).lower()
+                if lk in lower:
+                    return lower.get(lk)
+        except Exception:
+            return None
+        return None
+
     # Always treat the provided integer as 1-based (1 selects first preset).
-    preset_raw = body.get('preset', body.get('preset_index', body.get('index', body.get('value', None))))
+    # Accept several common key names (including Companion-style TimerIndex).
+    preset_raw = _get_body_value_ci(
+        body,
+        'preset',
+        'preset_index',
+        'index',
+        'value',
+        'timerindex',
+        'timer_index',
+        'TimerIndex',
+    )
     if preset_raw is None:
-        preset_raw = request.args.get('preset', None)
+        preset_raw = (
+            request.args.get('preset')
+            or request.args.get('timerindex')
+            or request.args.get('timer_index')
+            or request.args.get('TimerIndex')
+        )
 
     try:
         preset_number = int(preset_raw)

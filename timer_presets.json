@@ -1,10 +1,18 @@
 [
   {
-    "time": "10:00",
-    "name": "Test 2"
+    "time": "11:30",
+    "name": "Worship Timer"
   },
   {
-    "time": "10:10",
+    "time": "11:45",
     "name": "MC Timer"
+  },
+  {
+    "time": "12:10",
+    "name": "Preach Timer"
+  },
+  {
+    "time": "12:30",
+    "name": "End Service"
   }
 ]

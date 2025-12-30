@@ -1,12 +1,12 @@
 {
-  "EVENTS_FILE": "test_events.json",
+  "EVENTS_FILE": "events.json",
   "companion_ip": "127.0.0.1",
   "companion_port": 8100,
+  "companion_timer_name": "timer_name_",
   "propresenter_ip": "127.0.0.1",
   "propresenter_port": 1025,
-  "webserver_port": 5000,
-  "poll_interval": 1,
-  "debug": false,
   "propresenter_timer_index": 1,
-  "companion_timer_name": "timer_name_"
+  "webserver_port": 5100,
+  "poll_interval": 1,
+  "debug": false
 }

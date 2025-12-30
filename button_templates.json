@@ -1,16 +1,16 @@
 [
   {
-    "label": "Church Countdown",
+    "label": "Button 1",
     "pattern": "1/0/1",
     "buttonURL": "location/1/0/1/press"
   },
   {
-    "label": "Spotify Stop",
+    "label": "Button 2",
     "pattern": "1/0/2",
     "buttonURL": "location/1/0/2/press"
   },
   {
-    "label": "Reset Timer",
+    "label": "Button 3",
     "pattern": "1/0/3",
     "buttonURL": "location/1/0/3/press"
   }

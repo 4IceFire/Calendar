@@ -23,6 +23,8 @@ _defaults = {
     # Timers app defaults
     # Which ProPresenter timer to control
     "propresenter_timer_index": 1,
+    # Web UI port
+    "webserver_port": 5000,
     "poll_interval": 1.0,
     "debug": False,
 }
@@ -114,6 +116,12 @@ def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
         return _defaults.copy()
 
     changed = False
+
+    # Backward-compatible migrations for older web server config keys.
+    # - `server_port` -> `webserver_port`
+    if "webserver_port" not in data and "server_port" in data:
+        data["webserver_port"] = data.get("server_port")
+        changed = True
 
     # Migrate old inline presets into the dedicated presets file.
     # This keeps config.json free of large lists.

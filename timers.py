@@ -1,19 +1,20 @@
-from propresentor import ProPresentor
-from datetime import time, datetime
-from companion import Companion
+"""Deprecated legacy script.
 
-pp = ProPresentor("127.0.0.1", port=1025)
-c = Companion("127.0.0.1", port=8100)
+This file previously contained ad-hoc timer test code that executed network
+calls on import/run. The project now supports timer control via:
 
-class Time():
-    def __init__(self, time):
-        self.time = time
+- Web UI: /timers and /api/timers/apply
+- CLI: python cli.py timers ...
 
-timers = [Time("8:15"), Time("8:30"), Time("9:10"), Time("9:30")]
+This module is intentionally kept as a stub to avoid unexpected side-effects.
+"""
 
-TimerIndex = 0
-timer_index = 1
 
-pp.SetCountdownToTime(timer_index, timers[TimerIndex].time)
-#print(c.GetVariable("testing"))
-c.SetVariable("testing", 10)
+def main() -> int:
+    print("This legacy script is deprecated.")
+    print("Use the Web UI at /timers, or run: python cli.py timers --help")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
