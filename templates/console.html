@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div id="console-page">
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <h1 class="h3 mb-0">Console</h1>
+  </div>
+
+  <div id="console-status" class="mb-3"></div>
+
+  <div class="mb-3">
+    <div class="input-group">
+      <span class="input-group-text">cli</span>
+      <input id="console-command" type="text" class="form-control" placeholder="list" autocomplete="off" />
+      <button id="console-run" class="btn btn-primary" type="button">Run</button>
+    </div>
+    <div class="form-text">Runs the app CLI as <code>cli &lt;command&gt;</code> (example: <code>cli list</code>). Do not type <code>python cli.py</code>.</div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <h2 class="h6">Live Output</h2>
+      <pre id="console-log" class="border rounded p-2 mb-0" style="height: 55vh; overflow: auto; white-space: pre-wrap;"></pre>
+    </div>
+  </div>
+</div>
+{% endblock %}

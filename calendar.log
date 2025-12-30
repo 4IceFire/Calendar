@@ -17,3 +17,6 @@
 2025-12-28 09:29:00 [WARNING] Companion not connected; would POST location/1/0/1/press | event=#3 ' n,,lnmk' | due=2025-12-28 09:29:00
 2025-12-28 15:14:00 [INFO] POST location/1/0/1/press OK | event=#4 'DND' | due=2025-12-28 15:14:00
 2025-12-28 15:15:00 [INFO] POST location/1/0/2/press OK | event=#4 'DND' | due=2025-12-28 15:15:00
+2025-12-30 09:36:00 [INFO] POST location/1/0/1/press OK | event=#1 'Annika Test' | due=2025-12-30 09:36:00
+2025-12-30 09:37:00 [INFO] POST location/1/0/2/press OK | event=#1 'Annika Test' | due=2025-12-30 09:37:00
+2025-12-30 09:38:00 [INFO] POST location/1/0/3/press OK | event=#1 'Annika Test' | due=2025-12-30 09:38:00

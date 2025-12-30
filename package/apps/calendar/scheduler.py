@@ -103,44 +103,46 @@ class ClockScheduler:
             if cfg_mtime != self._last_config_mtime:
                 # update stored mtime first to avoid repeated reloads
                 self._last_config_mtime = cfg_mtime
+                # Best-effort reload. Note: in this process, config.json may
+                # have already been reloaded elsewhere (e.g., web UI save), in
+                # which case reload_config() can return False even though the
+                # file changed. We still must react to the new config values.
                 try:
-                    reloaded = utils.reload_config()
+                    utils.reload_config()
                 except Exception:
-                    reloaded = False
+                    pass
 
-                if reloaded:
-                    # Pull new companion client and dynamic debug immediately
-                    try:
-                        self.c = utils.get_companion()
-                        new_debug = bool(utils.get_debug())
-                        if new_debug != self.debug:
-                            print(f"[DEBUG] Dynamic debug set to {new_debug}")
-                            self.debug = new_debug
-                            try:
-                                if self.c is not None:
-                                    self.c.debug = self.debug
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                # Pull new companion client and dynamic debug immediately
+                try:
+                    self.c = utils.get_companion()
+                    new_debug = bool(utils.get_debug())
+                    if new_debug != self.debug:
+                        print(f"[DEBUG] Dynamic debug set to {new_debug}")
+                        self.debug = new_debug
+                        try:
+                            if self.c is not None:
+                                self.c.debug = self.debug
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
-                    # If events filename changed in config, adopt it and force reload
-                    try:
-                        cfg = utils.get_config()
-                        new_events = cfg.get("EVENTS_FILE", self.events_file)
-                        if new_events != self.events_file:
-                            self._dbg(f"Config changed EVENTS_FILE: '{self.events_file}' -> '{new_events}'")
-                            self.events_file = new_events
-                            # force events-file mtime refresh so loader picks up the file
-                            self._last_mtime = None
+                # If events filename changed in config, adopt it and force reload
+                try:
+                    cfg = utils.get_config()
+                    new_events = cfg.get("EVENTS_FILE", self.events_file)
+                    if new_events != self.events_file:
+                        self._dbg(f"Config changed EVENTS_FILE: '{self.events_file}' -> '{new_events}'")
+                        self.events_file = new_events
+                        # force events-file mtime refresh so loader picks up the file
+                        self._last_mtime = None
+                except Exception:
+                    pass
 
-                    except Exception:
-                        pass
-
-                    with self._cv:
-                        self._reload_needed = True
-                        self._cv.notify()
-                    self._dbg("Detected change in config file; scheduling reload")
+                with self._cv:
+                    self._reload_needed = True
+                    self._cv.notify()
+                self._dbg("Detected change in config file; scheduling reload")
 
             t.sleep(self.poll_interval)
 

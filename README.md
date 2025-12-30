@@ -179,6 +179,64 @@ Notes:
 
 ## ProPresenter timers (optional)
 
+This project can also act as a small “glue” service between Bitfocus Companion and ProPresenter timers:
+
+- You maintain a list of timer presets in the Web UI (each has a name + time).
+- When you save presets, the app writes the names to Companion custom variables:
+  - Variable names are `companion_timer_name` + `1..N` (e.g. `timer_name_1`, `timer_name_2`, ...)
+  - Variable values are formatted like: `timer_name_1: 08:15am`
+- Companion buttons call the app endpoint to apply a preset (always 1-based) which sets and starts the configured ProPresenter timer.
+
+### Timers Setup
+
+1) Configure the app (config.json)
+
+- `propresenter_ip`: ProPresenter host
+- `propresenter_port`: ProPresenter API port
+- `propresenter_timer_index`: which ProPresenter timer/clock to update
+- `companion_ip` / `companion_port`: Companion host/port
+- `companion_timer_name`: prefix for Companion timer-name variables (default: `timer_name_`)
+
+2) Configure presets in the Web UI
+
+- Run the Web UI: `python webui.py`
+- Open the Timers page: `http://127.0.0.1:<webserver_port>/timers`
+- Add/update **Name** and **Time** rows, then click **Save**
+
+Presets are stored in `timer_presets.json`.
+
+3) Configure Companion
+
+- Create custom variables for as many timers as you want to display:
+  - `timer_name_1`, `timer_name_2`, `timer_name_3`, ...
+- Create buttons whose text uses those custom variables (so the button labels update after you save presets).
+- For each button, add actions in this order:
+  1. (Optional) “Set Custom Variable” if you want to track state in Companion
+  2. “HTTP Request” to trigger the preset (details below)
+
+### Correct Companion API Call To Trigger A Timer
+
+Endpoint (Web UI):
+
+- Method: `POST`
+- URL: `http://<app_host>:<webserver_port>/api/timers/apply`
+- Header: `Content-Type: application/json`
+- Body:
+
+```json
+{"preset": 1}
+```
+
+Notes:
+- `preset` is ALWAYS 1-based (`1` selects the first preset).
+- You can also send it as a query param (still using POST): `.../api/timers/apply?preset=1`
+
+Quick test from PowerShell:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5000/api/timers/apply" -ContentType "application/json" -Body '{"preset":1}'
+```
+
 This repo also includes a small ProPresenter HTTP API client focused on timer control.
 
 Example:

@@ -10,14 +10,96 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 CONFIG_FILE = "config.json"
+TIMER_PRESETS_FILE = "timer_presets.json"
 
 _defaults = {
     "EVENTS_FILE": DEFAULT_EVENTS_FILE,
     "companion_ip": "127.0.0.1",
     "companion_port": 8000,
+    # Prefix for Companion custom variables storing timer names, e.g. timer_name_1
+    "companion_timer_name": "timer_name_",
+    "propresenter_ip": "127.0.0.1",
+    "propresenter_port": 1025,
+    # Timers app defaults
+    # Which ProPresenter timer to control
+    "propresenter_timer_index": 1,
     "poll_interval": 1.0,
     "debug": False,
 }
+
+
+def _coerce_timer_preset(value: Any) -> Dict[str, str] | None:
+    """Coerce a timer preset into a normalized dict form.
+
+    Supported on-disk / API formats:
+    - "HH:MM" (string)
+    - {"time": "HH:MM", "name": "Some Name"}
+
+    Returns None for unusable entries.
+    """
+    try:
+        if isinstance(value, dict):
+            t = str(value.get("time", "")).strip()
+            n = str(value.get("name", "")).strip()
+        else:
+            t = str(value).strip()
+            n = ""
+    except Exception:
+        return None
+
+    if not t:
+        return None
+    if not n:
+        n = t
+    return {"time": t, "name": n}
+
+
+def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, str]]:
+    """Load timer presets from a dedicated JSON file.
+
+    File format:
+    - preferred: JSON array of objects {"time": "HH:MM", "name": "..."}
+    - legacy: JSON array of strings "HH:MM"
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        out: list[Dict[str, str]] = []
+        for v in data:
+            p = _coerce_timer_preset(v)
+            if p is not None:
+                out.append(p)
+        return out
+    except FileNotFoundError:
+        # create with defaults
+        defaults = [
+            {"time": "08:15", "name": "08:15"},
+            {"time": "08:30", "name": "08:30"},
+            {"time": "09:10", "name": "09:10"},
+            {"time": "09:30", "name": "09:30"},
+        ]
+        try:
+            save_timer_presets(defaults, path)
+        except Exception:
+            pass
+        return defaults
+    except Exception:
+        return []
+
+
+def save_timer_presets(presets: list[Any], path: str = TIMER_PRESETS_FILE) -> None:
+    try:
+        normalized: list[Dict[str, str]] = []
+        for v in presets or []:
+            p = _coerce_timer_preset(v)
+            if p is not None:
+                normalized.append(p)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(normalized, f, indent=2)
+    except Exception:
+        pass
 
 
 def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
@@ -32,10 +114,44 @@ def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
         return _defaults.copy()
 
     changed = False
+
+    # Migrate old inline presets into the dedicated presets file.
+    # This keeps config.json free of large lists.
+    if "timer_presets" in data:
+        try:
+            presets = data.get("timer_presets")
+            if isinstance(presets, list) and presets:
+                save_timer_presets(presets)
+        except Exception:
+            pass
+        data.pop("timer_presets", None)
+        changed = True
+
+    # Backward-compatible migrations for older timers config keys.
+    # - `timer_index` -> `propresenter_timer_index`
+    if "propresenter_timer_index" not in data and "timer_index" in data:
+        data["propresenter_timer_index"] = data.get("timer_index")
+        changed = True
     for k, v in _defaults.items():
         if k not in data:
             data[k] = v
             changed = True
+
+    # Prefer the new keys going forward; remove legacy keys if present.
+    if "timer_index" in data:
+        data.pop("timer_index", None)
+        changed = True
+    if "companion_timer_variable" in data:
+        data.pop("companion_timer_variable", None)
+        changed = True
+
+    # Remove request-only unrelated keys from older versions.
+    if "companion_preset_variable" in data:
+        data.pop("companion_preset_variable", None)
+        changed = True
+    if "companion_preset_is_one_based" in data:
+        data.pop("companion_preset_is_one_based", None)
+        changed = True
     if changed:
         save_config(data, path)
 

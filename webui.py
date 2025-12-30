@@ -4,12 +4,18 @@ import threading
 import os
 import time
 from pathlib import Path
+import sys
+import subprocess
+import shlex
+from collections import deque
 
 from werkzeug.serving import make_server
 import json
 import re
+from datetime import datetime
 
 from package.core import list_apps, get_app
+import package.apps  # noqa: F401  # register apps
 try:
     from package.apps.calendar import utils
 except Exception:
@@ -44,6 +50,125 @@ except Exception:
     utils = _StubUtils()
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
+
+
+# --- Console capture + CLI runner (Web UI) ---
+_CONSOLE_MAX_LINES = 2000
+_console_lock = threading.Lock()
+_console_lines: deque[tuple[int, str]] = deque(maxlen=_CONSOLE_MAX_LINES)
+_console_seq = 0
+
+
+def _console_append(text: str) -> None:
+    """Append text to the in-memory console buffer.
+
+    The buffer stores newline-terminated lines for convenient rendering.
+    """
+    global _console_seq
+    if text is None:
+        return
+    s = str(text)
+    if not s:
+        return
+    with _console_lock:
+        for line in s.splitlines(True):
+            _console_seq += 1
+            _console_lines.append((_console_seq, line))
+
+
+class _ConsoleTee:
+    """Tee writes to the original stream AND the console buffer."""
+
+    def __init__(self, original, stream_name: str):
+        self._original = original
+        self._stream_name = stream_name
+
+    def write(self, s):
+        try:
+            _console_append(s)
+        except Exception:
+            pass
+        try:
+            return self._original.write(s)
+        except Exception:
+            return 0
+
+    def flush(self):
+        try:
+            return self._original.flush()
+        except Exception:
+            return None
+
+    def isatty(self):
+        try:
+            return bool(self._original.isatty())
+        except Exception:
+            return False
+
+
+class _ConsoleLogHandler(logging.Handler):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Hide noisy request/access logs in the Web Console.
+        try:
+            name = record.name or ''
+        except Exception:
+            name = ''
+        if name.startswith('werkzeug'):
+            return False
+
+        # Extra safety: some environments may log access lines elsewhere.
+        try:
+            msg = record.getMessage() or ''
+        except Exception:
+            msg = ''
+        if '"GET /api/console/logs' in msg or '"POST /api/console/run' in msg:
+            return False
+        return True
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = str(record.getMessage())
+        _console_append(msg + "\n")
+
+
+def _install_console_capture() -> None:
+    """Capture server stdout/stderr + logging into the console buffer."""
+    try:
+        if not getattr(sys.stdout, '_webui_console_wrapped', False):
+            sys.stdout = _ConsoleTee(sys.stdout, 'stdout')
+            setattr(sys.stdout, '_webui_console_wrapped', True)
+    except Exception:
+        pass
+
+    try:
+        if not getattr(sys.stderr, '_webui_console_wrapped', False):
+            sys.stderr = _ConsoleTee(sys.stderr, 'stderr')
+            setattr(sys.stderr, '_webui_console_wrapped', True)
+    except Exception:
+        pass
+
+    # Also attach a logging handler so we capture logs even if other handlers
+    # hold references to the pre-wrap stderr stream.
+    try:
+        root = logging.getLogger()
+        if not any(isinstance(h, _ConsoleLogHandler) for h in root.handlers):
+            h = _ConsoleLogHandler()
+            h.setLevel(logging.INFO)
+            h.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
+            root.addHandler(h)
+    except Exception:
+        pass
+
+
+_install_console_capture()
+
+# Optional ProPresenter timer integration (Companion -> this Web UI -> ProPresenter)
+try:
+    from propresentor import ProPresentor
+except Exception:
+    ProPresentor = None
 
 
 def _apply_logging_config():
@@ -275,6 +400,21 @@ def calendar_page():
 @app.route('/templates')
 def templates_page():
     return render_template('templates.html')
+
+
+@app.route('/timers')
+def timers_page():
+    return render_template('timers.html')
+
+
+@app.route('/config')
+def config_page():
+    return render_template('config.html')
+
+
+@app.route('/console')
+def console_page():
+    return render_template('console.html')
 
 
 @app.route('/calendar/new')
@@ -579,6 +719,13 @@ def api_set_config():
 
     try:
         cfg = utils.get_config()
+
+        # Compute port change before writing so we can tell the UI what's happening.
+        try:
+            old_port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
+        except Exception:
+            old_port = 5000
+
         # merge provided values
         cfg.update(new)
         # persist
@@ -590,17 +737,430 @@ def api_set_config():
         except Exception:
             pass
 
-        # if webserver_port changed, instruct restart
+        # IMPORTANT:
+        # Do NOT restart the server from inside this request handler.
+        # The werkzeug `make_server` instance is single-threaded; calling
+        # shutdown/restart inline can deadlock and make the UI appear to hang.
+        # Port changes are handled by the background config watcher thread.
         try:
-            port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
-            # restart server on the new port
-            restart_http_server('0.0.0.0', port)
+            new_port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
         except Exception:
-            pass
+            new_port = old_port
 
-        return jsonify({'ok': True, 'config': cfg})
+        restart_required = bool(new_port != old_port)
+        return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/console/logs', methods=['GET'])
+def api_console_logs():
+    """Return captured stdout/stderr/logging lines.
+
+    Query:
+      - since: last seen line id (int). Returns only newer lines when possible.
+      - limit: max lines to return (int, default 400, max 2000)
+    """
+    try:
+        since = int(request.args.get('since', '0') or '0')
+    except Exception:
+        since = 0
+
+    try:
+        limit = int(request.args.get('limit', '400') or '400')
+    except Exception:
+        limit = 400
+    if limit < 1:
+        limit = 1
+    if limit > _CONSOLE_MAX_LINES:
+        limit = _CONSOLE_MAX_LINES
+
+    with _console_lock:
+        lines = list(_console_lines)
+        next_id = _console_seq
+
+    if since > 0:
+        lines = [(i, t) for (i, t) in lines if i > since]
+    if len(lines) > limit:
+        lines = lines[-limit:]
+
+    return jsonify({
+        'ok': True,
+        'next': next_id,
+        'lines': [t for (_, t) in lines],
+    })
+
+
+def _project_root() -> str:
+    try:
+        return str(Path(__file__).resolve().parent)
+    except Exception:
+        return str(Path.cwd())
+
+
+@app.route('/api/console/run', methods=['POST'])
+def api_console_run():
+    """Run a cli.py command (subcommands only, no shell).
+
+    Body JSON:
+      {"command": "list"}
+
+    Executed as: <python> cli.py <args...>
+    """
+    body = request.get_json(silent=True) or {}
+    cmd = str(body.get('command', '')).strip()
+    if not cmd:
+        return jsonify({'ok': False, 'error': 'Missing command'}), 400
+
+    try:
+        args = shlex.split(cmd, posix=False)
+    except Exception:
+        args = cmd.split()
+
+    if not args:
+        return jsonify({'ok': False, 'error': 'Missing command'}), 400
+
+    # Be forgiving: users may type prefixes out of habit.
+    # Allow: "list", "cli list", "cli.py list", "python cli.py list"
+    try:
+        a0 = str(args[0]).lower()
+    except Exception:
+        a0 = ''
+
+    if a0 in ('cli',):
+        args = args[1:]
+    elif a0.endswith('cli.py'):
+        args = args[1:]
+    elif a0 in ('python', 'python3', 'py') and len(args) >= 2:
+        try:
+            a1 = str(args[1]).lower()
+        except Exception:
+            a1 = ''
+        if a1.endswith('cli.py'):
+            args = args[2:]
+
+    if not args:
+        args = ['--help']
+
+    if len(args) == 1 and args[0].lower() == 'help':
+        args = ['--help']
+
+    py = sys.executable or 'python'
+    cli_path = str(Path(_project_root()) / 'cli.py')
+
+    _console_append(f"\n$ cli {' '.join(args)}\n")
+
+    try:
+        proc = subprocess.run(
+            [py, cli_path, *args],
+            cwd=_project_root(),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        _console_append("[cli] ERROR: command timed out\n")
+        return jsonify({'ok': False, 'error': 'Command timed out'}), 408
+    except Exception as e:
+        _console_append(f"[cli] ERROR: {e}\n")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+    out = proc.stdout or ''
+    err = proc.stderr or ''
+    if out:
+        _console_append(out)
+        if not out.endswith('\n'):
+            _console_append('\n')
+    if err:
+        _console_append(err)
+        if not err.endswith('\n'):
+            _console_append('\n')
+
+    return jsonify({
+        'ok': True,
+        'exit_code': int(proc.returncode),
+        'stdout': out,
+        'stderr': err,
+    })
+
+
+def _validate_time_hhmm(s: str) -> bool:
+    try:
+        datetime.strptime(s, '%H:%M')
+        return True
+    except Exception:
+        return False
+
+
+@app.route('/api/timers', methods=['GET'])
+def api_get_timers():
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+
+    try:
+        presets = utils.load_timer_presets() if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        presets = []
+
+    # Backward-compatible reads for legacy keys
+    try:
+        propresenter_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
+    except Exception:
+        propresenter_timer_index = 1
+
+    return jsonify({
+        'propresenter_timer_index': propresenter_timer_index,
+        'timer_presets': presets,
+    })
+
+
+@app.route('/api/timers', methods=['POST'])
+def api_set_timers():
+    body = request.get_json(silent=True) or {}
+
+    presets = body.get('timer_presets')
+    if presets is None:
+        # allow alternate key
+        presets = body.get('presets')
+
+    if not isinstance(presets, list):
+        return jsonify({'ok': False, 'error': 'timer_presets must be an array of presets'}), 400
+
+    normalized_presets: list[dict[str, str]] = []
+    for v in presets:
+        if isinstance(v, dict):
+            time_str = str(v.get('time', '')).strip()
+            name_str = str(v.get('name', '')).strip()
+        else:
+            time_str = str(v).strip()
+            name_str = ''
+
+        if not time_str:
+            continue
+        if not _validate_time_hhmm(time_str):
+            return jsonify({'ok': False, 'error': f'invalid time: {time_str}. Use HH:MM'}), 400
+
+        # Always ensure each timer has a name; default to its time.
+        if not name_str:
+            name_str = time_str
+
+        normalized_presets.append({'time': time_str, 'name': name_str})
+
+    if len(normalized_presets) < 1:
+        return jsonify({'ok': False, 'error': 'timer_presets must contain at least 1 entry'}), 400
+    if len(normalized_presets) > 100:
+        return jsonify({'ok': False, 'error': 'timer_presets too large (max 100)'}), 400
+
+    try:
+        propresenter_timer_index = int(body.get('propresenter_timer_index', body.get('timer_index', None)))
+    except Exception:
+        propresenter_timer_index = None
+
+
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+
+    # presets are stored outside config.json
+    try:
+        if hasattr(utils, 'save_timer_presets'):
+            utils.save_timer_presets(normalized_presets)
+    except Exception:
+        pass
+    if propresenter_timer_index is not None:
+        cfg['propresenter_timer_index'] = propresenter_timer_index
+        # remove legacy key if present
+        cfg.pop('timer_index', None)
+
+    try:
+        utils.save_config(cfg)
+        utils.reload_config(force=True)
+        # Push names to Companion custom variables, e.g. timer_name_1, timer_name_2, ...
+        companion_updated = False
+        companion_failed = 0
+        try:
+            prefix = str(cfg.get('companion_timer_name', '')).strip()
+        except Exception:
+            prefix = ''
+        try:
+            comp = utils.get_companion() if hasattr(utils, 'get_companion') else None
+            if prefix and comp is not None:
+                companion_updated = True
+                for i, p in enumerate(normalized_presets, start=1):
+                    var_name = f"{prefix}{i}"
+
+                    # Format: "timer_name_{index}: HH:MMam" (12-hour with am/pm)
+                    try:
+                        t = str(p.get('time', '')).strip()
+                    except Exception:
+                        t = ''
+                    try:
+                        dt = datetime.strptime(t, '%H:%M')
+                        pretty_time = dt.strftime('%I:%M%p').lower()
+                    except Exception:
+                        pretty_time = t
+
+                    # Use the saved preset name as the label; fall back to the variable name.
+                    try:
+                        label = str(p.get('name', '')).strip()
+                    except Exception:
+                        label = ''
+
+                    # If the label is missing (or just equals the raw HH:MM), use the variable name as label.
+                    if (not label) or (label == t):
+                        label = var_name
+
+                    value = f"{label}: {pretty_time}"
+
+                    if not comp.SetVariable(var_name, value):
+                        companion_failed += 1
+        except Exception:
+            companion_updated = False
+
+        return jsonify({
+            'ok': True,
+            'timer_presets': normalized_presets,
+            'propresenter_timer_index': cfg.get('propresenter_timer_index', 1),
+            'companion_names_updated': companion_updated,
+            'companion_names_failed': companion_failed,
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/timers/apply', methods=['POST'])
+def api_apply_timer_preset():
+    """Apply a timer preset selected by Companion and start the timer.
+
+        Companion can call this endpoint with either:
+            - JSON body: {"preset": 1}
+            - Query param: ?preset=1
+
+    Notes:
+    - The preset value is ALWAYS 1-based: 1 selects the first entry.
+    - Presets are stored in `timer_presets.json`.
+    - The ProPresenter timer to update is `propresenter_timer_index` in config.json.
+    """
+
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
+
+    body = request.get_json(silent=True) or {}
+    # Always treat the provided integer as 1-based (1 selects first preset).
+    preset_raw = body.get('preset', body.get('preset_index', body.get('index', body.get('value', None))))
+    if preset_raw is None:
+        preset_raw = request.args.get('preset', None)
+
+    try:
+        preset_number = int(preset_raw)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'preset must be an integer'}), 400
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    try:
+        presets = utils.load_timer_presets() if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        presets = []
+
+    if not presets:
+        return jsonify({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)', 'preset_count': 0}), 400
+
+    preset_index = preset_number - 1
+    if preset_index < 0 or preset_index >= len(presets):
+        return jsonify({'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}), 400
+
+    selected = presets[preset_index]
+    if isinstance(selected, dict):
+        time_str = str(selected.get('time', '')).strip()
+    else:
+        time_str = str(selected).strip()
+    if not _validate_time_hhmm(time_str):
+        return jsonify({'ok': False, 'error': f'invalid preset time in config: {time_str}'}), 500
+
+    try:
+        pp_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
+    except Exception:
+        pp_timer_index = 1
+
+    ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+    try:
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'propresenter_port must be an integer'}), 400
+
+    pp = ProPresentor(ip, port)
+    set_ok = bool(pp.SetCountdownToTime(pp_timer_index, time_str))
+    if not set_ok:
+        return jsonify({
+            'ok': False,
+            'error': 'failed to set timer (check ProPresenter connection and timer index)',
+            'preset': preset_number,
+            'preset_count': len(presets),
+            'time': time_str,
+            'propresenter_timer_index': pp_timer_index,
+            'set': False,
+            'reset': False,
+            'started': False,
+            'propresenter_ip': ip,
+            'propresenter_port': port,
+        }), 502
+
+    # ProPresenter often needs a reset/restart after changing timer config
+    # for the UI to reflect the new time correctly.
+    reset_ok = bool(pp.timer_operation(pp_timer_index, 'reset'))
+    if not reset_ok:
+        return jsonify({
+            'ok': False,
+            'error': 'timer set, but failed to reset (check ProPresenter timer state/permissions)',
+            'preset': preset_number,
+            'preset_count': len(presets),
+            'time': time_str,
+            'propresenter_timer_index': pp_timer_index,
+            'set': True,
+            'reset': False,
+            'started': False,
+            'propresenter_ip': ip,
+            'propresenter_port': port,
+        }), 502
+
+    # Start countdown immediately (per OpenAPI: GET /v1/timer/{id}/{operation})
+    start_ok = bool(pp.timer_operation(pp_timer_index, 'start'))
+
+    if not start_ok:
+        return jsonify({
+            'ok': False,
+            'error': 'timer set, but failed to start (check ProPresenter timer state/permissions)',
+            'preset': preset_number,
+            'preset_count': len(presets),
+            'time': time_str,
+            'propresenter_timer_index': pp_timer_index,
+            'set': True,
+            'reset': True,
+            'started': False,
+            'propresenter_ip': ip,
+            'propresenter_port': port,
+        }), 502
+
+    return jsonify({
+        'ok': True,
+        'preset': preset_number,
+        'preset_count': len(presets),
+        'time': time_str,
+        'propresenter_timer_index': pp_timer_index,
+        'set': True,
+        'reset': True,
+        'started': True,
+        'propresenter_ip': ip,
+        'propresenter_port': port,
+    })
 
 
 @app.route('/api/events/<int:ident>', methods=['DELETE'])

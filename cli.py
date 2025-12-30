@@ -8,6 +8,10 @@ import subprocess
 import os
 import signal
 import time
+import json
+import urllib.request
+import urllib.error
+from datetime import datetime
 from typing import List, Optional
 
 from package.core import list_apps, get_app
@@ -15,6 +19,196 @@ from package.apps.calendar import storage, utils
 logger = utils.get_logger()
 
 PID_FILE = "calendar.pid"
+
+
+def _validate_time_hhmm(s: str) -> bool:
+    try:
+        datetime.strptime(s, "%H:%M")
+        return True
+    except Exception:
+        return False
+
+
+def _get_timer_presets(cfg: dict) -> list[dict]:
+    try:
+        if hasattr(utils, "load_timer_presets"):
+            return list(utils.load_timer_presets())
+    except Exception:
+        pass
+    return []
+
+
+def _save_timer_presets(presets: list[dict]) -> None:
+    try:
+        if hasattr(utils, "save_timer_presets"):
+            utils.save_timer_presets(presets)
+            return
+    except Exception:
+        pass
+    # fallback
+    try:
+        with open("timer_presets.json", "w", encoding="utf-8") as f:
+            json.dump(list(presets), f, indent=2)
+    except Exception:
+        pass
+
+
+def _save_cfg(cfg: dict) -> None:
+    try:
+        utils.save_config(cfg)
+        utils.reload_config(force=True)
+    except Exception:
+        # fall back to best-effort write if utils methods change
+        try:
+            with open("config.json", "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
+
+
+def cmd_timers_list(args) -> int:
+    cfg = utils.get_config()
+    presets = _get_timer_presets(cfg)
+    if not presets:
+        print("No timer presets configured")
+        return 0
+    for i, t in enumerate(presets):
+        if isinstance(t, dict):
+            name = str(t.get("name", "")).strip()
+            time_str = str(t.get("time", "")).strip()
+            if name and name != time_str:
+                print(f"{i + 1}: {name} ({time_str})")
+            else:
+                print(f"{i + 1}: {time_str}")
+        else:
+            print(f"{i + 1}: {t}")
+    return 0
+
+
+def cmd_timers_add(args) -> int:
+    t = str(args.time).strip()
+    if not _validate_time_hhmm(t):
+        print("Invalid time format. Use HH:MM")
+        return 2
+
+    cfg = utils.get_config()
+    presets = _get_timer_presets(cfg)
+
+    item = {"time": t, "name": t}
+    if args.at is None:
+        presets.append(item)
+    else:
+        try:
+            idx = int(args.at)
+        except Exception:
+            print("--at must be an integer")
+            return 2
+        if idx < 0 or idx > len(presets):
+            print(f"--at out of range (0..{len(presets)})")
+            return 2
+        presets.insert(idx, item)
+
+    _save_timer_presets(presets)
+    print(f"Added preset: {t}")
+    return 0
+
+
+def cmd_timers_remove(args) -> int:
+    cfg = utils.get_config()
+    presets = _get_timer_presets(cfg)
+    if not presets:
+        print("No timer presets configured")
+        return 1
+    try:
+        idx = int(args.index)
+    except Exception:
+        print("index must be an integer")
+        return 2
+    if idx < 0 or idx >= len(presets):
+        print(f"index out of range (0..{len(presets)-1})")
+        return 2
+    removed = presets.pop(idx)
+    _save_timer_presets(presets)
+    if isinstance(removed, dict):
+        print(f"Removed preset {idx}: {removed.get('name', '')} ({removed.get('time', '')})")
+    else:
+        print(f"Removed preset {idx}: {removed}")
+    return 0
+
+
+def cmd_timers_move(args) -> int:
+    cfg = utils.get_config()
+    presets = _get_timer_presets(cfg)
+    if len(presets) < 2:
+        print("Not enough presets to move")
+        return 1
+    try:
+        src = int(args.src)
+        dst = int(args.dst)
+    except Exception:
+        print("src and dst must be integers")
+        return 2
+    if src < 0 or src >= len(presets):
+        print(f"src out of range (0..{len(presets)-1})")
+        return 2
+    if dst < 0 or dst >= len(presets):
+        print(f"dst out of range (0..{len(presets)-1})")
+        return 2
+    item = presets.pop(src)
+    presets.insert(dst, item)
+    _save_timer_presets(presets)
+    print(f"Moved preset {src} -> {dst}")
+    return 0
+
+
+def cmd_timers_set(args) -> int:
+    times = [str(t).strip() for t in (args.times or [])]
+    times = [t for t in times if t]
+    if not times:
+        print("Provide one or more HH:MM times")
+        return 2
+    for t in times:
+        if not _validate_time_hhmm(t):
+            print(f"Invalid time format: {t}. Use HH:MM")
+            return 2
+    presets = [{"time": t, "name": t} for t in times]
+    _save_timer_presets(presets)
+    print(f"Replaced presets ({len(presets)} entries)")
+    return 0
+
+
+def cmd_timers_apply(args) -> int:
+    """Mimic a Companion preset push by calling the web UI endpoint."""
+    try:
+        value = int(args.value)
+    except Exception:
+        print("value must be an integer")
+        return 2
+
+    cfg = utils.get_config()
+    port = int(cfg.get("webserver_port", cfg.get("server_port", 5000)))
+    base = args.webui.strip() if args.webui else f"http://127.0.0.1:{port}"
+    url = base.rstrip("/") + "/api/timers/apply"
+
+    payload = {"preset": value}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            print(body)
+            return 0
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = str(e)
+        print(f"HTTP error calling {url}: {e.code}\n{err_body}")
+        return 2
+    except Exception as e:
+        print(f"Failed to call {url}: {e}")
+        print("Is the web UI running? Start it with: python webui.py")
+        return 2
 
 
 def write_pid(pid: int) -> None:
@@ -265,6 +459,30 @@ def main(argv=None):
     debug_p = sub.add_parser("debug", help="Show or set debug mode")
     debug_p.add_argument("action", choices=["show", "on", "off"], help="Action: show, on, off")
 
+    # Timers management
+    timers_p = sub.add_parser("timers", help="Manage timer presets and simulate Companion preset pushes")
+    timers_sub = timers_p.add_subparsers(dest="timers_cmd")
+
+    timers_sub.add_parser("list", help="List configured timer presets")
+
+    t_add = timers_sub.add_parser("add", help="Add a preset time (HH:MM)")
+    t_add.add_argument("time", help="Time in HH:MM")
+    t_add.add_argument("--at", type=int, help="Insert at index (0..len)")
+
+    t_rm = timers_sub.add_parser("remove", help="Remove a preset by index")
+    t_rm.add_argument("index", help="Preset index (0-based)")
+
+    t_mv = timers_sub.add_parser("move", help="Move/reorder a preset")
+    t_mv.add_argument("src", help="Source index (0-based)")
+    t_mv.add_argument("dst", help="Destination index (0-based)")
+
+    t_set = timers_sub.add_parser("set", help="Replace the preset list with provided times")
+    t_set.add_argument("times", nargs="+", help="One or more times in HH:MM")
+
+    t_apply = timers_sub.add_parser("apply", help="Mimic a Companion preset push (calls the web UI)")
+    t_apply.add_argument("value", help="The integer value Companion would send")
+    t_apply.add_argument("--webui", help="Override web UI base URL (default http://127.0.0.1:<webserver_port>)")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "apps":
@@ -476,6 +694,22 @@ def main(argv=None):
         if action == "show":
             print("debug=", utils.get_debug())
             return 0
+
+    if args.cmd == "timers":
+        if args.timers_cmd == "list":
+            return cmd_timers_list(args)
+        if args.timers_cmd == "add":
+            return cmd_timers_add(args)
+        if args.timers_cmd == "remove":
+            return cmd_timers_remove(args)
+        if args.timers_cmd == "move":
+            return cmd_timers_move(args)
+        if args.timers_cmd == "set":
+            return cmd_timers_set(args)
+        if args.timers_cmd == "apply":
+            return cmd_timers_apply(args)
+        timers_p.print_help()
+        return 1
         if action == "on":
             utils.set_debug(True, persist=True)
             print("debug set to true")

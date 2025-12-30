@@ -46,6 +46,23 @@ This document describes the `calendarctl` CLI available in this workspace and ex
 - **debug show|on|off**: Query or set runtime debug mode. Setting persists to `config.json` and runs `reload_config()`.
   - Example: `python cli.py debug off`
 
+- **timers ...**: Manage timer presets (stored in `timer_presets.json`) and simulate a Companion preset push.
+  - `timers list`: View the preset list (displayed starting at 1). Each preset includes a saved name.
+    - Example: `python cli.py timers list`
+  - `timers add HH:MM [--at N]`: Add a preset time (optionally insert at an index)
+    - Example: `python cli.py timers add 08:45`
+    - Example: `python cli.py timers add 09:05 --at 1`
+  - `timers remove INDEX`: Remove a preset by index (0-based)
+    - Example: `python cli.py timers remove 0`
+  - `timers move SRC DST`: Reorder presets (0-based indices)
+    - Example: `python cli.py timers move 3 1`
+  - `timers set HH:MM HH:MM ...`: Replace the entire preset list
+    - Example: `python cli.py timers set 08:15 08:30 09:10 09:30`
+  - `timers apply VALUE [--webui URL]`: Mimic a Companion button/preset push by calling the web UI endpoint `/api/timers/apply`.
+    - NOTE: VALUE is always 1-based (1 selects the first preset).
+    - Example: `python cli.py timers apply 1`
+    - Example (override webui): `python cli.py timers apply 2 --webui http://127.0.0.1:5000`
+
 
 **Notes & Details**
 - The CLI reads/writes the `EVENTS_FILE` from `config.json`. To confirm which file is active:

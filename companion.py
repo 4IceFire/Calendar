@@ -128,6 +128,8 @@ class Companion:
     def GetVariable(self, var) -> str:
         return self.get_command(f"custom-variable/{var}/value")
 
+    def SetVariable(self, var, value):
+        return self.post_command(f"custom-variable/{var}/value", params={"value": value})
 
     def close(self) -> None:
         try:
