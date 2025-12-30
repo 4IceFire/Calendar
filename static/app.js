@@ -82,9 +82,15 @@ if (document.getElementById('apps-body')) {
 function _configSetStatus(msg, kind) {
   const el = document.getElementById('config-status');
   if (!el) return;
-  const cls = kind === 'error' ? 'alert alert-danger' : 'alert alert-success';
+  let cls;
+  if (kind === 'error') cls = 'alert alert-danger';
+  else if (kind === 'warn') cls = 'alert alert-warning';
+  else cls = 'alert alert-success';
+
   el.className = cls;
-  el.textContent = msg;
+
+  // allow html for link/warning UX
+  el.innerHTML = msg;
 }
 
 function _configClearStatus() {
@@ -393,7 +399,19 @@ if (document.getElementById('config-page')) {
 
         _configOriginal = data.config || cfg;
         _renderConfigGroups(_configOriginal);
-        _configSetStatus('Saved.', 'ok');
+
+        if (data.restart_required && data.port) {
+          const proto = window.location.protocol;
+          const host = window.location.hostname;
+          const newUrl = `${proto}//${host}:${data.port}/config`;
+          _configSetStatus(
+            `Saved. <strong>Web UI Port changed</strong> — the server will restart on <strong>${data.port}</strong>. ` +
+            `Open: <a href="${newUrl}">${newUrl}</a>`,
+            'warn'
+          );
+        } else {
+          _configSetStatus('Saved.', 'ok');
+        }
       } catch (e) {
         _configSetStatus(String(e.message || e), 'error');
       } finally {
@@ -440,7 +458,15 @@ if (document.getElementById('console-page')) {
       if (!data || !data.ok) throw new Error(data && data.error ? data.error : 'Failed to load console logs');
       const lines = data.lines || [];
       if (lines.length) {
-        _appendToLog(lines.join(''));
+        const rendered = lines.map((ln) => {
+          // Backward-compatible with older string-only API.
+          if (typeof ln === 'string') return ln;
+          const ts = String(ln.ts || '').trim();
+          const text = String(ln.text || '');
+          // Prefix every captured line with date/time.
+          return ts ? `${ts} ${text}` : text;
+        }).join('');
+        _appendToLog(rendered);
       }
       since = Number(data.next || since) || since;
     } catch (e) {

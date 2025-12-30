@@ -6,7 +6,7 @@
   "propresenter_port": 1025,
   "webserver_port": 5000,
   "poll_interval": 1,
-  "debug": true,
+  "debug": false,
   "propresenter_timer_index": 1,
   "companion_timer_name": "timer_name_"
 }

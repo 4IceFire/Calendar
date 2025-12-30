@@ -55,7 +55,7 @@ app = Flask(__name__, template_folder='templates', static_folder='static')
 # --- Console capture + CLI runner (Web UI) ---
 _CONSOLE_MAX_LINES = 2000
 _console_lock = threading.Lock()
-_console_lines: deque[tuple[int, str]] = deque(maxlen=_CONSOLE_MAX_LINES)
+_console_lines: deque[tuple[int, str, str]] = deque(maxlen=_CONSOLE_MAX_LINES)
 _console_seq = 0
 
 
@@ -73,7 +73,8 @@ def _console_append(text: str) -> None:
     with _console_lock:
         for line in s.splitlines(True):
             _console_seq += 1
-            _console_lines.append((_console_seq, line))
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            _console_lines.append((_console_seq, ts, line))
 
 
 class _ConsoleTee:
@@ -156,7 +157,8 @@ def _install_console_capture() -> None:
         if not any(isinstance(h, _ConsoleLogHandler) for h in root.handlers):
             h = _ConsoleLogHandler()
             h.setLevel(logging.INFO)
-            h.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
+            # Timestamp is added per-line in _console_append
+            h.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
             root.addHandler(h)
     except Exception:
         pass
@@ -748,6 +750,30 @@ def api_set_config():
             new_port = old_port
 
         restart_required = bool(new_port != old_port)
+
+        # If the port changed, restart the HTTP server asynchronously.
+        # We deliberately do NOT restart inline in this request handler.
+        if restart_required:
+            def _restart_later(port: int):
+                try:
+                    # Give the response time to flush before restarting.
+                    time.sleep(0.75)
+                except Exception:
+                    pass
+                try:
+                    _console_append(f"[WEB] Port changed; restarting server on port {port}...\n")
+                except Exception:
+                    pass
+                try:
+                    restart_http_server('0.0.0.0', port)
+                except Exception:
+                    pass
+
+            try:
+                threading.Thread(target=_restart_later, args=(new_port,), daemon=True).start()
+            except Exception:
+                pass
+
         return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -780,14 +806,14 @@ def api_console_logs():
         next_id = _console_seq
 
     if since > 0:
-        lines = [(i, t) for (i, t) in lines if i > since]
+        lines = [(i, ts, t) for (i, ts, t) in lines if i > since]
     if len(lines) > limit:
         lines = lines[-limit:]
 
     return jsonify({
         'ok': True,
         'next': next_id,
-        'lines': [t for (_, t) in lines],
+        'lines': [{'ts': ts, 'text': t} for (_, ts, t) in lines],
     })
 
 

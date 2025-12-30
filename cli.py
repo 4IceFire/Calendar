@@ -694,6 +694,16 @@ def main(argv=None):
         if action == "show":
             print("debug=", utils.get_debug())
             return 0
+        if action == "on":
+            utils.set_debug(True, persist=True)
+            print("debug set to true")
+            return 0
+        if action == "off":
+            utils.set_debug(False, persist=True)
+            print("debug set to false")
+            return 0
+        print("Unknown debug action")
+        return 2
 
     if args.cmd == "timers":
         if args.timers_cmd == "list":
@@ -710,14 +720,6 @@ def main(argv=None):
             return cmd_timers_apply(args)
         timers_p.print_help()
         return 1
-        if action == "on":
-            utils.set_debug(True, persist=True)
-            print("debug set to true")
-            return 0
-        if action == "off":
-            utils.set_debug(False, persist=True)
-            print("debug set to false")
-            return 0
 
     parser.print_help()
     return 1

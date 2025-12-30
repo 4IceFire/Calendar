@@ -20,3 +20,5 @@
 2025-12-30 09:36:00 [INFO] POST location/1/0/1/press OK | event=#1 'Annika Test' | due=2025-12-30 09:36:00
 2025-12-30 09:37:00 [INFO] POST location/1/0/2/press OK | event=#1 'Annika Test' | due=2025-12-30 09:37:00
 2025-12-30 09:38:00 [INFO] POST location/1/0/3/press OK | event=#1 'Annika Test' | due=2025-12-30 09:38:00
+2025-12-30 10:30:00 [INFO] POST location/1/0/1/press OK | event=#1 'Test 1' | due=2025-12-30 10:30:00
+2025-12-30 10:31:00 [INFO] POST location/1/0/2/press OK | event=#1 'Test 1' | due=2025-12-30 10:31:00
