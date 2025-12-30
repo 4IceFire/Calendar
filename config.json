@@ -4,8 +4,8 @@
   "companion_port": 8100,
   "companion_timer_name": "timer_name_",
   "propresenter_ip": "127.0.0.1",
-  "propresenter_port": 1025,
-  "propresenter_timer_index": 1,
+  "propresenter_port": 4000,
+  "propresenter_timer_index": 2,
   "webserver_port": 5100,
   "poll_interval": 1,
   "debug": false

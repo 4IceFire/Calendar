@@ -75,6 +75,27 @@ def _console_append(text: str) -> None:
             _console_lines.append((_console_seq, ts, line))
 
 
+def _is_debug_enabled() -> bool:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        return bool(cfg.get('debug', False))
+    except Exception:
+        return False
+
+
+def _truncate_for_log(value, max_len: int = 240) -> str:
+    try:
+        s = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        try:
+            s = str(value)
+        except Exception:
+            s = ''
+    if len(s) > max_len:
+        return s[:max_len] + '…'
+    return s
+
+
 class _ConsoleTee:
     """Tee writes to the original stream AND the console buffer."""
 
@@ -624,6 +645,37 @@ def companion_status():
     return jsonify({'connected': status})
 
 
+@app.route('/api/propresenter_status')
+def propresenter_status():
+    """Lightweight ProPresenter connectivity check for the UI indicator.
+
+    Intentionally does not print to console to avoid noisy logs.
+    """
+    status = False
+    try:
+        if ProPresentor is None:
+            status = False
+        else:
+            try:
+                cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+            except Exception:
+                cfg = {}
+
+            ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+            try:
+                port = int(cfg.get('propresenter_port', 1025))
+            except Exception:
+                port = 1025
+
+            # Keep this fast; it's polled periodically.
+            pp = ProPresentor(ip, port, timeout=1.0, verify_on_init=False, debug=False)
+            status = bool(pp.check_connection())
+    except Exception:
+        status = False
+
+    return jsonify({'connected': status})
+
+
 @app.route('/api/config', methods=['GET'])
 def api_get_config():
     try:
@@ -926,6 +978,17 @@ def api_set_timers():
     try:
         utils.save_config(cfg)
         utils.reload_config(force=True)
+
+        # Debug-only: log when presets/config are successfully saved.
+        if _is_debug_enabled():
+            try:
+                _console_append(
+                    f"[TIMERS] Saved {len(normalized_presets)} preset(s); "
+                    f"propresenter_timer_index={cfg.get('propresenter_timer_index', 1)}\n"
+                )
+            except Exception:
+                pass
+
         # Push names to Companion custom variables, e.g. timer_name_1, timer_name_2, ...
         companion_updated = False
         companion_failed = 0
@@ -993,10 +1056,25 @@ def api_apply_timer_preset():
     - The ProPresenter timer to update is `propresenter_timer_index` in config.json.
     """
 
+    # Always log the incoming request (Companion button press visibility)
+    # regardless of debug mode.
+    try:
+        body_for_log = request.get_json(silent=True)
+    except Exception:
+        body_for_log = None
+    try:
+        _console_append(
+            f"[COMPANION] Received /api/timers/apply from {request.remote_addr} "
+            f"args={_truncate_for_log(dict(request.args))} "
+            f"json={_truncate_for_log(body_for_log)}\n"
+        )
+    except Exception:
+        pass
+
     if ProPresentor is None:
         return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
 
-    body = request.get_json(silent=True) or {}
+    body = body_for_log or {}
 
     def _get_body_value_ci(d: dict, *keys: str):
         try:
@@ -1067,6 +1145,11 @@ def api_apply_timer_preset():
     except Exception:
         pp_timer_index = 1
 
+    # ProPresenter's HTTP API timer IDs are 0-based indices. Keep the config
+    # value human-friendly (1-based), but convert for API calls.
+    # Backward compatibility: if someone configured 0 explicitly, keep it.
+    pp_timer_id = pp_timer_index - 1 if pp_timer_index > 0 else 0
+
     ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
     try:
         port = int(cfg.get('propresenter_port', 1025))
@@ -1074,7 +1157,7 @@ def api_apply_timer_preset():
         return jsonify({'ok': False, 'error': 'propresenter_port must be an integer'}), 400
 
     pp = ProPresentor(ip, port)
-    set_ok = bool(pp.SetCountdownToTime(pp_timer_index, time_str))
+    set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
     if not set_ok:
         return jsonify({
             'ok': False,
@@ -1083,6 +1166,7 @@ def api_apply_timer_preset():
             'preset_count': len(presets),
             'time': time_str,
             'propresenter_timer_index': pp_timer_index,
+            'propresenter_timer_id': pp_timer_id,
             'set': False,
             'reset': False,
             'started': False,
@@ -1092,7 +1176,7 @@ def api_apply_timer_preset():
 
     # ProPresenter often needs a reset/restart after changing timer config
     # for the UI to reflect the new time correctly.
-    reset_ok = bool(pp.timer_operation(pp_timer_index, 'reset'))
+    reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
     if not reset_ok:
         return jsonify({
             'ok': False,
@@ -1101,6 +1185,7 @@ def api_apply_timer_preset():
             'preset_count': len(presets),
             'time': time_str,
             'propresenter_timer_index': pp_timer_index,
+            'propresenter_timer_id': pp_timer_id,
             'set': True,
             'reset': False,
             'started': False,
@@ -1109,7 +1194,7 @@ def api_apply_timer_preset():
         }), 502
 
     # Start countdown immediately (per OpenAPI: GET /v1/timer/{id}/{operation})
-    start_ok = bool(pp.timer_operation(pp_timer_index, 'start'))
+    start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
 
     if not start_ok:
         return jsonify({
@@ -1119,6 +1204,7 @@ def api_apply_timer_preset():
             'preset_count': len(presets),
             'time': time_str,
             'propresenter_timer_index': pp_timer_index,
+            'propresenter_timer_id': pp_timer_id,
             'set': True,
             'reset': True,
             'started': False,
@@ -1132,6 +1218,7 @@ def api_apply_timer_preset():
         'preset_count': len(presets),
         'time': time_str,
         'propresenter_timer_index': pp_timer_index,
+        'propresenter_timer_id': pp_timer_id,
         'set': True,
         'reset': True,
         'started': True,

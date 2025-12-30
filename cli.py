@@ -190,7 +190,7 @@ def cmd_timers_apply(args) -> int:
     base = args.webui.strip() if args.webui else f"http://127.0.0.1:{port}"
     url = base.rstrip("/") + "/api/timers/apply"
 
-    payload = {"preset": value}
+    payload = {"TimersIndex": value}
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:

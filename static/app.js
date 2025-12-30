@@ -24,10 +24,38 @@ async function updateCompanion() {
   }
 }
 
+// Poll ProPresenter status endpoint and update indicator
+async function updateProPresenter() {
+  try {
+    const res = await fetch('/api/propresenter_status');
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    const dot = document.getElementById('propresenter-dot');
+    const label = document.getElementById('propresenter-label');
+    if (data.connected) {
+      dot.classList.remove('bg-danger');
+      dot.classList.add('bg-success');
+      label.textContent = 'ProPresenter: Online';
+    } else {
+      dot.classList.remove('bg-success');
+      dot.classList.add('bg-danger');
+      label.textContent = 'ProPresenter: Offline';
+    }
+  } catch (e) {
+    const dot = document.getElementById('propresenter-dot');
+    const label = document.getElementById('propresenter-label');
+    dot.classList.remove('bg-success');
+    dot.classList.add('bg-danger');
+    label.textContent = 'ProPresenter: Unknown';
+  }
+}
+
 // initial check
 updateCompanion();
+updateProPresenter();
 // refresh every 10s for more responsive UI
 setInterval(updateCompanion, 10000);
+setInterval(updateProPresenter, 10000);
 
 // --- Config page ---
 function _configSetStatus(msg, kind) {
