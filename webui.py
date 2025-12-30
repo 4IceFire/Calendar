@@ -211,9 +211,27 @@ def _start_all_apps():
     apps = list_apps()
     for name in apps:
         try:
+            # Avoid starting the same app multiple times (e.g. if the web server
+            # is restarted due to a port change).
+            try:
+                if name in _running_apps:
+                    continue
+            except Exception:
+                pass
+
             app_inst = get_app(name)
             if app_inst is None:
                 continue
+
+            try:
+                if hasattr(app_inst, 'status'):
+                    st = app_inst.status() or {}
+                    if bool(st.get('running', False)):
+                        _running_apps[name] = app_inst
+                        continue
+            except Exception:
+                pass
+
             # start non-blocking and record instance as running
             try:
                 app_inst.start(blocking=False)
@@ -378,11 +396,6 @@ def home():
         companion_ip=companion_ip,
         running_apps=running_apps,
     )
-
-
-@app.route('/apps')
-def apps_page():
-    return render_template('apps.html')
 
 
 @app.route('/calendar')
@@ -587,89 +600,6 @@ def api_ui_events():
         return resp
     except Exception:
         return jsonify([])
-
-
-@app.route('/api/apps')
-def api_list_apps():
-    regs = list_apps()
-    out = []
-    for name, factory in regs.items():
-        running = False
-        # prefer asking the singleton instance for its status()
-        try:
-            inst = get_app(name)
-            if inst is not None and hasattr(inst, 'status'):
-                st = inst.status() or {}
-                # if status reports running, use that
-                running = bool(st.get('running', False))
-            else:
-                running = name in _running_apps
-        except Exception:
-            running = name in _running_apps
-
-        out.append({
-            'name': name,
-            'running': running,
-        })
-    return jsonify(out)
-
-
-@app.route('/api/apps/<name>/start', methods=['POST'])
-def api_start_app(name: str):
-    regs = list_apps()
-    if name not in regs:
-        return jsonify({'ok': False, 'error': 'unknown app'}), 404
-    # prefer the singleton instance so UI controls the same app the server uses
-    try:
-        inst = get_app(name)
-        if inst is None:
-            return jsonify({'ok': False, 'error': 'failed to construct app instance'}), 500
-
-        # if app reports it's already running, return success
-        try:
-            st = inst.status() or {}
-            if st.get('running'):
-                _running_apps[name] = inst
-                return jsonify({'ok': True, 'msg': 'already running'})
-        except Exception:
-            pass
-
-        # start non-blocking
-        try:
-            inst.start(blocking=False)
-        except TypeError:
-            threading.Thread(target=lambda inst=inst: inst.start(), daemon=True).start()
-        except Exception:
-            pass
-
-        _running_apps[name] = inst
-        return jsonify({'ok': True})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
-
-
-@app.route('/api/apps/<name>/stop', methods=['POST'])
-def api_stop_app(name: str):
-    # prefer the singleton instance
-    try:
-        inst = get_app(name)
-        if inst is None:
-            return jsonify({'ok': False, 'error': 'unknown app'}), 404
-
-        try:
-            inst.stop()
-        except Exception:
-            pass
-
-        # ensure we remove any record in our running map
-        try:
-            _running_apps.pop(name, None)
-        except Exception:
-            pass
-
-        return jsonify({'ok': True})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/companion_status')

@@ -29,55 +29,6 @@ updateCompanion();
 // refresh every 10s for more responsive UI
 setInterval(updateCompanion, 10000);
 
-// --- App Control functions ---
-async function loadApps() {
-  try {
-    const res = await fetch('/api/apps');
-    const data = await res.json();
-    const body = document.getElementById('apps-body');
-    if (!body) return;
-    body.innerHTML = '';
-    data.forEach(a => {
-      const tr = document.createElement('tr');
-      const nameTd = document.createElement('td');
-      nameTd.textContent = a.name;
-      const statusTd = document.createElement('td');
-      statusTd.textContent = a.running ? 'Running' : 'Stopped';
-      const actionTd = document.createElement('td');
-      const btn = document.createElement('button');
-      btn.className = a.running ? 'btn btn-sm btn-danger' : 'btn btn-sm btn-success';
-      btn.textContent = a.running ? 'Stop' : 'Start';
-      btn.onclick = async () => {
-        btn.disabled = true;
-        try {
-          const method = a.running ? 'stop' : 'start';
-          const resp = await fetch(`/api/apps/${encodeURIComponent(a.name)}/${method}`, {method: 'POST'});
-          // refresh apps list and companion indicator immediately after action
-          await loadApps();
-          try { updateCompanion(); } catch (e) {}
-        } catch (e) {
-          console.error(e);
-        } finally {
-          btn.disabled = false;
-        }
-      };
-      actionTd.appendChild(btn);
-      tr.appendChild(nameTd);
-      tr.appendChild(statusTd);
-      tr.appendChild(actionTd);
-      body.appendChild(tr);
-    });
-  } catch (e) {
-    console.error('Failed to load apps', e);
-  }
-}
-
-// If on apps page, load apps periodically
-if (document.getElementById('apps-body')) {
-  loadApps();
-  setInterval(loadApps, 5000);
-}
-
 // --- Config page ---
 function _configSetStatus(msg, kind) {
   const el = document.getElementById('config-status');

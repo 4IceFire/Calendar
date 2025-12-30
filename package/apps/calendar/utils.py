@@ -77,10 +77,10 @@ def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, str]]:
     except FileNotFoundError:
         # create with defaults
         defaults = [
-            {"time": "08:15", "name": "08:15"},
-            {"time": "08:30", "name": "08:30"},
-            {"time": "09:10", "name": "09:10"},
-            {"time": "09:30", "name": "09:30"},
+            {"time": "08:15", "name": "Timer 1"},
+            {"time": "08:30", "name": "Timer 2"},
+            {"time": "09:10", "name": "Timer 3"},
+            {"time": "09:30", "name": "Timer 4"},
         ]
         try:
             save_timer_presets(defaults, path)
