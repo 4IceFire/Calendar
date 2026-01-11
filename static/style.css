@@ -1,8 +1,4 @@
-:root{
-  --primary:#0d6efd;
-  --bg:#ffffff;
-  --text:#212529;
-}
+/* Theme: prefer Bootstrap 5.3's CSS variables driven by `data-bs-theme`. */
 
 /* Simple indicator dot */
 .indicator-dot{
@@ -13,23 +9,15 @@
   margin-right:8px;
 }
 
-/* Palette options (unused directly; see below for examples) */
-/* Palette 1: Blue / Gray */
---palette1-primary: #0d6efd;
---palette1-bg: #ffffff;
---palette1-text: #212529;
+body{
+  background-color: var(--bs-body-bg);
+  color: var(--bs-body-color);
+}
 
-/* Palette 2: Dark Teal */
---palette2-primary: #0d9488;
---palette2-bg: #f8fafc;
---palette2-text: #0f172a;
-
-/* Palette 3: Warm */
---palette3-primary: #d97706;
---palette3-bg: #fff7ed;
---palette3-text: #92400e;
-
-body{background:var(--bg);color:var(--text)}
+/* Slightly improve contrast for status blocks in dark mode */
+html[data-bs-theme="dark"] .card{
+  border-color: rgba(255, 255, 255, 0.12);
+}
 
 /* Simple layout tweaks */
 .container h1{margin-bottom:1rem}

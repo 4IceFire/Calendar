@@ -27,6 +27,8 @@ _defaults = {
     "webserver_port": 5000,
     "poll_interval": 1.0,
     "debug": False,
+    # Web UI theme
+    "dark_mode": False,
 }
 
 

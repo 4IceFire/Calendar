@@ -12,5 +12,6 @@
   "propresenter_timer_wait_reset_ms": 1000,
   "webserver_port": 5100,
   "poll_interval": 1,
-  "debug": false
+  "debug": false,
+  "dark_mode": false
 }
