@@ -13,5 +13,5 @@
   "webserver_port": 5000,
   "poll_interval": 1,
   "debug": false,
-  "dark_mode": false
+  "dark_mode": true
 }

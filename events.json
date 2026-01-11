@@ -27,6 +27,11 @@
         "minutes": 5,
         "typeOfTrigger": "AFTER",
         "buttonURL": "location/133/2/3/press"
+      },
+      {
+        "minutes": 60,
+        "typeOfTrigger": "AFTER",
+        "buttonURL": "location/133/2/4/press"
       }
     ]
   }
