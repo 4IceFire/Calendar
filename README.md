@@ -194,6 +194,10 @@ This project can also act as a small “glue” service between Bitfocus Compani
 - `propresenter_ip`: ProPresenter host
 - `propresenter_port`: ProPresenter API port
 - `propresenter_timer_index`: which ProPresenter timer/clock to update
+- `propresenter_is_latest`: set `true` for normal timer flow, set `false` to enable the legacy start workaround sequence
+- `propresenter_timer_wait_stop_ms`: legacy-only delay after stop (default 200ms)
+- `propresenter_timer_wait_set_ms`: legacy-only delay after setting time (default 600ms)
+- `propresenter_timer_wait_reset_ms`: legacy-only delay after reset (default 1000ms)
 - `companion_ip` / `companion_port`: Companion host/port
 - `companion_timer_name`: prefix for Companion timer-name variables (default: `timer_name_`)
 

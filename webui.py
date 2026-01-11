@@ -892,6 +892,36 @@ def _validate_time_hhmm(s: str) -> bool:
         return False
 
 
+def _cfg_bool(cfg: dict, key: str, default: bool = False) -> bool:
+    try:
+        v = cfg.get(key, default)
+    except Exception:
+        return bool(default)
+
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return bool(default)
+    s = str(v).strip().lower()
+    if s in ('1', 'true', 't', 'yes', 'y', 'on'):
+        return True
+    if s in ('0', 'false', 'f', 'no', 'n', 'off'):
+        return False
+    return bool(default)
+
+
+def _cfg_int(cfg: dict, key: str, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
+    try:
+        v = int(cfg.get(key, default))
+    except Exception:
+        v = int(default)
+    if min_value is not None and v < min_value:
+        v = min_value
+    if max_value is not None and v > max_value:
+        v = max_value
+    return v
+
+
 @app.route('/api/timers', methods=['GET'])
 def api_get_timers():
     try:
@@ -1156,7 +1186,131 @@ def api_apply_timer_preset():
     except Exception:
         return jsonify({'ok': False, 'error': 'propresenter_port must be an integer'}), 400
 
+    # Some older ProPresenter versions have a bug where a normal `start` right
+    # after setting/resetting a timer doesn't reliably start.
+    # Control behavior via config.json:
+    #   - propresenter_is_latest: true => normal flow (set -> reset -> start)
+    #                             false => legacy workaround flow
+    #   - propresenter_timer_wait_stop_ms (default 200)
+    #   - propresenter_timer_wait_set_ms  (default 600)
+    #   - propresenter_timer_wait_reset_ms(default 1000)
+    is_latest = _cfg_bool(cfg, 'propresenter_is_latest', True)
+    wait_stop_ms = _cfg_int(cfg, 'propresenter_timer_wait_stop_ms', 200, min_value=0, max_value=60000)
+    wait_set_ms = _cfg_int(cfg, 'propresenter_timer_wait_set_ms', 600, min_value=0, max_value=60000)
+    wait_reset_ms = _cfg_int(cfg, 'propresenter_timer_wait_reset_ms', 1000, min_value=0, max_value=60000)
+
     pp = ProPresentor(ip, port)
+
+    if not is_latest:
+        # Legacy workaround sequence:
+        # Stop Timer -> wait -> Set -> wait -> Reset -> wait -> Start
+        stop_ok = bool(pp.timer_operation(pp_timer_id, 'stop'))
+        if not stop_ok:
+            return jsonify({
+                'ok': False,
+                'error': 'failed to stop timer (legacy sequence)',
+                'preset': preset_number,
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'legacy',
+                'stop': False,
+                'set': False,
+                'reset': False,
+                'started': False,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+            }), 502
+
+        if wait_stop_ms:
+            time.sleep(wait_stop_ms / 1000.0)
+
+        set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
+        if not set_ok:
+            return jsonify({
+                'ok': False,
+                'error': 'failed to set timer (legacy sequence)',
+                'preset': preset_number,
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'legacy',
+                'stop': True,
+                'set': False,
+                'reset': False,
+                'started': False,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+            }), 502
+
+        if wait_set_ms:
+            time.sleep(wait_set_ms / 1000.0)
+
+        reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
+        if not reset_ok:
+            return jsonify({
+                'ok': False,
+                'error': 'timer set, but failed to reset (legacy sequence)',
+                'preset': preset_number,
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'legacy',
+                'stop': True,
+                'set': True,
+                'reset': False,
+                'started': False,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+            }), 502
+
+        if wait_reset_ms:
+            time.sleep(wait_reset_ms / 1000.0)
+
+        start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
+        if not start_ok:
+            return jsonify({
+                'ok': False,
+                'error': 'timer set, but failed to start (legacy sequence)',
+                'preset': preset_number,
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'legacy',
+                'stop': True,
+                'set': True,
+                'reset': True,
+                'started': False,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+            }), 502
+
+        return jsonify({
+            'ok': True,
+            'preset': preset_number,
+            'preset_count': len(presets),
+            'time': time_str,
+            'propresenter_timer_index': pp_timer_index,
+            'propresenter_timer_id': pp_timer_id,
+            'sequence': 'legacy',
+            'stop': True,
+            'set': True,
+            'reset': True,
+            'started': True,
+            'propresenter_ip': ip,
+            'propresenter_port': port,
+            'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+        })
+
+    # Normal flow (latest versions): set -> reset -> start
     set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
     if not set_ok:
         return jsonify({
@@ -1167,6 +1321,7 @@ def api_apply_timer_preset():
             'time': time_str,
             'propresenter_timer_index': pp_timer_index,
             'propresenter_timer_id': pp_timer_id,
+            'sequence': 'normal',
             'set': False,
             'reset': False,
             'started': False,
@@ -1186,6 +1341,7 @@ def api_apply_timer_preset():
             'time': time_str,
             'propresenter_timer_index': pp_timer_index,
             'propresenter_timer_id': pp_timer_id,
+            'sequence': 'normal',
             'set': True,
             'reset': False,
             'started': False,
@@ -1205,6 +1361,7 @@ def api_apply_timer_preset():
             'time': time_str,
             'propresenter_timer_index': pp_timer_index,
             'propresenter_timer_id': pp_timer_id,
+            'sequence': 'normal',
             'set': True,
             'reset': True,
             'started': False,
@@ -1219,6 +1376,7 @@ def api_apply_timer_preset():
         'time': time_str,
         'propresenter_timer_index': pp_timer_index,
         'propresenter_timer_id': pp_timer_id,
+        'sequence': 'normal',
         'set': True,
         'reset': True,
         'started': True,

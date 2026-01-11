@@ -6,6 +6,10 @@
   "propresenter_ip": "127.0.0.1",
   "propresenter_port": 4000,
   "propresenter_timer_index": 2,
+  "propresenter_is_latest": true,
+  "propresenter_timer_wait_stop_ms": 200,
+  "propresenter_timer_wait_set_ms": 600,
+  "propresenter_timer_wait_reset_ms": 1000,
   "webserver_port": 5100,
   "poll_interval": 1,
   "debug": false
