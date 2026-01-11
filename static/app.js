@@ -111,6 +111,11 @@ const CONFIG_META = {
     help: 'Enables extra logging and developer-friendly errors.',
   },
 
+  dark_mode: {
+    label: 'Dark Mode',
+    help: 'Enable dark theme for the Web UI.',
+  },
+
   companion_ip: {
     label: 'Companion Host',
     help: 'Bitfocus Companion IP or hostname.',
@@ -255,7 +260,7 @@ function _renderConfigGroups(cfg) {
   const groups = [
     {
       title: 'Web UI',
-      keys: ['webserver_port', 'server_port', 'poll_interval', 'debug'],
+      keys: ['webserver_port', 'server_port', 'poll_interval', 'debug', 'dark_mode'],
     },
     {
       title: 'Companion',
@@ -378,6 +383,12 @@ if (document.getElementById('config-page')) {
 
         _configOriginal = data.config || cfg;
         _renderConfigGroups(_configOriginal);
+
+        // Apply theme immediately (no reload required)
+        if (Object.prototype.hasOwnProperty.call(_configOriginal, 'dark_mode')) {
+          const theme = _configOriginal.dark_mode ? 'dark' : 'light';
+          document.documentElement.setAttribute('data-bs-theme', theme);
+        }
 
         if (data.restart_required && data.port) {
           const proto = window.location.protocol;

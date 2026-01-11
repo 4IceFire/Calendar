@@ -50,6 +50,19 @@ except Exception:
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
 
+@app.context_processor
+def _inject_theme():
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        dark_mode = bool(cfg.get('dark_mode', False))
+    except Exception:
+        dark_mode = False
+    return {
+        'dark_mode': dark_mode,
+        'bs_theme': 'dark' if dark_mode else 'light',
+    }
+
+
 # --- Console capture + CLI runner (Web UI) ---
 _CONSOLE_MAX_LINES = 2000
 _console_lock = threading.Lock()
