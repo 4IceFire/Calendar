@@ -326,22 +326,46 @@ class ClockScheduler:
 
 
 def next_weekly_occurrence(event: Event, now: datetime) -> Optional[datetime]:
+    def _has_future_trigger(occurrence: datetime) -> bool:
+        # A trigger is still pending if its computed due time is in the future.
+        for trig in getattr(event, "times", []):
+            due = (occurrence + timedelta(minutes=trig.timer)).replace(microsecond=0)
+            if due > now:
+                return True
+        return False
+
     base = datetime.combine(event.date, event.time)
 
     if not event.repeating:
-        return base if base > now else None
+        # Non-repeating events can still have AFTER triggers pending even if the
+        # base event time is already in the past.
+        if base > now:
+            return base
+        return base if _has_future_trigger(base) else None
 
+    # Repeating weekly: prefer the most recent occurrence (including today)
+    # if it still has future trigger(s) pending; otherwise schedule the next.
     target_weekday = event.day.value - 1
-    start_date = max(event.date, now.date())
 
-    days_ahead = (target_weekday - start_date.weekday()) % 7
-    candidate_date = start_date + timedelta(days=days_ahead)
-    candidate = datetime.combine(candidate_date, event.time)
+    # First possible occurrence on/after the configured start date.
+    first_date = event.date + timedelta(days=(target_weekday - event.date.weekday()) % 7)
+    first_occ = datetime.combine(first_date, event.time)
 
-    if candidate <= now:
-        candidate += timedelta(days=7)
+    # Most recent occurrence on/before today.
+    today = now.date()
+    days_back = (today.weekday() - target_weekday) % 7
+    last_date = today - timedelta(days=days_back)
+    if last_date < first_date:
+        last_date = first_date
+    last_occ = datetime.combine(last_date, event.time)
 
-    return candidate
+    if last_occ > now:
+        return last_occ
+
+    if _has_future_trigger(last_occ):
+        return last_occ
+
+    return last_occ + timedelta(days=7)
 
 
 def push_triggers_for_occurrence(
