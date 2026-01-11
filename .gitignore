@@ -13,3 +13,4 @@ calendar_triggers.json
 # Local Config/Event Files
 config.json
 events.json
+config copy.json

@@ -30,3 +30,7 @@
 2025-12-30 11:19:00 [INFO] POST location/1/0/3/press OK | event=#1 'Test 1' | due=2025-12-30 11:19:00
 2025-12-30 11:20:00 [INFO] POST location/1/0/1/press OK | event=#1 'Test 1' | due=2025-12-30 11:20:00
 2025-12-30 11:21:00 [INFO] POST location/1/0/2/press OK | event=#1 'Test 1' | due=2025-12-30 11:21:00
+2026-01-11 16:50:00 [INFO] POST location/133/2/0/press OK | event=#1 'Test Triggers' | due=2026-01-11 16:50:00
+2026-01-11 16:55:00 [INFO] POST location/133/2/1/press OK | event=#1 'Test Triggers' | due=2026-01-11 16:55:00
+2026-01-11 17:00:00 [INFO] POST location/133/2/2/press OK | event=#1 'Test Triggers' | due=2026-01-11 17:00:00
+2026-01-11 17:05:00 [INFO] POST location/133/2/3/press OK | event=#1 'Test Triggers' | due=2026-01-11 17:05:00
