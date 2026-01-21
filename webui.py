@@ -315,6 +315,7 @@ _server_lock = threading.Lock()
 # Status endpoint caches (to avoid each connected browser triggering a blocking probe)
 _companion_status_cache = {'ts': 0.0, 'connected': False}
 _propresenter_status_cache = {'ts': 0.0, 'connected': False}
+_videohub_status_cache = {'ts': 0.0, 'connected': False}
 _status_cache_lock = threading.Lock()
 _STATUS_CACHE_TTL_SECONDS = 2.0
 
@@ -1230,6 +1231,34 @@ def propresenter_status():
         _propresenter_status_cache['connected'] = bool(status)
 
     return jsonify({'connected': status})
+
+
+@app.route('/api/videohub_status')
+def videohub_status():
+    """Lightweight VideoHub connectivity check for the UI indicator.
+
+    Uses the same caching strategy as the other status endpoints.
+    """
+    now = time.time()
+    with _status_cache_lock:
+        if (now - float(_videohub_status_cache.get('ts', 0.0))) < _STATUS_CACHE_TTL_SECONDS:
+            return jsonify({'connected': bool(_videohub_status_cache.get('connected', False))})
+
+    status = False
+    try:
+        vh = _get_videohub_client_from_config()
+        if vh is None:
+            status = False
+        else:
+            status = bool(vh.ping())
+    except Exception:
+        status = False
+
+    with _status_cache_lock:
+        _videohub_status_cache['ts'] = now
+        _videohub_status_cache['connected'] = bool(status)
+
+    return jsonify({'connected': bool(status)})
 
 
 @app.route('/api/config', methods=['GET'])
