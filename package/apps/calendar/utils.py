@@ -1,14 +1,18 @@
+from __future__ import annotations
+
 import json
 import threading
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 import os
 import re
 
-from companion import Companion
 from package.apps.calendar.storage import DEFAULT_EVENTS_FILE
 import logging
 from logging.handlers import RotatingFileHandler
+
+if TYPE_CHECKING:
+    from companion import Companion
 
 CONFIG_FILE = "config.json"
 TIMER_PRESETS_FILE = "timer_presets.json"
@@ -30,6 +34,12 @@ _defaults = {
     "debug": False,
     # Web UI theme
     "dark_mode": False,
+
+    # VideoHub defaults
+    "videohub_ip": "",
+    "videohub_port": 9990,
+    "videohub_timeout": 2.0,
+    "videohub_presets_file": "videohub_presets.json",
 }
 
 
@@ -276,11 +286,7 @@ def reload_config(force: bool = False) -> bool:
         _RUNTIME_DEBUG = bool(_CONFIG.get("debug", False))
 
     # recreate or update companion client
-    try:
-        _companion_client = Companion(_CONFIG.get("companion_ip", "127.0.0.1"), int(_CONFIG.get("companion_port", 8000)))
-        _companion_client.debug = _RUNTIME_DEBUG
-    except Exception:
-        _companion_client = None
+    _companion_client = _create_companion_client(_CONFIG)
 
     _config_mtime = mtime
     return True
@@ -288,11 +294,25 @@ def reload_config(force: bool = False) -> bool:
 
 # Companion client singleton
 _companion_client = None
-try:
-    _companion_client = Companion(_CONFIG.get("companion_ip", "127.0.0.1"), int(_CONFIG.get("companion_port", 8000)))
-    _companion_client.debug = _RUNTIME_DEBUG
-except Exception:
-    _companion_client = None
+
+
+def _create_companion_client(cfg: Dict[str, Any]) -> Companion | None:
+    try:
+        from companion import Companion as _Companion
+    except ModuleNotFoundError as e:
+        # Allows the app to run even if optional dependencies (like `requests`) are missing.
+        logging.getLogger("calendar").warning("Companion client unavailable (%s).", e)
+        return None
+
+    try:
+        client = _Companion(cfg.get("companion_ip", "127.0.0.1"), int(cfg.get("companion_port", 8000)))
+        client.debug = bool(cfg.get("debug", False))
+        return client
+    except Exception:
+        return None
+
+
+_companion_client = _create_companion_client(_CONFIG)
 
 
 def get_companion() -> Companion | None:

@@ -1,0 +1,224 @@
+# API Reference (WebUI)
+
+This document lists the HTTP API endpoints implemented by the Flask Web UI server (`webui.py`).
+
+## Basics
+
+- Base URL: `http://<host>:<port>`
+- Port: configured by `webserver_port` in `config.json` (default typically `5000`)
+- Auth: none (intended for trusted LAN usage)
+- Format: JSON (unless otherwise noted)
+
+### Indexing conventions
+
+- Calendar event IDs: integers assigned by the server.
+- Timer preset selection for `/api/timers/apply`: **1-based** (1 selects the first preset).
+- VideoHub routing:
+  - `/api/videohub/route`: defaults to **1-based**, unless `zero_based=true`
+  - VideoHub presets store routes using **1-based** numbers.
+
+---
+
+## Calendar
+
+### List events (for UI)
+- **GET** `/api/ui/events`
+- **Returns:** JSON array of events.
+- **Notes:** Reads from the configured `EVENTS_FILE`.
+
+Event shape (simplified):
+```json
+{
+  "id": 1,
+  "name": "Sunday Service",
+  "date": "2026-01-21",
+  "time": "09:30:00",
+  "repeating": false,
+  "active": true,
+  "times": [
+    {"minutes": 10, "typeOfTrigger": "BEFORE", "buttonURL": "location/1/0/1/press"}
+  ]
+}
+```
+
+### Create event
+- **POST** `/api/ui/events`
+- **Body:** event object (similar to the shape above; `id` is assigned server-side).
+- **Returns:** `{ "ok": true, "id": <new_id> }` on success.
+
+### Get event by id
+- **GET** `/api/events/<id>`
+- **Returns:** single event object.
+
+### Update event by id
+- **PUT** `/api/events/<id>`
+- **Body:** event fields to update.
+- **Returns:** `{ "ok": true, "id": <id> }` on success.
+
+### Delete event by id
+- **DELETE** `/api/events/<id>`
+- **Returns:** `{ "removed": true, "id": <id>, "name": "..." }` on success.
+
+### Upcoming triggers (dashboard)
+- **GET** `/api/upcoming_triggers`
+- **Returns:** `{ now_ms, triggers: [...] }`
+- **Notes:** Used by the UI to display the next few trigger actions.
+
+Trigger entry shape (simplified):
+```json
+{
+  "due_ms": 1730000000000,
+  "seconds_until": 120,
+  "event": "Sunday Service",
+  "event_id": 1,
+  "offset_min": 10,
+  "offset": "10m",
+  "buttonURL": "location/1/0/1/press",
+  "button": {"label": "Start Stream", "pattern": "1/0/1"}
+}
+```
+
+---
+
+## Timers
+
+### Get timer settings + presets
+- **GET** `/api/timers`
+- **Returns:**
+  - `propresenter_timer_index` (1-based index)
+  - `timer_presets` (array)
+
+### Save timer presets + ProPresenter timer index
+- **POST** `/api/timers`
+- **Body:**
+```json
+{
+  "propresenter_timer_index": 1,
+  "timer_presets": [
+    {
+      "time": "08:15",
+      "name": "Timer 1",
+      "button_presses": [{"buttonURL": "location/1/0/1/press"}]
+    }
+  ]
+}
+```
+- **Notes:** Presets are persisted to `timer_presets.json` (not stored inline in `config.json`).
+
+### Apply a timer preset (Companion → WebUI)
+- **POST** `/api/timers/apply`
+- **Input (either):**
+  - JSON body: `{ "preset": 1 }`
+  - Query string: `?preset=1`
+- **Notes:** `preset` is always **1-based** (1 selects the first preset).
+- **Returns:** JSON describing what happened (button presses fired + ProPresenter timer set/reset/start attempts).
+
+---
+
+## VideoHub
+
+### Ping VideoHub
+- **GET** `/api/videohub/ping`
+- **Returns:** `{ "ok": true|false }`
+- **Errors:** `400` if `videohub_ip` isn’t configured.
+
+### Route a single output
+- **POST** `/api/videohub/route`
+- **Body (preferred):**
+```json
+{
+  "output": 1,
+  "input": 3,
+  "monitor": false,
+  "zero_based": false
+}
+```
+- **Notes:**
+  - By default, `output`/`input` are treated as **1-based** for humans.
+  - Set `zero_based=true` to pass VideoHub-native indexes.
+
+### Get input/output labels (for dropdowns)
+- **GET** `/api/videohub/labels`
+- **Returns:**
+```json
+{
+  "ok": true,
+  "configured": true,
+  "inputs": [{"number": 1, "label": "Camera 1"}],
+  "outputs": [{"number": 1, "label": "TV 1"}]
+}
+```
+- **Notes:** Best-effort. Falls back to numeric-only 1..40 if labels can’t be fetched.
+
+### Presets: list
+- **GET** `/api/videohub/presets`
+- **Returns:** `{ ok: true, presets: [...] }`
+
+### Presets: create
+- **POST** `/api/videohub/presets`
+- **Body:**
+```json
+{
+  "name": "Sunday Service",
+  "routes": [
+    {"output": 1, "input": 4, "monitoring": false}
+  ]
+}
+```
+- **Notes:** Presets save **numbers only**; names/labels are fetched separately.
+
+### Presets: update
+- **PUT** `/api/videohub/presets/<id>`
+- **Body:** same as create.
+
+### Presets: delete
+- **DELETE** `/api/videohub/presets/<id>`
+
+### Presets: apply (Companion → WebUI)
+- **POST** `/api/videohub/presets/<id>/apply`
+- **Body:** none required.
+- **Returns:** `{ ok: true, result: {...} }`
+
+---
+
+## Templates (used by Calendar + Timers UI)
+
+### Get templates
+- **GET** `/api/templates`
+- **Returns:** `{ buttons: [...], triggers: [...] }`
+
+### Button templates
+- **POST** `/api/templates/button`
+- **PUT** `/api/templates/button/<idx>`
+- **DELETE** `/api/templates/button/<idx>`
+
+`idx` is a **0-based array index** into the JSON file (not a stable ID).
+
+### Trigger templates
+- **POST** `/api/templates/trigger`
+- **PUT** `/api/templates/trigger/<idx>`
+- **DELETE** `/api/templates/trigger/<idx>`
+
+`idx` is a **0-based array index** into the JSON file (not a stable ID).
+
+---
+
+## System / Status
+
+### Config
+- **GET** `/api/config`
+- **POST** `/api/config` (merge provided keys into `config.json`)
+
+### Status indicators
+- **GET** `/api/companion_status`
+- **GET** `/api/propresenter_status`
+
+---
+
+## Web Console
+
+### Fetch logs
+- **GET** `/api/console/logs`
+
+### Run CLI command
+- **POST** `/api/console/run`

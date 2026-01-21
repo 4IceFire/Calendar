@@ -65,6 +65,26 @@ This document describes the `calendarctl` CLI available in this workspace and ex
     - Example: `python cli.py timers apply 1`
     - Example (override webui): `python cli.py timers apply 2 --webui http://127.0.0.1:5000`
 
+- **videohub ...**: Control a Blackmagic VideoHub via direct TCP (default port 9990).
+  - Config keys (in `config.json`):
+    - `videohub_ip` (or `videohub_host`): IP/hostname of the VideoHub
+    - `videohub_port` (optional, default 9990)
+    - `videohub_timeout` (optional, seconds)
+  - You can also override host/port per-command:
+    - `--host <ip-or-hostname>`
+    - `--port <port>`
+  - Indexing note:
+    - The VideoHub protocol is **0-based**.
+    - This CLI defaults to **1-based** `--output/--input` for convenience.
+    - Use `--zero-based` to treat `--output/--input` as 0-based.
+  - `videohub ping`: Best-effort ping (just sends `PING` block)
+    - Example (from config.json): `python cli.py videohub ping`
+    - Example (override host): `python cli.py videohub ping --host 192.168.1.50`
+  - `videohub route --output N --input N [--monitor] [--zero-based]`: Route an input to an output
+    - Example (human 1-based): `python cli.py videohub route --output 1 --input 4`
+    - Example (0-based): `python cli.py videohub route --output 0 --input 3 --zero-based`
+    - Example (monitoring output): `python cli.py videohub route --output 1 --input 4 --monitor`
+
 
 **Notes & Details**
 - The CLI reads/writes the `EVENTS_FILE` from `config.json`. To confirm which file is active:

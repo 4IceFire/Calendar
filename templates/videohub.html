@@ -1,0 +1,412 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'VideoHub' %}
+{% set page_subtitle = 'Save, edit, and apply VideoHub routing presets' %}
+
+{% block page_actions %}
+<button id="vh-new" class="btn btn-outline-secondary">New Preset</button>
+<button id="vh-ping" class="btn btn-outline-primary">Ping</button>
+{% endblock %}
+
+{% block content %}
+<div id="vh-status" class="mb-3"></div>
+
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="card">
+      <div class="card-body">
+        <h2 class="h5">Presets</h2>
+        <div id="vh-list" class="text-muted">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="card-body">
+        <h2 class="h5" id="vh-editor-title">Edit Preset</h2>
+
+        <div class="mb-3">
+          <label class="form-label">Name</label>
+          <input id="vh-name" class="form-control" placeholder="e.g. Sunday Service" />
+        </div>
+
+        <div class="mb-2 d-flex align-items-end justify-content-between">
+          <div>
+            <label class="form-label">Routes</label>
+            <div class="form-text">
+              Select an output and an input for each route.
+              Search by typing a number or a name (format: <code>1: TV 1</code>).
+            </div>
+          </div>
+          <div class="d-flex gap-2">
+            <button id="vh-add-route" class="btn btn-sm btn-outline-secondary" type="button">Add Route</button>
+            <button id="vh-fill-identity" class="btn btn-sm btn-outline-secondary" type="button">Identity 1..40</button>
+            <button id="vh-clear" class="btn btn-sm btn-outline-secondary" type="button">Clear</button>
+          </div>
+        </div>
+
+        <div id="vh-routes-editor" class="border rounded p-2"></div>
+
+        <div class="mt-3 d-flex gap-2">
+          <button id="vh-save" class="btn btn-success" type="button">Save</button>
+          <button id="vh-apply" class="btn btn-primary" type="button">Apply</button>
+          <button id="vh-delete" class="btn btn-outline-danger ms-auto" type="button">Delete</button>
+        </div>
+
+        <div class="form-text mt-2">
+          Applying a preset sends routing to the configured VideoHub (config keys: <code>videohub_ip</code>, <code>videohub_port</code>).
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let _vhPresets = [];
+let _vhCurrentId = null;
+let _vhRoutes = [];
+let _vhLabels = { inputs: [], outputs: [], configured: false };
+
+function _vhSetStatus(msg, kind){
+  const el = document.getElementById('vh-status');
+  if(!el) return;
+  if(!msg){ el.className=''; el.textContent=''; return; }
+  el.className = kind==='error' ? 'alert alert-danger' : (kind==='warn' ? 'alert alert-warning' : 'alert alert-success');
+  el.textContent = msg;
+}
+
+function _safeHtml(s){
+  return String(s || '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _parseNumberFromSelect(value){
+  const s = String(value || '').trim();
+  if(!s) return null;
+  const m = s.match(/^\s*(\d+)\s*(?::.*)?$/);
+  if(m) return parseInt(m[1], 10);
+  return null;
+}
+
+function _fmtLabel(list, number){
+  const n = parseInt(number, 10);
+  if(!Number.isFinite(n) || n <= 0) return '';
+  const item = (Array.isArray(list) ? list : []).find(x => parseInt(x.number, 10) === n);
+  const label = item && item.label ? String(item.label).trim() : '';
+  return label ? `${n}: ${label}` : String(n);
+}
+
+function _buildDataLists(){
+  let dlOut = document.getElementById('vh-outputs-dl');
+  let dlIn = document.getElementById('vh-inputs-dl');
+  if(!dlOut){
+    dlOut = document.createElement('datalist');
+    dlOut.id = 'vh-outputs-dl';
+    document.body.appendChild(dlOut);
+  }
+  if(!dlIn){
+    dlIn = document.createElement('datalist');
+    dlIn.id = 'vh-inputs-dl';
+    document.body.appendChild(dlIn);
+  }
+
+  const outs = Array.isArray(_vhLabels.outputs) ? _vhLabels.outputs : [];
+  const ins = Array.isArray(_vhLabels.inputs) ? _vhLabels.inputs : [];
+
+  dlOut.innerHTML = outs.map(o => {
+    const n = parseInt(o.number, 10);
+    const label = String(o.label || '').trim();
+    const v = label ? `${n}: ${label}` : String(n);
+    return `<option value="${_safeHtml(v)}"></option>`;
+  }).join('');
+
+  dlIn.innerHTML = ins.map(i => {
+    const n = parseInt(i.number, 10);
+    const label = String(i.label || '').trim();
+    const v = label ? `${n}: ${label}` : String(n);
+    return `<option value="${_safeHtml(v)}"></option>`;
+  }).join('');
+}
+
+async function _loadLabels(){
+  const res = await fetch('/api/videohub/labels?_ts=' + Date.now(), {cache:'no-store'});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load VideoHub labels');
+  _vhLabels = {
+    inputs: Array.isArray(data.inputs) ? data.inputs : [],
+    outputs: Array.isArray(data.outputs) ? data.outputs : [],
+    configured: !!data.configured,
+  };
+  _buildDataLists();
+
+  if(!_vhLabels.configured){
+    _vhSetStatus('VideoHub not configured (set videohub_ip). Labels will be blank.', 'warn');
+  }
+}
+
+function _renderRoutesEditor(){
+  const host = document.getElementById('vh-routes-editor');
+  if(!host) return;
+  const rows = Array.isArray(_vhRoutes) ? _vhRoutes : [];
+  host.innerHTML = `
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr>
+            <th style="width:45%">Output</th>
+            <th style="width:45%">Input</th>
+            <th style="width:10%"></th>
+          </tr>
+        </thead>
+        <tbody id="vh-routes-tbody"></tbody>
+      </table>
+    </div>
+  `;
+
+  const tbody = document.getElementById('vh-routes-tbody');
+  if(!tbody) return;
+
+  if(!rows.length){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="3" class="text-muted">No routes yet. Click “Add Route”.</td>`;
+    tbody.appendChild(tr);
+    return;
+  }
+
+  rows.forEach((r, idx) => {
+    const tr = document.createElement('tr');
+    tr.dataset.idx = String(idx);
+    tr.innerHTML = `
+      <td>
+        <input class="form-control form-control-sm vh-out" list="vh-outputs-dl" placeholder="e.g. 1: TV 1" value="${_safeHtml(_fmtLabel(_vhLabels.outputs, r.output))}" />
+      </td>
+      <td>
+        <input class="form-control form-control-sm vh-in" list="vh-inputs-dl" placeholder="e.g. 4: Camera" value="${_safeHtml(_fmtLabel(_vhLabels.inputs, r.input))}" />
+      </td>
+      <td class="text-end">
+        <button type="button" class="btn btn-sm btn-outline-danger" data-act="remove">Remove</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function _readRoutesFromUI(){
+  const tbody = document.getElementById('vh-routes-tbody');
+  if(!tbody) return [];
+
+  const out = [];
+  const rows = tbody.querySelectorAll('tr[data-idx]');
+  for(const tr of rows){
+    const outEl = tr.querySelector('input.vh-out');
+    const inEl = tr.querySelector('input.vh-in');
+    const o = _parseNumberFromSelect(outEl ? outEl.value : '');
+    const i = _parseNumberFromSelect(inEl ? inEl.value : '');
+    if(!o || !i || o <= 0 || i <= 0) throw new Error('Every route must have a valid output and input number');
+    out.push({output:o, input:i, monitoring:false});
+  }
+  return out;
+}
+
+function _renderList(){
+  const el = document.getElementById('vh-list');
+  if(!el) return;
+  if(!_vhPresets.length){ el.innerHTML = '<div class="text-muted">No presets yet</div>'; return; }
+  el.innerHTML = '';
+  _vhPresets.forEach((p) => {
+    const div = document.createElement('div');
+    div.className = 'd-flex align-items-center mb-2';
+    const count = (p.routes || []).length;
+    const active = (_vhCurrentId === p.id);
+    div.innerHTML = `
+      <div class="flex-grow-1">
+        <strong>${_safeHtml(p.name || ('Preset ' + p.id))}</strong>
+        <div class="text-muted small">#${p.id} • ${count} route${count===1?'':'s'}</div>
+      </div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-primary" data-act="select" data-id="${p.id}">${active?'Editing':'Edit'}</button>
+        <button class="btn btn-sm btn-primary" data-act="apply" data-id="${p.id}">Apply</button>
+      </div>
+    `;
+    el.appendChild(div);
+  });
+}
+
+async function _loadPresets(){
+  const res = await fetch('/api/videohub/presets?_ts=' + Date.now(), {cache:'no-store'});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load presets');
+  _vhPresets = data.presets || [];
+  _renderList();
+  if(_vhCurrentId != null){
+    const cur = _vhPresets.find(p => p.id === _vhCurrentId);
+    if(cur) _loadEditor(cur);
+  }
+}
+
+function _loadEditor(p){
+  _vhCurrentId = p ? p.id : null;
+  document.getElementById('vh-editor-title').textContent = p ? `Edit Preset #${p.id}` : 'New Preset';
+  document.getElementById('vh-name').value = p ? (p.name || '') : '';
+  _vhRoutes = (p && Array.isArray(p.routes) ? p.routes : []).map(r => ({
+    output: parseInt(r.output, 10) || 0,
+    input: parseInt(r.input, 10) || 0,
+    monitoring: false,
+  })).filter(r => r.output > 0 && r.input > 0);
+  document.getElementById('vh-delete').disabled = !p;
+  _renderList();
+  _renderRoutesEditor();
+}
+
+async function _savePreset(){
+  const name = String(document.getElementById('vh-name').value || '').trim();
+  const routes = _readRoutesFromUI();
+  const payload = {name, routes};
+
+  let res;
+  if(_vhCurrentId != null){
+    payload.id = _vhCurrentId;
+    res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(_vhCurrentId))}`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+  }else{
+    res = await fetch('/api/videohub/presets', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+  }
+
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Save failed');
+  _vhSetStatus('Saved.', 'ok');
+  _vhCurrentId = data.preset && data.preset.id ? data.preset.id : _vhCurrentId;
+  await _loadPresets();
+}
+
+async function _applyPreset(id){
+  const res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(id))}/apply`, {method:'POST'});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Apply failed');
+  _vhSetStatus(`Applied preset #${id}.`, 'ok');
+}
+
+async function _deleteCurrent(){
+  if(_vhCurrentId == null) return;
+  if(!confirm('Delete this preset?')) return;
+  const res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(_vhCurrentId))}`, {method:'DELETE'});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Delete failed');
+  _vhSetStatus('Deleted.', 'ok');
+  _vhCurrentId = null;
+  _loadEditor(null);
+  await _loadPresets();
+}
+
+async function _ping(){
+  const res = await fetch('/api/videohub/ping');
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Ping failed');
+  _vhSetStatus('VideoHub ping OK.', 'ok');
+}
+
+// UI wiring
+
+document.getElementById('vh-new').addEventListener('click', () => {
+  _vhSetStatus('', '');
+  _loadEditor(null);
+});
+
+document.getElementById('vh-save').addEventListener('click', async () => {
+  try{ _vhSetStatus('', ''); await _savePreset(); }
+  catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+});
+
+document.getElementById('vh-apply').addEventListener('click', async () => {
+  try{
+    if(_vhCurrentId == null) throw new Error('Save the preset first');
+    _vhSetStatus('', '');
+    await _applyPreset(_vhCurrentId);
+  }catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+});
+
+document.getElementById('vh-delete').addEventListener('click', async () => {
+  try{ await _deleteCurrent(); }
+  catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+});
+
+document.getElementById('vh-clear').addEventListener('click', () => {
+  _vhRoutes = [];
+  _renderRoutesEditor();
+});
+
+document.getElementById('vh-add-route').addEventListener('click', () => {
+  const arr = Array.isArray(_vhRoutes) ? _vhRoutes.slice() : [];
+  arr.push({output: 1, input: 1, monitoring:false});
+  _vhRoutes = arr;
+  _renderRoutesEditor();
+});
+
+document.getElementById('vh-fill-identity').addEventListener('click', () => {
+  const n = Math.max(
+    40,
+    Array.isArray(_vhLabels.outputs) ? _vhLabels.outputs.length : 0,
+    Array.isArray(_vhLabels.inputs) ? _vhLabels.inputs.length : 0,
+  );
+  const routes = [];
+  for(let i=1;i<=n;i++) routes.push({output:i, input:i, monitoring:false});
+  _vhRoutes = routes;
+  _renderRoutesEditor();
+});
+
+document.getElementById('vh-routes-editor').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-act="remove"]');
+  if(!btn) return;
+  const tr = btn.closest('tr[data-idx]');
+  if(!tr) return;
+  const idx = parseInt(tr.dataset.idx, 10);
+  if(!Number.isFinite(idx)) return;
+  _vhRoutes = (Array.isArray(_vhRoutes) ? _vhRoutes : []).filter((_, i) => i !== idx);
+  _renderRoutesEditor();
+});
+
+document.getElementById('vh-list').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-act]');
+  if(!btn) return;
+  const act = btn.dataset.act;
+  const id = parseInt(btn.dataset.id, 10);
+  const p = _vhPresets.find(x => x.id === id);
+  if(!p) return;
+
+  try{
+    if(act === 'select'){
+      _loadEditor(p);
+    }else if(act === 'apply'){
+      _vhSetStatus('', '');
+      await _applyPreset(id);
+    }
+  }catch(e){
+    _vhSetStatus(String(e.message || e), 'error');
+  }
+});
+
+document.getElementById('vh-ping').addEventListener('click', async () => {
+  try{ _vhSetStatus('', ''); await _ping(); }
+  catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+});
+
+// init
+(async () => {
+  try{
+    await _loadLabels();
+    await _loadPresets();
+    if(_vhPresets.length) _loadEditor(_vhPresets[0]);
+    else _loadEditor(null);
+  }catch(e){
+    _vhSetStatus(String(e.message || e), 'error');
+  }
+})();
+</script>
+{% endblock %}

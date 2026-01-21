@@ -142,6 +142,23 @@ const CONFIG_META = {
     help: 'Which ProPresenter timer this app sets/resets/starts.',
   },
 
+  videohub_ip: {
+    label: 'VideoHub Host',
+    help: 'Blackmagic VideoHub IP or hostname.',
+  },
+  videohub_port: {
+    label: 'VideoHub Port',
+    help: 'Blackmagic VideoHub TCP port (default 9990).',
+  },
+  videohub_timeout: {
+    label: 'VideoHub Timeout (seconds)',
+    help: 'Socket timeout used for VideoHub TCP requests.',
+  },
+  videohub_presets_file: {
+    label: 'VideoHub Presets File',
+    help: 'JSON file where VideoHub routing presets are stored.',
+  },
+
   EVENTS_FILE: {
     label: 'Events File',
     help: 'JSON file used to store scheduled events.',
@@ -269,6 +286,10 @@ function _renderConfigGroups(cfg) {
     {
       title: 'ProPresenter',
       keys: ['propresenter_ip', 'propresenter_port', 'propresenter_timer_index'],
+    },
+    {
+      title: 'VideoHub',
+      keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
     },
     {
       title: 'Scheduling',

@@ -14,6 +14,7 @@ import re
 from datetime import datetime
 
 from package.core import list_apps, get_app
+import package.apps  # noqa: F401
 try:
     from package.apps.calendar import utils
 except Exception:
@@ -204,6 +205,14 @@ try:
 except Exception:
     ProPresentor = None
 
+# Optional Blackmagic VideoHub TCP routing integration
+try:
+    from videohub import VideohubClient, get_videohub_client_from_config, DEFAULT_PORT as VIDEOHUB_DEFAULT_PORT
+except Exception:
+    VideohubClient = None  # type: ignore
+    get_videohub_client_from_config = None  # type: ignore
+    VIDEOHUB_DEFAULT_PORT = 9990
+
 
 def _apply_logging_config():
     """Adjust log levels for noisy servers (werkzeug) based on config debug flag.
@@ -229,6 +238,16 @@ def _apply_logging_config():
 
 # apply logging config at import/startup
 _apply_logging_config()
+
+
+def _get_videohub_client_from_config():
+    if VideohubClient is None or get_videohub_client_from_config is None:
+        return None
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    return get_videohub_client_from_config(cfg)
 
 TEMPLATES_DIR = Path.cwd()
 TRIGGER_TEMPLATES = TEMPLATES_DIR / 'trigger_templates.json'
@@ -657,6 +676,11 @@ def calendar_page():
 @app.route('/templates')
 def templates_page():
     return render_template('templates.html')
+
+
+@app.route('/videohub')
+def videohub_page():
+    return render_template('videohub.html')
 
 
 @app.route('/timers')
@@ -1282,6 +1306,158 @@ def api_set_config():
         return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# --- VideoHub presets API ---
+
+def _get_videohub_app():
+    try:
+        return get_app('videohub')
+    except Exception:
+        return None
+
+
+@app.route('/api/videohub/presets', methods=['GET'])
+def api_videohub_presets_list():
+    app_inst = _get_videohub_app()
+    if app_inst is None or not hasattr(app_inst, 'list_presets'):
+        return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        presets = app_inst.list_presets(cfg)  # type: ignore[attr-defined]
+        return jsonify({'ok': True, 'presets': presets})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/videohub/presets', methods=['POST'])
+def api_videohub_presets_create():
+    app_inst = _get_videohub_app()
+    if app_inst is None or not hasattr(app_inst, 'upsert_preset'):
+        return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid json'}), 400
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        preset = app_inst.upsert_preset(cfg, body)  # type: ignore[attr-defined]
+        return jsonify({'ok': True, 'preset': preset.to_dict() if hasattr(preset, 'to_dict') else preset})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.route('/api/videohub/presets/<int:preset_id>', methods=['PUT'])
+def api_videohub_presets_update(preset_id: int):
+    app_inst = _get_videohub_app()
+    if app_inst is None or not hasattr(app_inst, 'upsert_preset'):
+        return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid json'}), 400
+    body = dict(body)
+    body['id'] = preset_id
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        preset = app_inst.upsert_preset(cfg, body)  # type: ignore[attr-defined]
+        return jsonify({'ok': True, 'preset': preset.to_dict() if hasattr(preset, 'to_dict') else preset})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.route('/api/videohub/presets/<int:preset_id>', methods=['DELETE'])
+def api_videohub_presets_delete(preset_id: int):
+    app_inst = _get_videohub_app()
+    if app_inst is None or not hasattr(app_inst, 'delete_preset'):
+        return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        ok = bool(app_inst.delete_preset(cfg, preset_id))  # type: ignore[attr-defined]
+        if not ok:
+            return jsonify({'ok': False, 'error': 'preset not found'}), 404
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/videohub/presets/<int:preset_id>/apply', methods=['POST'])
+def api_videohub_presets_apply(preset_id: int):
+    app_inst = _get_videohub_app()
+    if app_inst is None or not hasattr(app_inst, 'apply_preset'):
+        return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        result = app_inst.apply_preset(cfg, preset_id)  # type: ignore[attr-defined]
+        try:
+            _console_append(f"[VIDEOHUB] Applied preset #{preset_id}\n")
+        except Exception:
+            pass
+        return jsonify({'ok': True, 'result': result})
+    except KeyError:
+        return jsonify({'ok': False, 'error': 'preset not found'}), 404
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.route('/api/videohub/labels', methods=['GET'])
+def api_videohub_labels():
+    """Return VideoHub input/output labels for UI dropdowns.
+
+    This endpoint is best-effort. If the router isn't configured/reachable,
+    it returns a numeric fallback list so the UI can still function.
+    """
+
+    # Default to 40, since common VideoHubs are 40x40.
+    fallback_count = 40
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    vh = _get_videohub_client_from_config()
+    if vh is None:
+        # Not configured.
+        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
+        return jsonify({
+            'ok': True,
+            'configured': False,
+            'inputs': nums,
+            'outputs': nums,
+        })
+
+    try:
+        labels = vh.get_labels(fallback_count=fallback_count)
+        return jsonify({
+            'ok': True,
+            'configured': True,
+            'inputs': labels.get('inputs', []),
+            'outputs': labels.get('outputs', []),
+        })
+    except Exception as e:
+        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
+        return jsonify({
+            'ok': True,
+            'configured': True,
+            'error': str(e),
+            'inputs': nums,
+            'outputs': nums,
+        })
 
 
 @app.route('/api/console/logs', methods=['GET'])
@@ -2145,6 +2321,69 @@ def api_apply_timer_preset():
         'propresenter_ip': ip,
         'propresenter_port': port,
     })
+
+
+@app.route('/api/videohub/ping', methods=['GET'])
+def api_videohub_ping():
+    """Best-effort connectivity check to the configured VideoHub."""
+    vh = _get_videohub_client_from_config()
+    if vh is None:
+        return jsonify({'ok': False, 'error': "VideoHub not configured (set videohub_ip in config.json)"}), 400
+    ok = vh.ping()
+    return jsonify({'ok': bool(ok)})
+
+
+@app.route('/api/videohub/route', methods=['POST'])
+def api_videohub_route():
+    """Route an input to an output on the configured VideoHub.
+
+    Accepts JSON body (preferred):
+      {"output": 1, "input": 3, "monitor": false, "zero_based": false}
+
+    Notes:
+    - Default interpretation is 1-based for humans.
+    - Set zero_based=true to pass VideoHub-native indexes.
+    """
+
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception:
+        body = {}
+
+    try:
+        _console_append(
+            f"[COMPANION] Received /api/videohub/route from {request.remote_addr} "
+            f"args={_truncate_for_log(dict(request.args))} "
+            f"json={_truncate_for_log(body)}\n"
+        )
+    except Exception:
+        pass
+
+    vh = _get_videohub_client_from_config()
+    if vh is None:
+        return jsonify({'ok': False, 'error': "VideoHub not configured (set videohub_ip in config.json)"}), 400
+
+    output_raw = body.get('output') or body.get('destination') or request.args.get('output') or request.args.get('destination')
+    input_raw = body.get('input') or body.get('source') or request.args.get('input') or request.args.get('source')
+
+    try:
+        output_n = int(output_raw)
+        input_n = int(input_raw)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'output and input must be integers'}), 400
+
+    monitor = bool(body.get('monitor') or body.get('monitoring') or False)
+    zero_based = bool(body.get('zero_based') or body.get('zerobased') or False)
+
+    output_idx = output_n if zero_based else output_n - 1
+    input_idx = input_n if zero_based else input_n - 1
+
+    try:
+        vh.route_video_output(output=output_idx, input_=input_idx, monitoring=monitor)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+    return jsonify({'ok': True, 'output': output_n, 'input': input_n, 'monitor': monitor, 'zero_based': zero_based})
 
 
 @app.route('/api/events/<int:ident>', methods=['DELETE'])
