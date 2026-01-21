@@ -21,3 +21,42 @@ html[data-bs-theme="dark"] .card{
 
 /* Simple layout tweaks */
 .container h1{margin-bottom:1rem}
+
+/* Compact icon buttons (used for timers Up/Down) */
+.btn-icon-sm{
+  padding: 0.15rem 0.4rem;
+  line-height: 1;
+  font-size: 0.75rem;
+}
+
+/* Timer "Button Presses" editor readability */
+.timer-press-header{
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.35rem;
+  padding: 0 0.1rem;
+  font-size: 0.8rem;
+  color: var(--bs-secondary-color);
+}
+
+.timer-press-row{
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 0.4rem;
+}
+
+details.timer-presses > summary{
+  cursor: pointer;
+  user-select: none;
+}
+
+.timer-presses-body{
+  /* JS controls max-height/opacity during open/close */
+  will-change: max-height, opacity;
+}

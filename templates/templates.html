@@ -32,6 +32,7 @@ async function loadTemplates(){
   try{
     const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
     const data = await resp.json();
+    window.__buttonTemplates = data.buttons || [];
     renderButtons(data.buttons || []);
     renderTriggers(data.triggers || []);
   }catch(e){
@@ -48,8 +49,33 @@ function renderButtons(btns){
   btns.forEach((b,i)=>{
     const div = document.createElement('div');
     div.className = 'd-flex align-items-center mb-1';
-    const url = b.buttonURL || (b.pattern ? `location/${b.pattern}/press` : '');
-    div.innerHTML = `<div class="flex-grow-1"><strong>${b.label}</strong> — ${b.pattern} <small class="text-muted">(${url})</small></div><div><button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="button">Delete</button></div>`;
+
+    const isEditing = (window.__editingButtonIndex === i);
+    const label = b.label || '';
+    const pattern = b.pattern || '';
+
+    if(isEditing){
+      div.innerHTML = `
+        <div class="flex-grow-1 d-flex gap-2 align-items-center">
+          <input class="form-control form-control-sm" style="max-width: 260px" data-role="button-label" value="${label.replace(/"/g,'&quot;')}">
+          <input class="form-control form-control-sm" style="max-width: 160px" data-role="button-pattern" value="${pattern.replace(/"/g,'&quot;')}" placeholder="1/0/1">
+          <small class="text-muted">(format: 1/0/1)</small>
+        </div>
+        <div class="ms-2">
+          <button class="btn btn-sm btn-success" data-idx="${i}" data-type="button-save">Save</button>
+          <button class="btn btn-sm btn-outline-secondary ms-2" data-idx="${i}" data-type="button-cancel">Cancel</button>
+        </div>
+      `;
+    }else{
+      // Keep URL in short format (pattern only)
+      div.innerHTML = `
+        <div class="flex-grow-1"><strong>${label}</strong> — <span class="text-muted">${pattern}</span></div>
+        <div>
+          <button class="btn btn-sm btn-outline-primary ms-2" data-idx="${i}" data-type="button-edit">Edit</button>
+          <button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="button-delete">Delete</button>
+        </div>
+      `;
+    }
     out.appendChild(div);
   });
     // also populate buttonTemplate selects in the trigger add form
@@ -101,6 +127,25 @@ function newTriggerRow(templates){
     <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
     <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
   `;
+
+  // If a template is selected, disable custom URL input (like other pages)
+  const sel = div.querySelector('select[name="buttonTemplate"]');
+  const inp = div.querySelector('input[name="buttonURL"]');
+  const updateDisabled = ()=>{
+    if(!sel || !inp) return;
+    const v = String(sel.value || '');
+    if(v !== ''){
+      const t = templates[parseInt(v,10)];
+      inp.value = (t && t.pattern) ? String(t.pattern) : '';
+      inp.disabled = true;
+    }else{
+      inp.disabled = false;
+      // leave existing value so user can type
+    }
+  };
+  if(sel) sel.addEventListener('change', updateDisabled);
+  updateDisabled();
+
   return div;
 }
 
@@ -117,8 +162,16 @@ document.getElementById('add-button-form').addEventListener('submit', async (ev)
   }
   try{
     const resp = await fetch('/api/templates/button',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, pattern})});
+    const data = await resp.json().catch(()=>null);
     if(resp.ok){ await loadTemplates(); form.reset(); }
-    else { alert('Failed to add'); }
+    else {
+      if(resp.status === 409 && data && data.existing){
+        const ex = data.existing;
+        alert(`That button is already saved as:\n\nName: ${ex.label || '(no name)'}\nButton: ${ex.pattern || ''}\nURL: ${ex.buttonURL || ''}`);
+      }else{
+        alert((data && data.error) ? data.error : 'Failed to add');
+      }
+    }
   }catch(e){ console.error(e); alert('Error adding'); }
 });
 
@@ -188,8 +241,75 @@ document.getElementById('add-trigger-form').addEventListener('submit', async (ev
 
 // delegate deletes
 document.getElementById('buttons-list').addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button'); if(!btn) return; const idx = btn.getAttribute('data-idx');
-  if(!confirm('Delete button template?')) return; try{ const r = await fetch('/api/templates/button/'+encodeURIComponent(idx), {method:'DELETE'}); if(r.ok) loadTemplates(); else alert('Delete failed'); }catch(e){alert('Error');}
+  const btn = ev.target.closest('button');
+  if(!btn) return;
+  const idx = btn.getAttribute('data-idx');
+  const type = btn.getAttribute('data-type');
+  if(type === 'button-delete'){
+    if(!confirm('Delete button template?')) return;
+    try{
+      const r = await fetch('/api/templates/button/'+encodeURIComponent(idx), {method:'DELETE'});
+      if(r.ok) loadTemplates();
+      else alert('Delete failed');
+    }catch(e){alert('Error');}
+  }else if(type === 'button-edit'){
+    window.__editingButtonIndex = parseInt(idx, 10);
+    renderButtons(window.__buttonTemplates || []);
+  }else if(type === 'button-cancel'){
+    window.__editingButtonIndex = null;
+    renderButtons(window.__buttonTemplates || []);
+  }else if(type === 'button-save'){
+    const i = parseInt(idx, 10);
+    const row = btn.closest('.d-flex.align-items-center.mb-1');
+    const labelInput = row ? row.querySelector('[data-role="button-label"]') : null;
+    const patternInput = row ? row.querySelector('[data-role="button-pattern"]') : null;
+    const label = String(labelInput ? labelInput.value : '').trim();
+    const pattern = String(patternInput ? patternInput.value : '').trim();
+    if(!label || !pattern) return alert('Label and pattern required');
+    if(!/^\d+\/\d+\/\d+$/.test(pattern)){
+      return alert('Pattern must be like "1/0/1" (three integers separated by "/")');
+    }
+    try{
+      const r = await fetch('/api/templates/button/'+encodeURIComponent(i), {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({label, pattern})
+      });
+      const data = await r.json().catch(()=>null);
+      if(!r.ok || !data || !data.ok){
+        if(r.status === 409 && data && data.existing){
+          const ex = data.existing;
+          alert(`That button is already saved as:\n\nName: ${ex.label || '(no name)'}\nButton: ${ex.pattern || ''}\nURL: ${ex.buttonURL || ''}`);
+          return;
+        }
+        return alert((data && data.error) ? data.error : 'Update failed');
+      }
+      window.__editingButtonIndex = null;
+      await loadTemplates();
+      const trigN = data.trigger_templates_updated || 0;
+      const evN = data.events_updated || 0;
+      const tmN = data.timer_presets_updated || 0;
+      if(trigN || evN || tmN){
+        alert(`Updated references:\nTrigger templates: ${trigN}\nEvent triggers: ${evN}\nTimer presses: ${tmN}`);
+      }
+    }catch(e){
+      console.error(e);
+      alert('Error updating');
+    }
+  }
+});
+
+// Save inline edit on Enter
+document.getElementById('buttons-list').addEventListener('keydown', (ev)=>{
+  if(ev.key !== 'Enter') return;
+  const input = ev.target.closest('[data-role="button-label"], [data-role="button-pattern"]');
+  if(!input) return;
+  const row = input.closest('.d-flex.align-items-center.mb-1');
+  const saveBtn = row ? row.querySelector('button[data-type="button-save"]') : null;
+  if(saveBtn){
+    ev.preventDefault();
+    saveBtn.click();
+  }
 });
 
 document.getElementById('triggers-list').addEventListener('click', async (ev)=>{
@@ -219,7 +339,15 @@ document.getElementById('triggers-list').addEventListener('click', async (ev)=>{
         // try to match a button template
         let matched = false;
         btns.forEach((b,bi)=>{ if(!matched){ const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null); if(bu === s.buttonURL){ row.querySelector('select[name="buttonTemplate"]').value = bi; matched = true; } }});
-        if(!matched) row.querySelector('input[name="buttonURL"]').value = s.buttonURL;
+        if(matched){
+          const inp = row.querySelector('input[name="buttonURL"]');
+          inp.value = (btns[parseInt(row.querySelector('select[name="buttonTemplate"]').value,10)] || {}).pattern || '';
+          inp.disabled = true;
+        }else{
+          const inp = row.querySelector('input[name="buttonURL"]');
+          inp.value = s.buttonURL;
+          inp.disabled = false;
+        }
         document.getElementById('add-trigger-triggers-container').appendChild(row);
       });
       document.getElementById('save-template-btn').innerText = 'Update Template';

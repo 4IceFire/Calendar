@@ -293,13 +293,22 @@ _http_server = None
 _server_thread = None
 _server_lock = threading.Lock()
 
+# Status endpoint caches (to avoid each connected browser triggering a blocking probe)
+_companion_status_cache = {'ts': 0.0, 'connected': False}
+_propresenter_status_cache = {'ts': 0.0, 'connected': False}
+_status_cache_lock = threading.Lock()
+_STATUS_CACHE_TTL_SECONDS = 2.0
+
 
 def start_http_server(host: str, port: int) -> None:
     global _http_server, _server_thread
     with _server_lock:
         if _http_server is not None:
             return
-        srv = make_server(host, port, app)
+        # Threaded server is important here: the UI polls status endpoints and
+        # some endpoints perform short network checks. Without threading, one
+        # slow request can block all users.
+        srv = make_server(host, port, app, threaded=True)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         _http_server = srv
         _server_thread = thread
@@ -401,34 +410,78 @@ def home():
         companion_ip = str(cfg.get('companion_ip', '127.0.0.1'))
     except Exception:
         companion_ip = '127.0.0.1'
-
-    running_apps: list[str] = []
     try:
-        regs = list_apps()
-        for name in regs.keys():
-            running = False
-            try:
-                inst = get_app(name)
-                if inst is not None and hasattr(inst, 'status'):
-                    st = inst.status() or {}
-                    running = bool(st.get('running', False))
-                else:
-                    running = name in _running_apps
-            except Exception:
-                running = name in _running_apps
-
-            if running:
-                running_apps.append(name)
+        companion_port = int(cfg.get('companion_port', 8000))
     except Exception:
-        running_apps = []
+        companion_port = 8000
 
-    running_apps = sorted(set(running_apps))
+    try:
+        propresenter_ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+    except Exception:
+        propresenter_ip = '127.0.0.1'
+    try:
+        propresenter_port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        propresenter_port = 1025
+
+    companion_hostport = f"{companion_ip}:{companion_port}"
+    propresenter_hostport = f"{propresenter_ip}:{propresenter_port}"
+
+    # List base event times (not individual triggers)
+    event_times: list[dict[str, str]] = []
+    try:
+        from package.apps.calendar import storage
+        if hasattr(storage, 'load_events_safe'):
+            events = storage.load_events_safe(events_file)
+        else:
+            events = storage.load_events(events_file)
+        for e in events or []:
+            try:
+                if not getattr(e, 'active', True):
+                    continue
+            except Exception:
+                pass
+            try:
+                day_obj = getattr(e, 'day', None)
+                day_name = getattr(day_obj, 'name', None) or str(day_obj or '')
+            except Exception:
+                day_name = ''
+            try:
+                day_val = int(getattr(getattr(e, 'day', None), 'value', 999))
+            except Exception:
+                day_val = 999
+            try:
+                t = getattr(e, 'time', None)
+                time_str = t.strftime('%H:%M') if t is not None else ''
+            except Exception:
+                time_str = ''
+            try:
+                name = str(getattr(e, 'name', '') or '').strip()
+            except Exception:
+                name = ''
+
+            event_times.append({'name': name or '(unnamed)', 'day': day_name, 'time': time_str, '_day': str(day_val)})
+
+        def _sort_key(ev: dict) -> tuple[int, str, str]:
+            try:
+                dv = int(ev.get('_day') or 999)
+            except Exception:
+                dv = 999
+            return (dv, str(ev.get('time') or ''), str(ev.get('name') or ''))
+
+        event_times.sort(key=_sort_key)
+        # drop internal sort key
+        for ev in event_times:
+            ev.pop('_day', None)
+    except Exception:
+        event_times = []
 
     return render_template(
         'home.html',
         events_file=events_file,
-        companion_ip=companion_ip,
-        running_apps=running_apps,
+        companion_hostport=companion_hostport,
+        propresenter_hostport=propresenter_hostport,
+        event_times=event_times,
     )
 
 
@@ -485,6 +538,190 @@ def _write_json_file(p: Path, data):
         return False
 
 
+def _coerce_trigger_times_list(val):
+    """Return a list of trigger specs from a trigger template 'times' field."""
+    if val is None:
+        return []
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+        except Exception:
+            parsed = None
+        val = parsed if parsed is not None else []
+    if isinstance(val, dict):
+        return [val]
+    if isinstance(val, list):
+        return val
+    return []
+
+
+def _extract_pattern_from_button_url(button_url: str) -> str | None:
+    try:
+        s = str(button_url or '').strip()
+    except Exception:
+        return None
+    m = re.match(r'^location\/(\d+\/\d+\/\d+)\/press$', s)
+    if m and m.group(1):
+        return m.group(1)
+    if re.match(r'^\d+\/\d+\/\d+$', s):
+        return s
+    return None
+
+
+def _button_template_effective_url(tpl: dict) -> str:
+    if not isinstance(tpl, dict):
+        return ''
+    url = (tpl.get('buttonURL') or '').strip()
+    if url:
+        return url
+    pattern = (tpl.get('pattern') or '').strip()
+    if pattern:
+        return f'location/{pattern}/press'
+    return ''
+
+
+def _find_duplicate_button_template(arr: list, *, url: str, pattern: str, exclude_idx: int | None = None) -> dict | None:
+    url = (url or '').strip()
+    pattern = (pattern or '').strip()
+    if not url and not pattern:
+        return None
+    for i, tpl in enumerate(arr or []):
+        if exclude_idx is not None and i == exclude_idx:
+            continue
+        if not isinstance(tpl, dict):
+            continue
+        existing_pattern = (tpl.get('pattern') or '').strip()
+        existing_url = _button_template_effective_url(tpl)
+        if url and existing_url == url:
+            return {
+                'index': i,
+                'label': (tpl.get('label') or '').strip(),
+                'pattern': existing_pattern,
+                'buttonURL': existing_url,
+            }
+        if pattern and existing_pattern == pattern:
+            return {
+                'index': i,
+                'label': (tpl.get('label') or '').strip(),
+                'pattern': existing_pattern,
+                'buttonURL': existing_url,
+            }
+    return None
+
+
+def _replace_button_url_everywhere(old_url: str, new_url: str) -> dict:
+    """Best-effort replacement across stored data files."""
+    out = {
+        'trigger_templates_updated': 0,
+        'events_updated': 0,
+        'timer_presets_updated': 0,
+    }
+
+    if not old_url or not new_url or old_url == new_url:
+        return out
+
+    old_pattern = _extract_pattern_from_button_url(old_url)
+    # 1) trigger_templates.json
+    try:
+        trigs = _read_json_file(TRIGGER_TEMPLATES)
+        changed = False
+        replaced = 0
+        normalized = []
+        for t in trigs:
+            if not isinstance(t, dict):
+                normalized.append(t)
+                continue
+            times = _coerce_trigger_times_list(t.get('times'))
+            new_times = []
+            for spec in times:
+                if isinstance(spec, dict):
+                    current = str(spec.get('buttonURL', '')).strip()
+                    if current == old_url or (old_pattern and current == old_pattern):
+                        spec = dict(spec)
+                        spec['buttonURL'] = new_url
+                        replaced += 1
+                        changed = True
+                new_times.append(spec)
+            t2 = dict(t)
+            t2['times'] = new_times
+            t2.pop('spec', None)
+            normalized.append(t2)
+        if changed:
+            _write_json_file(TRIGGER_TEMPLATES, normalized)
+        out['trigger_templates_updated'] = replaced
+    except Exception:
+        pass
+
+    # 2) events.json (or configured events file)
+    try:
+        from package.apps.calendar import storage
+        try:
+            cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        except Exception:
+            cfg = {}
+        events_file = cfg.get('EVENTS_FILE', storage.DEFAULT_EVENTS_FILE)
+        events = storage.load_events(events_file)
+        replaced = 0
+        for e in events or []:
+            for trig in getattr(e, 'times', []) or []:
+                try:
+                    cur = getattr(trig, 'buttonURL', '')
+                    if cur == old_url or (old_pattern and cur == old_pattern):
+                        trig.buttonURL = new_url
+                        replaced += 1
+                except Exception:
+                    pass
+        if replaced:
+            storage.save_events(events, events_file)
+        out['events_updated'] = replaced
+    except Exception:
+        pass
+
+    # 3) timer_presets.json (button_presses)
+    try:
+        if hasattr(utils, 'load_timer_presets') and hasattr(utils, 'save_timer_presets'):
+            presets = list(utils.load_timer_presets())
+            replaced = 0
+            any_changed = False
+            for p in presets:
+                if not isinstance(p, dict):
+                    continue
+                presses = p.get('button_presses')
+                if presses is None and 'buttonPresses' in p:
+                    presses = p.get('buttonPresses')
+                if presses is None and 'actions' in p:
+                    presses = p.get('actions')
+                if not isinstance(presses, list):
+                    continue
+                preset_changed = False
+                new_presses = []
+                for entry in presses:
+                    if isinstance(entry, dict):
+                        current = str(entry.get('buttonURL', '')).strip()
+                        if current == old_url or (old_pattern and current == old_pattern):
+                            e2 = dict(entry)
+                            e2['buttonURL'] = new_url
+                            new_presses.append(e2)
+                            replaced += 1
+                            preset_changed = True
+                        else:
+                            new_presses.append(entry)
+                    else:
+                        new_presses.append(entry)
+                if preset_changed:
+                    p['button_presses'] = new_presses
+                    p.pop('buttonPresses', None)
+                    p.pop('actions', None)
+                    any_changed = True
+            if any_changed:
+                utils.save_timer_presets(presets)
+            out['timer_presets_updated'] = replaced
+    except Exception:
+        pass
+
+    return out
+
+
 @app.route('/api/templates')
 def api_get_templates():
     btns = _read_json_file(BUTTON_TEMPLATES)
@@ -521,7 +758,7 @@ def api_get_templates():
 @app.route('/api/templates/button', methods=['POST'])
 def api_add_button_template():
     body = request.get_json() or {}
-    label = body.get('label')
+    label = (body.get('label') or '').strip()
     pattern = (body.get('pattern') or '').strip()
     if not label or not pattern:
         return jsonify({'ok': False, 'error': 'label and pattern required'}), 400
@@ -531,6 +768,13 @@ def api_add_button_template():
 
     arr = _read_json_file(BUTTON_TEMPLATES)
     button_url = f"location/{pattern}/press"
+    dup = _find_duplicate_button_template(arr, url=button_url, pattern=pattern)
+    if dup:
+        return jsonify({
+            'ok': False,
+            'error': 'duplicate button template',
+            'existing': dup,
+        }), 409
     arr.append({'label': label, 'pattern': pattern, 'buttonURL': button_url})
     ok = _write_json_file(BUTTON_TEMPLATES, arr)
     if not ok:
@@ -548,6 +792,55 @@ def api_delete_button_template(idx: int):
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
     return jsonify({'ok': True, 'removed': removed})
+
+
+@app.route('/api/templates/button/<int:idx>', methods=['PUT'])
+def api_update_button_template(idx: int):
+    body = request.get_json() or {}
+    label = (body.get('label') or '').strip()
+    pattern = (body.get('pattern') or '').strip()
+    button_url_raw = (body.get('buttonURL') or '').strip()
+
+    if not label:
+        return jsonify({'ok': False, 'error': 'label required'}), 400
+
+    # Allow updating via pattern or buttonURL.
+    if not pattern and button_url_raw:
+        pattern = _extract_pattern_from_button_url(button_url_raw) or ''
+
+    if not pattern:
+        return jsonify({'ok': False, 'error': 'pattern required (e.g. 1/0/1)'}), 400
+    if not re.match(r'^\d+\/\d+\/\d+$', pattern):
+        return jsonify({'ok': False, 'error': 'pattern must be like "1/0/1" (three integers separated by "/")'}), 400
+
+    new_url = f'location/{pattern}/press'
+
+    arr = _read_json_file(BUTTON_TEMPLATES)
+    if idx < 0 or idx >= len(arr):
+        return jsonify({'ok': False, 'error': 'index out of range'}), 404
+
+    dup = _find_duplicate_button_template(arr, url=new_url, pattern=pattern, exclude_idx=idx)
+    if dup:
+        return jsonify({
+            'ok': False,
+            'error': 'duplicate button template',
+            'existing': dup,
+        }), 409
+
+    old = arr[idx] if isinstance(arr[idx], dict) else {}
+    try:
+        old_url = str(old.get('buttonURL') or (f"location/{old.get('pattern')}/press" if old.get('pattern') else '')).strip()
+    except Exception:
+        old_url = ''
+
+    arr[idx] = {'label': label, 'pattern': pattern, 'buttonURL': new_url}
+    ok = _write_json_file(BUTTON_TEMPLATES, arr)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'failed to save'}), 500
+
+    # Propagate URL change across stored data
+    replace_stats = _replace_button_url_everywhere(old_url, new_url)
+    return jsonify({'ok': True, 'template': arr[idx], 'replaced': {'old': old_url, 'new': new_url}, **replace_stats})
 
 
 @app.route('/api/templates/trigger', methods=['POST'])
@@ -638,6 +931,13 @@ def api_ui_events():
 
 @app.route('/api/companion_status')
 def companion_status():
+    # Cache to prevent N clients polling every 10s from causing N blocking
+    # network probes at the same moment.
+    now = time.time()
+    with _status_cache_lock:
+        if (now - float(_companion_status_cache.get('ts', 0.0))) < _STATUS_CACHE_TTL_SECONDS:
+            return jsonify({'connected': bool(_companion_status_cache.get('connected', False))})
+
     c = utils.get_companion()
     status = False
     try:
@@ -655,6 +955,10 @@ def companion_status():
                 status = bool(getattr(c, 'connected', False))
     except Exception:
         status = False
+
+    with _status_cache_lock:
+        _companion_status_cache['ts'] = now
+        _companion_status_cache['connected'] = bool(status)
     return jsonify({'connected': status})
 
 
@@ -664,6 +968,11 @@ def propresenter_status():
 
     Intentionally does not print to console to avoid noisy logs.
     """
+    now = time.time()
+    with _status_cache_lock:
+        if (now - float(_propresenter_status_cache.get('ts', 0.0))) < _STATUS_CACHE_TTL_SECONDS:
+            return jsonify({'connected': bool(_propresenter_status_cache.get('connected', False))})
+
     status = False
     try:
         if ProPresentor is None:
@@ -685,6 +994,10 @@ def propresenter_status():
             status = bool(pp.check_connection())
     except Exception:
         status = False
+
+    with _status_cache_lock:
+        _propresenter_status_cache['ts'] = now
+        _propresenter_status_cache['connected'] = bool(status)
 
     return jsonify({'connected': status})
 
@@ -905,6 +1218,98 @@ def _validate_time_hhmm(s: str) -> bool:
         return False
 
 
+_BTN_FULL_RE = re.compile(r'^location/\d+/\d+/\d+/press$')
+_BTN_SHORT_RE = re.compile(r'^\d+/\d+/\d+$')
+
+
+def _normalize_companion_button_url(raw: str) -> str | None:
+    s = (raw or '').strip()
+    if not s:
+        return None
+    if _BTN_FULL_RE.match(s):
+        return s
+    if _BTN_SHORT_RE.match(s):
+        return f'location/{s}/press'
+    return None
+
+
+# --- Timer preset actions (Companion button presses) ---
+_timer_action_lock = threading.Lock()
+_timer_action_jobs: dict[int, threading.Timer] = {}
+
+
+def _cancel_timer_action_job(pp_timer_id: int) -> None:
+    with _timer_action_lock:
+        old = _timer_action_jobs.pop(pp_timer_id, None)
+        try:
+            if old is not None:
+                old.cancel()
+        except Exception:
+            pass
+
+
+def _fire_timer_button_presses_now(*, pp_timer_id: int, preset_number: int, preset_name: str, time_str: str, button_presses: list[dict]) -> dict:
+    """Fire configured Companion button presses immediately.
+
+    This is intentionally "immediate on button press" behavior: when the timer
+    preset is applied, we execute the press list right away.
+    """
+    _cancel_timer_action_job(pp_timer_id)
+
+    presses: list[str] = []
+    for p in button_presses or []:
+        if isinstance(p, dict):
+            u = _normalize_companion_button_url(str(p.get('buttonURL') or p.get('url') or ''))
+        else:
+            u = _normalize_companion_button_url(str(p or ''))
+        if u:
+            presses.append(u)
+
+    if not presses:
+        return {'fired': False, 'count': 0}
+
+    try:
+        _console_append(
+            f"[TIMERS] Timer preset #{preset_number} '{preset_name or time_str}' -> firing {len(presses)} Companion press(es) now\n"
+        )
+    except Exception:
+        pass
+
+    try:
+        comp = utils.get_companion() if hasattr(utils, 'get_companion') else None
+    except Exception:
+        comp = None
+
+    try:
+        if comp is not None and hasattr(comp, 'check_connection'):
+            comp.check_connection()
+    except Exception:
+        pass
+
+    if comp is None or not getattr(comp, 'connected', False):
+        try:
+            _console_append("[TIMERS] Companion not connected; timer presses skipped\n")
+        except Exception:
+            pass
+        return {'fired': False, 'count': len(presses), 'error': 'companion_not_connected'}
+
+    ok_count = 0
+    for u in presses:
+        ok = False
+        try:
+            ok = bool(comp.post_command(u))
+        except Exception:
+            ok = False
+        if ok:
+            ok_count += 1
+        try:
+            _console_append(f"[TIMERS] POST {u} -> {'OK' if ok else 'FAIL'}\n")
+        except Exception:
+            pass
+
+    return {'fired': True, 'count': len(presses), 'ok': ok_count, 'fail': len(presses) - ok_count}
+
+
 def _cfg_bool(cfg: dict, key: str, default: bool = False) -> bool:
     try:
         v = cfg.get(key, default)
@@ -971,14 +1376,20 @@ def api_set_timers():
     if not isinstance(presets, list):
         return jsonify({'ok': False, 'error': 'timer_presets must be an array of presets'}), 400
 
-    normalized_presets: list[dict[str, str]] = []
+    normalized_presets: list[dict] = []
     for v in presets:
         if isinstance(v, dict):
             time_str = str(v.get('time', '')).strip()
             name_str = str(v.get('name', '')).strip()
+            raw_presses = v.get('button_presses')
+            if raw_presses is None and 'buttonPresses' in v:
+                raw_presses = v.get('buttonPresses')
+            if raw_presses is None and 'actions' in v:
+                raw_presses = v.get('actions')
         else:
             time_str = str(v).strip()
             name_str = ''
+            raw_presses = None
 
         if not time_str:
             continue
@@ -989,7 +1400,37 @@ def api_set_timers():
         if not name_str:
             name_str = time_str
 
-        normalized_presets.append({'time': time_str, 'name': name_str})
+        # Normalize button presses
+        presses_out: list[dict[str, str]] = []
+        if raw_presses is not None:
+            if isinstance(raw_presses, dict) or isinstance(raw_presses, str):
+                raw_list = [raw_presses]
+            else:
+                raw_list = raw_presses
+
+            if not isinstance(raw_list, list):
+                return jsonify({'ok': False, 'error': 'button_presses must be an array of button press entries'}), 400
+
+            if len(raw_list) > 50:
+                return jsonify({'ok': False, 'error': 'too many button presses (max 50 per timer)'}), 400
+
+            for item in raw_list:
+                if isinstance(item, str):
+                    u = _normalize_companion_button_url(item)
+                elif isinstance(item, dict):
+                    u = _normalize_companion_button_url(str(item.get('buttonURL') or item.get('url') or item.get('button_url') or ''))
+                else:
+                    u = None
+
+                if not u:
+                    return jsonify({'ok': False, 'error': "Invalid buttonURL in button_presses. Use '1/2/3' or 'location/1/2/3/press'"}), 400
+                presses_out.append({'buttonURL': u})
+
+        obj = {'time': time_str, 'name': name_str}
+        if presses_out:
+            obj['button_presses'] = presses_out
+
+        normalized_presets.append(obj)
 
     if len(normalized_presets) < 1:
         return jsonify({'ok': False, 'error': 'timer_presets must contain at least 1 entry'}), 400
@@ -1114,9 +1555,6 @@ def api_apply_timer_preset():
     except Exception:
         pass
 
-    if ProPresentor is None:
-        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
-
     body = body_for_log or {}
 
     def _get_body_value_ci(d: dict, *keys: str):
@@ -1180,8 +1618,52 @@ def api_apply_timer_preset():
         time_str = str(selected.get('time', '')).strip()
     else:
         time_str = str(selected).strip()
+
+    # Extract configured Companion presses for this preset and fire them
+    # immediately, regardless of ProPresenter availability.
+    try:
+        preset_name = str(selected.get('name', '')).strip() if isinstance(selected, dict) else ''
+    except Exception:
+        preset_name = ''
+    try:
+        presses = selected.get('button_presses') if isinstance(selected, dict) else None
+        if presses is None and isinstance(selected, dict) and 'buttonPresses' in selected:
+            presses = selected.get('buttonPresses')
+        if presses is None and isinstance(selected, dict) and 'actions' in selected:
+            presses = selected.get('actions')
+        if not isinstance(presses, list):
+            presses = []
+    except Exception:
+        presses = []
+
+    # We don't yet know the ProPresenter timer id here; use a placeholder.
+    # If ProPresenter is available, we'll re-fire using the real timer id
+    # after computing pp_timer_id to keep cancellation semantics consistent.
+    press_info = _fire_timer_button_presses_now(
+        pp_timer_id=-1,
+        preset_number=preset_number,
+        preset_name=preset_name,
+        time_str=time_str,
+        button_presses=presses,
+    )
+
+    # Keep original time validation for timer control, but don't prevent button presses.
     if not _validate_time_hhmm(time_str):
-        return jsonify({'ok': False, 'error': f'invalid preset time in config: {time_str}'}), 500
+        return jsonify({
+            'ok': True,
+            'preset': preset_number,
+            'preset_count': len(presets),
+            'time': time_str,
+            'sequence': 'none',
+            'set': False,
+            'reset': False,
+            'started': False,
+            'button_presses': press_info,
+            'propresenter': {
+                'ok': False,
+                'error': f'invalid preset time in config: {time_str}',
+            },
+        })
 
     try:
         pp_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
@@ -1193,11 +1675,63 @@ def api_apply_timer_preset():
     # Backward compatibility: if someone configured 0 explicitly, keep it.
     pp_timer_id = pp_timer_index - 1 if pp_timer_index > 0 else 0
 
+    # Re-fire using the real timer id so subsequent presses replace the prior job.
+    try:
+        press_info = _fire_timer_button_presses_now(
+            pp_timer_id=pp_timer_id,
+            preset_number=preset_number,
+            preset_name=preset_name,
+            time_str=time_str,
+            button_presses=presses,
+        )
+    except Exception:
+        pass
+
     ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
     try:
         port = int(cfg.get('propresenter_port', 1025))
     except Exception:
-        return jsonify({'ok': False, 'error': 'propresenter_port must be an integer'}), 400
+        return jsonify({
+            'ok': True,
+            'preset': preset_number,
+            'preset_count': len(presets),
+            'time': time_str,
+            'propresenter_timer_index': pp_timer_index,
+            'propresenter_timer_id': pp_timer_id,
+            'sequence': 'none',
+            'set': False,
+            'reset': False,
+            'started': False,
+            'button_presses': press_info,
+            'propresenter': {
+                'ok': False,
+                'error': 'propresenter_port must be an integer',
+            },
+        })
+
+    # If ProPresenter client is missing, still succeed for Companion presses.
+    if ProPresentor is None:
+        try:
+            _console_append('[TIMERS] ProPresenter client not available; skipped timer control\n')
+        except Exception:
+            pass
+        return jsonify({
+            'ok': True,
+            'preset': preset_number,
+            'preset_count': len(presets),
+            'time': time_str,
+            'propresenter_timer_index': pp_timer_index,
+            'propresenter_timer_id': pp_timer_id,
+            'sequence': 'none',
+            'set': False,
+            'reset': False,
+            'started': False,
+            'button_presses': press_info,
+            'propresenter': {
+                'ok': False,
+                'error': 'propresentor client not available',
+            },
+        })
 
     # Some older ProPresenter versions have a bug where a normal `start` right
     # after setting/resetting a timer doesn't reliably start.
@@ -1220,7 +1754,7 @@ def api_apply_timer_preset():
         stop_ok = bool(pp.timer_operation(pp_timer_id, 'stop'))
         if not stop_ok:
             return jsonify({
-                'ok': False,
+                'ok': True,
                 'error': 'failed to stop timer (legacy sequence)',
                 'preset': preset_number,
                 'preset_count': len(presets),
@@ -1232,10 +1766,11 @@ def api_apply_timer_preset():
                 'set': False,
                 'reset': False,
                 'started': False,
+                'button_presses': press_info,
                 'propresenter_ip': ip,
                 'propresenter_port': port,
                 'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            }), 502
+            })
 
         if wait_stop_ms:
             time.sleep(wait_stop_ms / 1000.0)
@@ -1243,7 +1778,7 @@ def api_apply_timer_preset():
         set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
         if not set_ok:
             return jsonify({
-                'ok': False,
+                'ok': True,
                 'error': 'failed to set timer (legacy sequence)',
                 'preset': preset_number,
                 'preset_count': len(presets),
@@ -1255,10 +1790,11 @@ def api_apply_timer_preset():
                 'set': False,
                 'reset': False,
                 'started': False,
+                'button_presses': press_info,
                 'propresenter_ip': ip,
                 'propresenter_port': port,
                 'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            }), 502
+            })
 
         if wait_set_ms:
             time.sleep(wait_set_ms / 1000.0)
@@ -1266,7 +1802,7 @@ def api_apply_timer_preset():
         reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
         if not reset_ok:
             return jsonify({
-                'ok': False,
+                'ok': True,
                 'error': 'timer set, but failed to reset (legacy sequence)',
                 'preset': preset_number,
                 'preset_count': len(presets),
@@ -1278,10 +1814,11 @@ def api_apply_timer_preset():
                 'set': True,
                 'reset': False,
                 'started': False,
+                'button_presses': press_info,
                 'propresenter_ip': ip,
                 'propresenter_port': port,
                 'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            }), 502
+            })
 
         if wait_reset_ms:
             time.sleep(wait_reset_ms / 1000.0)
@@ -1289,7 +1826,7 @@ def api_apply_timer_preset():
         start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
         if not start_ok:
             return jsonify({
-                'ok': False,
+                'ok': True,
                 'error': 'timer set, but failed to start (legacy sequence)',
                 'preset': preset_number,
                 'preset_count': len(presets),
@@ -1301,10 +1838,11 @@ def api_apply_timer_preset():
                 'set': True,
                 'reset': True,
                 'started': False,
+                'button_presses': press_info,
                 'propresenter_ip': ip,
                 'propresenter_port': port,
                 'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            }), 502
+            })
 
         return jsonify({
             'ok': True,
@@ -1318,6 +1856,7 @@ def api_apply_timer_preset():
             'set': True,
             'reset': True,
             'started': True,
+            'button_presses': press_info,
             'propresenter_ip': ip,
             'propresenter_port': port,
             'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
@@ -1327,7 +1866,7 @@ def api_apply_timer_preset():
     set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
     if not set_ok:
         return jsonify({
-            'ok': False,
+            'ok': True,
             'error': 'failed to set timer (check ProPresenter connection and timer index)',
             'preset': preset_number,
             'preset_count': len(presets),
@@ -1338,16 +1877,17 @@ def api_apply_timer_preset():
             'set': False,
             'reset': False,
             'started': False,
+            'button_presses': press_info,
             'propresenter_ip': ip,
             'propresenter_port': port,
-        }), 502
+        })
 
     # ProPresenter often needs a reset/restart after changing timer config
     # for the UI to reflect the new time correctly.
     reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
     if not reset_ok:
         return jsonify({
-            'ok': False,
+            'ok': True,
             'error': 'timer set, but failed to reset (check ProPresenter timer state/permissions)',
             'preset': preset_number,
             'preset_count': len(presets),
@@ -1358,16 +1898,17 @@ def api_apply_timer_preset():
             'set': True,
             'reset': False,
             'started': False,
+            'button_presses': press_info,
             'propresenter_ip': ip,
             'propresenter_port': port,
-        }), 502
+        })
 
     # Start countdown immediately (per OpenAPI: GET /v1/timer/{id}/{operation})
     start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
 
     if not start_ok:
         return jsonify({
-            'ok': False,
+            'ok': True,
             'error': 'timer set, but failed to start (check ProPresenter timer state/permissions)',
             'preset': preset_number,
             'preset_count': len(presets),
@@ -1378,9 +1919,10 @@ def api_apply_timer_preset():
             'set': True,
             'reset': True,
             'started': False,
+            'button_presses': press_info,
             'propresenter_ip': ip,
             'propresenter_port': port,
-        }), 502
+        })
 
     return jsonify({
         'ok': True,
@@ -1393,6 +1935,7 @@ def api_apply_timer_preset():
         'set': True,
         'reset': True,
         'started': True,
+        'button_presses': press_info,
         'propresenter_ip': ip,
         'propresenter_port': port,
     })

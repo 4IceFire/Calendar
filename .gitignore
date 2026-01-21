@@ -11,9 +11,4 @@ calendar.pid
 calendar_triggers.json
 
 # Local Config/Event Files
-config.json
-events.json
-config copy.json
-events.json
-config.json
 *.json
