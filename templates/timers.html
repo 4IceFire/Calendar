@@ -1,12 +1,13 @@
 {% extends 'base.html' %}
 
+{% set page_title = 'Timers' %}
+
+{% block page_actions %}
+		<button id="timers-save" class="btn btn-primary">Save</button>
+{% endblock %}
+
 {% block content %}
 <div id="timers-page">
-	<div class="d-flex align-items-center justify-content-between mb-3">
-		<h1 class="h3 mb-0">Timers</h1>
-		<button id="timers-save" class="btn btn-primary">Save</button>
-	</div>
-
 	<div class="d-flex align-items-center justify-content-between mb-2">
 		<h2 class="h5 mb-0">Preset Times</h2>
 		<button id="timers-add" class="btn btn-outline-secondary btn-sm">Add Time</button>

@@ -1,5 +1,66 @@
 /* Theme: prefer Bootstrap 5.3's CSS variables driven by `data-bs-theme`. */
 
+/* --- TDeck accent theme (derived from the app icon) --- */
+html{
+  --tdeck-accent: #0ea5e9;   /* sky */
+  --tdeck-accent-2: #4f46e5; /* indigo */
+}
+
+html[data-bs-theme="light"]{
+  --tdeck-accent-text: #0b7fb3;
+  --tdeck-accent-soft-bg: rgba(14, 165, 233, 0.10);
+  --tdeck-accent-border: rgba(14, 165, 233, 0.35);
+}
+
+html[data-bs-theme="dark"]{
+  --tdeck-accent-text: #59c2ff;
+  --tdeck-accent-soft-bg: rgba(14, 165, 233, 0.12);
+  --tdeck-accent-border: rgba(14, 165, 233, 0.45);
+}
+
+.tdeck-accent{ color: var(--tdeck-accent-text) !important; }
+.tdeck-accent-link{ color: var(--tdeck-accent-text) !important; }
+.tdeck-accent-link:hover{ color: var(--tdeck-accent) !important; }
+.tdeck-accent-border{ border-color: var(--tdeck-accent-border) !important; }
+
+/* A subtle “brand card” look for small panels */
+.tdeck-soft{
+  background: linear-gradient(135deg, var(--tdeck-accent-soft-bg), rgba(79, 70, 229, 0.06));
+  border: 1px solid var(--tdeck-accent-border);
+}
+
+/* Make primary buttons feel more like the brand without re-theming Bootstrap */
+.btn.btn-primary{
+  background: linear-gradient(135deg, var(--tdeck-accent-2), var(--tdeck-accent));
+  border-color: transparent;
+}
+.btn.btn-primary:hover{
+  filter: brightness(1.05);
+}
+.btn.btn-outline-primary{
+  border-color: var(--tdeck-accent-border);
+  color: var(--tdeck-accent-text);
+}
+.btn.btn-outline-primary:hover{
+  background-color: var(--tdeck-accent-soft-bg);
+  color: var(--tdeck-accent-text);
+}
+
+/* Links and nav affordances */
+a{ color: var(--tdeck-accent-text); }
+a:hover{ color: var(--tdeck-accent); }
+
+/* Headings feel less grey */
+.container h1, .container .h1, .container h2, .container .h2{
+  letter-spacing: -0.01em;
+}
+.tdeck-title{
+  background: linear-gradient(135deg, var(--tdeck-accent-2), var(--tdeck-accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
 /* Simple indicator dot */
 .indicator-dot{
   display:inline-block;
@@ -60,3 +121,35 @@ details.timer-presses > summary{
   /* JS controls max-height/opacity during open/close */
   will-change: max-height, opacity;
 }
+
+/* Calendar triggers alignment */
+.cal-triggers{
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.cal-trigger-row{
+  display: grid;
+  grid-template-columns: 4.2rem 1fr;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+.cal-trigger-offset{
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--bs-secondary-color);
+}
+
+.cal-trigger-before{ color: var(--bs-secondary-color); }
+.cal-trigger-at{ color: var(--bs-body-color); }
+.cal-trigger-after{ color: var(--bs-secondary-color); }
+
+.cal-trigger-target{
+  overflow-wrap: anywhere;
+}
+
+.cal-trigger-template{ color: var(--bs-body-color); }
+.cal-trigger-button{ color: var(--bs-secondary-color); font-family: var(--bs-font-monospace); }

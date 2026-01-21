@@ -144,7 +144,7 @@ const CONFIG_META = {
 
   EVENTS_FILE: {
     label: 'Events File',
-    help: 'JSON file used to store calendar events.',
+    help: 'JSON file used to store scheduled events.',
   },
 
   // Legacy keys that may still exist in older config.json files
@@ -271,7 +271,7 @@ function _renderConfigGroups(cfg) {
       keys: ['propresenter_ip', 'propresenter_port', 'propresenter_timer_index'],
     },
     {
-      title: 'Calendar',
+      title: 'Scheduling',
       keys: ['EVENTS_FILE'],
     },
   ];

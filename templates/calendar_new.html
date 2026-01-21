@@ -1,7 +1,8 @@
 {% extends 'base.html' %}
 
+{% set page_title = 'Create Event' %}
+
 {% block content %}
-<h1>Create Event</h1>
 <form id="event-form">
   <div class="mb-3">
     <label class="form-label">Name</label>
@@ -91,6 +92,24 @@ function newTriggerRow(templates){
     <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
     <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
   `;
+
+  const minutesInput = div.querySelector('input[name="minutes"]');
+  const typeSelect = div.querySelector('select[name="typeOfTrigger"]');
+  const syncMinutesDisabled = ()=>{
+    if(!minutesInput || !typeSelect) return;
+    const type = String(typeSelect.value || 'AT').toUpperCase();
+    if(type === 'AT'){
+      minutesInput.value = '0';
+      minutesInput.disabled = true;
+    }else{
+      minutesInput.disabled = false;
+    }
+  };
+  if(typeSelect) typeSelect.addEventListener('change', syncMinutesDisabled);
+  syncMinutesDisabled();
+
+  // allow callers (edit-mode/template loader) to re-run this after populating values
+  div.__syncMinutesDisabled = syncMinutesDisabled;
   return div;
 }
 
@@ -108,7 +127,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   if(m){
     editId = m[1];
     // switch UI to edit mode and fetch event
-    document.querySelector('h1').textContent = 'Edit Event';
+    const titleEl = document.getElementById('page-title') || document.querySelector('h1');
+    if(titleEl) titleEl.textContent = 'Edit Event';
     const submitBtn = document.querySelector('button[type="submit"]');
     if(submitBtn) submitBtn.textContent = 'Save Changes';
     try{
@@ -129,6 +149,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           const row = newTriggerRow(templates);
           row.querySelector('input[name="minutes"]').value = t.minutes;
           row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
+          if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
           // attempt to match a button template
           let matched = false;
           for(let bi=0; bi<templates.length; bi++){
@@ -213,6 +234,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       const row = newTriggerRow(templates);
       row.querySelector('input[name="minutes"]').value = t.minutes;
       row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
+      if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
       // try to match button template
       let matched = false;
       for(let bi=0; bi<templates.length; bi++){
@@ -275,10 +297,14 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
       let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
 
-      // Minutes: required unless type==AT then default 0
-      if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
-        if(type === 'AT') minsRaw = '0';
-        else { alert('Minutes required for non-AT triggers'); return; }
+      // Minutes: required unless type==AT (AT is always saved as 0)
+      if(String(type).toUpperCase() === 'AT'){
+        minsRaw = '0';
+        const mi = row.querySelector('input[name="minutes"]');
+        if(mi){ mi.value = '0'; mi.disabled = true; }
+      }else if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
+        alert('Minutes required for non-AT triggers');
+        return;
       }
       const mins = parseInt(minsRaw,10);
       if(Number.isNaN(mins) || mins < 0){ alert('Minutes must be a non-negative integer'); return; }

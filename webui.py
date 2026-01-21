@@ -299,6 +299,10 @@ _propresenter_status_cache = {'ts': 0.0, 'connected': False}
 _status_cache_lock = threading.Lock()
 _STATUS_CACHE_TTL_SECONDS = 2.0
 
+# Upcoming trigger cache (to avoid recomputing schedule for each client refresh)
+_upcoming_triggers_cache = {'ts': 0.0, 'events_file': '', 'payload': None}
+_UPCOMING_TRIGGERS_TTL_SECONDS = 1.0
+
 
 def start_http_server(host: str, port: int) -> None:
     global _http_server, _server_thread
@@ -483,6 +487,166 @@ def home():
         propresenter_hostport=propresenter_hostport,
         event_times=event_times,
     )
+
+
+def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> dict:
+    """Compute next upcoming triggers across active events.
+
+    Uses the same scheduling logic as the background scheduler: next weekly
+    occurrence + trigger offsets.
+    """
+    from datetime import datetime
+    import heapq
+
+    now = datetime.now().replace(microsecond=0)
+
+    try:
+        from package.apps.calendar import storage
+        from package.apps.calendar.scheduler import next_weekly_occurrence, push_triggers_for_occurrence
+    except Exception:
+        return {'now_ms': int(time.time() * 1000), 'triggers': []}
+
+    # Map buttonURL -> template info (for nicer display)
+    tpl_by_url: dict[str, dict] = {}
+    try:
+        arr = _read_json_file(BUTTON_TEMPLATES)
+        for tpl in arr or []:
+            if not isinstance(tpl, dict):
+                continue
+            url = _button_template_effective_url(tpl)
+            if url:
+                tpl_by_url[url] = tpl
+    except Exception:
+        tpl_by_url = {}
+
+    try:
+        loaded = storage.load_events_safe(events_file) if hasattr(storage, 'load_events_safe') else storage.load_events(events_file)
+    except Exception:
+        loaded = []
+
+    heap = []
+    for ev in loaded or []:
+        try:
+            if not getattr(ev, 'active', True):
+                continue
+        except Exception:
+            pass
+
+        occ = None
+        try:
+            occ = next_weekly_occurrence(ev, now)
+        except Exception:
+            occ = None
+        if occ is None:
+            continue
+        try:
+            push_triggers_for_occurrence(heap, ev, occ, now)
+        except Exception:
+            continue
+
+    try:
+        heapq.heapify(heap)
+    except Exception:
+        pass
+
+    out = []
+    for job in sorted(heap)[: max(0, int(limit))]:
+        try:
+            due = getattr(job, 'due', None)
+            if due is None:
+                continue
+            due = due.replace(microsecond=0)
+            due_ms = int(due.timestamp() * 1000)
+            seconds_until = int((due - now).total_seconds())
+            if seconds_until < 0:
+                # should not happen (we only schedule future jobs), but be safe
+                continue
+
+            ev = getattr(job, 'event', None)
+            event_name = str(getattr(ev, 'name', '') or '').strip() if ev is not None else ''
+            event_id = getattr(ev, 'id', None) if ev is not None else None
+
+            trig = getattr(job, 'trigger', None)
+            url = str(getattr(trig, 'buttonURL', '') or '').strip() if trig is not None else ''
+            pattern = _extract_pattern_from_button_url(url) or ''
+
+            offset_min = None
+            try:
+                offset_min = int(getattr(trig, 'timer', 0)) if trig is not None else 0
+            except Exception:
+                offset_min = 0
+            if offset_min > 0:
+                offset_label = f"+{offset_min}m"
+            elif offset_min < 0:
+                offset_label = f"{offset_min}m"
+            else:
+                offset_label = "0m"
+
+            tpl = tpl_by_url.get(url) if url else None
+            button_label = ''
+            button_pattern = ''
+            try:
+                if isinstance(tpl, dict):
+                    button_label = str(tpl.get('label') or '').strip()
+                    button_pattern = str(tpl.get('pattern') or '').strip()
+            except Exception:
+                pass
+            if not button_pattern:
+                button_pattern = pattern
+
+            out.append(
+                {
+                    'due_ms': due_ms,
+                    'seconds_until': seconds_until,
+                    'event': event_name or '(unnamed)',
+                    'event_id': event_id,
+                    'offset_min': offset_min,
+                    'offset': offset_label,
+                    'buttonURL': url,
+                    'button': {
+                        'label': button_label,
+                        'pattern': button_pattern,
+                    },
+                }
+            )
+        except Exception:
+            continue
+
+    return {'now_ms': int(now.timestamp() * 1000), 'triggers': out}
+
+
+@app.route('/api/upcoming_triggers')
+def api_upcoming_triggers():
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+
+    try:
+        events_file = str(cfg.get('EVENTS_FILE', 'events.json'))
+    except Exception:
+        events_file = 'events.json'
+
+    now = time.time()
+    with _status_cache_lock:
+        if (
+            _upcoming_triggers_cache.get('payload') is not None
+            and _upcoming_triggers_cache.get('events_file') == events_file
+            and (now - float(_upcoming_triggers_cache.get('ts', 0.0))) < _UPCOMING_TRIGGERS_TTL_SECONDS
+        ):
+            return jsonify(_upcoming_triggers_cache.get('payload'))
+
+    payload = _compute_upcoming_triggers_payload(events_file=events_file, limit=3)
+
+    with _status_cache_lock:
+        _upcoming_triggers_cache['ts'] = now
+        _upcoming_triggers_cache['events_file'] = events_file
+        _upcoming_triggers_cache['payload'] = payload
+
+    resp = jsonify(payload)
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
 
 
 @app.route('/calendar')
@@ -855,8 +1019,29 @@ def api_add_trigger_template():
         times = [times]
     if not isinstance(times, list):
         return jsonify({'ok': False, 'error': 'times must be an object or an array of trigger specs'}), 400
+
+    # normalize: if typeOfTrigger is AT, minutes must be 0
+    normalized_times = []
+    for t in times:
+        if not isinstance(t, dict):
+            continue
+        typ_name = str(t.get('typeOfTrigger', 'AT')).upper()
+        mins_val = t.get('minutes', 0)
+        if typ_name == 'AT':
+            mins = 0
+        else:
+            try:
+                mins = int(mins_val or 0)
+            except Exception:
+                return jsonify({'ok': False, 'error': f"Invalid minutes value: {mins_val}"}), 400
+            if mins < 0:
+                return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
+        t2 = dict(t)
+        t2['typeOfTrigger'] = typ_name
+        t2['minutes'] = mins
+        normalized_times.append(t2)
     arr = _read_json_file(TRIGGER_TEMPLATES)
-    arr.append({'label': label, 'times': times})
+    arr.append({'label': label, 'times': normalized_times})
     ok = _write_json_file(TRIGGER_TEMPLATES, arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
@@ -884,10 +1069,31 @@ def api_update_trigger_template(idx: int):
         return jsonify({'ok': False, 'error': 'label and times required'}), 400
     if not isinstance(times, list):
         return jsonify({'ok': False, 'error': 'times must be an array of trigger specs'}), 400
+
+    # normalize: if typeOfTrigger is AT, minutes must be 0
+    normalized_times = []
+    for t in times:
+        if not isinstance(t, dict):
+            continue
+        typ_name = str(t.get('typeOfTrigger', 'AT')).upper()
+        mins_val = t.get('minutes', 0)
+        if typ_name == 'AT':
+            mins = 0
+        else:
+            try:
+                mins = int(mins_val or 0)
+            except Exception:
+                return jsonify({'ok': False, 'error': f"Invalid minutes value: {mins_val}"}), 400
+            if mins < 0:
+                return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
+        t2 = dict(t)
+        t2['typeOfTrigger'] = typ_name
+        t2['minutes'] = mins
+        normalized_times.append(t2)
     arr = _read_json_file(TRIGGER_TEMPLATES)
     if idx < 0 or idx >= len(arr):
         return jsonify({'ok': False, 'error': 'index out of range'}), 404
-    arr[idx] = {'label': label, 'times': times}
+    arr[idx] = {'label': label, 'times': normalized_times}
     ok = _write_json_file(TRIGGER_TEMPLATES, arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
@@ -2042,17 +2248,21 @@ def api_update_event_ui(ident: int):
         times = []
         import re as _re
         for t in body.get('times', []):
-            try:
-                mins = int(t.get('minutes', 0) or 0)
-            except Exception:
-                return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400
-            if mins < 0:
-                return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
-
             typ_name = t.get('typeOfTrigger', 'AT')
             if typ_name not in TypeofTime.__members__:
                 return jsonify({'ok': False, 'error': f"Invalid typeOfTrigger: {typ_name}"}), 400
             typ = TypeofTime[typ_name]
+
+            # Minutes: if type is AT, always save 0 (ignore client input)
+            if typ_name == 'AT':
+                mins = 0
+            else:
+                try:
+                    mins = int(t.get('minutes', 0) or 0)
+                except Exception:
+                    return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400
+                if mins < 0:
+                    return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
 
             btn_raw = (t.get('buttonURL') or '').strip()
             btn_final = ''
@@ -2126,18 +2336,22 @@ def api_create_event_ui():
         import re as _re
         for t in body.get('times', []):
             # minutes must be 0 or positive integer
-            try:
-                mins = int(t.get('minutes', 0) or 0)
-            except Exception:
-                return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400
-            if mins < 0:
-                return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
-
             # typeOfTrigger must map to TypeofTime
             typ_name = t.get('typeOfTrigger', 'AT')
             if typ_name not in TypeofTime.__members__:
                 return jsonify({'ok': False, 'error': f"Invalid typeOfTrigger: {typ_name}"}), 400
             typ = TypeofTime[typ_name]
+
+            # Minutes: if type is AT, always save 0 (ignore client input)
+            if typ_name == 'AT':
+                mins = 0
+            else:
+                try:
+                    mins = int(t.get('minutes', 0) or 0)
+                except Exception:
+                    return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400
+                if mins < 0:
+                    return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
 
             # buttonURL handling: prefer a full button URL from templates (location/x/y/z/press)
             btn_raw = (t.get('buttonURL') or '').strip()

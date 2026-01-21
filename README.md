@@ -1,6 +1,8 @@
-# Calendar Companion Scheduler
+# TDeck
 
-A small Python app that schedules calendar events and fires Bitfocus Companion button presses at configured times.
+A small Python app for technical directors: scheduling service cues and firing Bitfocus Companion button presses at configured times.
+
+This project started as a calendar-focused scheduler, and still includes a calendar scheduler component under the hood.
 
 It supports:
 - A **scheduler** that watches an events JSON file and executes triggers.

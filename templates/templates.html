@@ -1,7 +1,8 @@
 {% extends 'base.html' %}
 
+{% set page_title = 'Templates' %}
+
 {% block content %}
-<h1>Templates</h1>
 <div class="mb-4">
   <h3>Button Templates</h3>
   <div id="buttons-list" class="mb-3">Loading…</div>
@@ -128,6 +129,23 @@ function newTriggerRow(templates){
     <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
   `;
 
+  // If type is AT, minutes is always 0 and should not be editable.
+  const minutesInput = div.querySelector('input[name="minutes"]');
+  const typeSelect = div.querySelector('select[name="typeOfTrigger"]');
+  const syncMinutesDisabled = ()=>{
+    if(!minutesInput || !typeSelect) return;
+    const type = String(typeSelect.value || 'AT').toUpperCase();
+    if(type === 'AT'){
+      minutesInput.value = '0';
+      minutesInput.disabled = true;
+    }else{
+      minutesInput.disabled = false;
+    }
+  };
+  if(typeSelect) typeSelect.addEventListener('change', syncMinutesDisabled);
+  syncMinutesDisabled();
+  div.__syncMinutesDisabled = syncMinutesDisabled;
+
   // If a template is selected, disable custom URL input (like other pages)
   const sel = div.querySelector('select[name="buttonTemplate"]');
   const inp = div.querySelector('input[name="buttonURL"]');
@@ -210,8 +228,13 @@ document.getElementById('add-trigger-form').addEventListener('submit', async (ev
     const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
     const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
     let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
-    if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
-      if(type === 'AT') minsRaw = '0'; else { alert('Minutes required for non-AT triggers'); return; }
+    if(String(type).toUpperCase() === 'AT'){
+      minsRaw = '0';
+      const mi = row.querySelector('input[name="minutes"]');
+      if(mi){ mi.value = '0'; mi.disabled = true; }
+    }else if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
+      alert('Minutes required for non-AT triggers');
+      return;
     }
     const mins = parseInt(minsRaw,10);
     if(Number.isNaN(mins) || mins < 0){ alert('Minutes must be a non-negative integer'); return; }
@@ -286,12 +309,6 @@ document.getElementById('buttons-list').addEventListener('click', async (ev)=>{
       }
       window.__editingButtonIndex = null;
       await loadTemplates();
-      const trigN = data.trigger_templates_updated || 0;
-      const evN = data.events_updated || 0;
-      const tmN = data.timer_presets_updated || 0;
-      if(trigN || evN || tmN){
-        alert(`Updated references:\nTrigger templates: ${trigN}\nEvent triggers: ${evN}\nTimer presses: ${tmN}`);
-      }
     }catch(e){
       console.error(e);
       alert('Error updating');
@@ -336,6 +353,7 @@ document.getElementById('triggers-list').addEventListener('click', async (ev)=>{
         // populate
         row.querySelector('input[name="minutes"]').value = s.minutes;
         row.querySelector('select[name="typeOfTrigger"]').value = s.typeOfTrigger;
+        if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
         // try to match a button template
         let matched = false;
         btns.forEach((b,bi)=>{ if(!matched){ const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null); if(bu === s.buttonURL){ row.querySelector('select[name="buttonTemplate"]').value = bi; matched = true; } }});

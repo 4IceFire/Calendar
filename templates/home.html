@@ -1,12 +1,23 @@
 {% extends 'base.html' %}
+
+{% set page_title = 'Home' %}
 {% block content %}
   <div class="row">
     <div class="col-md-8">
-      <h1>Home</h1>
-      <p>Welcome to the Calendar UI. Use the links in the nav to manage events, timers, and settings.</p>
+      <p>Welcome to TDeck. Use the links in the nav to manage events, timers, and settings.</p>
+
+      <div class="tdeck-soft rounded-3 p-3 mb-3">
+        <div class="d-flex align-items-center gap-2">
+          <img src="/static/tdeck-icon.svg" alt="" width="28" height="28" style="display:block">
+          <div>
+            <div class="h5 mb-0 tdeck-title">TDeck</div>
+            <div class="small text-muted">Your Technical Director deck for cues, timers, and control.</div>
+          </div>
+        </div>
+      </div>
 
       <div class="list-group">
-        <a href="/calendar" class="list-group-item list-group-item-action">Calendar</a>
+        <a href="/calendar" class="list-group-item list-group-item-action">Schedule</a>
         <a href="/templates" class="list-group-item list-group-item-action">Templates</a>
         <a href="/timers" class="list-group-item list-group-item-action">Timers</a>
         <a href="/console" class="list-group-item list-group-item-action">Console</a>
@@ -16,15 +27,26 @@
     </div>
     <div class="col-md-4">
       <h5>Quick Status</h5>
-      <ul class="list-group">
+      <ul class="list-group tdeck-soft">
         <li class="list-group-item">Events file: <strong>{{ events_file or 'events.json' }}</strong></li>
         <li class="list-group-item">Companion: <strong>{{ companion_hostport or '127.0.0.1:8000' }}</strong></li>
         <li class="list-group-item">ProPresenter: <strong>{{ propresenter_hostport or '127.0.0.1:1025' }}</strong></li>
       </ul>
 
       <div class="mt-3">
+        <div class="d-flex justify-content-between align-items-center">
+          <h6 class="mb-2">Next Triggers</h6>
+          <button id="refresh-upcoming-triggers" class="btn btn-sm btn-outline-secondary">Refresh</button>
+        </div>
+        <div class="small text-muted" id="next-trigger-countdown">Loading…</div>
+        <div class="list-group mt-2 tdeck-soft" id="next-triggers-list">
+          <div class="list-group-item text-muted">Loading…</div>
+        </div>
+      </div>
+
+      <div class="mt-3">
         <h6 class="mb-2">Event Times</h6>
-        <div class="list-group">
+        <div class="list-group tdeck-soft">
           {% if event_times and event_times|length > 0 %}
             {% for ev in event_times %}
               <div class="list-group-item d-flex justify-content-between align-items-center">
@@ -39,4 +61,99 @@
       </div>
     </div>
   </div>
+
+  <script>
+  (function(){
+    const listEl = document.getElementById('next-triggers-list');
+    const countdownEl = document.getElementById('next-trigger-countdown');
+    const refreshBtn = document.getElementById('refresh-upcoming-triggers');
+    let current = [];
+    let tickHandle = null;
+    let lastFetchAt = 0;
+
+    function pad2(n){ return String(n).padStart(2,'0'); }
+    function formatDuration(seconds){
+      const s = Math.max(0, Math.floor(seconds));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const ss = s % 60;
+      if(h > 0) return `${h}:${pad2(m)}:${pad2(ss)}`;
+      return `${m}:${pad2(ss)}`;
+    }
+    function formatDue(ms){
+      try{
+        const d = new Date(ms);
+        return d.toLocaleString(undefined, {weekday:'short', hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      }catch(e){
+        return '';
+      }
+    }
+    function render(){
+      if(!Array.isArray(current) || current.length === 0){
+        countdownEl.textContent = 'No upcoming triggers found';
+        listEl.innerHTML = '<div class="list-group-item text-muted">No upcoming triggers</div>';
+        return;
+      }
+
+      const next = current[0];
+      const secs = (next.due_ms - Date.now()) / 1000;
+      countdownEl.textContent = `Next trigger in ${formatDuration(secs)} (${formatDue(next.due_ms)})`;
+
+      listEl.innerHTML = '';
+      current.slice(0,3).forEach((t)=>{
+        const button = (t.button && (t.button.label || t.button.pattern))
+          ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
+          : (t.buttonURL || '');
+        const row = document.createElement('div');
+        row.className = 'list-group-item d-flex justify-content-between align-items-center';
+        row.innerHTML = `
+          <div class="text-truncate">
+            <div class="fw-semibold text-truncate">${t.event || '(unnamed)'} <span class="text-muted">(${t.offset || ''})</span></div>
+            <div class="small text-muted text-truncate">${button || ''}</div>
+          </div>
+          <div class="text-muted ms-2" style="white-space:nowrap">${formatDue(t.due_ms)}</div>
+        `;
+        listEl.appendChild(row);
+      });
+    }
+
+    function startTick(){
+      if(tickHandle) return;
+      tickHandle = setInterval(()=>{
+        if(!Array.isArray(current) || current.length === 0) return;
+        const next = current[0];
+        const secsLeft = (next.due_ms - Date.now()) / 1000;
+        if(secsLeft <= 0){
+          // refresh soon after a trigger time passes
+          fetchUpcoming(true);
+        }else{
+          countdownEl.textContent = `Next trigger in ${formatDuration(secsLeft)} (${formatDue(next.due_ms)})`;
+        }
+      }, 1000);
+    }
+
+    async function fetchUpcoming(force){
+      const now = Date.now();
+      if(!force && (now - lastFetchAt) < 3000) return; // basic debounce
+      lastFetchAt = now;
+      try{
+        const resp = await fetch('/api/upcoming_triggers?_ts=' + Date.now(), {cache:'no-store'});
+        if(!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        current = Array.isArray(data.triggers) ? data.triggers : [];
+        render();
+        startTick();
+      }catch(e){
+        console.error(e);
+        countdownEl.textContent = 'Unable to load upcoming triggers';
+        listEl.innerHTML = '<div class="list-group-item text-muted">Unable to load</div>';
+      }
+    }
+
+    if(refreshBtn){ refreshBtn.addEventListener('click', (ev)=>{ ev.preventDefault(); fetchUpcoming(true); }); }
+    fetchUpcoming(true);
+    // periodic refresh to keep list accurate across changes
+    setInterval(()=>fetchUpcoming(false), 15000);
+  })();
+  </script>
 {% endblock %}
