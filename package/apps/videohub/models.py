@@ -25,10 +25,12 @@ class VideohubPreset:
     id: int
     name: str
     routes: list[VideohubRoute]
+    locked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": int(self.id),
             "name": str(self.name),
             "routes": [r.to_dict() for r in (self.routes or [])],
+            "locked": bool(self.locked),
         }

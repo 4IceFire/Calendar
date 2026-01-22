@@ -80,6 +80,8 @@ class VideohubApp(AppBase):
         if target_id is not None:
             for i, p in enumerate(presets):
                 if int(p.id) == int(target_id):
+                    if bool(getattr(p, 'locked', False)):
+                        raise ValueError('preset is locked')
                     updated = VideohubPreset(id=target_id, name=name, routes=routes_in)
                     presets[i] = updated
                     storage.save_presets(presets, self._presets_file(cfg))
@@ -88,19 +90,44 @@ class VideohubApp(AppBase):
         next_id = 1
         for p in presets:
             next_id = max(next_id, int(p.id) + 1)
-        created = VideohubPreset(id=next_id, name=name, routes=routes_in)
+        created = VideohubPreset(id=next_id, name=name, routes=routes_in, locked=False)
         presets.append(created)
         storage.save_presets(presets, self._presets_file(cfg))
         return created
 
     def delete_preset(self, cfg: dict, preset_id: int) -> bool:
         presets = storage.load_presets(self._presets_file(cfg))
+        found = None
+        for p in presets:
+            if int(p.id) == int(preset_id):
+                found = p
+                break
+        if found is None:
+            return False
+        if bool(getattr(found, 'locked', False)):
+            raise ValueError('preset is locked')
+
         before = len(presets)
         presets = [p for p in presets if int(p.id) != int(preset_id)]
         if len(presets) == before:
             return False
         storage.save_presets(presets, self._presets_file(cfg))
         return True
+
+    def set_preset_locked(self, cfg: dict, preset_id: int, locked: bool) -> VideohubPreset:
+        presets = storage.load_presets(self._presets_file(cfg))
+        for i, p in enumerate(presets):
+            if int(p.id) == int(preset_id):
+                updated = VideohubPreset(
+                    id=int(p.id),
+                    name=str(p.name),
+                    routes=list(p.routes or []),
+                    locked=bool(locked),
+                )
+                presets[i] = updated
+                storage.save_presets(presets, self._presets_file(cfg))
+                return updated
+        raise KeyError('preset not found')
 
     def apply_preset(self, cfg: dict, preset_id: int) -> dict:
         preset = self.get_preset(cfg, preset_id)

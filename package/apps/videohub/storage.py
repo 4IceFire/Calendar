@@ -61,7 +61,12 @@ def _coerce_preset(value: Any, *, next_id: int) -> tuple[VideohubPreset | None, 
             if rr is not None:
                 routes.append(rr)
 
-    return VideohubPreset(id=preset_id, name=name, routes=routes), next_id
+    try:
+        locked = bool(value.get("locked", value.get("lock", False)))
+    except Exception:
+        locked = False
+
+    return VideohubPreset(id=preset_id, name=name, routes=routes, locked=locked), next_id
 
 
 def load_presets(path: str | Path = DEFAULT_PRESETS_FILE) -> list[VideohubPreset]:

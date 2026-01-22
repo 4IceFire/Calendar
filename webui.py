@@ -1400,6 +1400,8 @@ def api_videohub_presets_update(preset_id: int):
     try:
         preset = app_inst.upsert_preset(cfg, body)  # type: ignore[attr-defined]
         return jsonify({'ok': True, 'preset': preset.to_dict() if hasattr(preset, 'to_dict') else preset})
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
 
@@ -1418,8 +1420,46 @@ def api_videohub_presets_delete(preset_id: int):
         if not ok:
             return jsonify({'ok': False, 'error': 'preset not found'}), 404
         return jsonify({'ok': True})
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/videohub/presets/<int:preset_id>/lock', methods=['POST'])
+def api_videohub_presets_lock(preset_id: int):
+    """Lock/unlock a preset to prevent accidental edits."""
+
+    app_inst = _get_videohub_app()
+    if app_inst is None or not hasattr(app_inst, 'set_preset_locked'):
+        return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
+
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        body = {}
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    locked = body.get('locked', None)
+    if locked is None:
+        # Toggle if caller didn't specify.
+        try:
+            cur = app_inst.get_preset(cfg, preset_id)  # type: ignore[attr-defined]
+            locked = not bool(getattr(cur, 'locked', False)) if cur is not None else True
+        except Exception:
+            locked = True
+
+    try:
+        updated = app_inst.set_preset_locked(cfg, preset_id, bool(locked))  # type: ignore[attr-defined]
+        return jsonify({'ok': True, 'preset': updated.to_dict() if hasattr(updated, 'to_dict') else updated})
+    except KeyError:
+        return jsonify({'ok': False, 'error': 'preset not found'}), 404
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
 
 
 @app.route('/api/videohub/presets/<int:preset_id>/apply', methods=['POST'])
@@ -1440,6 +1480,72 @@ def api_videohub_presets_apply(preset_id: int):
         return jsonify({'ok': True, 'result': result})
     except KeyError:
         return jsonify({'ok': False, 'error': 'preset not found'}), 404
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.route('/api/videohub/presets/from_device', methods=['POST'])
+def api_videohub_presets_from_device():
+    """Pull current routing from the configured VideoHub and save as a preset."""
+
+    app_inst = _get_videohub_app()
+    if app_inst is None or not hasattr(app_inst, 'upsert_preset'):
+        return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
+
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        body = {}
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    vh = _get_videohub_client_from_config()
+    if vh is None:
+        return jsonify({'ok': False, 'error': 'VideoHub not configured (set videohub_ip)'}), 400
+
+    name = str(body.get('name') or '').strip()
+    if not name:
+        name = f"Snapshot {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+    target_id = None
+    try:
+        raw_id = body.get('id', None)
+        if isinstance(raw_id, int) and raw_id > 0:
+            target_id = int(raw_id)
+    except Exception:
+        target_id = None
+
+    try:
+        st = vh.get_state(fallback_count=40) if hasattr(vh, 'get_state') else None
+        routing = (st or {}).get('routing') if isinstance(st, dict) else None
+        if not isinstance(routing, list) or not routing:
+            # fallback identity
+            routing = [i for i in range(1, 41)]
+
+        routes = []
+        for out_n, in_n in enumerate(routing, start=1):
+            try:
+                inp = int(in_n)
+            except Exception:
+                inp = 0
+            if inp <= 0:
+                continue
+            routes.append({'output': out_n, 'input': inp, 'monitoring': False})
+
+        payload = {'name': name, 'routes': routes}
+        if target_id is not None:
+            payload['id'] = target_id
+
+        preset = app_inst.upsert_preset(cfg, payload)  # type: ignore[attr-defined]
+        try:
+            _console_append(f"[VIDEOHUB] Saved snapshot from device as preset #{getattr(preset, 'id', '?')}\n")
+        except Exception:
+            pass
+
+        return jsonify({'ok': True, 'preset': preset.to_dict() if hasattr(preset, 'to_dict') else preset})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
 
@@ -1486,6 +1592,60 @@ def api_videohub_labels():
             'error': str(e),
             'inputs': nums,
             'outputs': nums,
+        })
+
+
+@app.route('/api/videohub/state', methods=['GET'])
+def api_videohub_state():
+    """Return VideoHub labels + current routing snapshot.
+
+    Best-effort: if the router isn't reachable, returns a numeric fallback list
+    and an identity-style routing mapping.
+    """
+
+    fallback_count = 40
+
+    vh = _get_videohub_client_from_config()
+    if vh is None:
+        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
+        return jsonify({
+            'ok': True,
+            'configured': False,
+            'inputs': nums,
+            'outputs': nums,
+            'routing': [i for i in range(1, fallback_count + 1)],
+        })
+
+    try:
+        if hasattr(vh, 'get_state'):
+            st = vh.get_state(fallback_count=fallback_count)
+            inputs = st.get('inputs') or []
+            outputs = st.get('outputs') or []
+            routing = st.get('routing') or []
+        else:
+            # Backwards compatibility if older client is present.
+            labels = vh.get_labels(fallback_count=fallback_count)
+            inputs = labels.get('inputs', [])
+            outputs = labels.get('outputs', [])
+            n = max(fallback_count, len(inputs), len(outputs))
+            routing = [i for i in range(1, n + 1)]
+
+        return jsonify({
+            'ok': True,
+            'configured': True,
+            'inputs': inputs,
+            'outputs': outputs,
+            'routing': routing,
+        })
+    except Exception as e:
+        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
+        return jsonify({
+            'ok': True,
+            'configured': True,
+            'error': str(e),
+            'inputs': nums,
+            'outputs': nums,
+            'routing': [i for i in range(1, fallback_count + 1)],
         })
 
 

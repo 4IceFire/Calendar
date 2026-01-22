@@ -202,6 +202,50 @@ class VideohubClient:
             out[idx] = str(label or "").strip()
         return out
 
+    @staticmethod
+    def _parse_routing_block(text: str, header: str) -> dict[int, int]:
+        """Parse a routing block like VIDEO OUTPUT ROUTING.
+
+        Returns a map of 0-based output index -> 0-based input index.
+        """
+
+        if not text:
+            return {}
+
+        try:
+            token = f"{header}:"
+            start = text.find(token)
+            if start < 0:
+                return {}
+            block = text[start + len(token):]
+            block = block.lstrip("\r\n")
+            import re
+            m = re.search(r"\r?\n\r?\n", block)
+            if m:
+                block = block[:m.start()]
+            lines = [ln.strip() for ln in block.splitlines()]
+        except Exception:
+            return {}
+
+        out: dict[int, int] = {}
+        for ln in lines:
+            if not ln:
+                continue
+            # Lines look like: "0 4" => output 0 routes to input 4
+            try:
+                out_str, in_str = ln.split(None, 1)
+            except ValueError:
+                continue
+            try:
+                out_idx = int(out_str)
+                in_idx = int(in_str)
+            except Exception:
+                continue
+            if out_idx < 0 or in_idx < 0:
+                continue
+            out[out_idx] = in_idx
+        return out
+
     def get_labels(self, *, fallback_count: int = 40) -> dict[str, list[dict[str, Any]]]:
         """Fetch input/output labels from the device.
 
@@ -231,6 +275,63 @@ class VideohubClient:
         return {
             "inputs": _to_list(inputs0),
             "outputs": _to_list(outputs0),
+        }
+
+    def get_state(self, *, fallback_count: int = 40) -> dict[str, Any]:
+        """Fetch labels and current routing snapshot from the device.
+
+        Returns:
+          - inputs: [{number,label}] (1-based)
+          - outputs: [{number,label}] (1-based)
+          - routing: [input_number,...] where index 0 corresponds to output #1
+
+        If routing isn't available, defaults to an identity-style mapping.
+        """
+
+        state = ""
+        try:
+            state = self._recv_initial_state()
+        except Exception:
+            state = ""
+
+        inputs0 = self._parse_label_block(state, "INPUT LABELS")
+        outputs0 = self._parse_label_block(state, "OUTPUT LABELS")
+        routing0 = self._parse_routing_block(state, "VIDEO OUTPUT ROUTING")
+
+        def _to_list(m: dict[int, str]) -> list[dict[str, Any]]:
+            if not m:
+                return [{"number": i, "label": ""} for i in range(1, int(fallback_count) + 1)]
+            max_idx = max(m.keys()) if m else -1
+            n = max(max_idx + 1, int(fallback_count))
+            out_list: list[dict[str, Any]] = []
+            for i0 in range(0, n):
+                out_list.append({"number": i0 + 1, "label": m.get(i0, "")})
+            return out_list
+
+        inputs = _to_list(inputs0)
+        outputs = _to_list(outputs0)
+        n = max(
+            int(fallback_count),
+            len(inputs),
+            len(outputs),
+            (max(routing0.keys()) + 1) if routing0 else 0,
+        )
+
+        # Default to identity mapping where possible.
+        routing: list[int] = []
+        for out0 in range(0, n):
+            in0 = routing0.get(out0, out0)
+            # Clamp into [0, n-1] as a best-effort fallback.
+            if in0 < 0:
+                in0 = 0
+            if in0 >= n:
+                in0 = 0
+            routing.append(in0 + 1)
+
+        return {
+            "inputs": inputs,
+            "outputs": outputs,
+            "routing": routing,
         }
 
     def ping(self) -> bool:
