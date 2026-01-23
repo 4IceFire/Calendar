@@ -63,6 +63,7 @@ Event shape (simplified):
 - **GET** `/api/upcoming_triggers`
 - **Returns:** `{ now_ms, triggers: [...] }`
 - **Notes:** Used by the UI to display the next few trigger actions.
+- **Query:** optional `limit` (default `3`, max `500`).
 
 Trigger entry shape (simplified):
 ```json
@@ -150,6 +151,22 @@ Trigger entry shape (simplified):
 ```
 - **Notes:** Best-effort. Falls back to numeric-only 1..40 if labels can’t be fetched.
 
+### Get labels + current routing snapshot
+- **GET** `/api/videohub/state`
+- **Returns:**
+```json
+{
+  "ok": true,
+  "configured": true,
+  "inputs": [{"number": 1, "label": "Camera 1"}],
+  "outputs": [{"number": 1, "label": "TV 1"}],
+  "routing": [4, 1, 2, 3]
+}
+```
+- **Notes:**
+  - `routing` is a 1-based list where index 0 corresponds to output #1.
+  - Best-effort. If routing can’t be fetched, returns an identity-style routing (1..40).
+
 ### Presets: list
 - **GET** `/api/videohub/presets`
 - **Returns:** `{ ok: true, presets: [...] }`
@@ -160,19 +177,39 @@ Trigger entry shape (simplified):
 ```json
 {
   "name": "Sunday Service",
+  "locked": false,
   "routes": [
     {"output": 1, "input": 4, "monitoring": false}
   ]
 }
 ```
-- **Notes:** Presets save **numbers only**; names/labels are fetched separately.
+- **Notes:**
+  - Presets save **numbers only**; names/labels are fetched separately.
+  - `locked=true` prevents updates/deletes until unlocked.
 
 ### Presets: update
 - **PUT** `/api/videohub/presets/<id>`
 - **Body:** same as create.
 
+### Presets: lock/unlock (prevents edits)
+- **POST** `/api/videohub/presets/<id>/lock`
+- **Body:**
+```json
+{ "locked": true }
+```
+- **Notes:**
+  - If `locked` is omitted, the server toggles the current value.
+
 ### Presets: delete
 - **DELETE** `/api/videohub/presets/<id>`
+
+### Presets: save snapshot from device
+- **POST** `/api/videohub/presets/from_device`
+- **Body:**
+```json
+{ "name": "Default routing" }
+```
+- **Notes:** Pulls current routing from the configured VideoHub and saves it as a preset snapshot (outputs 1..40).
 
 ### Presets: apply (Companion → WebUI)
 - **POST** `/api/videohub/presets/<id>/apply`
@@ -212,6 +249,7 @@ Trigger entry shape (simplified):
 ### Status indicators
 - **GET** `/api/companion_status`
 - **GET** `/api/propresenter_status`
+- **GET** `/api/videohub_status`
 
 ---
 

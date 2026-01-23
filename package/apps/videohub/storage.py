@@ -103,6 +103,31 @@ def load_presets(path: str | Path = DEFAULT_PRESETS_FILE) -> list[VideohubPreset
         # Ensure normalized structure is persisted
         if not isinstance(item, dict) or ("id" not in item) or ("routes" not in item) or ("name" not in item):
             changed = True
+        else:
+            # Compact legacy data: if a route explicitly stores monitoring=false, rewrite
+            # the file so the key is omitted (monitoring only persisted when true).
+            try:
+                routes_raw = item.get("routes")
+                if routes_raw is None:
+                    routes_raw = item.get("mappings")
+                if isinstance(routes_raw, list):
+                    for r in routes_raw:
+                        if not isinstance(r, dict):
+                            continue
+                        if "monitoring" in r or "monitor" in r:
+                            raw = r.get("monitoring", r.get("monitor", False))
+                            if isinstance(raw, bool):
+                                is_true = raw
+                            elif isinstance(raw, (int, float)):
+                                is_true = bool(raw)
+                            else:
+                                is_true = str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
+                            if not is_true:
+                                changed = True
+                                break
+            except Exception:
+                # If anything about the legacy structure is odd, avoid crashing.
+                pass
 
     if changed:
         save_presets(out, path=p)
@@ -113,5 +138,9 @@ def load_presets(path: str | Path = DEFAULT_PRESETS_FILE) -> list[VideohubPreset
 def save_presets(presets: list[VideohubPreset], path: str | Path = DEFAULT_PRESETS_FILE) -> None:
     p = Path(path)
     data = [pr.to_dict() for pr in (presets or [])]
+    payload = json.dumps(data, indent=2)
     with _lock:
-        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(p)

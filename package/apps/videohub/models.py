@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -17,7 +17,14 @@ class VideohubRoute:
     monitoring: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        out: dict[str, Any] = {
+            "output": int(self.output),
+            "input": int(self.input),
+        }
+        # Keep storage compact: only persist when a route targets the monitoring table.
+        if bool(self.monitoring):
+            out["monitoring"] = True
+        return out
 
 
 @dataclass

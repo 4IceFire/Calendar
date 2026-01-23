@@ -12,6 +12,5 @@ This file exists so older imports continue working:
 from videohub import (  # noqa: F401
     DEFAULT_PORT,
     VideohubClient,
-    VideohubConfig,
     get_videohub_client_from_config,
 )

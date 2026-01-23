@@ -319,8 +319,56 @@ _videohub_status_cache = {'ts': 0.0, 'connected': False}
 _status_cache_lock = threading.Lock()
 _STATUS_CACHE_TTL_SECONDS = 2.0
 
+# Track last-known connectivity so we can log state changes (ONLINE/OFFLINE)
+# without spamming the console on every poll.
+_connectivity_last: dict[str, bool | None] = {
+    'companion': None,
+    'propresenter': None,
+    'videohub': None,
+}
+
+
+def _log_connectivity_change(service: str, connected: bool, *, detail: str = '') -> None:
+    """Log a line when a service flips online/offline.
+
+    This is used by the lightweight UI status endpoints which are polled
+    frequently; we only emit output on transitions.
+    """
+
+    label = {
+        'companion': 'Companion',
+        'propresenter': 'ProPresenter',
+        'videohub': 'VideoHub',
+    }.get(service, service)
+
+    should_log = False
+    with _status_cache_lock:
+        prev = _connectivity_last.get(service, None)
+        if prev is None:
+            _connectivity_last[service] = bool(connected)
+        elif bool(prev) != bool(connected):
+            _connectivity_last[service] = bool(connected)
+            should_log = True
+
+    if not should_log:
+        return
+
+    state = 'ONLINE' if bool(connected) else 'OFFLINE'
+    suffix = ''
+    try:
+        d = str(detail or '').strip()
+        if d:
+            suffix = f" ({d})"
+    except Exception:
+        suffix = ''
+
+    try:
+        _console_append(f"[STATUS] {label} is now {state}{suffix}\n")
+    except Exception:
+        pass
+
 # Upcoming trigger cache (to avoid recomputing schedule for each client refresh)
-_upcoming_triggers_cache = {'ts': 0.0, 'events_file': '', 'payload': None}
+_upcoming_triggers_cache = {'ts': 0.0, 'events_file': '', 'limit': None, 'payload': None}
 _UPCOMING_TRIGGERS_TTL_SECONDS = 1.0
 
 
@@ -647,20 +695,29 @@ def api_upcoming_triggers():
     except Exception:
         events_file = 'events.json'
 
+    # optional limit override (defaults to dashboard-friendly 3)
+    try:
+        limit = int(request.args.get('limit', 3))
+    except Exception:
+        limit = 3
+    limit = max(0, min(limit, 500))
+
     now = time.time()
     with _status_cache_lock:
         if (
             _upcoming_triggers_cache.get('payload') is not None
             and _upcoming_triggers_cache.get('events_file') == events_file
+            and int(_upcoming_triggers_cache.get('limit') or 0) == int(limit)
             and (now - float(_upcoming_triggers_cache.get('ts', 0.0))) < _UPCOMING_TRIGGERS_TTL_SECONDS
         ):
             return jsonify(_upcoming_triggers_cache.get('payload'))
 
-    payload = _compute_upcoming_triggers_payload(events_file=events_file, limit=3)
+    payload = _compute_upcoming_triggers_payload(events_file=events_file, limit=limit)
 
     with _status_cache_lock:
         _upcoming_triggers_cache['ts'] = now
         _upcoming_triggers_cache['events_file'] = events_file
+        _upcoming_triggers_cache['limit'] = limit
         _upcoming_triggers_cache['payload'] = payload
 
     resp = jsonify(payload)
@@ -672,6 +729,11 @@ def api_upcoming_triggers():
 @app.route('/calendar')
 def calendar_page():
     return render_template('calendar.html')
+
+
+@app.route('/calendar/triggers')
+def calendar_triggers_page():
+    return render_template('calendar_triggers.html')
 
 
 @app.route('/templates')
@@ -1190,14 +1252,26 @@ def companion_status():
     with _status_cache_lock:
         _companion_status_cache['ts'] = now
         _companion_status_cache['connected'] = bool(status)
+
+    # Log only on ONLINE/OFFLINE transitions.
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        ip = str(cfg.get('companion_ip', '')).strip()
+        port = int(cfg.get('companion_port', 0))
+        detail = f"{ip}:{port}" if ip and port else (ip or '')
+    except Exception:
+        detail = ''
+    _log_connectivity_change('companion', bool(status), detail=detail)
+
     return jsonify({'connected': status})
 
 
 @app.route('/api/propresenter_status')
 def propresenter_status():
     """Lightweight ProPresenter connectivity check for the UI indicator.
-
-    Intentionally does not print to console to avoid noisy logs.
     """
     now = time.time()
     with _status_cache_lock:
@@ -1230,6 +1304,12 @@ def propresenter_status():
         _propresenter_status_cache['ts'] = now
         _propresenter_status_cache['connected'] = bool(status)
 
+    try:
+        detail = f"{ip}:{port}" if ip and port else ''
+    except Exception:
+        detail = ''
+    _log_connectivity_change('propresenter', bool(status), detail=detail)
+
     return jsonify({'connected': status})
 
 
@@ -1257,6 +1337,18 @@ def videohub_status():
     with _status_cache_lock:
         _videohub_status_cache['ts'] = now
         _videohub_status_cache['connected'] = bool(status)
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        ip = str(cfg.get('videohub_ip', '')).strip()
+        port = int(cfg.get('videohub_port', 0))
+        detail = f"{ip}:{port}" if ip and port else (ip or '')
+    except Exception:
+        detail = ''
+    _log_connectivity_change('videohub', bool(status), detail=detail)
 
     return jsonify({'connected': bool(status)})
 
@@ -1533,7 +1625,7 @@ def api_videohub_presets_from_device():
                 inp = 0
             if inp <= 0:
                 continue
-            routes.append({'output': out_n, 'input': inp, 'monitoring': False})
+            routes.append({'output': out_n, 'input': inp})
 
         payload = {'name': name, 'routes': routes}
         if target_id is not None:

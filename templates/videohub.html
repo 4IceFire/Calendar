@@ -42,10 +42,6 @@
       <div class="card-body">
         <div class="d-flex align-items-center justify-content-between mb-2">
           <h2 class="h5 mb-0" id="vh-editor-title">Snapshot</h2>
-          <div class="d-flex gap-2">
-            <button id="vh-identity" class="btn btn-sm btn-outline-secondary" type="button">Identity</button>
-            <button id="vh-clear" class="btn btn-sm btn-outline-secondary" type="button">All → 1</button>
-          </div>
         </div>
 
         <div class="mb-3">
@@ -170,13 +166,9 @@ function _applyEditorLockState(){
   const nameEl = document.getElementById('vh-name');
   const saveEl = document.getElementById('vh-save');
   const delEl = document.getElementById('vh-delete');
-  const identityEl = document.getElementById('vh-identity');
-  const clearEl = document.getElementById('vh-clear');
   if(nameEl) nameEl.disabled = locked;
   if(saveEl) saveEl.disabled = locked;
   if(delEl) delEl.disabled = locked || (_vhCurrentId == null);
-  if(identityEl) identityEl.disabled = locked;
-  if(clearEl) clearEl.disabled = locked;
 
   const grid = document.getElementById('vh-grid');
   if(grid){
@@ -190,7 +182,7 @@ function _routesFromRouting(){
   for(let o=1; o<=n; o++){
     const inp = parseInt(_vhRouting[o-1], 10);
     if(!Number.isFinite(inp) || inp <= 0) throw new Error(`Output #${o} must have a valid input number`);
-    routes.push({output:o, input:inp, monitoring:false});
+    routes.push({output:o, input:inp});
   }
   return routes;
 }
@@ -356,13 +348,6 @@ async function _deleteCurrent(){
   await _loadPresets();
 }
 
-async function _ping(){
-  const res = await fetch('/api/videohub/ping');
-  const data = await res.json().catch(()=>({}));
-  if(!res.ok || !data.ok) throw new Error(data.error || 'Ping failed');
-  _vhSetStatus('VideoHub ping OK.', 'ok');
-}
-
 // UI wiring
 
 document.getElementById('vh-new').addEventListener('click', () => {
@@ -391,20 +376,6 @@ document.getElementById('vh-apply').addEventListener('click', async () => {
 document.getElementById('vh-delete').addEventListener('click', async () => {
   try{ await _deleteCurrent(); }
   catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
-});
-
-document.getElementById('vh-identity').addEventListener('click', () => {
-  const n = _nPorts();
-  _vhRouting = [];
-  for(let i=1;i<=n;i++) _vhRouting.push(i);
-  _renderGrid();
-});
-
-document.getElementById('vh-clear').addEventListener('click', () => {
-  const n = _nPorts();
-  _vhRouting = [];
-  for(let i=1;i<=n;i++) _vhRouting.push(1);
-  _renderGrid();
 });
 
 document.getElementById('vh-grid').addEventListener('change', (ev) => {

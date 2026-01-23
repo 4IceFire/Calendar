@@ -18,19 +18,18 @@ That is sufficient for routing triggers initiated by the CLI or Web UI.
 from __future__ import annotations
 
 import socket
-from dataclasses import dataclass
 from datetime import datetime
+import re
 from typing import Optional, Any
 
 
 DEFAULT_PORT = 9990
 
-
-@dataclass(frozen=True)
-class VideohubConfig:
-    host: str
-    port: int = DEFAULT_PORT
-    timeout: float = 2.0
+# Safety caps: keep reads bounded even if a device misbehaves.
+_RECV_CHUNK_BYTES = 8192
+_STATE_DUMP_DEFAULT_MAX_BYTES = 512 * 1024
+_STATE_DUMP_HARD_CAP_BYTES = 2 * 1024 * 1024
+_RESPONSE_DEFAULT_MAX_BYTES = 64 * 1024
 
 
 def get_videohub_client_from_config(
@@ -63,10 +62,19 @@ def get_videohub_client_from_config(
     except Exception:
         port_value = DEFAULT_PORT
 
+    # Be defensive: invalid ports should not crash the server.
+    if port_value < 1 or port_value > 65535:
+        port_value = DEFAULT_PORT
+
     try:
         timeout_value = float(timeout if timeout is not None else cfg.get("videohub_timeout", 2.0))
     except Exception:
         timeout_value = 2.0
+
+    # Clamp timeout to avoid hangs (too large) or immediate failures (<=0).
+    if not (timeout_value > 0):
+        timeout_value = 2.0
+    timeout_value = max(0.1, min(timeout_value, 30.0))
 
     return VideohubClient(host_value, port_value, timeout=timeout_value, debug=debug)
 
@@ -104,13 +112,24 @@ class VideohubClient:
         self._connected = ok
         return ok
 
-    def _send(self, payload: str, *, read_response: bool = False) -> Optional[str]:
+    def _send(
+        self,
+        payload: str,
+        *,
+        read_response: bool = False,
+        max_response_bytes: int = _RESPONSE_DEFAULT_MAX_BYTES,
+    ) -> Optional[str]:
         if not self.host:
             raise ValueError("VideoHub host is required")
 
         data = payload.encode("utf-8", errors="replace")
 
         self._dbg(f"TCP {self.host}:{self.port} send {len(data)} bytes")
+        max_response_bytes = int(max_response_bytes or 0)
+        if max_response_bytes <= 0:
+            max_response_bytes = _RESPONSE_DEFAULT_MAX_BYTES
+        max_response_bytes = min(max_response_bytes, _STATE_DUMP_HARD_CAP_BYTES)
+
         with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
             sock.settimeout(self.timeout)
             sock.sendall(data)
@@ -118,13 +137,19 @@ class VideohubClient:
             if not read_response:
                 return None
 
-            try:
-                chunk = sock.recv(8192)
-            except socket.timeout:
-                return ""
-            return chunk.decode("utf-8", errors="replace")
+            # Read until timeout or we hit the max cap.
+            buf = bytearray()
+            while len(buf) < max_response_bytes:
+                try:
+                    chunk = sock.recv(min(_RECV_CHUNK_BYTES, max_response_bytes - len(buf)))
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf.extend(chunk)
+            return bytes(buf).decode("utf-8", errors="replace")
 
-    def _recv_initial_state(self, *, max_bytes: int = 512 * 1024) -> str:
+    def _recv_initial_state(self, *, max_bytes: int = _STATE_DUMP_DEFAULT_MAX_BYTES) -> str:
         """Read the initial state dump that VideoHub sends upon connection.
 
         Many VideoHub devices push their full state/labels immediately after a TCP
@@ -134,13 +159,22 @@ class VideohubClient:
         if not self.host:
             raise ValueError("VideoHub host is required")
 
+        # Keep memory bounded even if a device sends an unexpectedly large dump.
+        try:
+            max_bytes = int(max_bytes)
+        except Exception:
+            max_bytes = _STATE_DUMP_DEFAULT_MAX_BYTES
+        if max_bytes <= 0:
+            max_bytes = _STATE_DUMP_DEFAULT_MAX_BYTES
+        max_bytes = min(max_bytes, _STATE_DUMP_HARD_CAP_BYTES)
+
         buf = bytearray()
         self._dbg(f"TCP {self.host}:{self.port} recv initial state")
         with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
             sock.settimeout(self.timeout)
             while len(buf) < max_bytes:
                 try:
-                    chunk = sock.recv(8192)
+                    chunk = sock.recv(min(_RECV_CHUNK_BYTES, max_bytes - len(buf)))
                 except socket.timeout:
                     break
                 if not chunk:
@@ -167,23 +201,15 @@ class VideohubClient:
         # 1 Camera 2
         #
         # (blank line ends the block)
-        try:
-            token = f"{header}:"
-            start = text.find(token)
-            if start < 0:
-                return {}
-            block = text[start + len(token):]
-            # Trim leading newlines
-            block = block.lstrip("\r\n")
-            # Take until first blank line
-            m = None
-            import re
-            m = re.search(r"\r?\n\r?\n", block)
-            if m:
-                block = block[:m.start()]
-            lines = [ln.strip() for ln in block.splitlines()]
-        except Exception:
+        token = f"{header}:"
+        start = text.find(token)
+        if start < 0:
             return {}
+        block = text[start + len(token):].lstrip("\r\n")
+        m = re.search(r"\r?\n\r?\n", block)
+        if m:
+            block = block[:m.start()]
+        lines = [ln.strip() for ln in block.splitlines()]
 
         out: dict[int, str] = {}
         for ln in lines:
@@ -212,20 +238,15 @@ class VideohubClient:
         if not text:
             return {}
 
-        try:
-            token = f"{header}:"
-            start = text.find(token)
-            if start < 0:
-                return {}
-            block = text[start + len(token):]
-            block = block.lstrip("\r\n")
-            import re
-            m = re.search(r"\r?\n\r?\n", block)
-            if m:
-                block = block[:m.start()]
-            lines = [ln.strip() for ln in block.splitlines()]
-        except Exception:
+        token = f"{header}:"
+        start = text.find(token)
+        if start < 0:
             return {}
+        block = text[start + len(token):].lstrip("\r\n")
+        m = re.search(r"\r?\n\r?\n", block)
+        if m:
+            block = block[:m.start()]
+        lines = [ln.strip() for ln in block.splitlines()]
 
         out: dict[int, int] = {}
         for ln in lines:
