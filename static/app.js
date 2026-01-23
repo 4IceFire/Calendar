@@ -304,6 +304,9 @@ function _renderConfigGroups(cfg) {
   if (!container) return;
   container.innerHTML = '';
 
+  const mainTitles = new Set(['Web UI', 'Companion', 'ProPresenter', 'VideoHub']);
+  const schedulingKeys = ['EVENTS_FILE'];
+
   const groups = [
     {
       title: 'Web UI',
@@ -321,21 +324,23 @@ function _renderConfigGroups(cfg) {
       title: 'VideoHub',
       keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
     },
-    {
-      title: 'Scheduling',
-      keys: ['EVENTS_FILE'],
-    },
   ];
 
   const used = new Set();
+  let proPresenterBody = null;
+  let webUiBody = null;
 
   for (const g of groups) {
     const presentKeys = (g.keys || []).filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
     if (!presentKeys.length) continue;
     for (const k of presentKeys) used.add(k);
 
+    const isMain = mainTitles.has(String(g.title || ''));
+    const col = document.createElement('div');
+    col.className = isMain ? 'col-12 col-md-6' : 'col-12';
+
     const card = document.createElement('div');
-    card.className = 'card mb-3';
+    card.className = isMain ? 'card h-100' : 'card';
     const body = document.createElement('div');
     body.className = 'card-body';
     const h = document.createElement('h2');
@@ -346,26 +351,65 @@ function _renderConfigGroups(cfg) {
     for (const k of presentKeys) {
       body.appendChild(_renderConfigField(k, cfg[k]));
     }
+
+    // Remember key bodies so we can add nested sub-boxes later.
+    if (String(g.title) === 'ProPresenter') proPresenterBody = body;
+    if (String(g.title) === 'Web UI') webUiBody = body;
+
     card.appendChild(body);
-    container.appendChild(card);
+    col.appendChild(card);
+    container.appendChild(col);
   }
 
-  // Everything else (sorted) so we truly show all variables.
+  // Scheduling: render inside Web UI as a nested sub-box.
+  const presentSchedulingKeys = schedulingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
+  if (webUiBody && presentSchedulingKeys.length) {
+    for (const k of presentSchedulingKeys) used.add(k);
+    const sub = document.createElement('div');
+    sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+    const h = document.createElement('div');
+    h.className = 'fw-semibold mb-2';
+    h.textContent = 'Scheduling';
+    sub.appendChild(h);
+    for (const k of presentSchedulingKeys) {
+      sub.appendChild(_renderConfigField(k, cfg[k]));
+    }
+    webUiBody.appendChild(sub);
+  }
+
+  // Everything else (sorted) gets included inside ProPresenter.
   const otherKeys = Object.keys(cfg || {}).filter(k => !used.has(k)).sort();
   if (otherKeys.length) {
-    const card = document.createElement('div');
-    card.className = 'card mb-3';
-    const body = document.createElement('div');
-    body.className = 'card-body';
-    const h = document.createElement('h2');
-    h.className = 'h5';
-    h.textContent = 'Other';
-    body.appendChild(h);
-    for (const k of otherKeys) {
-      body.appendChild(_renderConfigField(k, cfg[k]));
+    if (proPresenterBody) {
+      const sub = document.createElement('div');
+      sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+      const h = document.createElement('div');
+      h.className = 'fw-semibold mb-2';
+      h.textContent = 'Other';
+      sub.appendChild(h);
+      for (const k of otherKeys) {
+        sub.appendChild(_renderConfigField(k, cfg[k]));
+      }
+      proPresenterBody.appendChild(sub);
+    } else {
+      // Fallback: if ProPresenter group isn't present, still show these somewhere.
+      const col = document.createElement('div');
+      col.className = 'col-12';
+      const card = document.createElement('div');
+      card.className = 'card';
+      const body = document.createElement('div');
+      body.className = 'card-body';
+      const h = document.createElement('h2');
+      h.className = 'h5';
+      h.textContent = 'Other';
+      body.appendChild(h);
+      for (const k of otherKeys) {
+        body.appendChild(_renderConfigField(k, cfg[k]));
+      }
+      card.appendChild(body);
+      col.appendChild(card);
+      container.appendChild(col);
     }
-    card.appendChild(body);
-    container.appendChild(card);
   }
 }
 
