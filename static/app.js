@@ -50,12 +50,42 @@ async function updateProPresenter() {
   }
 }
 
+// Poll VideoHub status endpoint and update indicator
+async function updateVideoHub() {
+  try {
+    const res = await fetch('/api/videohub_status');
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    const dot = document.getElementById('videohub-dot');
+    const label = document.getElementById('videohub-label');
+    if (!dot || !label) return;
+    if (data.connected) {
+      dot.classList.remove('bg-danger');
+      dot.classList.add('bg-success');
+      label.textContent = 'VideoHub: Online';
+    } else {
+      dot.classList.remove('bg-success');
+      dot.classList.add('bg-danger');
+      label.textContent = 'VideoHub: Offline';
+    }
+  } catch (e) {
+    const dot = document.getElementById('videohub-dot');
+    const label = document.getElementById('videohub-label');
+    if (!dot || !label) return;
+    dot.classList.remove('bg-success');
+    dot.classList.add('bg-danger');
+    label.textContent = 'VideoHub: Unknown';
+  }
+}
+
 // initial check
 updateCompanion();
 updateProPresenter();
+updateVideoHub();
 // refresh every 10s for more responsive UI
 setInterval(updateCompanion, 10000);
 setInterval(updateProPresenter, 10000);
+setInterval(updateVideoHub, 10000);
 
 // --- Config page ---
 function _configSetStatus(msg, kind) {
@@ -142,9 +172,26 @@ const CONFIG_META = {
     help: 'Which ProPresenter timer this app sets/resets/starts.',
   },
 
+  videohub_ip: {
+    label: 'VideoHub Host',
+    help: 'Blackmagic VideoHub IP or hostname.',
+  },
+  videohub_port: {
+    label: 'VideoHub Port',
+    help: 'Blackmagic VideoHub TCP port (default 9990).',
+  },
+  videohub_timeout: {
+    label: 'VideoHub Timeout (seconds)',
+    help: 'Socket timeout used for VideoHub TCP requests.',
+  },
+  videohub_presets_file: {
+    label: 'VideoHub Presets File',
+    help: 'JSON file where VideoHub routing presets are stored.',
+  },
+
   EVENTS_FILE: {
     label: 'Events File',
-    help: 'JSON file used to store calendar events.',
+    help: 'JSON file used to store scheduled events.',
   },
 
   // Legacy keys that may still exist in older config.json files
@@ -257,6 +304,9 @@ function _renderConfigGroups(cfg) {
   if (!container) return;
   container.innerHTML = '';
 
+  const mainTitles = new Set(['Web UI', 'Companion', 'ProPresenter', 'VideoHub']);
+  const schedulingKeys = ['EVENTS_FILE'];
+
   const groups = [
     {
       title: 'Web UI',
@@ -271,20 +321,26 @@ function _renderConfigGroups(cfg) {
       keys: ['propresenter_ip', 'propresenter_port', 'propresenter_timer_index'],
     },
     {
-      title: 'Calendar',
-      keys: ['EVENTS_FILE'],
+      title: 'VideoHub',
+      keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
     },
   ];
 
   const used = new Set();
+  let proPresenterBody = null;
+  let webUiBody = null;
 
   for (const g of groups) {
     const presentKeys = (g.keys || []).filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
     if (!presentKeys.length) continue;
     for (const k of presentKeys) used.add(k);
 
+    const isMain = mainTitles.has(String(g.title || ''));
+    const col = document.createElement('div');
+    col.className = isMain ? 'col-12 col-md-6' : 'col-12';
+
     const card = document.createElement('div');
-    card.className = 'card mb-3';
+    card.className = isMain ? 'card h-100' : 'card';
     const body = document.createElement('div');
     body.className = 'card-body';
     const h = document.createElement('h2');
@@ -295,26 +351,65 @@ function _renderConfigGroups(cfg) {
     for (const k of presentKeys) {
       body.appendChild(_renderConfigField(k, cfg[k]));
     }
+
+    // Remember key bodies so we can add nested sub-boxes later.
+    if (String(g.title) === 'ProPresenter') proPresenterBody = body;
+    if (String(g.title) === 'Web UI') webUiBody = body;
+
     card.appendChild(body);
-    container.appendChild(card);
+    col.appendChild(card);
+    container.appendChild(col);
   }
 
-  // Everything else (sorted) so we truly show all variables.
+  // Scheduling: render inside Web UI as a nested sub-box.
+  const presentSchedulingKeys = schedulingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
+  if (webUiBody && presentSchedulingKeys.length) {
+    for (const k of presentSchedulingKeys) used.add(k);
+    const sub = document.createElement('div');
+    sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+    const h = document.createElement('div');
+    h.className = 'fw-semibold mb-2';
+    h.textContent = 'Scheduling';
+    sub.appendChild(h);
+    for (const k of presentSchedulingKeys) {
+      sub.appendChild(_renderConfigField(k, cfg[k]));
+    }
+    webUiBody.appendChild(sub);
+  }
+
+  // Everything else (sorted) gets included inside ProPresenter.
   const otherKeys = Object.keys(cfg || {}).filter(k => !used.has(k)).sort();
   if (otherKeys.length) {
-    const card = document.createElement('div');
-    card.className = 'card mb-3';
-    const body = document.createElement('div');
-    body.className = 'card-body';
-    const h = document.createElement('h2');
-    h.className = 'h5';
-    h.textContent = 'Other';
-    body.appendChild(h);
-    for (const k of otherKeys) {
-      body.appendChild(_renderConfigField(k, cfg[k]));
+    if (proPresenterBody) {
+      const sub = document.createElement('div');
+      sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+      const h = document.createElement('div');
+      h.className = 'fw-semibold mb-2';
+      h.textContent = 'Other';
+      sub.appendChild(h);
+      for (const k of otherKeys) {
+        sub.appendChild(_renderConfigField(k, cfg[k]));
+      }
+      proPresenterBody.appendChild(sub);
+    } else {
+      // Fallback: if ProPresenter group isn't present, still show these somewhere.
+      const col = document.createElement('div');
+      col.className = 'col-12';
+      const card = document.createElement('div');
+      card.className = 'card';
+      const body = document.createElement('div');
+      body.className = 'card-body';
+      const h = document.createElement('h2');
+      h.className = 'h5';
+      h.textContent = 'Other';
+      body.appendChild(h);
+      for (const k of otherKeys) {
+        body.appendChild(_renderConfigField(k, cfg[k]));
+      }
+      card.appendChild(body);
+      col.appendChild(card);
+      container.appendChild(col);
     }
-    card.appendChild(body);
-    container.appendChild(card);
   }
 }
 
@@ -512,6 +607,8 @@ if (document.getElementById('console-page')) {
 }
 
 // --- Timers page ---
+let _timersButtonTemplates = [];
+
 function _timersSetStatus(msg, kind) {
   const el = document.getElementById('timers-status');
   if (!el) return;
@@ -525,6 +622,198 @@ function _timersClearStatus() {
   if (!el) return;
   el.className = '';
   el.textContent = '';
+}
+
+function _timersNormalizeButtonURL(buttonURL) {
+  let s = String(buttonURL || '').trim();
+  if (!s) return '';
+  if (/^location\/\d+\/\d+\/\d+\/press$/.test(s)) return s;
+  if (/^\d+\/\d+\/\d+$/.test(s)) return `location/${s}/press`;
+  return '__INVALID__';
+}
+
+function _timersButtonURLToDisplay(buttonURL) {
+  const s = String(buttonURL || '').trim();
+  const m = s.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+  if (m && m[1]) return m[1];
+  return s;
+}
+
+function _timersTemplateToURL(idx) {
+  const i = Number(idx);
+  if (!Number.isFinite(i)) return '';
+  const t = _timersButtonTemplates[i];
+  if (!t) return '';
+  const url = t.buttonURL || (t.pattern ? `location/${t.pattern}/press` : '');
+  return String(url || '').trim();
+}
+
+function _timersNewPressRow(pressObj) {
+  const row = document.createElement('div');
+  row.className = 'timer-press-row mb-2';
+  row.dataset.role = 'press-row';
+
+  const sel = document.createElement('select');
+  sel.className = 'form-select form-select-sm';
+  // Keep select and input the same size
+  sel.style.flex = '1 1 0';
+  sel.style.minWidth = '0';
+  sel.dataset.role = 'press-template';
+
+  const optNone = document.createElement('option');
+  optNone.value = '';
+  optNone.textContent = '(custom)';
+  sel.appendChild(optNone);
+  _timersButtonTemplates.forEach((b, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = `${b.label || 'Template'} — ${b.pattern || ''}`.trim();
+    sel.appendChild(opt);
+  });
+
+  const urlInput = document.createElement('input');
+  urlInput.type = 'text';
+  urlInput.className = 'form-control form-control-sm';
+  urlInput.placeholder = 'button URL (e.g. 1/0/1 or location/1/0/1/press)';
+  urlInput.dataset.role = 'press-url';
+
+  const upBtn = document.createElement('button');
+  upBtn.className = 'btn btn-sm btn-outline-secondary btn-icon-sm';
+  upBtn.textContent = '▲';
+  upBtn.title = 'Move up';
+  upBtn.setAttribute('aria-label', 'Move up');
+  upBtn.dataset.pressAction = 'up';
+
+  const downBtn = document.createElement('button');
+  downBtn.className = 'btn btn-sm btn-outline-secondary btn-icon-sm';
+  downBtn.textContent = '▼';
+  downBtn.title = 'Move down';
+  downBtn.setAttribute('aria-label', 'Move down');
+  downBtn.dataset.pressAction = 'down';
+
+  const moveWrap = document.createElement('div');
+  moveWrap.className = 'd-flex flex-column align-items-center gap-1';
+  moveWrap.appendChild(upBtn);
+  moveWrap.appendChild(downBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn btn-sm btn-outline-danger';
+  delBtn.textContent = 'Remove';
+  delBtn.dataset.pressAction = 'delete';
+
+  row.appendChild(sel);
+  row.appendChild(urlInput);
+  row.appendChild(moveWrap);
+  row.appendChild(delBtn);
+
+  // Populate from existing data
+  const rawUrl = pressObj && typeof pressObj === 'object' ? (pressObj.buttonURL || pressObj.url || '') : String(pressObj || '');
+  const normalized = _timersNormalizeButtonURL(rawUrl);
+  // Try to match a template
+  let matched = false;
+  if (normalized && normalized !== '__INVALID__') {
+    _timersButtonTemplates.forEach((b, i) => {
+      if (matched) return;
+      const u = String(b.buttonURL || (b.pattern ? `location/${b.pattern}/press` : '')).trim();
+      if (u && u === normalized) {
+        sel.value = String(i);
+        // Show short form in the input (but keep it disabled)
+        urlInput.value = String(b.pattern || _timersButtonURLToDisplay(u) || '');
+        urlInput.disabled = true;
+        matched = true;
+      }
+    });
+  }
+  if (!matched) {
+    sel.value = '';
+    // For custom entries, prefer short display like 1/0/1
+    urlInput.value = normalized === '__INVALID__'
+      ? String(rawUrl || '')
+      : _timersButtonURLToDisplay(normalized || '');
+    urlInput.disabled = false;
+  }
+
+  return row;
+}
+
+function _timersUpdatePressSummary(tr) {
+  const summary = tr.querySelector('[data-role="presses-summary"]');
+  const list = tr.querySelector('[data-role="presses-list"]');
+  if (!summary || !list) return;
+  const count = list.querySelectorAll('[data-role="press-row"]').length;
+  summary.textContent = `${count} press${count === 1 ? '' : 'es'}`;
+}
+
+function _timersWirePressesDetailsAnimation(detailsEl) {
+  if (!detailsEl) return;
+  const summaryEl = detailsEl.querySelector('summary');
+  const bodyEl = detailsEl.querySelector('.timer-presses-body');
+  if (!summaryEl || !bodyEl) return;
+
+  // Avoid double-binding if re-rendered.
+  if (detailsEl.__animatedBound) return;
+  detailsEl.__animatedBound = true;
+
+  summaryEl.addEventListener('click', (ev) => {
+    // We'll manage open/close ourselves to allow animation.
+    ev.preventDefault();
+
+    const durationMs = 180;
+    const isOpen = detailsEl.hasAttribute('open');
+
+    // Clear any previous transitionend handler by cloning if needed
+    // (keep it simple: use {once:true} handlers below).
+
+    if (!isOpen) {
+      detailsEl.setAttribute('open', '');
+
+      // Start collapsed
+      bodyEl.style.overflow = 'hidden';
+      bodyEl.style.maxHeight = '0px';
+      bodyEl.style.opacity = '0';
+      bodyEl.style.transition = `max-height ${durationMs}ms ease, opacity ${durationMs}ms ease`;
+
+      requestAnimationFrame(() => {
+        const h = bodyEl.scrollHeight;
+        bodyEl.style.maxHeight = `${h}px`;
+        bodyEl.style.opacity = '1';
+      });
+
+      const onEndOpen = (e) => {
+        if (e.propertyName !== 'max-height') return;
+        bodyEl.removeEventListener('transitionend', onEndOpen);
+        // Let it size naturally after opening.
+        bodyEl.style.transition = '';
+        bodyEl.style.maxHeight = '';
+        bodyEl.style.opacity = '';
+        bodyEl.style.overflow = '';
+      };
+      bodyEl.addEventListener('transitionend', onEndOpen);
+    } else {
+      // Animate closed, then remove [open]
+      const h = bodyEl.scrollHeight;
+      bodyEl.style.overflow = 'hidden';
+      bodyEl.style.maxHeight = `${h}px`;
+      bodyEl.style.opacity = '1';
+      bodyEl.style.transition = `max-height ${durationMs}ms ease, opacity ${durationMs}ms ease`;
+
+      requestAnimationFrame(() => {
+        bodyEl.style.maxHeight = '0px';
+        bodyEl.style.opacity = '0';
+      });
+
+      const onEndClose = (e) => {
+        if (e.propertyName !== 'max-height') return;
+        bodyEl.removeEventListener('transitionend', onEndClose);
+        detailsEl.removeAttribute('open');
+        bodyEl.style.transition = '';
+        bodyEl.style.maxHeight = '';
+        bodyEl.style.opacity = '';
+        bodyEl.style.overflow = '';
+      };
+      bodyEl.addEventListener('transitionend', onEndClose);
+    }
+  });
 }
 
 function _timersRenderPresets(presets) {
@@ -559,16 +848,50 @@ function _timersRenderPresets(presets) {
     input.dataset.role = 'preset-time';
     timeTd.appendChild(input);
 
+    const pressesTd = document.createElement('td');
+    const details = document.createElement('details');
+    details.className = 'timer-presses';
+    details.dataset.role = 'presses-details';
+    const summary = document.createElement('summary');
+    summary.dataset.role = 'presses-summary';
+    summary.textContent = '0 presses';
+    const inner = document.createElement('div');
+    inner.className = 'timer-presses-body mt-2';
+
+    const header = document.createElement('div');
+    header.className = 'timer-press-header';
+    header.innerHTML = '<div>Template</div><div>Button</div><div class="text-center">Move</div><div></div>';
+
+    const list = document.createElement('div');
+    list.dataset.role = 'presses-list';
+    const addPressBtn = document.createElement('button');
+    addPressBtn.type = 'button';
+    addPressBtn.className = 'btn btn-sm btn-outline-primary mt-1';
+    addPressBtn.textContent = 'Add Press';
+    addPressBtn.dataset.pressAction = 'add';
+    inner.appendChild(header);
+    inner.appendChild(list);
+    inner.appendChild(addPressBtn);
+    details.appendChild(summary);
+    details.appendChild(inner);
+    pressesTd.appendChild(details);
+    _timersWirePressesDetailsAnimation(details);
+
     const actTd = document.createElement('td');
+    actTd.className = 'timer-actions-cell d-flex align-items-start justify-content-end gap-2 pt-1';
 
     const upBtn = document.createElement('button');
-    upBtn.className = 'btn btn-sm btn-outline-secondary me-1';
-    upBtn.textContent = 'Up';
+    upBtn.className = 'btn btn-sm btn-outline-secondary me-1 btn-icon-sm';
+    upBtn.textContent = '▲';
+    upBtn.title = 'Move preset up';
+    upBtn.setAttribute('aria-label', 'Move preset up');
     upBtn.dataset.action = 'up';
 
     const downBtn = document.createElement('button');
-    downBtn.className = 'btn btn-sm btn-outline-secondary me-1';
-    downBtn.textContent = 'Down';
+    downBtn.className = 'btn btn-sm btn-outline-secondary me-1 btn-icon-sm';
+    downBtn.textContent = '▼';
+    downBtn.title = 'Move preset down';
+    downBtn.setAttribute('aria-label', 'Move preset down');
     downBtn.dataset.action = 'down';
 
     const delBtn = document.createElement('button');
@@ -576,15 +899,27 @@ function _timersRenderPresets(presets) {
     delBtn.textContent = 'Delete';
     delBtn.dataset.action = 'delete';
 
-    actTd.appendChild(upBtn);
-    actTd.appendChild(downBtn);
+    const movePresetWrap = document.createElement('div');
+    movePresetWrap.className = 'd-flex flex-column align-items-center gap-1';
+    movePresetWrap.appendChild(upBtn);
+    movePresetWrap.appendChild(downBtn);
+
+    actTd.appendChild(movePresetWrap);
     actTd.appendChild(delBtn);
 
     tr.appendChild(orderTd);
     tr.appendChild(nameTd);
     tr.appendChild(timeTd);
+    tr.appendChild(pressesTd);
     tr.appendChild(actTd);
     body.appendChild(tr);
+
+    // Render existing presses
+    const presses = (presetObj && typeof presetObj === 'object') ? (presetObj.button_presses || presetObj.buttonPresses || presetObj.actions || []) : [];
+    if (Array.isArray(presses)) {
+      presses.forEach(p => list.appendChild(_timersNewPressRow(p)));
+    }
+    _timersUpdatePressSummary(tr);
   });
 }
 
@@ -602,12 +937,46 @@ function _timersReadPresetsFromUI() {
     if (!time) continue;
     const name = String((nameInp && nameInp.value) || '').trim();
 
-    values.push({time, name});
+    // button presses
+    const list = r.querySelector('[data-role="presses-list"]');
+    const pressesOut = [];
+    if (list) {
+      const pressRows = Array.from(list.querySelectorAll('[data-role="press-row"]'));
+      for (const pr of pressRows) {
+        const sel = pr.querySelector('select[data-role="press-template"]');
+        const inp = pr.querySelector('input[data-role="press-url"]');
+        let url = '';
+        if (sel && String(sel.value || '') !== '') {
+          url = _timersTemplateToURL(sel.value);
+        } else {
+          url = String((inp && inp.value) || '').trim();
+        }
+        const norm = _timersNormalizeButtonURL(url);
+        if (!norm) continue;
+        if (norm === '__INVALID__') {
+          throw new Error(`Invalid button URL: ${url}. Use '1/2/3' or 'location/1/2/3/press'.`);
+        }
+        pressesOut.push({buttonURL: norm});
+      }
+    }
+
+    const obj = {time, name};
+    if (pressesOut.length) obj.button_presses = pressesOut;
+    values.push(obj);
   }
   return values;
 }
 
 async function _timersLoad() {
+  // load button templates first so we can render presses with names
+  try {
+    const r = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
+    const data = await r.json().catch(() => ({}));
+    _timersButtonTemplates = Array.isArray(data.buttons) ? data.buttons : [];
+  } catch (e) {
+    _timersButtonTemplates = [];
+  }
+
   const res = await fetch('/api/timers');
   if (!res.ok) throw new Error('Failed to load timers');
   const data = await res.json();
@@ -665,8 +1034,39 @@ if (document.getElementById('timers-page')) {
     body.addEventListener('click', (ev) => {
       const btn = ev.target;
       if (!btn || !btn.dataset) return;
+
+      // Press-row actions
+      const pressAction = btn.dataset.pressAction;
+      if (pressAction) {
+        const tr = btn.closest('tr');
+        const pressRow = btn.closest('[data-role="press-row"]');
+        const list = tr ? tr.querySelector('[data-role="presses-list"]') : null;
+        if (!tr || !list) return;
+
+        if (pressAction === 'add') {
+          list.appendChild(_timersNewPressRow({buttonURL: ''}));
+        } else if (pressAction === 'delete' && pressRow) {
+          pressRow.remove();
+        } else if ((pressAction === 'up' || pressAction === 'down') && pressRow) {
+          const rows = Array.from(list.querySelectorAll('[data-role="press-row"]'));
+          const i = rows.indexOf(pressRow);
+          if (i >= 0) {
+            if (pressAction === 'up' && i > 0) {
+              list.insertBefore(pressRow, rows[i - 1]);
+            }
+            if (pressAction === 'down' && i < rows.length - 1) {
+              list.insertBefore(rows[i + 1], pressRow);
+            }
+          }
+        }
+
+        _timersUpdatePressSummary(tr);
+        return;
+      }
+
+      // Preset-row actions
       const action = btn.dataset.action;
-      if (!action) return;
+      if (!action || !['delete', 'up', 'down'].includes(action)) return;
       const tr = btn.closest('tr');
       if (!tr) return;
       const idx = Number(tr.dataset.index);
@@ -686,6 +1086,28 @@ if (document.getElementById('timers-page')) {
       }
 
       _timersRenderPresets(presets);
+    });
+
+    // Template selection autofill behavior
+    body.addEventListener('change', (ev) => {
+      const sel = ev.target;
+      if (!sel || sel.tagName !== 'SELECT') return;
+      if (sel.dataset.role !== 'press-template') return;
+      const pr = sel.closest('[data-role="press-row"]');
+      if (!pr) return;
+      const inp = pr.querySelector('input[data-role="press-url"]');
+      if (!inp) return;
+
+      if (String(sel.value || '') !== '') {
+        const i = Number(sel.value);
+        const t = Number.isFinite(i) ? _timersButtonTemplates[i] : null;
+        const u = _timersTemplateToURL(sel.value);
+        // Show short form like 1/0/1 for templates too
+        inp.value = String((t && t.pattern) ? t.pattern : _timersButtonURLToDisplay(u));
+        inp.disabled = true;
+      } else {
+        inp.disabled = false;
+      }
     });
   }
 }

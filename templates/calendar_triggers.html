@@ -1,0 +1,117 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Upcoming Triggers' %}
+{% set page_subtitle = 'All upcoming trigger actions across active events.' %}
+
+{% block page_actions %}
+  <button id="refresh-upcoming" class="btn btn-sm btn-secondary">Refresh</button>
+  <a href="/calendar" class="btn btn-sm btn-outline-primary">Back to Schedule</a>
+{% endblock %}
+
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <div class="text-muted small" id="upcoming-meta">Loading…</div>
+  </div>
+
+  <div class="list-group tdeck-soft" id="upcoming-list">
+    <div class="list-group-item text-muted">Loading…</div>
+  </div>
+
+  <script>
+  (function(){
+    const listEl = document.getElementById('upcoming-list');
+    const metaEl = document.getElementById('upcoming-meta');
+    const refreshBtn = document.getElementById('refresh-upcoming');
+
+    function pad2(n){ return String(n).padStart(2,'0'); }
+
+    function formatDateDMY(ms){
+      try{
+        const d = new Date(ms);
+        const dd = pad2(d.getDate());
+        const mm = pad2(d.getMonth() + 1);
+        const yy = pad2(d.getFullYear() % 100);
+        return `${dd}/${mm}/${yy}`;
+      }catch(e){
+        return '';
+      }
+    }
+
+    function formatDue(ms){
+      try{
+        const d = new Date(ms);
+        const date = formatDateDMY(ms);
+        const time = d.toLocaleString(undefined, {weekday:'short', hour:'2-digit', minute:'2-digit', second:'2-digit'});
+        return date ? `${date} ${time}` : time;
+      }catch(e){
+        return '';
+      }
+    }
+
+    function escapeHtml(s){
+      return String(s ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function render(triggers){
+      const arr = Array.isArray(triggers) ? triggers : [];
+      if(arr.length === 0){
+        metaEl.textContent = 'No upcoming triggers found';
+        listEl.innerHTML = '<div class="list-group-item text-muted">No upcoming triggers</div>';
+        return;
+      }
+
+      metaEl.textContent = `${arr.length} upcoming trigger${arr.length === 1 ? '' : 's'}`;
+      listEl.innerHTML = '';
+
+      for(const t of arr){
+        const button = (t.button && (t.button.label || t.button.pattern))
+          ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
+          : (t.buttonURL || '');
+
+        const eventLabel = t.event || '(unnamed)';
+        const eventId = (t.event_id !== undefined && t.event_id !== null) ? String(t.event_id) : '';
+        const eventHtml = eventId
+          ? `<a href="/calendar/edit/${encodeURIComponent(eventId)}" class="text-decoration-none">${escapeHtml(eventLabel)}</a>`
+          : `${escapeHtml(eventLabel)}`;
+
+        const row = document.createElement('div');
+        row.className = 'list-group-item d-flex justify-content-between align-items-center';
+        row.innerHTML = `
+          <div class="text-truncate">
+            <div class="fw-semibold text-truncate">${eventHtml} <span class="text-muted">(${escapeHtml(t.offset || '')})</span></div>
+            <div class="small text-muted text-truncate">${escapeHtml(button || '')}</div>
+          </div>
+          <div class="text-muted ms-2" style="white-space:nowrap">${escapeHtml(formatDue(t.due_ms))}</div>
+        `;
+        listEl.appendChild(row);
+      }
+    }
+
+    async function fetchUpcoming(force){
+      try{
+        const url = '/api/upcoming_triggers?limit=200&_ts=' + Date.now();
+        const resp = await fetch(url, {cache:'no-store'});
+        if(!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        render(data.triggers);
+      }catch(e){
+        console.error(e);
+        metaEl.textContent = 'Unable to load upcoming triggers';
+        listEl.innerHTML = '<div class="list-group-item text-muted">Unable to load</div>';
+      }
+    }
+
+    if(refreshBtn){
+      refreshBtn.addEventListener('click', (ev)=>{ ev.preventDefault(); fetchUpcoming(true); });
+    }
+
+    fetchUpcoming(true);
+    setInterval(()=>fetchUpcoming(false), 15000);
+  })();
+  </script>
+{% endblock %}

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="TDeck icon">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="48" y="48" width="416" height="416" rx="104" fill="url(#g)"/>
+
+  <!-- Stylized deck / fader -->
+  <g fill="none" stroke="#ffffff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+    <!-- top bar ("T") -->
+    <path d="M168 168H344"/>
+    <path d="M256 168V316"/>
+
+    <!-- three fader tracks -->
+    <path d="M176 360V296"/>
+    <path d="M256 360V272"/>
+    <path d="M336 360V312"/>
+
+    <!-- fader knobs -->
+    <rect x="154" y="274" width="44" height="44" rx="14" fill="#ffffff" stroke="none"/>
+    <rect x="234" y="250" width="44" height="44" rx="14" fill="#ffffff" stroke="none"/>
+    <rect x="314" y="290" width="44" height="44" rx="14" fill="#ffffff" stroke="none"/>
+  </g>
+</svg>

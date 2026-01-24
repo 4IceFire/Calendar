@@ -1,24 +1,26 @@
 {% extends 'base.html' %}
 
+{% set page_title = 'Timers' %}
+
+{% block page_actions %}
+		<button id="timers-save" class="btn btn-primary">Save</button>
+{% endblock %}
+
 {% block content %}
 <div id="timers-page">
-	<div class="d-flex align-items-center justify-content-between mb-3">
-		<h1 class="h3 mb-0">Timers</h1>
-		<button id="timers-save" class="btn btn-primary">Save</button>
-	</div>
-
 	<div class="d-flex align-items-center justify-content-between mb-2">
 		<h2 class="h5 mb-0">Preset Times</h2>
 		<button id="timers-add" class="btn btn-outline-secondary btn-sm">Add Time</button>
 	</div>
 
 	<div class="table-responsive">
-		<table class="table table-sm align-middle">
+		<table class="table table-sm align-top">
 			<thead>
 				<tr>
 					<th style="width: 90px;">Order</th>
 					<th style="width: 260px;">Name</th>
 					<th>Time (HH:MM)</th>
+					<th style="width: 420px;">Button Presses</th>
 					<th style="width: 220px;">Actions</th>
 				</tr>
 			</thead>

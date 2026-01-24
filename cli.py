@@ -15,8 +15,11 @@ from datetime import datetime
 from typing import List, Optional
 
 from package.core import list_apps, get_app
+import package.apps  # noqa: F401
 from package.apps.calendar import storage, utils
 logger = utils.get_logger()
+
+from videohub import VideohubClient, get_videohub_client_from_config, DEFAULT_PORT as VIDEOHUB_DEFAULT_PORT
 
 PID_FILE = "calendar.pid"
 
@@ -245,6 +248,67 @@ def spawn_background(child_args: List[str]) -> int:
     else:
         proc = subprocess.Popen(cmd, start_new_session=True, close_fds=True)
     return proc.pid
+
+
+def _get_videohub_client(args=None) -> Optional[VideohubClient]:
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+
+    host = None
+    port = None
+
+    if args is not None:
+        try:
+            host = getattr(args, "host", None)
+        except Exception:
+            host = None
+        try:
+            port = getattr(args, "port", None)
+        except Exception:
+            port = None
+
+    return get_videohub_client_from_config(cfg, host=host, port=port)
+
+
+def cmd_videohub_ping(args) -> int:
+    vh = _get_videohub_client(args)
+    if vh is None:
+        print("VideoHub not configured. Set 'videohub_ip' (and optional 'videohub_port') in config.json, or pass --host.")
+        return 2
+    ok = vh.ping()
+    print("OK" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def cmd_videohub_route(args) -> int:
+    vh = _get_videohub_client(args)
+    if vh is None:
+        print("VideoHub not configured. Set 'videohub_ip' (and optional 'videohub_port') in config.json, or pass --host.")
+        return 2
+
+    try:
+        output_n = int(args.output)
+        input_n = int(args.input)
+    except Exception:
+        print("--output and --input must be integers")
+        return 2
+
+    zero_based = bool(getattr(args, "zero_based", False))
+    output_idx = output_n if zero_based else output_n - 1
+    input_idx = input_n if zero_based else input_n - 1
+
+    try:
+        vh.route_video_output(output=output_idx, input_=input_idx, monitoring=bool(getattr(args, "monitor", False)))
+    except Exception as e:
+        print(f"Route failed: {e}")
+        return 1
+
+    label = "monitor" if bool(getattr(args, "monitor", False)) else "output"
+    basis = "0-based" if zero_based else "1-based"
+    print(f"Routed input {input_n} -> {label} {output_n} ({basis} args)")
+    return 0
 
 
 def kill_pid(pid: int) -> bool:
@@ -483,6 +547,24 @@ def main(argv=None):
     t_apply.add_argument("value", help="The integer value Companion would send")
     t_apply.add_argument("--webui", help="Override web UI base URL (default http://127.0.0.1:<webserver_port>)")
 
+    # VideoHub control (direct TCP)
+    vh_p = sub.add_parser("videohub", help="Control a Blackmagic VideoHub via TCP")
+    vh_p.add_argument("--host", help="Override VideoHub host (default from config.json videohub_ip)")
+    vh_p.add_argument("--port", type=int, help="Override VideoHub port (default 9990 or config.json videohub_port)")
+    vh_sub = vh_p.add_subparsers(dest="videohub_cmd")
+
+    vh_sub.add_parser("ping", help="Ping the VideoHub (best-effort)")
+
+    vh_route = vh_sub.add_parser("route", help="Route an input to an output")
+    vh_route.add_argument("--output", required=True, help="Destination output number")
+    vh_route.add_argument("--input", required=True, help="Source input number")
+    vh_route.add_argument("--monitor", action="store_true", help="Route a monitoring output (instead of primary output)")
+    vh_route.add_argument(
+        "--zero-based",
+        action="store_true",
+        help="Treat --output/--input as 0-based (VideoHub protocol). Default is 1-based for humans.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.cmd == "apps":
@@ -618,9 +700,18 @@ def main(argv=None):
             events.append(event)
             storage.save_events(events, events_file)
             print(f"Added event '{args.name}'")
+            return 0
         except Exception as e:
             print(f"Failed to add event: {e}")
-        return 0
+            return 1
+
+    if args.cmd == "videohub":
+        if args.videohub_cmd == "ping":
+            return cmd_videohub_ping(args)
+        if args.videohub_cmd == "route":
+            return cmd_videohub_route(args)
+        print("Missing videohub subcommand. Use: videohub ping | videohub route")
+        return 2
 
     if args.cmd == "remove":
         cfg = utils.get_config()

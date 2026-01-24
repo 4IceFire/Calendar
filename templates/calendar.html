@@ -1,14 +1,16 @@
 {% extends 'base.html' %}
 
-{% block content %}
-<h1>Calendar</h1>
-<p class="text-muted">List of scheduled events. Click refresh to reload.</p>
-<div class="mb-3">
-  <button id="refresh-events" class="btn btn-sm btn-secondary">Refresh</button>
-  <button id="add-event" class="btn btn-sm btn-success ms-2">Add Event</button>
-  <a href="/templates" class="btn btn-sm btn-outline-primary ms-2">Templates</a>
-</div>
+{% set page_title = 'Schedule' %}
+{% set page_subtitle = 'List of scheduled events.' %}
 
+{% block page_actions %}
+  <button id="refresh-events" class="btn btn-sm btn-secondary">Refresh</button>
+  <button id="add-event" class="btn btn-sm btn-success">Add Event</button>
+  <a href="/calendar/triggers" class="btn btn-sm btn-outline-primary">Upcoming Triggers</a>
+  <a href="/templates" class="btn btn-sm btn-outline-primary">Templates</a>
+{% endblock %}
+
+{% block content %}
 <table class="table table-striped">
   <thead>
     <tr>
@@ -54,11 +56,17 @@ async function loadEvents(){
       return;
     }
     tbody.innerHTML = '';
-    function friendlyTrigger(t){
-      const typeMap = { 'BEFORE': 'Before', 'AT': 'At', 'AFTER': 'After' };
-      const typeLabel = typeMap[String(t.typeOfTrigger).toUpperCase()] || String(t.typeOfTrigger);
+    function friendlyTriggerParts(t){
+      const rawType = String(t.typeOfTrigger || '').toUpperCase();
       const mins = Number(t.minutes) || 0;
-      let timePart = mins === 0 && typeLabel === 'At' ? 'At time' : `${mins} mins ${typeLabel}`;
+
+      // Represent BEFORE/AT/AFTER as a signed offset so it reads at-a-glance.
+      // BEFORE => -Xm, AT => 0m, AFTER => +Xm
+      let sign = '';
+      if (rawType === 'BEFORE') sign = '-';
+      else if (rawType === 'AFTER') sign = '+';
+      else sign = '';
+      const offsetLabel = `${sign}${mins}m`;
 
       // normalize short and full button forms
       const raw = t.buttonURL || '';
@@ -77,13 +85,40 @@ async function loadEvents(){
 
       // prefer showing a template label when available
       const label = btnMap[fullBtn] || btnMap[shortBtn];
-      const btnPart = label ? `Template: ${label}` : (shortBtn ? `Button: ${shortBtn}` : '');
-      return `${timePart}${btnPart ? '. ' + btnPart : ''}`;
+      const target = label ? String(label) : (shortBtn ? String(shortBtn) : '');
+      return {
+        rawType,
+        offsetLabel,
+        target,
+        targetKind: label ? 'template' : (shortBtn ? 'button' : ''),
+      };
+    }
+
+    function escapeHtml(s){
+      return String(s ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
     }
 
     for(const e of data){
       const tr = document.createElement('tr');
-      const triggersHtml = (e.times || []).map(t => friendlyTrigger(t)).join('<br>') || '';
+      const triggers = Array.isArray(e.times) ? e.times : [];
+      const triggerRows = triggers.map(t => {
+        const parts = friendlyTriggerParts(t);
+        const target = parts.target || '';
+        const typeCls = parts.rawType ? `cal-trigger-${String(parts.rawType).toLowerCase()}` : '';
+        const targetCls = parts.targetKind ? `cal-trigger-${parts.targetKind}` : '';
+        return `
+          <div class="cal-trigger-row">
+            <span class="cal-trigger-offset ${typeCls}">${escapeHtml(parts.offsetLabel || '')}</span>
+            <span class="cal-trigger-target ${targetCls}">${escapeHtml(target)}</span>
+          </div>
+        `;
+      }).join('');
+      const triggersHtml = triggerRows ? `<div class="cal-triggers">${triggerRows}</div>` : '';
       tr.innerHTML = `
         <td>${e.id ?? ''}</td>
         <td>${e.name}</td>

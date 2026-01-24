@@ -1,13 +1,18 @@
+from __future__ import annotations
+
 import json
 import threading
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 import os
+import re
 
-from companion import Companion
 from package.apps.calendar.storage import DEFAULT_EVENTS_FILE
 import logging
 from logging.handlers import RotatingFileHandler
+
+if TYPE_CHECKING:
+    from companion import Companion
 
 CONFIG_FILE = "config.json"
 TIMER_PRESETS_FILE = "timer_presets.json"
@@ -29,25 +34,75 @@ _defaults = {
     "debug": False,
     # Web UI theme
     "dark_mode": False,
+
+    # VideoHub defaults
+    "videohub_ip": "",
+    "videohub_port": 9990,
+    "videohub_timeout": 2.0,
+    "videohub_presets_file": "videohub_presets.json",
 }
 
 
-def _coerce_timer_preset(value: Any) -> Dict[str, str] | None:
+def _coerce_timer_preset(value: Any) -> Dict[str, Any] | None:
     """Coerce a timer preset into a normalized dict form.
 
     Supported on-disk / API formats:
     - "HH:MM" (string)
-    - {"time": "HH:MM", "name": "Some Name"}
+    - {"time": "HH:MM", "name": "Some Name", "button_presses": [{"buttonURL": "location/1/0/1/press"}, ...]}
 
     Returns None for unusable entries.
     """
+
+    def _normalize_button_url(raw: Any) -> str | None:
+        try:
+            s = str(raw or '').strip()
+        except Exception:
+            return None
+        if not s:
+            return None
+        if re.match(r'^location/\d+/\d+/\d+/press$', s):
+            return s
+        if re.match(r'^\d+/\d+/\d+$', s):
+            return f'location/{s}/press'
+        return None
+
+    def _coerce_button_presses(raw: Any) -> list[dict[str, str]]:
+        if raw is None:
+            return []
+        if isinstance(raw, dict) or isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+
+        out: list[dict[str, str]] = []
+        for item in raw:
+            if isinstance(item, str):
+                url = _normalize_button_url(item)
+                if url:
+                    out.append({'buttonURL': url})
+                continue
+
+            if isinstance(item, dict):
+                url = _normalize_button_url(item.get('buttonURL') or item.get('url') or item.get('button_url'))
+                if url:
+                    out.append({'buttonURL': url})
+                continue
+        return out
     try:
         if isinstance(value, dict):
             t = str(value.get("time", "")).strip()
             n = str(value.get("name", "")).strip()
+            presses = _coerce_button_presses(
+                value.get('button_presses')
+                if 'button_presses' in value
+                else value.get('buttonPresses')
+                if 'buttonPresses' in value
+                else value.get('actions')
+            )
         else:
             t = str(value).strip()
             n = ""
+            presses = []
     except Exception:
         return None
 
@@ -55,10 +110,14 @@ def _coerce_timer_preset(value: Any) -> Dict[str, str] | None:
         return None
     if not n:
         n = t
-    return {"time": t, "name": n}
+
+    out: Dict[str, Any] = {"time": t, "name": n}
+    if presses:
+        out['button_presses'] = presses
+    return out  # type: ignore[return-value]
 
 
-def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, str]]:
+def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, Any]]:
     """Load timer presets from a dedicated JSON file.
 
     File format:
@@ -70,7 +129,7 @@ def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, str]]:
             data = json.load(f)
         if not isinstance(data, list):
             return []
-        out: list[Dict[str, str]] = []
+        out: list[Dict[str, Any]] = []
         for v in data:
             p = _coerce_timer_preset(v)
             if p is not None:
@@ -227,11 +286,7 @@ def reload_config(force: bool = False) -> bool:
         _RUNTIME_DEBUG = bool(_CONFIG.get("debug", False))
 
     # recreate or update companion client
-    try:
-        _companion_client = Companion(_CONFIG.get("companion_ip", "127.0.0.1"), int(_CONFIG.get("companion_port", 8000)))
-        _companion_client.debug = _RUNTIME_DEBUG
-    except Exception:
-        _companion_client = None
+    _companion_client = _create_companion_client(_CONFIG)
 
     _config_mtime = mtime
     return True
@@ -239,11 +294,25 @@ def reload_config(force: bool = False) -> bool:
 
 # Companion client singleton
 _companion_client = None
-try:
-    _companion_client = Companion(_CONFIG.get("companion_ip", "127.0.0.1"), int(_CONFIG.get("companion_port", 8000)))
-    _companion_client.debug = _RUNTIME_DEBUG
-except Exception:
-    _companion_client = None
+
+
+def _create_companion_client(cfg: Dict[str, Any]) -> Companion | None:
+    try:
+        from companion import Companion as _Companion
+    except ModuleNotFoundError as e:
+        # Allows the app to run even if optional dependencies (like `requests`) are missing.
+        logging.getLogger("calendar").warning("Companion client unavailable (%s).", e)
+        return None
+
+    try:
+        client = _Companion(cfg.get("companion_ip", "127.0.0.1"), int(cfg.get("companion_port", 8000)))
+        client.debug = bool(cfg.get("debug", False))
+        return client
+    except Exception:
+        return None
+
+
+_companion_client = _create_companion_client(_CONFIG)
 
 
 def get_companion() -> Companion | None:
