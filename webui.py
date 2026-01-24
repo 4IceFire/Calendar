@@ -21,10 +21,61 @@ except Exception:
     # Fallback lightweight utils if importing the calendar utils fails (e.g., missing companion/requests)
     import json
 
+    _STUB_DEFAULTS = {
+        "EVENTS_FILE": "events.json",
+        "companion_ip": "127.0.0.1",
+        "companion_port": 8888,
+        "companion_timer_name": "timer_name_",
+        "propresenter_ip": "127.0.0.1",
+        "propresenter_port": 4000,
+        "propresenter_timer_index": 2,
+        "propresenter_is_latest": True,
+        "propresenter_timer_wait_stop_ms": 200,
+        "propresenter_timer_wait_set_ms": 600,
+        "propresenter_timer_wait_reset_ms": 1000,
+        "videohub_ip": "172.20.10.11",
+        "videohub_port": 9990,
+        "videohub_timeout": 2,
+        "videohub_presets_file": "videohub_presets.json",
+        "webserver_port": 5000,
+        "poll_interval": 1,
+        "debug": False,
+        "dark_mode": True,
+    }
+
+    def _seed_config_if_missing() -> dict:
+        try:
+            with open('config.json', 'w', encoding='utf-8') as out:
+                json.dump(_STUB_DEFAULTS, out, indent=2)
+        except Exception:
+            pass
+        return dict(_STUB_DEFAULTS)
+
+    def _upgrade_cfg_if_needed(cfg: dict) -> dict:
+        changed = False
+        for k, v in _STUB_DEFAULTS.items():
+            if k not in cfg:
+                cfg[k] = v
+                changed = True
+        if changed:
+            try:
+                with open('config.json', 'w', encoding='utf-8') as out:
+                    json.dump(cfg, out, indent=2)
+            except Exception:
+                pass
+        return cfg
+
     def _load_cfg():
         try:
             with open('config.json', 'r', encoding='utf-8') as f:
-                return json.load(f) or {}
+                cfg = json.load(f) or {}
+            if not isinstance(cfg, dict):
+                return _seed_config_if_missing()
+            return _upgrade_cfg_if_needed(cfg)
+        except FileNotFoundError:
+            return _seed_config_if_missing()
+        except json.JSONDecodeError:
+            return _seed_config_if_missing()
         except Exception:
             return {}
 

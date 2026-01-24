@@ -20,25 +20,29 @@ TIMER_PRESETS_FILE = "timer_presets.json"
 _defaults = {
     "EVENTS_FILE": DEFAULT_EVENTS_FILE,
     "companion_ip": "127.0.0.1",
-    "companion_port": 8000,
+    "companion_port": 8888,
     # Prefix for Companion custom variables storing timer names, e.g. timer_name_1
     "companion_timer_name": "timer_name_",
     "propresenter_ip": "127.0.0.1",
-    "propresenter_port": 1025,
+    "propresenter_port": 4000,
     # Timers app defaults
     # Which ProPresenter timer to control
-    "propresenter_timer_index": 1,
+    "propresenter_timer_index": 2,
+    "propresenter_is_latest": True,
+    "propresenter_timer_wait_stop_ms": 200,
+    "propresenter_timer_wait_set_ms": 600,
+    "propresenter_timer_wait_reset_ms": 1000,
     # Web UI port
     "webserver_port": 5000,
-    "poll_interval": 1.0,
+    "poll_interval": 1,
     "debug": False,
     # Web UI theme
-    "dark_mode": False,
+    "dark_mode": True,
 
     # VideoHub defaults
-    "videohub_ip": "",
+    "videohub_ip": "172.20.10.11",
     "videohub_port": 9990,
-    "videohub_timeout": 2.0,
+    "videohub_timeout": 2,
     "videohub_presets_file": "videohub_presets.json",
 }
 
@@ -167,7 +171,7 @@ def save_timer_presets(presets: list[Any], path: str = TIMER_PRESETS_FILE) -> No
 
 def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
     except FileNotFoundError:
         save_config(_defaults, path)
@@ -228,8 +232,8 @@ def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any], path: str = CONFIG_FILE) -> None:
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
 # Materialize runtime config and debug flag
