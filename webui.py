@@ -2222,7 +2222,7 @@ def api_set_timers():
                     if (not label) or (label == t):
                         label = var_name
 
-                    value = f"{label}: {pretty_time}"
+                    value = f"{label}\n{pretty_time}"
 
                     if not comp.SetVariable(var_name, value):
                         companion_failed += 1
