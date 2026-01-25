@@ -17,11 +17,11 @@
       </div>
 
       <div class="list-group">
-        <a href="/calendar" class="list-group-item list-group-item-action">Schedule</a>
-        <a href="/templates" class="list-group-item list-group-item-action">Templates</a>
-        <a href="/timers" class="list-group-item list-group-item-action">Timers</a>
-        <a href="/console" class="list-group-item list-group-item-action">Console</a>
-        <a href="/config" class="list-group-item list-group-item-action">Config</a>
+        {% if not auth_enabled or can_access('page:calendar') %}<a href="/calendar" class="list-group-item list-group-item-action">Schedule</a>{% endif %}
+        {% if not auth_enabled or can_access('page:templates') %}<a href="/templates" class="list-group-item list-group-item-action">Templates</a>{% endif %}
+        {% if not auth_enabled or can_access('page:timers') %}<a href="/timers" class="list-group-item list-group-item-action">Timers</a>{% endif %}
+        {% if not auth_enabled or can_access('page:console') %}<a href="/console" class="list-group-item list-group-item-action">Console</a>{% endif %}
+        {% if not auth_enabled or can_access('page:config') %}<a href="/config" class="list-group-item list-group-item-action">Config</a>{% endif %}
 
       </div>
     </div>

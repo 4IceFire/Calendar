@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file
 import logging
 import threading
 import time
@@ -7,11 +7,18 @@ import sys
 import subprocess
 import shlex
 from collections import deque
+import os
+import sqlite3
+import secrets
+from functools import wraps
 
 from werkzeug.serving import make_server
 import json
 import re
 from datetime import datetime, timedelta
+
+from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from package.core import list_apps, get_app
 import package.apps  # noqa: F401
@@ -41,6 +48,15 @@ except Exception:
         "poll_interval": 1,
         "debug": False,
         "dark_mode": True,
+
+        # Auth (Web UI pages only)
+        "auth_enabled": True,
+        "auth_idle_timeout_enabled": True,
+        "auth_idle_timeout_minutes": 2,
+        "auth_min_password_length": 6,
+
+        # Scheduler/internal API
+        "internal_api_timeout_seconds": 10,
     }
 
     def _seed_config_if_missing() -> dict:
@@ -102,6 +118,425 @@ except Exception:
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
 
+def _auth_cfg() -> dict:
+    try:
+        return utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        return {}
+
+
+def _auth_enabled() -> bool:
+    cfg = _auth_cfg()
+    try:
+        return bool(cfg.get('auth_enabled', False))
+    except Exception:
+        return False
+
+
+def _ensure_secret_key() -> None:
+    """Ensure a stable Flask secret key exists for secure sessions."""
+    try:
+        cfg = _auth_cfg()
+    except Exception:
+        cfg = {}
+
+    key = str(cfg.get('flask_secret_key') or '').strip()
+    if not key:
+        key = secrets.token_hex(32)
+        try:
+            cfg['flask_secret_key'] = key
+            if hasattr(utils, 'save_config'):
+                utils.save_config(cfg)
+        except Exception:
+            pass
+    try:
+        app.secret_key = key
+    except Exception:
+        pass
+
+
+_ensure_secret_key()
+
+# Cookie hardening (still helpful on LAN)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+)
+
+
+# --- Auth DB (SQLite) ---
+_AUTH_DB_PATH = (Path(__file__).resolve().parent / 'auth.db')
+
+
+def _db() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(_AUTH_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_auth_db() -> None:
+    conn = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              username TEXT NOT NULL UNIQUE,
+              password_hash TEXT NOT NULL,
+              role_id INTEGER,
+              is_active INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT,
+              updated_at TEXT,
+              FOREIGN KEY(role_id) REFERENCES roles(id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_pages (
+              role_id INTEGER NOT NULL,
+              page_key TEXT NOT NULL,
+              UNIQUE(role_id, page_key),
+              FOREIGN KEY(role_id) REFERENCES roles(id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT NOT NULL,
+              user_id INTEGER,
+              username TEXT,
+              action TEXT NOT NULL,
+              detail TEXT,
+              ip TEXT
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _audit(action: str, detail: str | None = None) -> None:
+    try:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        ts = ''
+    try:
+        uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+    except Exception:
+        uid = None
+    try:
+        uname = str(getattr(current_user, 'username', None) or '') if getattr(current_user, 'is_authenticated', False) else ''
+    except Exception:
+        uname = ''
+    try:
+        ip = str(request.remote_addr or '')
+    except Exception:
+        ip = ''
+    try:
+        conn = _db()
+        try:
+            conn.execute(
+                'INSERT INTO audit(ts,user_id,username,action,detail,ip) VALUES (?,?,?,?,?,?)',
+                (ts, uid, uname or None, str(action or ''), (str(detail) if detail is not None else None), ip or None),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+# --- Page registry (forward-compatible) ---
+_PAGE_REGISTRY: dict[str, dict[str, str]] = {}
+
+
+def _register_page(page_key: str, friendly_name: str) -> None:
+    if not page_key:
+        return
+    if page_key not in _PAGE_REGISTRY:
+        _PAGE_REGISTRY[page_key] = {'name': friendly_name or page_key}
+    else:
+        # keep the first friendly name unless it was empty
+        if not _PAGE_REGISTRY[page_key].get('name') and friendly_name:
+            _PAGE_REGISTRY[page_key]['name'] = friendly_name
+
+
+def require_page(page_key: str, friendly_name: str):
+    """Mark a view function as a protected page with a registry key."""
+    _register_page(page_key, friendly_name)
+
+    def _decorator(fn):
+        setattr(fn, '_required_page_key', page_key)
+        setattr(fn, '_required_page_name', friendly_name)
+        return fn
+
+    return _decorator
+
+
+def _get_role_by_name(name: str) -> sqlite3.Row | None:
+    conn = _db()
+    try:
+        cur = conn.execute('SELECT id,name FROM roles WHERE name=?', (name,))
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def _ensure_role(name: str) -> int:
+    conn = _db()
+    try:
+        row = conn.execute('SELECT id FROM roles WHERE name=?', (name,)).fetchone()
+        if row:
+            return int(row['id'])
+        conn.execute('INSERT INTO roles(name) VALUES (?)', (name,))
+        conn.commit()
+        row2 = conn.execute('SELECT id FROM roles WHERE name=?', (name,)).fetchone()
+        return int(row2['id'])
+    finally:
+        conn.close()
+
+
+def _set_role_pages(role_id: int, page_keys: list[str]) -> None:
+    role_id = int(role_id)
+    keys = [k for k in (page_keys or []) if str(k or '').strip()]
+    conn = _db()
+    try:
+        conn.execute('DELETE FROM role_pages WHERE role_id=?', (role_id,))
+        for k in keys:
+            conn.execute('INSERT OR IGNORE INTO role_pages(role_id,page_key) VALUES (?,?)', (role_id, str(k)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _bootstrap_default_users_roles() -> None:
+    """Create initial roles and default admin/admin if missing."""
+    _init_auth_db()
+
+    admin_role_id = _ensure_role('Admin')
+    td_role_id = _ensure_role('TD')
+    sp_role_id = _ensure_role('SP')
+
+    # Seed initial page access lists once. Do not overwrite user-managed
+    # assignments from the Admin UI.
+    try:
+        conn = _db()
+        try:
+            td_has = conn.execute('SELECT 1 FROM role_pages WHERE role_id=? LIMIT 1', (td_role_id,)).fetchone()
+            sp_has = conn.execute('SELECT 1 FROM role_pages WHERE role_id=? LIMIT 1', (sp_role_id,)).fetchone()
+        finally:
+            conn.close()
+
+        if not td_has or not sp_has:
+            all_pages = sorted(_PAGE_REGISTRY.keys())
+            if 'page:home' not in all_pages:
+                all_pages = ['page:home', *all_pages]
+
+            if not td_has:
+                td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin')]
+                _set_role_pages(td_role_id, td_pages)
+            if not sp_has:
+                sp_pages = [k for k in all_pages if k in ('page:home', 'page:timers')]
+                _set_role_pages(sp_role_id, sp_pages)
+    except Exception:
+        pass
+
+    # Default admin/admin
+    conn = _db()
+    try:
+        row = conn.execute('SELECT id FROM users WHERE username=?', ('admin',)).fetchone()
+        if not row:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute(
+                'INSERT INTO users(username,password_hash,role_id,is_active,created_at,updated_at) VALUES (?,?,?,?,?,?)',
+                ('admin', generate_password_hash('admin'), admin_role_id, 1, now, now),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def _user_record(user_id: int) -> sqlite3.Row | None:
+    conn = _db()
+    try:
+        return conn.execute(
+            'SELECT u.*, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE u.id=?',
+            (int(user_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _user_by_username(username: str) -> sqlite3.Row | None:
+    conn = _db()
+    try:
+        return conn.execute(
+            'SELECT u.*, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE lower(u.username)=lower(?)',
+            (str(username or ''),),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _role_allows_page(role_id: int | None, role_name: str | None, page_key: str) -> bool:
+    if not page_key:
+        return False
+    if str(role_name or '') == 'Admin':
+        return True
+    if role_id is None:
+        return False
+    conn = _db()
+    try:
+        row = conn.execute(
+            'SELECT 1 FROM role_pages WHERE role_id=? AND page_key=?',
+            (int(role_id), str(page_key)),
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+class _User(UserMixin):
+    def __init__(self, row: sqlite3.Row):
+        self.id = int(row['id'])
+        self.username = str(row['username'])
+        self.role_id = int(row['role_id']) if row['role_id'] is not None else None
+        self.role_name = str(row['role_name'] or '') if row['role_name'] is not None else ''
+        self._active = bool(int(row['is_active'] or 0))
+
+    def is_active(self) -> bool:
+        return bool(self._active)
+
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login_page'
+
+
+@login_manager.user_loader
+def _load_user(user_id: str):
+    try:
+        row = _user_record(int(user_id))
+        return _User(row) if row else None
+    except Exception:
+        return None
+
+
+def can_access(page_key: str) -> bool:
+    if not _auth_enabled():
+        return True
+    if not getattr(current_user, 'is_authenticated', False):
+        return False
+    try:
+        return _role_allows_page(getattr(current_user, 'role_id', None), getattr(current_user, 'role_name', None), page_key)
+    except Exception:
+        return False
+
+
+def _csrf_token() -> str:
+    tok = session.get('_csrf')
+    if not tok:
+        tok = secrets.token_hex(16)
+        session['_csrf'] = tok
+    return str(tok)
+
+
+def _validate_csrf() -> bool:
+    try:
+        sent = request.form.get('_csrf') or request.headers.get('X-CSRF-Token')
+    except Exception:
+        sent = None
+    return bool(sent) and str(sent) == str(session.get('_csrf'))
+
+
+@app.context_processor
+def _inject_auth():
+    return {
+        'auth_enabled': _auth_enabled(),
+        'can_access': can_access,
+        'csrf_token': _csrf_token,
+        'current_user': current_user,
+    }
+
+
+@app.before_request
+def _auth_gate():
+    if not _auth_enabled():
+        return None
+
+    # Always allow static + API + login/logout
+    p = request.path or ''
+    if p.startswith('/static/') or p.startswith('/api/') or p == '/login' or p == '/logout':
+        return None
+
+    # Ensure auth DB + defaults exist when auth is enabled
+    try:
+        _bootstrap_default_users_roles()
+    except Exception:
+        pass
+
+    if not getattr(current_user, 'is_authenticated', False):
+        nxt = request.full_path if request.query_string else request.path
+        return redirect(url_for('login_page', next=nxt))
+
+    # Idle timeout
+    cfg = _auth_cfg()
+    try:
+        idle_enabled = bool(cfg.get('auth_idle_timeout_enabled', True))
+    except Exception:
+        idle_enabled = True
+    try:
+        idle_minutes = int(cfg.get('auth_idle_timeout_minutes', 2))
+    except Exception:
+        idle_minutes = 2
+    idle_minutes = max(1, min(idle_minutes, 24 * 60))
+
+    if idle_enabled:
+        now = int(time.time())
+        last = int(session.get('_last_activity') or 0)
+        if last and (now - last) > (idle_minutes * 60):
+            try:
+                _audit('logout_idle', f'idle_minutes={idle_minutes}')
+            except Exception:
+                pass
+            logout_user()
+            session.clear()
+            return redirect(url_for('login_page', timeout=1))
+        session['_last_activity'] = now
+
+    # CSRF protect non-API mutating requests
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        if not _validate_csrf():
+            _audit('csrf_fail', f'path={p}')
+            return abort(400)
+
+    # Authorization for pages
+    view_fn = app.view_functions.get(request.endpoint)
+    page_key = getattr(view_fn, '_required_page_key', None) if view_fn else None
+    if not page_key:
+        _audit('deny_missing_page_key', f'endpoint={request.endpoint} path={p}')
+        return abort(403)
+
+    if not can_access(str(page_key)):
+        _audit('deny_page', f'page={page_key} path={p}')
+        return abort(403)
+
+    return None
+
+
 @app.context_processor
 def _inject_theme():
     try:
@@ -113,6 +548,26 @@ def _inject_theme():
         'dark_mode': dark_mode,
         'bs_theme': 'dark' if dark_mode else 'light',
     }
+
+
+@app.errorhandler(400)
+def _handle_bad_request(err):
+    try:
+        if (request.path or '').startswith('/api/'):
+            return jsonify({'error': 'bad_request'}), 400
+    except Exception:
+        pass
+    return render_template('bad_request.html'), 400
+
+
+@app.errorhandler(403)
+def _handle_forbidden(err):
+    try:
+        if (request.path or '').startswith('/api/'):
+            return jsonify({'error': 'forbidden'}), 403
+    except Exception:
+        pass
+    return render_template('access_denied.html'), 403
 
 
 # --- Console capture + CLI runner (Web UI) ---
@@ -516,7 +971,333 @@ def _config_watcher():
 threading.Thread(target=_config_watcher, daemon=True).start()
 
 
+@app.route('/login', methods=['GET', 'POST'])
+def login_page():
+    if not _auth_enabled():
+        return redirect('/')
+
+    # Ensure DB + default admin exists before first login
+    try:
+        _bootstrap_default_users_roles()
+    except Exception:
+        pass
+
+    next_url = request.args.get('next') or request.form.get('next') or ''
+    # Safety: only allow local redirects
+    if next_url and (next_url.startswith('http://') or next_url.startswith('https://') or '://' in next_url):
+        next_url = ''
+
+    if request.method == 'POST':
+        if not _validate_csrf():
+            _audit('login_csrf_fail')
+            return abort(400)
+
+        username = str(request.form.get('username') or '').strip()
+        password = str(request.form.get('password') or '')
+
+        row = _user_by_username(username)
+        if not row:
+            _audit('login_fail', f'username={username}')
+            return render_template('login.html', page_title='Login', error='Invalid username or password', next=next_url), 401
+
+        if not bool(int(row['is_active'] or 0)):
+            _audit('login_fail_inactive', f'username={username}')
+            return render_template('login.html', page_title='Login', error='Account is disabled', next=next_url), 403
+
+        try:
+            ok = check_password_hash(str(row['password_hash'] or ''), password)
+        except Exception:
+            ok = False
+
+        if not ok:
+            _audit('login_fail', f'username={username}')
+            return render_template('login.html', page_title='Login', error='Invalid username or password', next=next_url), 401
+
+        user = _User(row)
+        login_user(user)
+        session['_last_activity'] = int(time.time())
+        _audit('login_ok', f'username={username}')
+
+        return redirect(next_url or '/')
+
+    timeout = request.args.get('timeout')
+    msg = 'You have been logged out due to inactivity.' if timeout else None
+    return render_template('login.html', page_title='Login', message=msg, next=next_url)
+
+
+@app.route('/logout')
+def logout_page():
+    if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
+        _audit('logout')
+    try:
+        logout_user()
+    except Exception:
+        pass
+    try:
+        session.clear()
+    except Exception:
+        pass
+    return redirect('/login' if _auth_enabled() else '/')
+
+
+@app.route('/account/password', methods=['GET', 'POST'])
+@require_page('page:account', 'Account')
+def account_password_page():
+    if request.method == 'POST':
+        current_pw = str(request.form.get('current_password') or '')
+        new_pw = str(request.form.get('new_password') or '')
+        confirm_pw = str(request.form.get('confirm_password') or '')
+
+        cfg = _auth_cfg()
+        try:
+            min_len = int(cfg.get('auth_min_password_length', 6))
+        except Exception:
+            min_len = 6
+        min_len = max(4, min(min_len, 128))
+
+        if new_pw != confirm_pw:
+            return render_template('account_password.html', page_title='Change Password', error='Passwords do not match')
+        if len(new_pw) < min_len:
+            return render_template('account_password.html', page_title='Change Password', error=f'Password must be at least {min_len} characters')
+
+        # Verify current password
+        row = _user_record(int(current_user.get_id()))
+        if not row or not check_password_hash(str(row['password_hash'] or ''), current_pw):
+            _audit('password_change_fail', 'bad_current_password')
+            return render_template('account_password.html', page_title='Change Password', error='Current password is incorrect')
+
+        conn = _db()
+        try:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute(
+                'UPDATE users SET password_hash=?, updated_at=? WHERE id=?',
+                (generate_password_hash(new_pw), now, int(current_user.get_id())),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _audit('password_change_ok')
+        return redirect('/')
+
+    return render_template('account_password.html', page_title='Change Password')
+
+
+@app.route('/admin/roles', methods=['GET', 'POST'])
+@require_page('page:admin', 'Admin')
+def admin_roles_page():
+    if request.method == 'POST':
+        action = str(request.form.get('action') or '').strip()
+
+        if action == 'create_role':
+            name = str(request.form.get('role_name') or '').strip()
+            if name:
+                try:
+                    _ensure_role(name)
+                    _audit('role_create', name)
+                except Exception:
+                    pass
+
+        if action == 'delete_role':
+            role_id = request.form.get('role_id')
+            try:
+                rid = int(role_id)
+            except Exception:
+                rid = None
+            if rid:
+                conn = _db()
+                try:
+                    r = conn.execute('SELECT id,name FROM roles WHERE id=?', (rid,)).fetchone()
+                    if r and str(r['name']) != 'Admin':
+                        # Unassign users from this role
+                        conn.execute('UPDATE users SET role_id=NULL WHERE role_id=?', (rid,))
+                        conn.execute('DELETE FROM role_pages WHERE role_id=?', (rid,))
+                        conn.execute('DELETE FROM roles WHERE id=?', (rid,))
+                        conn.commit()
+                        _audit('role_delete', str(r['name']))
+                finally:
+                    conn.close()
+
+        if action == 'save_pages':
+            role_id = request.form.get('role_id')
+            try:
+                rid = int(role_id)
+            except Exception:
+                rid = None
+            if rid:
+                # Admin role is allow-all; still allow saving but not required.
+                keys = request.form.getlist('page_keys')
+                try:
+                    _set_role_pages(rid, [str(k) for k in keys])
+                    _audit('role_pages_update', f'role_id={rid} keys={len(keys)}')
+                except Exception:
+                    pass
+
+    conn = _db()
+    try:
+        roles = conn.execute('SELECT id,name FROM roles ORDER BY lower(name)').fetchall()
+        role_pages = conn.execute('SELECT role_id,page_key FROM role_pages').fetchall()
+    finally:
+        conn.close()
+
+    pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()], key=lambda x: x[1].lower())
+    role_to_pages: dict[int, set[str]] = {}
+    for rp in role_pages or []:
+        try:
+            role_to_pages.setdefault(int(rp['role_id']), set()).add(str(rp['page_key']))
+        except Exception:
+            continue
+
+    return render_template('admin_roles.html', page_title='Access Levels', roles=roles, pages=pages, role_to_pages=role_to_pages)
+
+
+@app.route('/admin/users', methods=['GET', 'POST'])
+@require_page('page:admin', 'Admin')
+def admin_users_page():
+    cfg = _auth_cfg()
+    try:
+        min_len = int(cfg.get('auth_min_password_length', 6))
+    except Exception:
+        min_len = 6
+    min_len = max(4, min(min_len, 128))
+
+    if request.method == 'POST':
+        action = str(request.form.get('action') or '').strip()
+
+        if action == 'create_user':
+            username = str(request.form.get('username') or '').strip()
+            password = str(request.form.get('password') or '')
+            role_id = request.form.get('role_id')
+            try:
+                rid = int(role_id) if role_id else None
+            except Exception:
+                rid = None
+
+            if username and len(password) >= min_len:
+                conn = _db()
+                try:
+                    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    conn.execute(
+                        'INSERT INTO users(username,password_hash,role_id,is_active,created_at,updated_at) VALUES (?,?,?,?,?,?)',
+                        (username, generate_password_hash(password), rid, 1, now, now),
+                    )
+                    conn.commit()
+                    _audit('user_create', username)
+                except Exception:
+                    pass
+                finally:
+                    conn.close()
+
+        if action == 'update_user':
+            user_id = request.form.get('user_id')
+            try:
+                uid = int(user_id)
+            except Exception:
+                uid = None
+            role_id = request.form.get('role_id')
+            try:
+                rid = int(role_id) if role_id else None
+            except Exception:
+                rid = None
+            is_active = 1 if request.form.get('is_active') == 'on' else 0
+
+            if uid:
+                conn = _db()
+                try:
+                    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    conn.execute('UPDATE users SET role_id=?, is_active=?, updated_at=? WHERE id=?', (rid, is_active, now, uid))
+                    conn.commit()
+                    _audit('user_update', f'id={uid}')
+                finally:
+                    conn.close()
+
+        if action == 'reset_password':
+            user_id = request.form.get('user_id')
+            new_pw = str(request.form.get('new_password') or '')
+            try:
+                uid = int(user_id)
+            except Exception:
+                uid = None
+            if uid and len(new_pw) >= min_len:
+                conn = _db()
+                try:
+                    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    conn.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', (generate_password_hash(new_pw), now, uid))
+                    conn.commit()
+                    _audit('user_password_reset', f'id={uid}')
+                finally:
+                    conn.close()
+
+        if action == 'delete_user':
+            user_id = request.form.get('user_id')
+            try:
+                uid = int(user_id)
+            except Exception:
+                uid = None
+            if uid:
+                conn = _db()
+                try:
+                    # Prevent deleting yourself or the last admin
+                    if int(current_user.get_id()) == uid:
+                        pass
+                    else:
+                        # check if user is admin
+                        row = conn.execute('SELECT u.id, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE u.id=?', (uid,)).fetchone()
+                        if row and str(row['role_name'] or '') == 'Admin':
+                            admins = conn.execute(
+                                "SELECT count(*) AS c FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE r.name='Admin' AND u.is_active=1"
+                            ).fetchone()
+                            if admins and int(admins['c'] or 0) <= 1:
+                                pass
+                            else:
+                                conn.execute('DELETE FROM users WHERE id=?', (uid,))
+                                conn.commit()
+                                _audit('user_delete', f'id={uid}')
+                        else:
+                            conn.execute('DELETE FROM users WHERE id=?', (uid,))
+                            conn.commit()
+                            _audit('user_delete', f'id={uid}')
+                finally:
+                    conn.close()
+
+    conn = _db()
+    try:
+        users = conn.execute(
+            'SELECT u.id,u.username,u.is_active,u.role_id, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id ORDER BY lower(u.username)'
+        ).fetchall()
+        roles = conn.execute('SELECT id,name FROM roles ORDER BY lower(name)').fetchall()
+    finally:
+        conn.close()
+
+    return render_template('admin_users.html', page_title='Users', users=users, roles=roles, min_len=min_len)
+
+
+@app.get('/admin/backup/authdb')
+@require_page('page:admin', 'Admin')
+def admin_backup_authdb():
+    """Download the auth database as a backup (Admin only)."""
+    try:
+        _bootstrap_default_users_roles()
+    except Exception:
+        pass
+
+    try:
+        src = Path(_AUTH_DB_PATH)
+        if not src.exists():
+            _init_auth_db()
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        filename = f'auth-{stamp}.db'
+        return send_file(str(src), as_attachment=True, download_name=filename)
+    except Exception as e:
+        try:
+            _audit('backup_authdb_fail', str(e))
+        except Exception:
+            pass
+        return abort(500)
+
+
 @app.route('/')
+@require_page('page:home', 'Home')
 def home():
     # Provide lightweight status data for the Home page.
     try:
@@ -782,21 +1563,25 @@ def api_upcoming_triggers():
 
 
 @app.route('/calendar')
+@require_page('page:calendar', 'Schedule')
 def calendar_page():
     return render_template('calendar.html')
 
 
 @app.route('/calendar/triggers')
+@require_page('page:calendar', 'Schedule')
 def calendar_triggers_page():
     return render_template('calendar_triggers.html')
 
 
 @app.route('/templates')
+@require_page('page:templates', 'Templates')
 def templates_page():
     return render_template('templates.html')
 
 
 @app.route('/api-reference')
+@require_page('page:api_reference', 'API Reference')
 def api_reference_page():
     p = Path.cwd() / 'API_REFERENCE.md'
     try:
@@ -807,31 +1592,37 @@ def api_reference_page():
 
 
 @app.route('/videohub')
+@require_page('page:videohub', 'VideoHub')
 def videohub_page():
     return render_template('videohub.html')
 
 
 @app.route('/timers')
+@require_page('page:timers', 'Timers')
 def timers_page():
     return render_template('timers.html')
 
 
 @app.route('/config')
+@require_page('page:config', 'Config')
 def config_page():
     return render_template('config.html')
 
 
 @app.route('/console')
+@require_page('page:console', 'Console')
 def console_page():
     return render_template('console.html')
 
 
 @app.route('/calendar/new')
+@require_page('page:calendar', 'Schedule')
 def calendar_new_page():
     return render_template('calendar_new.html')
 
 
 @app.route('/calendar/edit/<int:ident>')
+@require_page('page:calendar', 'Schedule')
 def calendar_edit_page(ident: int):
     # Render the same create page; client JS will fetch event data and switch to edit mode
     return render_template('calendar_new.html')

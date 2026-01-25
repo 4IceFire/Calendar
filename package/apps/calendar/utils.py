@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, TYPE_CHECKING
 import os
 import re
+import secrets
 
 from package.apps.calendar.storage import DEFAULT_EVENTS_FILE
 import logging
@@ -38,6 +39,16 @@ _defaults = {
     "debug": False,
     # Web UI theme
     "dark_mode": True,
+
+    # Auth (Web UI pages only)
+    # NOTE: /api/* endpoints are intentionally left open for Companion.
+    "auth_enabled": True,
+    "auth_idle_timeout_enabled": True,
+    "auth_idle_timeout_minutes": 2,
+    "auth_min_password_length": 6,
+
+    # Scheduler/internal API
+    "internal_api_timeout_seconds": 10,
 
     # VideoHub defaults
     "videohub_ip": "172.20.10.11",
@@ -209,6 +220,15 @@ def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
         if k not in data:
             data[k] = v
             changed = True
+
+    # Ensure we have a stable secret key for Flask sessions.
+    # Generate one once and persist it.
+    if not str(data.get('flask_secret_key') or '').strip():
+        try:
+            data['flask_secret_key'] = secrets.token_hex(32)
+            changed = True
+        except Exception:
+            pass
 
     # Prefer the new keys going forward; remove legacy keys if present.
     if "timer_index" in data:

@@ -17,14 +17,13 @@
         </a>
         <div class="collapse navbar-collapse">
           <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-            <li class="nav-item"><a class="nav-link" href="/">Home</a></li>
-            <li class="nav-item"><a class="nav-link" href="/timers">Timers</a></li>
-            <li class="nav-item"><a class="nav-link" href="/calendar">Schedule</a></li>
-            <li class="nav-item"><a class="nav-link" href="/videohub">VideoHub</a></li>
-            <li class="nav-item"><a class="nav-link" href="/templates">Templates</a></li>
-            <li class="nav-item"><a class="nav-link" href="/api-reference">API Reference</a></li>
-            <li class="nav-item"><a class="nav-link" href="/config">Config</a></li>
-            <li class="nav-item"><a class="nav-link" href="/console">Console</a></li>
+            {% if not auth_enabled or can_access('page:home') %}<li class="nav-item"><a class="nav-link" href="/">Home</a></li>{% endif %}
+            {% if not auth_enabled or can_access('page:timers') %}<li class="nav-item"><a class="nav-link" href="/timers">Timers</a></li>{% endif %}
+            {% if not auth_enabled or can_access('page:calendar') %}<li class="nav-item"><a class="nav-link" href="/calendar">Schedule</a></li>{% endif %}
+            {% if not auth_enabled or can_access('page:videohub') %}<li class="nav-item"><a class="nav-link" href="/videohub">VideoHub</a></li>{% endif %}
+            {% if not auth_enabled or can_access('page:templates') %}<li class="nav-item"><a class="nav-link" href="/templates">Templates</a></li>{% endif %}
+            {% if not auth_enabled or can_access('page:api_reference') %}<li class="nav-item"><a class="nav-link" href="/api-reference">API Reference</a></li>{% endif %}
+            {% if not auth_enabled or can_access('page:console') %}<li class="nav-item"><a class="nav-link" href="/console">Console</a></li>{% endif %}
           </ul>
         </div>
         <div class="d-flex align-items-center">
@@ -40,6 +39,33 @@
             <span id="videohub-dot" class="indicator-dot bg-danger"></span>
             <span id="videohub-label">VideoHub: Checking...</span>
           </div>
+
+          {% if auth_enabled %}
+            <div class="dropdown">
+              <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                {% if current_user and current_user.is_authenticated %}{{ current_user.username }}{% else %}Account{% endif %}
+              </button>
+              <ul class="dropdown-menu dropdown-menu-end">
+                {% if current_user and current_user.is_authenticated %}
+                  {% if can_access('page:account') %}
+                    <li><a class="dropdown-item" href="/account/password">Change Password</a></li>
+                  {% endif %}
+                  {% if can_access('page:config') %}
+                    <li><a class="dropdown-item" href="/config">Config</a></li>
+                  {% endif %}
+                  {% if can_access('page:admin') %}
+                    <li><hr class="dropdown-divider"></li>
+                    <li><a class="dropdown-item" href="/admin/users">Users</a></li>
+                    <li><a class="dropdown-item" href="/admin/roles">Access Levels</a></li>
+                  {% endif %}
+                  <li><hr class="dropdown-divider"></li>
+                  <li><a class="dropdown-item" href="/logout">Logout</a></li>
+                {% else %}
+                  <li><a class="dropdown-item" href="/login">Login</a></li>
+                {% endif %}
+              </ul>
+            </div>
+          {% endif %}
         </div>
       </div>
     </nav>

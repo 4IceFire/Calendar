@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+
+{% set page_title = page_title|default('Login') %}
+
+{% block content %}
+  <div class="row justify-content-center">
+    <div class="col-md-5 col-lg-4">
+      <div class="card tdeck-soft">
+        <div class="card-body">
+          <h1 class="h4 mb-3">Login</h1>
+
+          {% if message %}
+            <div class="alert alert-info py-2">{{ message }}</div>
+          {% endif %}
+          {% if error %}
+            <div class="alert alert-danger py-2">{{ error }}</div>
+          {% endif %}
+
+          <form method="post" action="/login">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <input type="hidden" name="next" value="{{ next or '' }}">
+
+            <div class="mb-3">
+              <label class="form-label">Username</label>
+              <input class="form-control" name="username" autocomplete="username" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input class="form-control" name="password" type="password" autocomplete="current-password" required>
+            </div>
+
+            <button class="btn btn-primary w-100" type="submit">Sign in</button>
+
+            <div class="small text-muted mt-3">
+              Default admin credentials: <strong>admin</strong> / <strong>admin</strong>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

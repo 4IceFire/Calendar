@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Access Denied' %}
+
+{% block content %}
+  <div class="alert alert-danger">
+    <div class="fw-semibold">You do not have permission to view this page.</div>
+    <div class="small mt-1">If you think this is a mistake, ask an Admin to update your access level.</div>
+  </div>
+{% endblock %}

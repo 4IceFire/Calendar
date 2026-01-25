@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Bad Request' %}
+
+{% block content %}
+  <div class="alert alert-warning">
+    <div class="fw-semibold">Bad request.</div>
+    <div class="small mt-1">This can happen if your session expired or a form was submitted from another tab.</div>
+  </div>
+{% endblock %}

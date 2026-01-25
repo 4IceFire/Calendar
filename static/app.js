@@ -146,6 +146,29 @@ const CONFIG_META = {
     help: 'Enable dark theme for the Web UI.',
   },
 
+  auth_enabled: {
+    label: 'Require Login (Pages)',
+    help: 'If enabled, the HTML pages require login. (The /api endpoints remain unauthenticated.)',
+  },
+  auth_idle_timeout_enabled: {
+    label: 'Idle Timeout Enabled',
+    help: 'Automatically logs a user out after inactivity.',
+  },
+  auth_idle_timeout_minutes: {
+    label: 'Idle Timeout (minutes)',
+    help: 'How many minutes of inactivity before logout.',
+  },
+  auth_min_password_length: {
+    label: 'Minimum Password Length',
+    help: 'Minimum length required for new passwords.',
+  },
+  flask_secret_key: {
+    label: 'Flask Secret Key',
+    help: 'Used to sign session cookies. Changing this will log out all users and invalidate existing sessions.',
+    sensitive: true,
+    inputType: 'password',
+  },
+
   companion_ip: {
     label: 'Companion Host',
     help: 'Bitfocus Companion IP or hostname.',
@@ -278,7 +301,7 @@ function _renderConfigField(key, value) {
     input.dataset.cfgType = 'json';
   } else {
     input = document.createElement('input');
-    input.type = 'text';
+    input.type = meta.inputType || 'text';
     input.className = 'form-control';
     input.value = value == null ? '' : String(value);
     input.dataset.cfgType = 'string';
@@ -306,6 +329,13 @@ function _renderConfigGroups(cfg) {
 
   const mainTitles = new Set(['Web UI', 'Companion', 'ProPresenter', 'VideoHub']);
   const schedulingKeys = ['EVENTS_FILE'];
+  const authKeys = [
+    'auth_enabled',
+    'auth_idle_timeout_enabled',
+    'auth_idle_timeout_minutes',
+    'auth_min_password_length',
+    'flask_secret_key',
+  ];
 
   const groups = [
     {
@@ -372,6 +402,22 @@ function _renderConfigGroups(cfg) {
     h.textContent = 'Scheduling';
     sub.appendChild(h);
     for (const k of presentSchedulingKeys) {
+      sub.appendChild(_renderConfigField(k, cfg[k]));
+    }
+    webUiBody.appendChild(sub);
+  }
+
+  // Authentication: render inside Web UI as a nested sub-box.
+  const presentAuthKeys = authKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
+  if (webUiBody && presentAuthKeys.length) {
+    for (const k of presentAuthKeys) used.add(k);
+    const sub = document.createElement('div');
+    sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+    const h = document.createElement('div');
+    h.className = 'fw-semibold mb-2';
+    h.textContent = 'Authentication';
+    sub.appendChild(h);
+    for (const k of presentAuthKeys) {
       sub.appendChild(_renderConfigField(k, cfg[k]));
     }
     webUiBody.appendChild(sub);
