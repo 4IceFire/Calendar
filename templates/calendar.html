@@ -60,6 +60,8 @@ async function loadEvents(){
       const rawType = String(t.typeOfTrigger || '').toUpperCase();
       const mins = Number(t.minutes) || 0;
 
+      const actionType = String(t.actionType || 'companion').toLowerCase();
+
       // Represent BEFORE/AT/AFTER as a signed offset so it reads at-a-glance.
       // BEFORE => -Xm, AT => 0m, AFTER => +Xm
       let sign = '';
@@ -67,6 +69,18 @@ async function loadEvents(){
       else if (rawType === 'AFTER') sign = '+';
       else sign = '';
       const offsetLabel = `${sign}${mins}m`;
+
+      if(actionType === 'api'){
+        const m = (t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST';
+        const rawP = (t.api && t.api.path) ? String(t.api.path) : '';
+        const p = rawP.startsWith('/api/') ? rawP.slice(4) : rawP;
+        return {
+          rawType,
+          offsetLabel,
+          target: `API: ${m} ${p}`,
+          targetKind: 'api',
+        };
+      }
 
       // normalize short and full button forms
       const raw = t.buttonURL || '';

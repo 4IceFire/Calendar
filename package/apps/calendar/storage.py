@@ -38,14 +38,34 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                     max_id = ev.get("id")
 
             for ev in events_data:
-                times = [
-                    TimeOfTrigger(
-                        trig.get("minutes", 0),
-                        TypeofTime[trig.get("typeOfTrigger", "AT")],
-                        trig.get("buttonURL", ""),
-                    )
-                    for trig in ev.get("times", [])
-                ]
+                times: list[TimeOfTrigger] = []
+                for trig in ev.get("times", []):
+                    action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
+                    api = trig.get("api") if isinstance(trig, dict) else None
+
+                    # Backward compatible inference: if api exists, treat as API action.
+                    if not action_type:
+                        action_type = "api" if isinstance(api, dict) else "companion"
+
+                    if action_type == "api":
+                        times.append(
+                            TimeOfTrigger(
+                                trig.get("minutes", 0),
+                                TypeofTime[trig.get("typeOfTrigger", "AT")],
+                                "",
+                                actionType="api",
+                                api=api if isinstance(api, dict) else {},
+                            )
+                        )
+                    else:
+                        times.append(
+                            TimeOfTrigger(
+                                trig.get("minutes", 0),
+                                TypeofTime[trig.get("typeOfTrigger", "AT")],
+                                trig.get("buttonURL", ""),
+                                actionType="companion",
+                            )
+                        )
 
                 # assign id if missing
                 ev_id = ev.get("id")
@@ -73,11 +93,26 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                 if "active" not in ev:
                     ev["active"] = True
                     changed = True
-                # ensure buttonURL exists on triggers
+                # ensure trigger action schema exists
                 for trig in ev.get("times", []):
-                    if "buttonURL" not in trig:
-                        trig["buttonURL"] = ""
+                    if not isinstance(trig, dict):
+                        continue
+
+                    action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
+                    if not action_type:
+                        action_type = "api" if isinstance(trig.get("api"), dict) else "companion"
+                        trig["actionType"] = action_type
                         changed = True
+
+                    if action_type == "api":
+                        if "api" not in trig or not isinstance(trig.get("api"), dict):
+                            trig["api"] = {}
+                            changed = True
+                        # keep legacy buttonURL if present; not used by executor
+                    else:
+                        if "buttonURL" not in trig:
+                            trig["buttonURL"] = ""
+                            changed = True
                 # ensure id exists
                 if "id" not in ev or not isinstance(ev.get("id"), int):
                     max_id += 1
@@ -125,10 +160,10 @@ def save_events(events_list: List[Event], path: str = DEFAULT_EVENTS_FILE) -> No
             "repeating": event.repeating,
             "active": getattr(event, "active", True),
             "times": [
-                {
+                trig.to_dict() if hasattr(trig, "to_dict") else {
                     "minutes": trig.minutes,
                     "typeOfTrigger": trig.typeOfTrigger.name,
-                    "buttonURL": trig.buttonURL,
+                    "buttonURL": getattr(trig, "buttonURL", ""),
                 }
                 for trig in event.times
             ],

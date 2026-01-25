@@ -58,6 +58,21 @@
 </form>
 
 <script>
+function normalizeApiPath(p){
+  let s = String(p || '').trim();
+  if(!s) return '';
+  if(s.includes('://')) return '';
+  if(s.startsWith('/api/')) return s;
+  if(s.startsWith('/')) return '/api' + s;
+  return '/api/' + s.replace(/^\/+/, '');
+}
+
+function displayApiPath(p){
+  const s = String(p || '').trim();
+  if(s.startsWith('/api/')) return s.slice(4);
+  return s;
+}
+
 async function loadButtonTemplates(){
   try{
     const resp = await fetch('/api/templates');
@@ -77,20 +92,42 @@ async function loadTriggerTemplates(){
 function newTriggerRow(templates){
   const idx = Date.now();
   const div = document.createElement('div');
-  div.className = 'd-flex gap-2 align-items-center mb-2';
+  div.className = 'trigger-row border rounded p-2 mb-2';
   div.innerHTML = `
-    <input name="minutes" placeholder="minutes" class="form-control form-control-sm" style="width:100px">
-    <select name="typeOfTrigger" class="form-select form-select-sm" style="width:140px">
-      <option value="BEFORE">Before</option>
-      <option value="AT">At</option>
-      <option value="AFTER">After</option>
-    </select>
-    <select name="buttonTemplate" class="form-select form-select-sm">
-      <option value="">(none)</option>
-      ${templates.map((t,i)=>`<option value="${i}">${t.label}</option>`).join('')}
-    </select>
-    <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
-    <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
+    <div class="d-flex gap-2 align-items-center">
+      <input name="minutes" placeholder="minutes" class="form-control form-control-sm" style="width:100px">
+      <select name="typeOfTrigger" class="form-select form-select-sm" style="width:140px">
+        <option value="BEFORE">Before</option>
+        <option value="AT">At</option>
+        <option value="AFTER">After</option>
+      </select>
+      <select name="actionType" class="form-select form-select-sm" style="width:160px">
+        <option value="companion">Companion Button</option>
+        <option value="api">API Call</option>
+      </select>
+      <button class="btn btn-sm btn-outline-danger ms-auto remove-trigger">Remove</button>
+    </div>
+
+    <div class="mt-2 gap-2 align-items-center companion-fields" style="display:flex">
+      <select name="buttonTemplate" class="form-select form-select-sm">
+        <option value="">(none)</option>
+        ${templates.map((t,i)=>`<option value="${i}">${t.label}</option>`).join('')}
+      </select>
+      <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
+      <small class="text-muted" style="white-space:nowrap" title="Companion short button format: bank/page/button">(bank/page/button, e.g. 1/2/3)</small>
+    </div>
+
+    <div class="mt-2 gap-2 align-items-start api-fields" style="display:none">
+      <select name="apiMethod" class="form-select form-select-sm" style="width:120px">
+        <option value="POST">POST</option>
+        <option value="GET">GET</option>
+        <option value="PUT">PUT</option>
+        <option value="PATCH">PATCH</option>
+        <option value="DELETE">DELETE</option>
+      </select>
+      <input name="apiPath" placeholder="/videohub/presets/1/apply" class="form-control form-control-sm">
+      <textarea name="apiBody" placeholder='JSON body (optional)' class="form-control form-control-sm" rows="2" style="max-width:340px"></textarea>
+    </div>
   `;
 
   const minutesInput = div.querySelector('input[name="minutes"]');
@@ -110,6 +147,31 @@ function newTriggerRow(templates){
 
   // allow callers (edit-mode/template loader) to re-run this after populating values
   div.__syncMinutesDisabled = syncMinutesDisabled;
+
+  // Toggle companion vs api fields
+  const actionSel = div.querySelector('select[name="actionType"]');
+  const companionFields = div.querySelector('.companion-fields');
+  const apiFields = div.querySelector('.api-fields');
+  const btnTplSel = div.querySelector('select[name="buttonTemplate"]');
+  const btnUrlInp = div.querySelector('input[name="buttonURL"]');
+  const syncActionFields = ()=>{
+    const v = String(actionSel ? actionSel.value : 'companion').toLowerCase();
+    if(v === 'api'){
+      if(companionFields) companionFields.style.display = 'none';
+      if(apiFields) apiFields.style.display = 'flex';
+      if(btnTplSel) btnTplSel.disabled = true;
+      if(btnUrlInp) btnUrlInp.disabled = true;
+    }else{
+      if(companionFields) companionFields.style.display = 'flex';
+      if(apiFields) apiFields.style.display = 'none';
+      if(btnTplSel) btnTplSel.disabled = false;
+      if(btnUrlInp) btnUrlInp.disabled = false;
+    }
+  };
+  if(actionSel) actionSel.addEventListener('change', syncActionFields);
+  syncActionFields();
+  div.__syncActionFields = syncActionFields;
+
   return div;
 }
 
@@ -149,26 +211,35 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           const row = newTriggerRow(templates);
           row.querySelector('input[name="minutes"]').value = t.minutes;
           row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
+          row.querySelector('select[name="actionType"]').value = (t.actionType || 'companion');
+          if(typeof row.__syncActionFields === 'function') row.__syncActionFields();
           if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
-          // attempt to match a button template
-          let matched = false;
-          for(let bi=0; bi<templates.length; bi++){
-            const b = templates[bi];
-            const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null);
-              if(bu && bu === t.buttonURL){
-                const m2 = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
-                // always display the short pattern (e.g. "1/0/1") when a template is used
-                const short = m2 ? m2[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || bu);
-                row.querySelector('select[name="buttonTemplate"]').value = bi;
-                row.querySelector('input[name="buttonURL"]').value = short;
-                row.querySelector('input[name="buttonURL"]').disabled = true;
-                matched = true; break;
-              }
-          }
-          if(!matched){
-            const bu = t.buttonURL || '';
-            const m2 = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
-            row.querySelector('input[name="buttonURL"]').value = m2 ? m2[1] : (/^\d+\/\d+\/\d+$/.test(bu) ? bu : '');
+
+          if(String(t.actionType || 'companion').toLowerCase() === 'api'){
+            row.querySelector('select[name="apiMethod"]').value = (t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST';
+            row.querySelector('input[name="apiPath"]').value = (t.api && t.api.path) ? displayApiPath(String(t.api.path)) : '';
+            row.querySelector('textarea[name="apiBody"]').value = (t.api && t.api.body !== undefined) ? JSON.stringify(t.api.body) : '';
+          }else{
+            // attempt to match a button template
+            let matched = false;
+            for(let bi=0; bi<templates.length; bi++){
+              const b = templates[bi];
+              const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null);
+                if(bu && bu === t.buttonURL){
+                  const m2 = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+                  // always display the short pattern (e.g. "1/0/1") when a template is used
+                  const short = m2 ? m2[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || bu);
+                  row.querySelector('select[name="buttonTemplate"]').value = bi;
+                  row.querySelector('input[name="buttonURL"]').value = short;
+                  row.querySelector('input[name="buttonURL"]').disabled = true;
+                  matched = true; break;
+                }
+            }
+            if(!matched){
+              const bu = t.buttonURL || '';
+              const m2 = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+              row.querySelector('input[name="buttonURL"]').value = m2 ? m2[1] : (/^\d+\/\d+\/\d+$/.test(bu) ? bu : '');
+            }
           }
           container.appendChild(row);
         }
@@ -183,14 +254,19 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   });
 
   container.addEventListener('click', (ev)=>{
-    const btn = ev.target.closest('.remove-trigger'); if(!btn) return; btn.closest('div').remove();
+    const btn = ev.target.closest('.remove-trigger');
+    if(!btn) return;
+    const row = btn.closest('.trigger-row');
+    if(row) row.remove();
   });
 
   // when a button template is selected, auto-fill and disable the buttonURL input
   container.addEventListener('change', (ev)=>{
     const sel = ev.target.closest('select[name="buttonTemplate"]');
     if(!sel) return;
-    const row = sel.closest('div');
+    const row = sel.closest('.trigger-row');
+    const actionSel = row.querySelector('select[name="actionType"]');
+    if(actionSel && String(actionSel.value || 'companion').toLowerCase() === 'api') return;
     const idx = sel.value;
     const input = row.querySelector('input[name="buttonURL"]');
     if(idx !== ''){
@@ -234,25 +310,34 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       const row = newTriggerRow(templates);
       row.querySelector('input[name="minutes"]').value = t.minutes;
       row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
+      row.querySelector('select[name="actionType"]').value = (t.actionType || 'companion');
+      if(typeof row.__syncActionFields === 'function') row.__syncActionFields();
       if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
-      // try to match button template
-      let matched = false;
-      for(let bi=0; bi<templates.length; bi++){
-        const b = templates[bi];
-        const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null);
-          if(bu && bu === t.buttonURL){
-            // display short form when populating from template
-            const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
-            const short = m ? m[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || '');
-            row.querySelector('select[name="buttonTemplate"]').value = bi;
-            row.querySelector('input[name="buttonURL"]').value = short;
-            row.querySelector('input[name="buttonURL"]').disabled = true;
-            matched = true; break; }
-      }
-      if(!matched){
-        const bu = t.buttonURL || '';
-        const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
-        row.querySelector('input[name="buttonURL"]') .value = m ? m[1] : (/^\d+\/\d+\/\d+$/.test(bu) ? bu : '');
+
+      if(String(t.actionType || 'companion').toLowerCase() === 'api'){
+        row.querySelector('select[name="apiMethod"]').value = (t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST';
+        row.querySelector('input[name="apiPath"]').value = (t.api && t.api.path) ? displayApiPath(String(t.api.path)) : '';
+        row.querySelector('textarea[name="apiBody"]').value = (t.api && t.api.body !== undefined) ? JSON.stringify(t.api.body) : '';
+      }else{
+        // try to match button template
+        let matched = false;
+        for(let bi=0; bi<templates.length; bi++){
+          const b = templates[bi];
+          const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null);
+            if(bu && bu === t.buttonURL){
+              // display short form when populating from template
+              const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+              const short = m ? m[1] : ((bu.match(/(\d+\/\d+\/\d+)/) || [null, null])[1] || '');
+              row.querySelector('select[name="buttonTemplate"]').value = bi;
+              row.querySelector('input[name="buttonURL"]').value = short;
+              row.querySelector('input[name="buttonURL"]').disabled = true;
+              matched = true; break; }
+        }
+        if(!matched){
+          const bu = t.buttonURL || '';
+          const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
+          row.querySelector('input[name="buttonURL"]') .value = m ? m[1] : (/^\d+\/\d+\/\d+$/.test(bu) ? bu : '');
+        }
       }
       container.appendChild(row);
     }
@@ -261,6 +346,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   // initialize any pre-selected templates on page load
   (function initSelectedTemplates(){
     for(const row of container.children){
+      const actionSel = row.querySelector('select[name="actionType"]');
+      if(actionSel && String(actionSel.value || 'companion').toLowerCase() === 'api') continue;
       const sel = row.querySelector('select[name="buttonTemplate"]');
       const input = row.querySelector('input[name="buttonURL"]');
       if(!sel || !input) continue;
@@ -294,8 +381,9 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     for(const row of container.children){
       let minsRaw = row.querySelector('input[name="minutes"]').value;
       const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
-      const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
-      let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
+        const actionType = String(row.querySelector('select[name="actionType"]').value || 'companion').toLowerCase();
+        const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
+        let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
 
       // Minutes: required unless type==AT (AT is always saved as 0)
       if(String(type).toUpperCase() === 'AT'){
@@ -308,6 +396,23 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       }
       const mins = parseInt(minsRaw,10);
       if(Number.isNaN(mins) || mins < 0){ alert('Minutes must be a non-negative integer'); return; }
+
+      if(actionType === 'api'){
+        const method = String(row.querySelector('select[name="apiMethod"]').value || 'POST').toUpperCase();
+        const path = String(row.querySelector('input[name="apiPath"]').value || '').trim();
+        const bodyRaw = String(row.querySelector('textarea[name="apiBody"]').value || '').trim();
+        const normPath = normalizeApiPath(path);
+        if(!normPath || !normPath.startsWith('/api/')){ alert('API path must be like /videohub/... (the /api prefix is added automatically)'); return; }
+        let body = undefined;
+        if(bodyRaw){
+          try{ body = JSON.parse(bodyRaw); }
+          catch(e){ alert('API body must be valid JSON'); return; }
+        }
+        const api = {method, path: normPath};
+        if(body !== undefined) api.body = body;
+        times.push({minutes: mins, typeOfTrigger: type, actionType: 'api', api});
+        continue;
+      }
 
       // If a template selected, use its buttonURL (and ignore user input)
       if(tmplIdx !== ''){
@@ -327,7 +432,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         alert('buttonURL must be like "1/2/3" or "location/1/2/3/press"'); return;
       }
 
-      times.push({minutes: mins, typeOfTrigger: type, buttonURL});
+      times.push({minutes: mins, typeOfTrigger: type, actionType: 'companion', buttonURL});
     }
 
     const active = document.getElementById('activeCheck').checked === true;

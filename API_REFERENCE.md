@@ -9,6 +9,12 @@ This document lists the HTTP API endpoints implemented by the Flask Web UI serve
 - Auth: none (intended for trusted LAN usage)
 - Format: JSON (unless otherwise noted)
 
+### Note about `/api` in trigger editors
+
+All HTTP API endpoints are served under `/api/...`.
+
+When configuring a scheduled **API Call** trigger in the UI, you can enter paths like `/videohub/ping` or `videohub/ping` and the app will automatically normalize them to `/api/videohub/ping` for execution.
+
 ### Indexing conventions
 
 - Calendar event IDs: integers assigned by the server.
@@ -36,7 +42,8 @@ Event shape (simplified):
   "repeating": false,
   "active": true,
   "times": [
-    {"minutes": 10, "typeOfTrigger": "BEFORE", "buttonURL": "location/1/0/1/press"}
+    {"minutes": 10, "typeOfTrigger": "BEFORE", "actionType": "companion", "buttonURL": "location/1/0/1/press"},
+    {"minutes": 0, "typeOfTrigger": "AT", "actionType": "api", "api": {"method": "POST", "path": "/api/videohub/presets/1/apply"}}
   ]
 }
 ```
@@ -74,7 +81,9 @@ Trigger entry shape (simplified):
   "event_id": 1,
   "offset_min": 10,
   "offset": "10m",
+  "actionType": "companion",
   "buttonURL": "location/1/0/1/press",
+  "api": null,
   "button": {"label": "Start Stream", "pattern": "1/0/1"}
 }
 ```
@@ -106,6 +115,24 @@ Trigger entry shape (simplified):
 ```
 - **Notes:** Presets are persisted to `timer_presets.json` (not stored inline in `config.json`).
 
+### Update one timer preset time (no full list required)
+- **PATCH** (or **POST**) `/api/timers/preset`
+- **Body:**
+```json
+{ "preset": 2, "time": "08:15" }
+```
+- **Notes:**
+  - `preset` is **1-based** (2 means the 2nd preset in `timer_presets.json`).
+  - Also accepts optional `name` to rename that preset.
+  - `time` can also be relative to the event start time when called by a scheduled API trigger:
+    - Example: `{ "preset": 2, "time": "$-60" }` means “event_start minus 60 minutes”.
+    - The scheduler automatically injects `event_start` into internal API trigger bodies.
+    - If you call this endpoint manually and use `$...`, include `event_start` (or `base_time`) as an ISO datetime:
+      - Example: `{ "preset": 2, "time": "$-60", "event_start": "2026-01-25T12:00:00" }`
+  - Optional: set `apply: true` to immediately apply/start that preset (same behavior as calling `/api/timers/apply` right after).
+    - Example: `{ "preset": 2, "time": "08:15", "apply": true }`
+  - Best-effort: updates the corresponding Companion custom variable for that preset index.
+
 ### Apply a timer preset (Companion → WebUI)
 - **POST** `/api/timers/apply`
 - **Input (either):**
@@ -113,6 +140,44 @@ Trigger entry shape (simplified):
   - Query string: `?preset=1`
 - **Notes:** `preset` is always **1-based** (1 selects the first preset).
 - **Returns:** JSON describing what happened (button presses fired + ProPresenter timer set/reset/start attempts).
+
+---
+
+## ProPresenter Timers
+
+These endpoints control a ProPresenter countdown timer directly (useful for scheduled API triggers).
+
+Timer selection is either:
+- `timer_id` (0-based, ProPresenter-native), OR
+- `timer_index` / `propresenter_timer_index` (1-based, human-friendly)
+
+### Set a timer to a time
+- **POST** `/api/propresenter/timer/set`
+- **Body:**
+```json
+{ "time": "08:15", "timer_index": 2, "reset": true }
+```
+
+### Start a timer
+- **POST** `/api/propresenter/timer/start`
+- **Body:**
+```json
+{ "timer_index": 2 }
+```
+
+### Stop a timer
+- **POST** `/api/propresenter/timer/stop`
+- **Body:**
+```json
+{ "timer_index": 2 }
+```
+
+### Reset a timer
+- **POST** `/api/propresenter/timer/reset`
+- **Body:**
+```json
+{ "timer_index": 2 }
+```
 
 ---
 

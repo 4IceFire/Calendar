@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 import json
 from pathlib import Path
+import requests
 
 from package.apps.calendar.models import Event, TriggerJob
 from package.apps.calendar import storage, utils
@@ -175,6 +176,8 @@ class ClockScheduler:
 
             now = datetime.now()
             for job in sorted(self._heap):
+                action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
+                api = getattr(job.trigger, "api", None)
                 out.append(
                     {
                         "due": job.due.strftime("%Y-%m-%d %H:%M:%S"),
@@ -183,7 +186,9 @@ class ClockScheduler:
                         "event_id": getattr(job.event, "id", None),
                         "trigger_index": job.trigger_index,
                         "offset_min": job.trigger.timer,
+                        "actionType": action_type,
                         "url": job.trigger.buttonURL,
+                        "api": api if isinstance(api, dict) else None,
                     }
                 )
 
@@ -198,16 +203,134 @@ class ClockScheduler:
             upcoming = sorted(self._heap)
             self._dbg(f"Scheduled {len(upcoming)} trigger(s)")
             for i, job in enumerate(upcoming[:20]):
+                action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
+                api = getattr(job.trigger, "api", None) if action_type == "api" else None
+                api_desc = ""
+                if isinstance(api, dict):
+                    api_desc = f" | api={str(api.get('method') or '').upper()} {api.get('path') or ''}"
                 self._dbg(
                     f"#{i+1:02d} due={job.due.strftime('%Y-%m-%d %H:%M:%S')} | "
                     f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
+                    + (api_desc if action_type == "api" else "")
                 )
 
+    def _execute_internal_api_action(self, api: dict, job: TriggerJob | None = None) -> bool:
+        try:
+            cfg = utils.get_config() or {}
+        except Exception:
+            cfg = {}
+
+        try:
+            port = int(cfg.get("webserver_port", 5000))
+        except Exception:
+            port = 5000
+
+        # Internal API calls may legitimately take a few seconds (e.g. ProPresenter
+        # legacy timer sequences include waits). Allow a configurable timeout.
+        try:
+            timeout_s = float(
+                cfg.get(
+                    "internal_api_timeout_seconds",
+                    cfg.get("scheduler_internal_api_timeout_seconds", 10.0),
+                )
+            )
+        except Exception:
+            timeout_s = 10.0
+        timeout_s = max(1.0, min(timeout_s, 60.0))
+
+        method = str(api.get("method") or "POST").strip().upper()
+        path = str(api.get("path") or "").strip()
+        body = api.get("body")
+
+        # If the request body is an object, inject event context so endpoints
+        # can resolve values relative to the event start time.
+        if isinstance(body, dict) and job is not None:
+            try:
+                injected = dict(body)
+                injected.setdefault('event_start', getattr(job, 'occurrence', None).isoformat() if getattr(job, 'occurrence', None) else None)
+                injected.setdefault('event_due', getattr(job, 'due', None).isoformat() if getattr(job, 'due', None) else None)
+                injected.setdefault('event_id', getattr(getattr(job, 'event', None), 'id', None))
+                injected.setdefault('event_name', getattr(getattr(job, 'event', None), 'name', None))
+                body = injected
+            except Exception:
+                pass
+
+        if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            return False
+
+        # Guardrails: only allow internal API calls to our own /api/* routes.
+        if '://' in path:
+            return False
+
+        if path.startswith('/api/'):
+            path_norm = path
+        elif path.startswith('/'):
+            path_norm = '/api' + path
+        else:
+            path_norm = '/api/' + path.lstrip('/')
+
+        if not path_norm.startswith('/api/'):
+            return False
+
+        url = f"http://127.0.0.1:{port}{path_norm}"
+
+        try:
+            if method == "GET":
+                resp = requests.request(method, url, timeout=timeout_s)
+            else:
+                resp = requests.request(method, url, json=body if body is not None else None, timeout=timeout_s)
+
+            ok = 200 <= int(resp.status_code) < 300
+            if not ok and self.debug:
+                try:
+                    snippet = (resp.text or '').strip().replace('\n', ' ')
+                    if len(snippet) > 300:
+                        snippet = snippet[:300] + '...'
+                    self._dbg(f"Internal API non-2xx: {resp.status_code} {method} {path_norm} resp='{snippet}'")
+                except Exception:
+                    pass
+            return ok
+        except Exception as e:
+            if self.debug:
+                try:
+                    self._dbg(f"Internal API exception: {method} {path_norm} err={e}")
+                except Exception:
+                    pass
+            return False
+
     def _handle_trigger(self, job: TriggerJob) -> None:
-        print(
-            f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
-            f"offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
-        )
+        action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
+        if action_type == "api":
+            api = getattr(job.trigger, "api", None)
+            m = str((api or {}).get("method") or "POST").upper() if isinstance(api, dict) else "POST"
+            p = str((api or {}).get("path") or "") if isinstance(api, dict) else ""
+            print(
+                f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
+                f"offset={job.trigger.timer}min | api={m} {p}"
+            )
+        else:
+            print(
+                f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
+                f"offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
+            )
+
+        if action_type == "api":
+            api = getattr(job.trigger, "api", None)
+            ok = self._execute_internal_api_action(api if isinstance(api, dict) else {}, job)
+            if ok:
+                logger.info(
+                    f"API {str((api or {}).get('method') or 'POST').upper()} {str((api or {}).get('path') or '')} OK | "
+                    f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
+                )
+                self._dbg("Internal API action -> OK")
+            else:
+                print(f"[ACTION] Internal API action failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}; see calendar.log")
+                logger.error(
+                    f"API {str((api or {}).get('method') or 'POST').upper()} {str((api or {}).get('path') or '')} FAIL | "
+                    f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
+                )
+                self._dbg("Internal API action -> FAIL")
+            return
 
         if self.c and getattr(self.c, "connected", False):
             ok = self.c.post_command(job.trigger.buttonURL)

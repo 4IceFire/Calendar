@@ -101,6 +101,10 @@
         return '';
       }
     }
+    function prettyApiPath(p){
+      const s = String(p || '').trim();
+      return s.startsWith('/api/') ? s.slice(4) : s;
+    }
     function render(){
       if(!Array.isArray(current) || current.length === 0){
         countdownEl.textContent = 'No upcoming triggers found';
@@ -114,9 +118,12 @@
 
       listEl.innerHTML = '';
       current.slice(0,3).forEach((t)=>{
-        const button = (t.button && (t.button.label || t.button.pattern))
-          ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
-          : (t.buttonURL || '');
+        const actionType = (t.actionType || 'companion');
+        const button = (actionType === 'api')
+          ? `API: ${(t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST'} ${t.api && t.api.path ? prettyApiPath(t.api.path) : ''}`
+          : ((t.button && (t.button.label || t.button.pattern))
+            ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
+            : (t.buttonURL || ''));
         const row = document.createElement('div');
         row.className = 'list-group-item d-flex justify-content-between align-items-center';
         row.innerHTML = `

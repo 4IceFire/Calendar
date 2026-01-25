@@ -47,6 +47,10 @@
         return '';
       }
     }
+      function prettyApiPath(p){
+        const s = String(p || '').trim();
+        return s.startsWith('/api/') ? s.slice(4) : s;
+      }
 
     function escapeHtml(s){
       return String(s ?? '')
@@ -69,9 +73,12 @@
       listEl.innerHTML = '';
 
       for(const t of arr){
-        const button = (t.button && (t.button.label || t.button.pattern))
-          ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
-          : (t.buttonURL || '');
+        const actionType = (t.actionType || 'companion');
+        const button = (actionType === 'api')
+           ? `API: ${(t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST'} ${t.api && t.api.path ? prettyApiPath(t.api.path) : ''}`
+          : ((t.button && (t.button.label || t.button.pattern))
+            ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
+            : (t.buttonURL || ''));
 
         const eventLabel = t.event || '(unnamed)';
         const eventId = (t.event_id !== undefined && t.event_id !== null) ? String(t.event_id) : '';

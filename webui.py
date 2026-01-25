@@ -11,7 +11,7 @@ from collections import deque
 from werkzeug.serving import make_server
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from package.core import list_apps, get_app
 import package.apps  # noqa: F401
@@ -686,7 +686,9 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
             event_id = getattr(ev, 'id', None) if ev is not None else None
 
             trig = getattr(job, 'trigger', None)
+            action_type = str(getattr(trig, 'actionType', 'companion') or 'companion').lower() if trig is not None else 'companion'
             url = str(getattr(trig, 'buttonURL', '') or '').strip() if trig is not None else ''
+            api = getattr(trig, 'api', None) if trig is not None else None
             pattern = _extract_pattern_from_button_url(url) or ''
 
             offset_min = None
@@ -701,7 +703,7 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
             else:
                 offset_label = "0m"
 
-            tpl = tpl_by_url.get(url) if url else None
+            tpl = tpl_by_url.get(url) if (url and action_type != 'api') else None
             button_label = ''
             button_pattern = ''
             try:
@@ -721,7 +723,9 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
                     'event_id': event_id,
                     'offset_min': offset_min,
                     'offset': offset_label,
-                    'buttonURL': url,
+                    'actionType': action_type,
+                    'buttonURL': url if action_type != 'api' else '',
+                    'api': api if (action_type == 'api' and isinstance(api, dict)) else None,
                     'button': {
                         'label': button_label,
                         'pattern': button_pattern,
@@ -790,6 +794,16 @@ def calendar_triggers_page():
 @app.route('/templates')
 def templates_page():
     return render_template('templates.html')
+
+
+@app.route('/api-reference')
+def api_reference_page():
+    p = Path.cwd() / 'API_REFERENCE.md'
+    try:
+        content = p.read_text(encoding='utf-8') if p.exists() else "# API Reference\n\nMissing API_REFERENCE.md."
+    except Exception:
+        content = "# API Reference\n\nFailed to read API_REFERENCE.md."
+    return render_template('api_reference.html', api_reference_content=content)
 
 
 @app.route('/videohub')
@@ -1177,7 +1191,11 @@ def api_add_trigger_template():
         t2 = dict(t)
         t2['typeOfTrigger'] = typ_name
         t2['minutes'] = mins
-        normalized_times.append(t2)
+        t3, err = _normalize_trigger_action_spec(t2)
+        if err:
+            return jsonify({'ok': False, 'error': err}), 400
+        if t3:
+            normalized_times.append(t3)
     arr = _read_json_file(TRIGGER_TEMPLATES)
     arr.append({'label': label, 'times': normalized_times})
     ok = _write_json_file(TRIGGER_TEMPLATES, arr)
@@ -1227,7 +1245,11 @@ def api_update_trigger_template(idx: int):
         t2 = dict(t)
         t2['typeOfTrigger'] = typ_name
         t2['minutes'] = mins
-        normalized_times.append(t2)
+        t3, err = _normalize_trigger_action_spec(t2)
+        if err:
+            return jsonify({'ok': False, 'error': err}), 400
+        if t3:
+            normalized_times.append(t3)
     arr = _read_json_file(TRIGGER_TEMPLATES)
     if idx < 0 or idx >= len(arr):
         return jsonify({'ok': False, 'error': 'index out of range'}), 404
@@ -1260,7 +1282,13 @@ def api_ui_events():
                 'repeating': e.repeating,
                 'active': getattr(e, 'active', True),
                 'times': [
-                    {'minutes': t.minutes, 'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)), 'buttonURL': t.buttonURL}
+                    {
+                        'minutes': t.minutes,
+                        'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)),
+                        'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
+                        'buttonURL': t.buttonURL,
+                        'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
+                    }
                     for t in e.times
                 ],
             })
@@ -1932,8 +1960,111 @@ def _validate_time_hhmm(s: str) -> bool:
         return False
 
 
+_RELATIVE_MINUTES_RE = re.compile(r'^\$(?P<sign>[+-])(?P<minutes>\d+)$')
+
+
+def _parse_iso_datetime(s: str) -> datetime | None:
+    try:
+        raw = str(s or '').strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+
+    # Accept common ISO forms, including trailing Z.
+    if raw.endswith('Z'):
+        raw = raw[:-1] + '+00:00'
+
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _resolve_base_datetime_for_relative_time(body: dict) -> tuple[datetime | None, str | None]:
+    if not isinstance(body, dict):
+        return None, 'request body must be an object when using relative time'
+
+    base_raw = (
+        body.get('event_start')
+        or body.get('eventStart')
+        or body.get('base_time')
+        or body.get('baseTime')
+    )
+    if base_raw is None:
+        return None, 'relative time requires event_start (or base_time) in the request body'
+
+    base_dt = _parse_iso_datetime(str(base_raw))
+    if base_dt is None:
+        return None, 'event_start/base_time must be an ISO datetime string (e.g. 2026-01-25T12:00:00)'
+
+    return base_dt, None
+
+
+def _resolve_time_hhmm_input(time_value: object, *, body: dict) -> tuple[str | None, str | None, bool]:
+    """Resolve a time input into concrete HH:MM.
+
+    Supports:
+      - "HH:MM" (direct)
+      - "$-60" / "$+15" (minutes relative to event_start/base_time)
+
+    Returns (time_str, error, was_relative).
+    """
+    try:
+        s = str(time_value or '').strip()
+    except Exception:
+        s = ''
+
+    if not s:
+        return None, 'time is required', False
+
+    if s.startswith('$'):
+        m = _RELATIVE_MINUTES_RE.match(s)
+        if not m:
+            return None, 'relative time must look like "$-60" (minutes) or "$+15"', True
+
+        base_dt, err = _resolve_base_datetime_for_relative_time(body)
+        if err:
+            return None, err, True
+
+        minutes = int(m.group('minutes'))
+        sign = -1 if m.group('sign') == '-' else 1
+        dt = base_dt + timedelta(minutes=sign * minutes)
+        return dt.strftime('%H:%M'), None, True
+
+    if not _validate_time_hhmm(s):
+        return None, 'time must be HH:MM', False
+
+    return s, None, False
+
+
 _BTN_FULL_RE = re.compile(r'^location/\d+/\d+/\d+/press$')
 _BTN_SHORT_RE = re.compile(r'^\d+/\d+/\d+$')
+
+
+def _normalize_internal_api_path(raw: str) -> str | None:
+    """Normalize user-entered API paths to an internal /api/... path.
+
+    Accepts:
+      - /api/videohub/ping
+      - /videohub/ping
+      - videohub/ping
+    Rejects absolute URLs.
+    """
+    try:
+        s = str(raw or '').strip()
+    except Exception:
+        s = ''
+    if not s:
+        return None
+    if '://' in s:
+        return None
+    if s.startswith('/api/'):
+        return s
+    if s.startswith('/'):
+        return '/api' + s
+    s = s.lstrip('/')
+    return '/api/' + s
 
 
 def _normalize_companion_button_url(raw: str) -> str | None:
@@ -1945,6 +2076,98 @@ def _normalize_companion_button_url(raw: str) -> str | None:
     if _BTN_SHORT_RE.match(s):
         return f'location/{s}/press'
     return None
+
+
+def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
+    """Normalize a trigger spec for storage.
+
+    Supported action modes:
+      - Companion: {actionType:'companion', buttonURL:'location/1/2/3/press'}
+      - API: {actionType:'api', api:{method:'POST', path:'/api/...', body:{...}}}
+    """
+    if not isinstance(raw, dict):
+        return None, 'trigger must be an object'
+
+    out: dict = {}
+
+    # typeOfTrigger + minutes are normalized by callers, but keep safe defaults.
+    try:
+        out['typeOfTrigger'] = str(raw.get('typeOfTrigger', 'AT')).upper()
+    except Exception:
+        out['typeOfTrigger'] = 'AT'
+    try:
+        out['minutes'] = int(raw.get('minutes', 0) or 0)
+    except Exception:
+        out['minutes'] = 0
+
+    action_type = str(raw.get('actionType') or raw.get('action_type') or '').strip().lower()
+
+    api_obj = None
+    if isinstance(raw.get('api'), dict):
+        api_obj = raw.get('api')
+    elif isinstance(raw.get('api'), str):
+        # allow passing JSON for convenience
+        try:
+            api_obj = json.loads(raw.get('api') or '')
+        except Exception:
+            api_obj = None
+
+    if not action_type:
+        # infer based on presence of API fields
+        if api_obj is not None or raw.get('path') or raw.get('method'):
+            action_type = 'api'
+        else:
+            action_type = 'companion'
+
+    if action_type == 'api':
+        method = None
+        path = None
+        body = None
+
+        if isinstance(api_obj, dict):
+            method = api_obj.get('method')
+            path = api_obj.get('path')
+            body = api_obj.get('body')
+        else:
+            method = raw.get('method')
+            path = raw.get('path')
+            body = raw.get('body')
+
+        method = str(method or 'POST').strip().upper()
+        path = str(path or '').strip()
+
+        if method not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
+            return None, f'invalid api method: {method}'
+
+        path_norm = _normalize_internal_api_path(path)
+        if not path_norm or not path_norm.startswith('/api/'):
+            return None, 'api path must be a relative /videohub/... (the /api prefix is added automatically)'
+        path = path_norm
+
+        if isinstance(body, str) and body.strip():
+            try:
+                body = json.loads(body)
+            except Exception:
+                return None, 'api body must be valid JSON'
+
+        if body is not None and not isinstance(body, (dict, list)):
+            return None, 'api body must be an object, array, or empty'
+
+        out['actionType'] = 'api'
+        out['api'] = {'method': method, 'path': path}
+        if body is not None:
+            out['api']['body'] = body
+        return out, None
+
+    # Default to companion
+    btn_raw = str(raw.get('buttonURL') or raw.get('button_url') or raw.get('url') or '').strip()
+    btn_norm = _normalize_companion_button_url(btn_raw) if btn_raw else ''
+    if btn_raw and not btn_norm:
+        return None, "Invalid buttonURL format. Use '1/2/3' or 'location/1/2/3/press'"
+
+    out['actionType'] = 'companion'
+    out['buttonURL'] = btn_norm or ''
+    return out, None
 
 
 # --- Timer preset actions (Companion button presses) ---
@@ -2052,6 +2275,60 @@ def _cfg_int(cfg: dict, key: str, default: int, *, min_value: int | None = None,
     if max_value is not None and v > max_value:
         v = max_value
     return v
+
+
+def _sync_companion_timer_variable_for_preset(*, cfg: dict, preset_number: int, preset: dict) -> tuple[bool, str | None]:
+    """Update Companion custom variable for a single timer preset.
+
+    Uses config key `companion_timer_name` as the variable prefix.
+    Writes value as:
+      label\npretty_time
+    """
+    try:
+        prefix = str(cfg.get('companion_timer_name', '')).strip()
+    except Exception:
+        prefix = ''
+    if not prefix:
+        return False, 'companion_timer_name not configured'
+
+    try:
+        comp = utils.get_companion() if hasattr(utils, 'get_companion') else None
+    except Exception:
+        comp = None
+    if comp is None:
+        return False, 'companion client not available'
+
+    try:
+        var_name = f"{prefix}{int(preset_number)}"
+    except Exception:
+        return False, 'invalid preset_number'
+
+    try:
+        t = str((preset or {}).get('time', '')).strip()
+    except Exception:
+        t = ''
+
+    try:
+        dt = datetime.strptime(t, '%H:%M')
+        pretty_time = dt.strftime('%I:%M%p').lower()
+    except Exception:
+        pretty_time = t
+
+    try:
+        label = str((preset or {}).get('name', '')).strip()
+    except Exception:
+        label = ''
+
+    # If the label is missing (or just equals the raw HH:MM), use the variable name as label.
+    if (not label) or (label == t):
+        label = var_name
+
+    value = f"{label}\n{pretty_time}"
+    try:
+        ok = bool(comp.SetVariable(var_name, value))
+    except Exception:
+        ok = False
+    return ok, None if ok else 'failed to set variable'
 
 
 @app.route('/api/timers', methods=['GET'])
@@ -2240,6 +2517,532 @@ def api_set_timers():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/timers/preset', methods=['POST', 'PATCH'])
+def api_update_timer_preset():
+    """Update a single timer preset's time (and optionally name) by 1-based preset number.
+
+    Body example:
+      {"preset": 2, "time": "08:15"}
+      {"preset": 2, "time": "08:15", "name": "Walk-in"}
+    """
+
+    body = request.get_json(silent=True) or {}
+
+    def _get_ci(d: dict, *keys: str):
+        try:
+            for k in keys:
+                if k in d:
+                    return d.get(k)
+            lower = {str(k).lower(): v for k, v in d.items()}
+            for k in keys:
+                lk = str(k).lower()
+                if lk in lower:
+                    return lower.get(lk)
+        except Exception:
+            return None
+        return None
+
+    preset_raw = _get_ci(body, 'preset', 'preset_index', 'index', 'number')
+    if preset_raw is None:
+        preset_raw = request.args.get('preset') or request.args.get('index')
+
+    time_raw = _get_ci(body, 'time', 'hhmm', 'value')
+    if time_raw is None:
+        time_raw = request.args.get('time')
+
+    apply_raw = _get_ci(body, 'apply', 'apply_now', 'applypreset')
+    if apply_raw is None:
+        apply_raw = request.args.get('apply')
+
+    def _coerce_bool(v) -> bool:
+        if isinstance(v, bool):
+            return v
+        if v is None:
+            return False
+        s = str(v).strip().lower()
+        if s in ('1', 'true', 't', 'yes', 'y', 'on'):
+            return True
+        if s in ('0', 'false', 'f', 'no', 'n', 'off'):
+            return False
+        return False
+
+    apply_now = _coerce_bool(apply_raw)
+
+    try:
+        preset_number = int(preset_raw)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'preset must be an integer (1-based)'}), 400
+
+    time_str, time_err, time_was_relative = _resolve_time_hhmm_input(time_raw, body=body)
+    if time_err:
+        return jsonify({'ok': False, 'error': time_err}), 400
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    try:
+        presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        presets = []
+
+    if not presets:
+        return jsonify({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)', 'preset_count': 0}), 400
+
+    preset_index = preset_number - 1
+    if preset_index < 0 or preset_index >= len(presets):
+        return jsonify({'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}), 400
+
+    current = presets[preset_index]
+    if isinstance(current, dict):
+        updated = dict(current)
+    else:
+        # legacy string format support
+        updated = {'time': str(current).strip(), 'name': str(current).strip()}
+
+    updated['time'] = time_str
+
+    # Optional name update
+    name_raw = _get_ci(body, 'name', 'label')
+    if name_raw is not None:
+        updated['name'] = str(name_raw or '').strip() or updated.get('name', '')
+
+    presets[preset_index] = updated
+
+    try:
+        if hasattr(utils, 'save_timer_presets'):
+            utils.save_timer_presets(presets)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'failed to save presets: {e}'}), 500
+
+    # Keep Companion custom vars in sync for this one preset (best-effort)
+    companion_updated = False
+    companion_error = None
+    try:
+        companion_updated, companion_error = _sync_companion_timer_variable_for_preset(
+            cfg=cfg,
+            preset_number=preset_number,
+            preset=updated,
+        )
+    except Exception:
+        companion_updated = False
+
+    if apply_now:
+        try:
+            _console_append(
+                f"[TIMERS] /api/timers/preset apply=true from {request.remote_addr} "
+                f"preset={preset_number} time={time_str}\n"
+            )
+        except Exception:
+            pass
+
+        payload, status = _apply_timer_preset_number(preset_number=preset_number, cfg=cfg, presets=presets)
+        # Include update info for visibility
+        try:
+            if isinstance(payload, dict):
+                payload['timer_preset'] = updated
+                payload['companion_updated'] = companion_updated
+                payload['companion_error'] = companion_error
+                payload['updated_then_applied'] = True
+                if time_was_relative:
+                    payload['time_input'] = str(time_raw)
+        except Exception:
+            pass
+        return jsonify(payload), status
+
+    return jsonify({
+        'ok': True,
+        'preset': preset_number,
+        'preset_count': len(presets),
+        'timer_preset': updated,
+        'companion_updated': companion_updated,
+        'companion_error': companion_error,
+        'updated_then_applied': False,
+        'time_input': str(time_raw) if time_was_relative else None,
+    })
+
+
+def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) -> tuple[dict, int]:
+    """Core implementation for applying a timer preset by 1-based preset number.
+
+    Returns (payload, http_status).
+    """
+    if not presets:
+        return ({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)', 'preset_count': 0}, 400)
+
+    try:
+        preset_index = int(preset_number) - 1
+    except Exception:
+        return ({'ok': False, 'error': 'preset must be an integer'}, 400)
+
+    if preset_index < 0 or preset_index >= len(presets):
+        return ({'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}, 400)
+
+    selected = presets[preset_index]
+    if isinstance(selected, dict):
+        time_str = str(selected.get('time', '')).strip()
+    else:
+        time_str = str(selected).strip()
+
+    # Extract configured Companion presses for this preset and fire them
+    # immediately, regardless of ProPresenter availability.
+    try:
+        preset_name = str(selected.get('name', '')).strip() if isinstance(selected, dict) else ''
+    except Exception:
+        preset_name = ''
+    try:
+        presses = selected.get('button_presses') if isinstance(selected, dict) else None
+        if presses is None and isinstance(selected, dict) and 'buttonPresses' in selected:
+            presses = selected.get('buttonPresses')
+        if presses is None and isinstance(selected, dict) and 'actions' in selected:
+            presses = selected.get('actions')
+        if not isinstance(presses, list):
+            presses = []
+    except Exception:
+        presses = []
+
+    # We don't yet know the ProPresenter timer id here; use a placeholder.
+    # If ProPresenter is available, we'll re-fire using the real timer id
+    # after computing pp_timer_id to keep cancellation semantics consistent.
+    press_info = _fire_timer_button_presses_now(
+        pp_timer_id=-1,
+        preset_number=int(preset_number),
+        preset_name=preset_name,
+        time_str=time_str,
+        button_presses=presses,
+    )
+
+    # Keep original time validation for timer control, but don't prevent button presses.
+    if not _validate_time_hhmm(time_str):
+        return (
+            {
+                'ok': True,
+                'preset': int(preset_number),
+                'preset_count': len(presets),
+                'time': time_str,
+                'sequence': 'none',
+                'set': False,
+                'reset': False,
+                'started': False,
+                'button_presses': press_info,
+                'propresenter': {
+                    'ok': False,
+                    'error': f'invalid preset time in config: {time_str}',
+                },
+            },
+            200,
+        )
+
+    try:
+        pp_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
+    except Exception:
+        pp_timer_index = 1
+
+    # ProPresenter's HTTP API timer IDs are 0-based indices. Keep the config
+    # value human-friendly (1-based), but convert for API calls.
+    # Backward compatibility: if someone configured 0 explicitly, keep it.
+    pp_timer_id = pp_timer_index - 1 if pp_timer_index > 0 else 0
+
+    # Re-fire using the real timer id so subsequent presses replace the prior job.
+    try:
+        press_info = _fire_timer_button_presses_now(
+            pp_timer_id=pp_timer_id,
+            preset_number=int(preset_number),
+            preset_name=preset_name,
+            time_str=time_str,
+            button_presses=presses,
+        )
+    except Exception:
+        pass
+
+    ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+    try:
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return (
+            {
+                'ok': True,
+                'preset': int(preset_number),
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'none',
+                'set': False,
+                'reset': False,
+                'started': False,
+                'button_presses': press_info,
+                'propresenter': {
+                    'ok': False,
+                    'error': 'propresenter_port must be an integer',
+                },
+            },
+            200,
+        )
+
+    # If ProPresenter client is missing, still succeed for Companion presses.
+    if ProPresentor is None:
+        try:
+            _console_append('[TIMERS] ProPresenter client not available; skipped timer control\n')
+        except Exception:
+            pass
+        return (
+            {
+                'ok': True,
+                'preset': int(preset_number),
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'none',
+                'set': False,
+                'reset': False,
+                'started': False,
+                'button_presses': press_info,
+                'propresenter': {
+                    'ok': False,
+                    'error': 'propresentor client not available',
+                },
+            },
+            200,
+        )
+
+    # Some older ProPresenter versions have a bug where a normal `start` right
+    # after setting/resetting a timer doesn't reliably start.
+    # Control behavior via config.json:
+    #   - propresenter_is_latest: true => normal flow (set -> reset -> start)
+    #                             false => legacy workaround flow
+    #   - propresenter_timer_wait_stop_ms (default 200)
+    #   - propresenter_timer_wait_set_ms  (default 600)
+    #   - propresenter_timer_wait_reset_ms(default 1000)
+    is_latest = _cfg_bool(cfg, 'propresenter_is_latest', True)
+    wait_stop_ms = _cfg_int(cfg, 'propresenter_timer_wait_stop_ms', 200, min_value=0, max_value=60000)
+    wait_set_ms = _cfg_int(cfg, 'propresenter_timer_wait_set_ms', 600, min_value=0, max_value=60000)
+    wait_reset_ms = _cfg_int(cfg, 'propresenter_timer_wait_reset_ms', 1000, min_value=0, max_value=60000)
+
+    pp = ProPresentor(ip, port)
+
+    if not is_latest:
+        # Legacy workaround sequence:
+        # Stop Timer -> wait -> Set -> wait -> Reset -> wait -> Start
+        stop_ok = bool(pp.timer_operation(pp_timer_id, 'stop'))
+        if not stop_ok:
+            return (
+                {
+                    'ok': True,
+                    'error': 'failed to stop timer (legacy sequence)',
+                    'preset': int(preset_number),
+                    'preset_count': len(presets),
+                    'time': time_str,
+                    'propresenter_timer_index': pp_timer_index,
+                    'propresenter_timer_id': pp_timer_id,
+                    'sequence': 'legacy',
+                    'stop': False,
+                    'set': False,
+                    'reset': False,
+                    'started': False,
+                    'button_presses': press_info,
+                    'propresenter_ip': ip,
+                    'propresenter_port': port,
+                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+                },
+                200,
+            )
+
+        if wait_stop_ms:
+            time.sleep(wait_stop_ms / 1000.0)
+
+        set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
+        if not set_ok:
+            return (
+                {
+                    'ok': True,
+                    'error': 'failed to set timer (legacy sequence)',
+                    'preset': int(preset_number),
+                    'preset_count': len(presets),
+                    'time': time_str,
+                    'propresenter_timer_index': pp_timer_index,
+                    'propresenter_timer_id': pp_timer_id,
+                    'sequence': 'legacy',
+                    'stop': True,
+                    'set': False,
+                    'reset': False,
+                    'started': False,
+                    'button_presses': press_info,
+                    'propresenter_ip': ip,
+                    'propresenter_port': port,
+                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+                },
+                200,
+            )
+
+        if wait_set_ms:
+            time.sleep(wait_set_ms / 1000.0)
+
+        reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
+        if not reset_ok:
+            return (
+                {
+                    'ok': True,
+                    'error': 'timer set, but failed to reset (legacy sequence)',
+                    'preset': int(preset_number),
+                    'preset_count': len(presets),
+                    'time': time_str,
+                    'propresenter_timer_index': pp_timer_index,
+                    'propresenter_timer_id': pp_timer_id,
+                    'sequence': 'legacy',
+                    'stop': True,
+                    'set': True,
+                    'reset': False,
+                    'started': False,
+                    'button_presses': press_info,
+                    'propresenter_ip': ip,
+                    'propresenter_port': port,
+                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+                },
+                200,
+            )
+
+        if wait_reset_ms:
+            time.sleep(wait_reset_ms / 1000.0)
+
+        start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
+        if not start_ok:
+            return (
+                {
+                    'ok': True,
+                    'error': 'timer set, but failed to start (legacy sequence)',
+                    'preset': int(preset_number),
+                    'preset_count': len(presets),
+                    'time': time_str,
+                    'propresenter_timer_index': pp_timer_index,
+                    'propresenter_timer_id': pp_timer_id,
+                    'sequence': 'legacy',
+                    'stop': True,
+                    'set': True,
+                    'reset': True,
+                    'started': False,
+                    'button_presses': press_info,
+                    'propresenter_ip': ip,
+                    'propresenter_port': port,
+                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+                },
+                200,
+            )
+
+        return (
+            {
+                'ok': True,
+                'preset': int(preset_number),
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'legacy',
+                'stop': True,
+                'set': True,
+                'reset': True,
+                'started': True,
+                'button_presses': press_info,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
+            },
+            200,
+        )
+
+    # Normal flow (latest versions): set -> reset -> start
+    set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
+    if not set_ok:
+        return (
+            {
+                'ok': True,
+                'error': 'failed to set timer (check ProPresenter connection and timer index)',
+                'preset': int(preset_number),
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'normal',
+                'set': False,
+                'reset': False,
+                'started': False,
+                'button_presses': press_info,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+            },
+            200,
+        )
+
+    # ProPresenter often needs a reset/restart after changing timer config
+    # for the UI to reflect the new time correctly.
+    reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
+    if not reset_ok:
+        return (
+            {
+                'ok': True,
+                'error': 'timer set, but failed to reset (check ProPresenter timer state/permissions)',
+                'preset': int(preset_number),
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'normal',
+                'set': True,
+                'reset': False,
+                'started': False,
+                'button_presses': press_info,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+            },
+            200,
+        )
+
+    # Start countdown immediately (per OpenAPI: GET /v1/timer/{id}/{operation})
+    start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
+
+    if not start_ok:
+        return (
+            {
+                'ok': True,
+                'error': 'timer set, but failed to start (check ProPresenter timer state/permissions)',
+                'preset': int(preset_number),
+                'preset_count': len(presets),
+                'time': time_str,
+                'propresenter_timer_index': pp_timer_index,
+                'propresenter_timer_id': pp_timer_id,
+                'sequence': 'normal',
+                'set': True,
+                'reset': True,
+                'started': False,
+                'button_presses': press_info,
+                'propresenter_ip': ip,
+                'propresenter_port': port,
+            },
+            200,
+        )
+
+    return (
+        {
+            'ok': True,
+            'preset': int(preset_number),
+            'preset_count': len(presets),
+            'time': time_str,
+            'propresenter_timer_index': pp_timer_index,
+            'propresenter_timer_id': pp_timer_id,
+            'sequence': 'normal',
+            'set': True,
+            'reset': True,
+            'started': True,
+            'button_presses': press_info,
+            'propresenter_ip': ip,
+            'propresenter_port': port,
+        },
+        200,
+    )
+
+
 @app.route('/api/timers/apply', methods=['POST'])
 def api_apply_timer_preset():
     """Apply a timer preset selected by Companion and start the timer.
@@ -2320,339 +3123,178 @@ def api_apply_timer_preset():
     except Exception:
         presets = []
 
-    if not presets:
-        return jsonify({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)', 'preset_count': 0}), 400
+    payload, status = _apply_timer_preset_number(preset_number=preset_number, cfg=cfg, presets=presets)
+    return jsonify(payload), status
 
-    preset_index = preset_number - 1
-    if preset_index < 0 or preset_index >= len(presets):
-        return jsonify({'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}), 400
 
-    selected = presets[preset_index]
-    if isinstance(selected, dict):
-        time_str = str(selected.get('time', '')).strip()
-    else:
-        time_str = str(selected).strip()
+def _resolve_pp_timer_id_from_body(body: dict, cfg: dict) -> tuple[int | None, str | None]:
+    """Resolve a ProPresenter timer id (0-based) from request body/config.
 
-    # Extract configured Companion presses for this preset and fire them
-    # immediately, regardless of ProPresenter availability.
+    Accepts either:
+      - timer_id (0-based), or
+      - timer_index / propresenter_timer_index (1-based)
+    """
+    raw_id = body.get('timer_id')
+    if raw_id is not None:
+        try:
+            return int(raw_id), None
+        except Exception:
+            return None, 'timer_id must be an integer'
+
+    raw_idx = body.get('timer_index')
+    if raw_idx is None:
+        raw_idx = body.get('propresenter_timer_index')
+    if raw_idx is None:
+        raw_idx = cfg.get('propresenter_timer_index', cfg.get('timer_index', 1))
+
     try:
-        preset_name = str(selected.get('name', '')).strip() if isinstance(selected, dict) else ''
+        idx = int(raw_idx)
     except Exception:
-        preset_name = ''
+        return None, 'timer_index must be an integer'
+
+    # Config is human-friendly 1-based; ProPresenter API uses 0-based ids.
+    return (idx - 1 if idx > 0 else 0), None
+
+
+@app.route('/api/propresenter/timer/set', methods=['POST'])
+def api_prop_set_timer():
+    body = request.get_json(silent=True) or {}
+
     try:
-        presses = selected.get('button_presses') if isinstance(selected, dict) else None
-        if presses is None and isinstance(selected, dict) and 'buttonPresses' in selected:
-            presses = selected.get('buttonPresses')
-        if presses is None and isinstance(selected, dict) and 'actions' in selected:
-            presses = selected.get('actions')
-        if not isinstance(presses, list):
-            presses = []
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
     except Exception:
-        presses = []
+        cfg = {}
 
-    # We don't yet know the ProPresenter timer id here; use a placeholder.
-    # If ProPresenter is available, we'll re-fire using the real timer id
-    # after computing pp_timer_id to keep cancellation semantics consistent.
-    press_info = _fire_timer_button_presses_now(
-        pp_timer_id=-1,
-        preset_number=preset_number,
-        preset_name=preset_name,
-        time_str=time_str,
-        button_presses=presses,
-    )
-
-    # Keep original time validation for timer control, but don't prevent button presses.
+    time_str = str(body.get('time') or body.get('hhmm') or body.get('value') or '').strip()
     if not _validate_time_hhmm(time_str):
-        return jsonify({
-            'ok': True,
-            'preset': preset_number,
-            'preset_count': len(presets),
-            'time': time_str,
-            'sequence': 'none',
-            'set': False,
-            'reset': False,
-            'started': False,
-            'button_presses': press_info,
-            'propresenter': {
-                'ok': False,
-                'error': f'invalid preset time in config: {time_str}',
-            },
-        })
+        return jsonify({'ok': False, 'error': 'time must be HH:MM'}), 400
+
+    timer_id, err = _resolve_pp_timer_id_from_body(body, cfg)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 400
 
     try:
-        pp_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+        port = int(cfg.get('propresenter_port', 1025))
     except Exception:
-        pp_timer_index = 1
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
 
-    # ProPresenter's HTTP API timer IDs are 0-based indices. Keep the config
-    # value human-friendly (1-based), but convert for API calls.
-    # Backward compatibility: if someone configured 0 explicitly, keep it.
-    pp_timer_id = pp_timer_index - 1 if pp_timer_index > 0 else 0
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
 
-    # Re-fire using the real timer id so subsequent presses replace the prior job.
+    pp = ProPresentor(ip, port)
+    set_ok = bool(pp.SetCountdownToTime(timer_id, time_str))
+
+    do_reset = bool(body.get('reset', False))
+    reset_ok = None
+    if do_reset:
+        reset_ok = bool(pp.timer_operation(timer_id, 'reset'))
+
     try:
-        press_info = _fire_timer_button_presses_now(
-            pp_timer_id=pp_timer_id,
-            preset_number=preset_number,
-            preset_name=preset_name,
-            time_str=time_str,
-            button_presses=presses,
-        )
+        _console_append(f"[PP] /api/propresenter/timer/set timer_id={timer_id} time={time_str} -> {'OK' if set_ok else 'FAIL'}\n")
     except Exception:
         pass
 
-    ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+    return jsonify({'ok': True, 'timer_id': timer_id, 'time': time_str, 'set': set_ok, 'reset': reset_ok, 'propresenter_ip': ip, 'propresenter_port': port})
+
+
+@app.route('/api/propresenter/timer/start', methods=['POST'])
+def api_prop_start_timer():
+    body = request.get_json(silent=True) or {}
+
     try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    timer_id, err = _resolve_pp_timer_id_from_body(body, cfg)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 400
+
+    try:
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
         port = int(cfg.get('propresenter_port', 1025))
     except Exception:
-        return jsonify({
-            'ok': True,
-            'preset': preset_number,
-            'preset_count': len(presets),
-            'time': time_str,
-            'propresenter_timer_index': pp_timer_index,
-            'propresenter_timer_id': pp_timer_id,
-            'sequence': 'none',
-            'set': False,
-            'reset': False,
-            'started': False,
-            'button_presses': press_info,
-            'propresenter': {
-                'ok': False,
-                'error': 'propresenter_port must be an integer',
-            },
-        })
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
 
-    # If ProPresenter client is missing, still succeed for Companion presses.
     if ProPresentor is None:
-        try:
-            _console_append('[TIMERS] ProPresenter client not available; skipped timer control\n')
-        except Exception:
-            pass
-        return jsonify({
-            'ok': True,
-            'preset': preset_number,
-            'preset_count': len(presets),
-            'time': time_str,
-            'propresenter_timer_index': pp_timer_index,
-            'propresenter_timer_id': pp_timer_id,
-            'sequence': 'none',
-            'set': False,
-            'reset': False,
-            'started': False,
-            'button_presses': press_info,
-            'propresenter': {
-                'ok': False,
-                'error': 'propresentor client not available',
-            },
-        })
-
-    # Some older ProPresenter versions have a bug where a normal `start` right
-    # after setting/resetting a timer doesn't reliably start.
-    # Control behavior via config.json:
-    #   - propresenter_is_latest: true => normal flow (set -> reset -> start)
-    #                             false => legacy workaround flow
-    #   - propresenter_timer_wait_stop_ms (default 200)
-    #   - propresenter_timer_wait_set_ms  (default 600)
-    #   - propresenter_timer_wait_reset_ms(default 1000)
-    is_latest = _cfg_bool(cfg, 'propresenter_is_latest', True)
-    wait_stop_ms = _cfg_int(cfg, 'propresenter_timer_wait_stop_ms', 200, min_value=0, max_value=60000)
-    wait_set_ms = _cfg_int(cfg, 'propresenter_timer_wait_set_ms', 600, min_value=0, max_value=60000)
-    wait_reset_ms = _cfg_int(cfg, 'propresenter_timer_wait_reset_ms', 1000, min_value=0, max_value=60000)
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
 
     pp = ProPresentor(ip, port)
+    ok = bool(pp.timer_operation(timer_id, 'start'))
 
-    if not is_latest:
-        # Legacy workaround sequence:
-        # Stop Timer -> wait -> Set -> wait -> Reset -> wait -> Start
-        stop_ok = bool(pp.timer_operation(pp_timer_id, 'stop'))
-        if not stop_ok:
-            return jsonify({
-                'ok': True,
-                'error': 'failed to stop timer (legacy sequence)',
-                'preset': preset_number,
-                'preset_count': len(presets),
-                'time': time_str,
-                'propresenter_timer_index': pp_timer_index,
-                'propresenter_timer_id': pp_timer_id,
-                'sequence': 'legacy',
-                'stop': False,
-                'set': False,
-                'reset': False,
-                'started': False,
-                'button_presses': press_info,
-                'propresenter_ip': ip,
-                'propresenter_port': port,
-                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            })
+    try:
+        _console_append(f"[PP] /api/propresenter/timer/start timer_id={timer_id} -> {'OK' if ok else 'FAIL'}\n")
+    except Exception:
+        pass
 
-        if wait_stop_ms:
-            time.sleep(wait_stop_ms / 1000.0)
+    return jsonify({'ok': True, 'timer_id': timer_id, 'started': ok, 'propresenter_ip': ip, 'propresenter_port': port})
 
-        set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
-        if not set_ok:
-            return jsonify({
-                'ok': True,
-                'error': 'failed to set timer (legacy sequence)',
-                'preset': preset_number,
-                'preset_count': len(presets),
-                'time': time_str,
-                'propresenter_timer_index': pp_timer_index,
-                'propresenter_timer_id': pp_timer_id,
-                'sequence': 'legacy',
-                'stop': True,
-                'set': False,
-                'reset': False,
-                'started': False,
-                'button_presses': press_info,
-                'propresenter_ip': ip,
-                'propresenter_port': port,
-                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            })
 
-        if wait_set_ms:
-            time.sleep(wait_set_ms / 1000.0)
+@app.route('/api/propresenter/timer/stop', methods=['POST'])
+def api_prop_stop_timer():
+    body = request.get_json(silent=True) or {}
 
-        reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
-        if not reset_ok:
-            return jsonify({
-                'ok': True,
-                'error': 'timer set, but failed to reset (legacy sequence)',
-                'preset': preset_number,
-                'preset_count': len(presets),
-                'time': time_str,
-                'propresenter_timer_index': pp_timer_index,
-                'propresenter_timer_id': pp_timer_id,
-                'sequence': 'legacy',
-                'stop': True,
-                'set': True,
-                'reset': False,
-                'started': False,
-                'button_presses': press_info,
-                'propresenter_ip': ip,
-                'propresenter_port': port,
-                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            })
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
 
-        if wait_reset_ms:
-            time.sleep(wait_reset_ms / 1000.0)
+    timer_id, err = _resolve_pp_timer_id_from_body(body, cfg)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 400
 
-        start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
-        if not start_ok:
-            return jsonify({
-                'ok': True,
-                'error': 'timer set, but failed to start (legacy sequence)',
-                'preset': preset_number,
-                'preset_count': len(presets),
-                'time': time_str,
-                'propresenter_timer_index': pp_timer_index,
-                'propresenter_timer_id': pp_timer_id,
-                'sequence': 'legacy',
-                'stop': True,
-                'set': True,
-                'reset': True,
-                'started': False,
-                'button_presses': press_info,
-                'propresenter_ip': ip,
-                'propresenter_port': port,
-                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            })
+    try:
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
 
-        return jsonify({
-            'ok': True,
-            'preset': preset_number,
-            'preset_count': len(presets),
-            'time': time_str,
-            'propresenter_timer_index': pp_timer_index,
-            'propresenter_timer_id': pp_timer_id,
-            'sequence': 'legacy',
-            'stop': True,
-            'set': True,
-            'reset': True,
-            'started': True,
-            'button_presses': press_info,
-            'propresenter_ip': ip,
-            'propresenter_port': port,
-            'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-        })
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
 
-    # Normal flow (latest versions): set -> reset -> start
-    set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
-    if not set_ok:
-        return jsonify({
-            'ok': True,
-            'error': 'failed to set timer (check ProPresenter connection and timer index)',
-            'preset': preset_number,
-            'preset_count': len(presets),
-            'time': time_str,
-            'propresenter_timer_index': pp_timer_index,
-            'propresenter_timer_id': pp_timer_id,
-            'sequence': 'normal',
-            'set': False,
-            'reset': False,
-            'started': False,
-            'button_presses': press_info,
-            'propresenter_ip': ip,
-            'propresenter_port': port,
-        })
+    pp = ProPresentor(ip, port)
+    ok = bool(pp.timer_operation(timer_id, 'stop'))
 
-    # ProPresenter often needs a reset/restart after changing timer config
-    # for the UI to reflect the new time correctly.
-    reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
-    if not reset_ok:
-        return jsonify({
-            'ok': True,
-            'error': 'timer set, but failed to reset (check ProPresenter timer state/permissions)',
-            'preset': preset_number,
-            'preset_count': len(presets),
-            'time': time_str,
-            'propresenter_timer_index': pp_timer_index,
-            'propresenter_timer_id': pp_timer_id,
-            'sequence': 'normal',
-            'set': True,
-            'reset': False,
-            'started': False,
-            'button_presses': press_info,
-            'propresenter_ip': ip,
-            'propresenter_port': port,
-        })
+    try:
+        _console_append(f"[PP] /api/propresenter/timer/stop timer_id={timer_id} -> {'OK' if ok else 'FAIL'}\n")
+    except Exception:
+        pass
 
-    # Start countdown immediately (per OpenAPI: GET /v1/timer/{id}/{operation})
-    start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
+    return jsonify({'ok': True, 'timer_id': timer_id, 'stopped': ok, 'propresenter_ip': ip, 'propresenter_port': port})
 
-    if not start_ok:
-        return jsonify({
-            'ok': True,
-            'error': 'timer set, but failed to start (check ProPresenter timer state/permissions)',
-            'preset': preset_number,
-            'preset_count': len(presets),
-            'time': time_str,
-            'propresenter_timer_index': pp_timer_index,
-            'propresenter_timer_id': pp_timer_id,
-            'sequence': 'normal',
-            'set': True,
-            'reset': True,
-            'started': False,
-            'button_presses': press_info,
-            'propresenter_ip': ip,
-            'propresenter_port': port,
-        })
 
-    return jsonify({
-        'ok': True,
-        'preset': preset_number,
-        'preset_count': len(presets),
-        'time': time_str,
-        'propresenter_timer_index': pp_timer_index,
-        'propresenter_timer_id': pp_timer_id,
-        'sequence': 'normal',
-        'set': True,
-        'reset': True,
-        'started': True,
-        'button_presses': press_info,
-        'propresenter_ip': ip,
-        'propresenter_port': port,
-    })
+@app.route('/api/propresenter/timer/reset', methods=['POST'])
+def api_prop_reset_timer():
+    body = request.get_json(silent=True) or {}
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    timer_id, err = _resolve_pp_timer_id_from_body(body, cfg)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 400
+
+    try:
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
+
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
+
+    pp = ProPresentor(ip, port)
+    ok = bool(pp.timer_operation(timer_id, 'reset'))
+
+    try:
+        _console_append(f"[PP] /api/propresenter/timer/reset timer_id={timer_id} -> {'OK' if ok else 'FAIL'}\n")
+    except Exception:
+        pass
+
+    return jsonify({'ok': True, 'timer_id': timer_id, 'reset': ok, 'propresenter_ip': ip, 'propresenter_port': port})
 
 
 @app.route('/api/videohub/ping', methods=['GET'])
@@ -2770,7 +3412,13 @@ def api_get_event_ui(ident: int):
             'active': getattr(e, 'active', True),
             'day': getattr(e, 'day').name if getattr(e, 'day', None) is not None else 'Monday',
             'times': [
-                {'minutes': t.minutes, 'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)), 'buttonURL': t.buttonURL}
+                {
+                    'minutes': t.minutes,
+                    'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)),
+                    'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
+                    'buttonURL': t.buttonURL,
+                    'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
+                }
                 for t in e.times
             ],
         }
@@ -2835,19 +3483,19 @@ def api_update_event_ui(ident: int):
                 if mins < 0:
                     return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
 
-            btn_raw = (t.get('buttonURL') or '').strip()
-            btn_final = ''
-            if btn_raw:
-                if _re.match(r'^location/\d+/\d+/\d+/press$', btn_raw):
-                    btn_final = btn_raw
-                elif _re.match(r'^\d+/\d+/\d+$', btn_raw):
-                    btn_final = f'location/{btn_raw}/press'
-                else:
-                    return jsonify({'ok': False, 'error': f"Invalid buttonURL format: {btn_raw}. Use '1/2/3' or 'location/1/2/3/press'"}), 400
-            else:
-                btn_final = ''
+            t2 = dict(t)
+            t2['typeOfTrigger'] = typ_name
+            t2['minutes'] = mins
+            t3, err = _normalize_trigger_action_spec(t2)
+            if err:
+                return jsonify({'ok': False, 'error': err}), 400
+            if not t3:
+                continue
+            action_type = str(t3.get('actionType') or 'companion').lower()
+            btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
+            api_obj = t3.get('api') if action_type == 'api' else None
 
-            times.append(TimeOfTrigger(mins, typ, btn_final))
+            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj))
 
         # replace fields on existing event object
         ev.name = name
@@ -2924,22 +3572,19 @@ def api_create_event_ui():
                 if mins < 0:
                     return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
 
-            # buttonURL handling: prefer a full button URL from templates (location/x/y/z/press)
-            btn_raw = (t.get('buttonURL') or '').strip()
-            btn_final = ''
-            if btn_raw:
-                # if already a full URL like location/.../press, accept
-                if _re.match(r'^location/\d+/\d+/\d+/press$', btn_raw):
-                    btn_final = btn_raw
-                # if it's a short pattern like 1/2/3, convert
-                elif _re.match(r'^\d+/\d+/\d+$', btn_raw):
-                    btn_final = f'location/{btn_raw}/press'
-                else:
-                    return jsonify({'ok': False, 'error': f"Invalid buttonURL format: {btn_raw}. Use '1/2/3' or 'location/1/2/3/press'"}), 400
-            else:
-                btn_final = ''
+            t2 = dict(t)
+            t2['typeOfTrigger'] = typ_name
+            t2['minutes'] = mins
+            t3, err = _normalize_trigger_action_spec(t2)
+            if err:
+                return jsonify({'ok': False, 'error': err}), 400
+            if not t3:
+                continue
+            action_type = str(t3.get('actionType') or 'companion').lower()
+            btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
+            api_obj = t3.get('api') if action_type == 'api' else None
 
-            times.append(TimeOfTrigger(mins, typ, btn_final))
+            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj))
 
         ev = Event(name, new_id, WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday, date_obj, time_obj, repeating, times, active)
         events.append(ev)

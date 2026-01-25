@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from enum import Enum
-from typing import List
+from typing import Any, Dict, List, Optional
 
 
 class TypeofTime(Enum):
@@ -21,10 +21,20 @@ class WeekDay(Enum):
 
 
 class TimeOfTrigger:
-    def __init__(self, minutes: int, typeOfTrigger: TypeofTime, buttonURL: str) -> None:
+    def __init__(
+        self,
+        minutes: int,
+        typeOfTrigger: TypeofTime,
+        buttonURL: str = "",
+        *,
+        actionType: str = "companion",
+        api: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.minutes = minutes
         self.typeOfTrigger = typeOfTrigger
         self.buttonURL = buttonURL
+        self.actionType = (actionType or "companion").lower()
+        self.api: Optional[Dict[str, Any]] = api if isinstance(api, dict) else None
 
         if typeOfTrigger == TypeofTime.BEFORE:
             self.timer = -minutes
@@ -34,6 +44,22 @@ class TimeOfTrigger:
             self.timer = minutes
         else:
             raise ValueError("Impossible Selection")
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {
+            "minutes": int(self.minutes),
+            "typeOfTrigger": self.typeOfTrigger.name,
+        }
+
+        if self.actionType == "api":
+            out["actionType"] = "api"
+            out["api"] = self.api or {}
+        else:
+            # Backward compatible default
+            out["actionType"] = "companion"
+            out["buttonURL"] = self.buttonURL
+
+        return out
 
     def __lt__(self, other: "TimeOfTrigger") -> bool:
         return self.timer < other.timer
