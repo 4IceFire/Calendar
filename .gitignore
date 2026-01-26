@@ -12,3 +12,5 @@ calendar_triggers.json
 
 # Local Config/Event Files
 *.json
+
+auth.db
