@@ -15,12 +15,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential gcc libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# copy requirements first to leverage Docker cache
-COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
-
-# copy app
+# copy app (copy full project so requirements.txt is available in image)
 COPY . /app
+RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 # Expose default port (config.json controls actual port)
 EXPOSE 5000
