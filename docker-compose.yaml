@@ -1,0 +1,18 @@
+services:
+  my-python-webapp:
+    build: .
+    image: my-python-webapp:latest
+    container_name: my-python-webapp
+    restart: unless-stopped
+
+    ports:
+      - "5000:5000"
+
+    volumes:
+      - myapp_data:/data
+
+    environment:
+      - TZ=Australia/Brisbane
+
+volumes:
+  myapp_data:
