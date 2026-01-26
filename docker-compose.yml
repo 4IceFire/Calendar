@@ -1,8 +1,8 @@
 services:
-  my-python-webapp:
+  tdeck:
     build: .
-    image: my-python-webapp:latest
-    container_name: my-python-webapp
+    image: tdeck:latest
+    container_name: tdeck
     restart: unless-stopped
 
     ports:
