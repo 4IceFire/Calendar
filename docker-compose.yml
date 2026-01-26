@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  tdeck:
+    build: .
+    image: tdeck-calendar:latest
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+    volumes:
+      - ./config.json:/app/config.json:rw
+      - ./events.json:/app/events.json:rw
+      - ./timer_presets.json:/app/timer_presets.json:rw
+      - ./videohub_presets.json:/app/videohub_presets.json:rw
+      - ./auth.db:/app/auth.db:rw
+    # Optionally mount other data files if you want them persisted
+    # - ./some_local_file:/app/some_local_file:rw
+    stdin_open: false
+    tty: false

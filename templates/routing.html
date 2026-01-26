@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Routing' %}
+{% set page_subtitle = 'Quick VideoHub routing (Output → Input)' %}
+
+{% block content %}
+  <div id="routing-page"
+       data-allowed-outputs='{{ allowed_outputs|tojson }}'
+       data-allowed-inputs='{{ allowed_inputs|tojson }}'>
+
+    <div id="routing-status" class="mb-3"></div>
+
+    <div class="row g-3">
+      <div class="col-12 col-md-5">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <h2 class="h5 mb-2">Outputs</h2>
+            <div class="form-text mb-2">Select an output to view and change what it follows.</div>
+            <div id="routing-outputs" class="list-group" style="max-height: 60vh; overflow:auto"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-7">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+              <h2 class="h5 mb-0">Inputs</h2>
+              <button id="routing-apply" class="btn btn-primary" type="button" disabled>Route / Apply</button>
+            </div>
+
+            <div class="small text-muted mb-2" id="routing-current">Select an output…</div>
+            <div id="routing-inputs" class="list-group" style="max-height: 60vh; overflow:auto"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

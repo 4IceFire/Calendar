@@ -87,6 +87,209 @@ setInterval(updateCompanion, 10000);
 setInterval(updateProPresenter, 10000);
 setInterval(updateVideoHub, 10000);
 
+// --- Routing page (quick VideoHub route) ---
+function _routingSetStatus(msg, kind) {
+  const el = document.getElementById('routing-status');
+  if (!el) return;
+  if (!msg) {
+    el.className = '';
+    el.textContent = '';
+    return;
+  }
+  const cls = kind === 'error' ? 'alert alert-danger' : (kind === 'warn' ? 'alert alert-warning' : 'alert alert-success');
+  el.className = cls;
+  el.textContent = msg;
+}
+
+function _routingLabel(item) {
+  if (!item) return '';
+  const n = parseInt(item.number, 10);
+  const label = String(item.label || '').trim();
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return label ? `${n}: ${label}` : String(n);
+}
+
+function _routingParseAllowList(raw) {
+  try {
+    const arr = JSON.parse(String(raw || '[]'));
+    if (!Array.isArray(arr)) return [];
+    return arr.map(x => parseInt(x, 10)).filter(n => Number.isFinite(n) && n > 0);
+  } catch (e) {
+    return [];
+  }
+}
+
+if (document.getElementById('routing-page')) {
+  const root = document.getElementById('routing-page');
+  const allowedOutputs = _routingParseAllowList(root.getAttribute('data-allowed-outputs'));
+  const allowedInputs = _routingParseAllowList(root.getAttribute('data-allowed-inputs'));
+
+  const elOutputs = document.getElementById('routing-outputs');
+  const elInputs = document.getElementById('routing-inputs');
+  const elCurrent = document.getElementById('routing-current');
+  const btnApply = document.getElementById('routing-apply');
+
+  let state = { configured: false, inputs: [], outputs: [], routing: [] };
+  let selectedOutput = null;
+  let selectedInput = null;
+
+  function _filterList(list, allow) {
+    const arr = Array.isArray(list) ? list : [];
+    if (Array.isArray(allow) && allow.length > 0) {
+      const set = new Set(allow.map(n => parseInt(n, 10)).filter(n => Number.isFinite(n) && n > 0));
+      return arr.filter(it => set.has(parseInt(it.number, 10)));
+    }
+    return arr;
+  }
+
+  function _getCurrentInputForOutput(outNum) {
+    const idx = parseInt(outNum, 10) - 1;
+    if (!Array.isArray(state.routing)) return null;
+    const v = state.routing[idx];
+    const n = parseInt(v, 10);
+    return (Number.isFinite(n) && n > 0) ? n : null;
+  }
+
+  function _setApplyEnabled() {
+    if (!btnApply) return;
+    btnApply.disabled = !(selectedOutput && selectedInput);
+  }
+
+  function _renderOutputs() {
+    if (!elOutputs) return;
+    const outputs = _filterList(state.outputs, allowedOutputs);
+    elOutputs.innerHTML = '';
+
+    outputs.forEach((o) => {
+      const n = parseInt(o.number, 10);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'list-group-item list-group-item-action';
+      btn.textContent = _routingLabel(o);
+      if (selectedOutput === n) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        selectedOutput = n;
+        const curIn = _getCurrentInputForOutput(n);
+        selectedInput = curIn;
+        _renderOutputs();
+        _renderInputs();
+        _renderCurrent();
+        _setApplyEnabled();
+      });
+      elOutputs.appendChild(btn);
+    });
+
+    if (!outputs.length) {
+      const div = document.createElement('div');
+      div.className = 'list-group-item text-muted';
+      div.textContent = 'No outputs configured';
+      elOutputs.appendChild(div);
+    }
+  }
+
+  function _renderInputs() {
+    if (!elInputs) return;
+    const inputs = _filterList(state.inputs, allowedInputs);
+    elInputs.innerHTML = '';
+
+    inputs.forEach((i) => {
+      const n = parseInt(i.number, 10);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'list-group-item list-group-item-action';
+      btn.textContent = _routingLabel(i);
+      if (selectedInput === n) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        selectedInput = n;
+        _renderInputs();
+        _renderCurrent();
+        _setApplyEnabled();
+      });
+      elInputs.appendChild(btn);
+    });
+
+    if (!inputs.length) {
+      const div = document.createElement('div');
+      div.className = 'list-group-item text-muted';
+      div.textContent = 'No inputs configured';
+      elInputs.appendChild(div);
+    }
+  }
+
+  function _findLabel(list, num) {
+    const n = parseInt(num, 10);
+    const arr = Array.isArray(list) ? list : [];
+    const it = arr.find(x => parseInt(x.number, 10) === n);
+    return it ? _routingLabel(it) : (Number.isFinite(n) && n > 0 ? String(n) : '');
+  }
+
+  function _renderCurrent() {
+    if (!elCurrent) return;
+    if (!selectedOutput) {
+      elCurrent.textContent = 'Select an output…';
+      return;
+    }
+    const outText = _findLabel(state.outputs, selectedOutput);
+    const curIn = _getCurrentInputForOutput(selectedOutput);
+    const curText = curIn ? _findLabel(state.inputs, curIn) : '(unknown)';
+    const selText = selectedInput ? _findLabel(state.inputs, selectedInput) : '(none)';
+    elCurrent.textContent = `Output ${outText} is currently ${curText}. Selected: ${selText}.`;
+  }
+
+  async function _applyRoute() {
+    if (!(selectedOutput && selectedInput)) return;
+    _routingSetStatus('', '');
+    if (btnApply) btnApply.disabled = true;
+    try {
+      const res = await fetch('/api/videohub/route', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({output: selectedOutput, input: selectedInput, zero_based: false}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Route failed');
+
+      // Update local snapshot
+      const idx = parseInt(selectedOutput, 10) - 1;
+      if (Array.isArray(state.routing) && idx >= 0) {
+        while (state.routing.length <= idx) state.routing.push(null);
+        state.routing[idx] = selectedInput;
+      }
+      _routingSetStatus('Routed successfully.', 'ok');
+      _renderOutputs();
+      _renderInputs();
+      _renderCurrent();
+    } catch (e) {
+      _routingSetStatus(String(e.message || e), 'error');
+    } finally {
+      _setApplyEnabled();
+    }
+  }
+
+  if (btnApply) btnApply.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    _applyRoute();
+  });
+
+  (async () => {
+    try {
+      const res = await fetch('/api/videohub/state', {cache: 'no-store'});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Unable to load VideoHub state');
+      state = data;
+      if (!data.configured) {
+        _routingSetStatus('VideoHub not configured (set videohub_ip). Showing fallback ports.', 'warn');
+      }
+      _renderOutputs();
+      _renderInputs();
+      _renderCurrent();
+      _setApplyEnabled();
+    } catch (e) {
+      _routingSetStatus(String(e.message || e), 'error');
+    }
+  })();
+}
+
 // --- Config page ---
 function _configSetStatus(msg, kind) {
   const el = document.getElementById('config-status');
@@ -210,6 +413,15 @@ const CONFIG_META = {
   videohub_presets_file: {
     label: 'VideoHub Presets File',
     help: 'JSON file where VideoHub routing presets are stored.',
+  },
+
+  videohub_allowed_outputs: {
+    label: 'Allowed Outputs (1-based list)',
+    help: 'Optional list of output numbers allowed in the Routing page. Example: [1,2,3]. Empty = all outputs.',
+  },
+  videohub_allowed_inputs: {
+    label: 'Allowed Inputs (1-based list)',
+    help: 'Optional list of input numbers allowed in the Routing page. Example: [1,2,3]. Empty = all inputs.',
   },
 
   EVENTS_FILE: {
@@ -352,7 +564,7 @@ function _renderConfigGroups(cfg) {
     },
     {
       title: 'VideoHub',
-      keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
+      keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file', 'videohub_allowed_outputs', 'videohub_allowed_inputs'],
     },
   ];
 

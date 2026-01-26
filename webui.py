@@ -44,6 +44,10 @@ except Exception:
         "videohub_port": 9990,
         "videohub_timeout": 2,
         "videohub_presets_file": "videohub_presets.json",
+
+        # Routing page allow-lists (1-based indices). Empty list => allow all.
+        "videohub_allowed_outputs": [],
+        "videohub_allowed_inputs": [],
         "webserver_port": 5000,
         "poll_interval": 1,
         "debug": False,
@@ -1597,6 +1601,43 @@ def videohub_page():
     return render_template('videohub.html')
 
 
+@app.route('/routing')
+@require_page('page:routing', 'Routing')
+def routing_page():
+    # Allow-lists are configured in config.json as 1-based indices.
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    def _coerce_allow_list(v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            # try JSON list, else ignore
+            try:
+                v = json.loads(v)
+            except Exception:
+                return []
+        if not isinstance(v, list):
+            return []
+        out = []
+        for item in v:
+            try:
+                n = int(item)
+            except Exception:
+                continue
+            if n > 0:
+                out.append(n)
+        # unique + sorted
+        return sorted(set(out))
+
+    allowed_outputs = _coerce_allow_list(cfg.get('videohub_allowed_outputs'))
+    allowed_inputs = _coerce_allow_list(cfg.get('videohub_allowed_inputs'))
+
+    return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs)
+
+
 @app.route('/timers')
 @require_page('page:timers', 'Timers')
 def timers_page():
@@ -2225,6 +2266,11 @@ def videohub_status():
 
 @app.route('/api/config', methods=['GET'])
 def api_get_config():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
     try:
         cfg = utils.get_config()
         return jsonify(cfg)
@@ -2234,6 +2280,11 @@ def api_get_config():
 
 @app.route('/api/config', methods=['POST'])
 def api_set_config():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
     try:
         new = request.get_json() or {}
     except Exception:
