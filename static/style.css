@@ -27,6 +27,19 @@ html[data-bs-theme="dark"]{
 .tdeck-soft{
   background: linear-gradient(135deg, var(--tdeck-accent-soft-bg), rgba(79, 70, 229, 0.06));
   border: 1px solid var(--tdeck-accent-border);
+  box-shadow: 0 12px 28px rgba(0,0,0,0.06);
+}
+
+html[data-bs-theme="dark"] .tdeck-soft{
+  box-shadow: 0 12px 28px rgba(0,0,0,0.35);
+}
+
+/* List groups look better inside gradient panels */
+.tdeck-soft .list-group-item{
+  background: transparent;
+}
+.tdeck-soft .list-group-item + .list-group-item{
+  border-top-color: rgba(127, 127, 127, 0.20);
 }
 
 /* Make primary buttons feel more like the brand without re-theming Bootstrap */
@@ -68,11 +81,52 @@ a:hover{ color: var(--tdeck-accent); }
   height:12px;
   border-radius:50%;
   margin-right:8px;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.55);
+}
+
+html[data-bs-theme="dark"] .indicator-dot{
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.25);
+}
+
+html, body{
+  min-height: 100%;
 }
 
 body{
-  background-color: var(--bs-body-bg);
+  min-height: 100vh;
+  background: transparent;
   color: var(--bs-body-color);
+}
+
+/* Subtle app background for a more “dashboard” feel.
+   Applied to html so it always fills the viewport (prevents seams on short pages). */
+html[data-bs-theme="light"]{
+  background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(79, 70, 229, 0.10), rgba(255,255,255,0) 55%),
+    radial-gradient(900px 500px at 95% 0%, rgba(14, 165, 233, 0.10), rgba(255,255,255,0) 55%),
+    var(--bs-body-bg);
+}
+html[data-bs-theme="dark"]{
+  background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(79, 70, 229, 0.20), rgba(0,0,0,0) 55%),
+    radial-gradient(900px 500px at 95% 0%, rgba(14, 165, 233, 0.18), rgba(0,0,0,0) 55%),
+    var(--bs-body-bg);
+}
+
+/* Sticky navbar + slight blur (supported browsers only) */
+.tdeck-navbar{
+  position: sticky;
+  top: 0;
+  z-index: 1020;
+  backdrop-filter: blur(10px);
+}
+
+/* Softer default cards */
+.card{
+  box-shadow: 0 10px 26px rgba(0,0,0,0.06);
+}
+html[data-bs-theme="dark"] .card{
+  box-shadow: 0 10px 26px rgba(0,0,0,0.35);
 }
 
 /* Slightly improve contrast for status blocks in dark mode */
@@ -82,6 +136,41 @@ html[data-bs-theme="dark"] .card{
 
 /* Simple layout tweaks */
 .container h1{margin-bottom:1rem}
+
+/* Tables on soft panels: remove heavy white blocks and keep readable separators */
+.tdeck-table{
+  --bs-table-bg: transparent;
+  --bs-table-color: var(--bs-body-color);
+  --bs-table-border-color: rgba(127, 127, 127, 0.22);
+  --bs-table-hover-bg: rgba(14, 165, 233, 0.06);
+}
+
+.tdeck-table-wrap{
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.tdeck-table thead th{
+  font-weight: 600;
+  color: var(--bs-secondary-color);
+  border-bottom-color: rgba(127, 127, 127, 0.30);
+}
+
+.tdeck-table td, .tdeck-table th{
+  padding-top: 0.6rem;
+  padding-bottom: 0.6rem;
+}
+
+/* Inputs on soft panels: slightly stronger borders for contrast */
+.tdeck-soft .form-control,
+.tdeck-soft .form-select{
+  border-color: rgba(127,127,127,0.28);
+}
+
+html[data-bs-theme="dark"] .tdeck-soft .form-control,
+html[data-bs-theme="dark"] .tdeck-soft .form-select{
+  border-color: rgba(255,255,255,0.16);
+}
 
 /* Compact icon buttons (used for timers Up/Down) */
 .btn-icon-sm{
@@ -110,7 +199,7 @@ html[data-bs-theme="dark"] .card{
 /* Timer "Button Presses" editor readability */
 .timer-press-header{
   display: grid;
-  grid-template-columns: 1fr 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
   gap: 0.5rem;
   align-items: center;
   margin-bottom: 0.35rem;
@@ -121,12 +210,24 @@ html[data-bs-theme="dark"] .card{
 
 .timer-press-row{
   display: grid;
-  grid-template-columns: 1fr 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
   gap: 0.5rem;
   align-items: center;
   padding: 0.35rem 0.5rem;
   border: 1px solid rgba(127, 127, 127, 0.25);
   border-radius: 0.4rem;
+}
+
+/* Prevent expanded press editor from overflowing into the Actions column */
+.timer-press-header > *,
+.timer-press-row > *{
+  min-width: 0;
+}
+
+.timer-press-row input,
+.timer-press-row select{
+  min-width: 0;
+  max-width: 100%;
 }
 
 details.timer-presses > summary{

@@ -9,8 +9,3 @@ This file exists so older imports continue working:
   from package.apps.videohub.client import VideohubClient
 """
 
-from videohub import (  # noqa: F401
-    DEFAULT_PORT,
-    VideohubClient,
-    get_videohub_client_from_config,
-)

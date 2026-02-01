@@ -4,8 +4,8 @@
 {% set page_subtitle = 'All upcoming trigger actions across active events.' %}
 
 {% block page_actions %}
-  <button id="refresh-upcoming" class="btn btn-sm btn-secondary">Refresh</button>
-  <a href="/calendar" class="btn btn-sm btn-outline-primary">Back to Schedule</a>
+  <button id="refresh-upcoming" class="btn btn-sm btn-outline-secondary">Refresh</button>
+  <a href="/calendar" class="btn btn-sm btn-outline-secondary">Back to Schedule</a>
 {% endblock %}
 
 {% block content %}
@@ -13,8 +13,10 @@
     <div class="text-muted small" id="upcoming-meta">Loading…</div>
   </div>
 
-  <div class="list-group tdeck-soft" id="upcoming-list">
-    <div class="list-group-item text-muted">Loading…</div>
+  <div class="tdeck-soft rounded-3 overflow-hidden">
+    <div class="list-group list-group-flush" id="upcoming-list">
+      <div class="list-group-item text-muted">Loading…</div>
+    </div>
   </div>
 
   <script>

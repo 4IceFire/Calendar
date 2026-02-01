@@ -4,29 +4,35 @@
 {% set page_subtitle = 'List of scheduled events.' %}
 
 {% block page_actions %}
-  <button id="refresh-events" class="btn btn-sm btn-secondary">Refresh</button>
-  <button id="add-event" class="btn btn-sm btn-success">Add Event</button>
-  <a href="/calendar/triggers" class="btn btn-sm btn-outline-primary">Upcoming Triggers</a>
-  <a href="/templates" class="btn btn-sm btn-outline-primary">Templates</a>
+  <button id="refresh-events" class="btn btn-sm btn-outline-secondary">Refresh</button>
+  <button id="add-event" class="btn btn-sm btn-primary">Add Event</button>
+  <a href="/calendar/triggers" class="btn btn-sm btn-outline-secondary">Upcoming Triggers</a>
+  <a href="/templates" class="btn btn-sm btn-outline-secondary">Templates</a>
 {% endblock %}
 
 {% block content %}
-<table class="table table-striped">
-  <thead>
-    <tr>
-      <th>ID</th>
-      <th>Name</th>
-      <th>Date</th>
-      <th>Time</th>
-      <th>Repeating</th>
-      <th>Active</th>
-      <th>Triggers</th>
-    </tr>
-  </thead>
-  <tbody id="events-body">
-    <tr><td colspan="7" class="text-center text-muted">Loading…</td></tr>
-  </tbody>
-</table>
+
+<div class="tdeck-soft rounded-3 p-3">
+  <div class="table-responsive tdeck-table-wrap">
+    <table class="table table-sm table-hover align-top tdeck-table mb-0">
+      <thead>
+        <tr>
+          <th style="width:70px">ID</th>
+          <th style="min-width:220px">Name</th>
+          <th style="width:140px">Date</th>
+          <th style="width:110px">Time</th>
+          <th style="width:100px">Repeating</th>
+          <th style="width:90px">Active</th>
+          <th>Triggers</th>
+          <th class="text-end" style="width:170px"></th>
+        </tr>
+      </thead>
+      <tbody id="events-body">
+        <tr><td colspan="8" class="text-center text-muted">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
 <script>
 async function loadEvents(){
@@ -52,7 +58,7 @@ async function loadEvents(){
       if(m && m[1]) btnMap[m[1]] = b.label;
     }
     if(!Array.isArray(data) || data.length===0){
-      tbody.innerHTML = '<tr><td colspan="7" class="text-center">No events</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="text-center">No events</td></tr>';
       return;
     }
     tbody.innerHTML = '';
@@ -151,7 +157,7 @@ async function loadEvents(){
       tbody.appendChild(tr);
     }
   }catch(err){
-    tbody.innerHTML = `<tr><td colspan="7" class="text-danger">Error loading events</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="text-danger">Error loading events</td></tr>`;
     console.error(err);
   }
 }

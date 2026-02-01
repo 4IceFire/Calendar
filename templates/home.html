@@ -2,11 +2,11 @@
 
 {% set page_title = 'Home' %}
 {% block content %}
-  <div class="row">
+  <div class="row g-3">
     <div class="col-md-8">
       <p class="text-muted">Overview of what’s happening right now.</p>
 
-      <div class="tdeck-soft rounded-3 p-3 mb-3">
+      <div class="tdeck-soft rounded-3 p-3">
         <div class="d-flex align-items-center gap-2">
           <img src="/static/tdeck-icon.svg" alt="" width="28" height="28" style="display:block">
           <div>
@@ -17,20 +17,20 @@
       </div>
 
 
-      <div class="tdeck-soft rounded-3 p-3 mb-3">
+      <div class="tdeck-soft rounded-3 p-3">
         <div class="d-flex justify-content-between align-items-center">
           <h5 class="mb-0">Next 3 Triggers</h5>
           <button id="refresh-upcoming-triggers" class="btn btn-sm btn-outline-secondary">Refresh</button>
         </div>
         <div class="small text-muted mt-1" id="next-trigger-countdown">Loading…</div>
-        <div class="list-group mt-2" id="next-triggers-list">
+        <div class="list-group list-group-flush mt-2" id="next-triggers-list">
           <div class="list-group-item text-muted">Loading…</div>
         </div>
       </div>
 
       <div class="tdeck-soft rounded-3 p-3">
         <h5 class="mb-2">Event Times</h5>
-        <div class="list-group">
+        <div class="list-group list-group-flush">
           {% if event_times and event_times|length > 0 %}
             {% for ev in event_times %}
               <div class="list-group-item d-flex justify-content-between align-items-center">
@@ -49,7 +49,7 @@
         <h5 class="mb-2">Health</h5>
         <div class="small text-muted" id="home-overview-updated"></div>
       </div>
-      <div class="tdeck-soft rounded-3 p-2 small">
+      <div class="tdeck-soft rounded-3 p-3 small">
         <div class="d-flex flex-wrap gap-2">
           <div><span class="text-muted">Events:</span> <strong>{{ events_file or 'events.json' }}</strong></div>
           <div><span class="text-muted">Companion:</span> <strong>{{ companion_hostport or '127.0.0.1:8000' }}</strong></div>
@@ -59,18 +59,20 @@
 
       <div class="mt-3">
         <h6 class="mb-2">Connections</h6>
-        <div class="list-group tdeck-soft">
-          <div class="list-group-item d-flex align-items-center gap-2">
-            <span id="companion-dot-home" class="indicator-dot bg-danger"></span>
-            <span id="companion-label-home">Companion: Checking...</span>
-          </div>
-          <div class="list-group-item d-flex align-items-center gap-2">
-            <span id="propresenter-dot-home" class="indicator-dot bg-danger"></span>
-            <span id="propresenter-label-home">ProPresenter: Checking...</span>
-          </div>
-          <div class="list-group-item d-flex align-items-center gap-2">
-            <span id="videohub-dot-home" class="indicator-dot bg-danger"></span>
-            <span id="videohub-label-home">VideoHub: Checking...</span>
+        <div class="tdeck-soft rounded-3 overflow-hidden">
+          <div class="list-group list-group-flush">
+            <div class="list-group-item d-flex align-items-center gap-2">
+              <span id="companion-dot-home" class="indicator-dot bg-danger"></span>
+              <span id="companion-label-home">Companion: Checking...</span>
+            </div>
+            <div class="list-group-item d-flex align-items-center gap-2">
+              <span id="propresenter-dot-home" class="indicator-dot bg-danger"></span>
+              <span id="propresenter-label-home">ProPresenter: Checking...</span>
+            </div>
+            <div class="list-group-item d-flex align-items-center gap-2">
+              <span id="videohub-dot-home" class="indicator-dot bg-danger"></span>
+              <span id="videohub-label-home">VideoHub: Checking...</span>
+            </div>
           </div>
         </div>
       </div>
@@ -81,7 +83,7 @@
             <h6 class="mb-2">Timers</h6>
             <a class="btn btn-sm btn-outline-secondary" href="/timers">Open</a>
           </div>
-          <div class="tdeck-soft rounded-3 p-2">
+          <div class="tdeck-soft rounded-3 p-3">
             <div class="d-flex justify-content-between align-items-center">
               <div class="text-truncate">
                 <div class="small text-muted">Last preset pressed</div>
@@ -108,7 +110,7 @@
             <h6 class="mb-2">VideoHub</h6>
             <a class="btn btn-sm btn-outline-secondary" href="/videohub">Open</a>
           </div>
-          <div class="tdeck-soft rounded-3 p-2">
+          <div class="tdeck-soft rounded-3 p-3">
             <div class="small text-muted">Latest preset applied</div>
             <div class="fw-semibold text-truncate" id="home-videohub-last">—</div>
             <div class="small text-muted" id="home-videohub-last-meta"></div>

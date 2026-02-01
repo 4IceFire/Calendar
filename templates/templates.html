@@ -3,28 +3,60 @@
 {% set page_title = 'Templates' %}
 
 {% block content %}
-<div class="mb-4">
-  <h3>Button Templates</h3>
-  <div id="buttons-list" class="mb-3">Loading…</div>
-  <form id="add-button-form" class="row g-2">
-    <div class="col-md-6"><input class="form-control" name="label" placeholder="Label"></div>
-    <div class="col-md-5"><input class="form-control" name="pattern" placeholder="Pattern (e.g. 1/0/1)"></div>
-    <div class="col-md-1"><button class="btn btn-sm btn-success">Add</button></div>
-  </form>
-</div>
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="tdeck-soft rounded-3 p-3">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div>
+          <h2 class="h5 mb-0">Button Templates</h2>
+          <div class="small text-muted">Reusable Companion button shortcuts.</div>
+        </div>
+      </div>
 
-<div>
-  <h3>Trigger Templates</h3>
-  <div id="triggers-list" class="mb-3">Loading…</div>
+      <div class="tdeck-soft rounded-3 overflow-hidden mb-3" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+        <div id="buttons-list" class="list-group list-group-flush">Loading…</div>
+      </div>
+
+      <form id="add-button-form" class="row g-2 align-items-end">
+        <div class="col-md-6">
+          <label class="form-label small text-muted mb-1">Label</label>
+          <input class="form-control" name="label" placeholder="e.g. Stream Start">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small text-muted mb-1">Pattern</label>
+          <input class="form-control" name="pattern" placeholder="1/0/1">
+        </div>
+        <div class="col-md-2 d-grid">
+          <button class="btn btn-sm btn-primary">Add</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="tdeck-soft rounded-3 p-3">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div>
+          <h2 class="h5 mb-0">Trigger Templates</h2>
+          <div class="small text-muted">Reusable groups of triggers for events.</div>
+        </div>
+      </div>
+
+      <div class="tdeck-soft rounded-3 overflow-hidden mb-3" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+        <div id="triggers-list" class="list-group list-group-flush">Loading…</div>
+      </div>
 
   <!-- Compose multiple triggers, then save as a single trigger-template -->
-  <div id="add-trigger-composer" class="mb-3">
-    <div id="add-trigger-triggers-container"></div>
-    <form id="add-trigger-form" class="d-flex gap-2 align-items-center mt-2">
-      <input name="label" class="form-control" placeholder="Template Label" style="width:200px">
-      <button id="add-one-trigger" type="button" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
-      <button id="save-template-btn" class="btn btn-sm btn-success">Save Template</button>
-    </form>
+      <!-- Compose multiple triggers, then save as a single trigger-template -->
+      <div id="add-trigger-composer" class="mb-1">
+        <div id="add-trigger-triggers-container"></div>
+        <form id="add-trigger-form" class="d-flex flex-wrap gap-2 align-items-center mt-2">
+          <input name="label" class="form-control" placeholder="Template Label" style="width:220px">
+          <button id="add-one-trigger" type="button" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
+          <button id="save-template-btn" class="btn btn-sm btn-primary">Save Template</button>
+        </form>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -60,11 +92,11 @@ async function loadTemplates(){
 
 function renderButtons(btns){
   const out = document.getElementById('buttons-list');
-  if(!btns.length){ out.innerHTML = '<div class="text-muted">No button templates</div>'; return }
+  if(!btns.length){ out.innerHTML = '<div class="list-group-item text-muted">No button templates</div>'; return }
   out.innerHTML = '';
   btns.forEach((b,i)=>{
     const div = document.createElement('div');
-    div.className = 'd-flex align-items-center mb-1';
+    div.className = 'list-group-item d-flex align-items-center gap-2';
 
     const isEditing = (window.__editingButtonIndex === i);
     const label = b.label || '';
@@ -72,10 +104,10 @@ function renderButtons(btns){
 
     if(isEditing){
       div.innerHTML = `
-        <div class="flex-grow-1 d-flex gap-2 align-items-center">
+        <div class="flex-grow-1 d-flex flex-wrap gap-2 align-items-center">
           <input class="form-control form-control-sm" style="max-width: 260px" data-role="button-label" value="${label.replace(/"/g,'&quot;')}">
           <input class="form-control form-control-sm" style="max-width: 160px" data-role="button-pattern" value="${pattern.replace(/"/g,'&quot;')}" placeholder="1/0/1">
-          <small class="text-muted">(format: 1/0/1)</small>
+          <small class="text-muted">Format: 1/0/1</small>
         </div>
         <div class="ms-2">
           <button class="btn btn-sm btn-success" data-idx="${i}" data-type="button-save">Save</button>
@@ -85,9 +117,12 @@ function renderButtons(btns){
     }else{
       // Keep URL in short format (pattern only)
       div.innerHTML = `
-        <div class="flex-grow-1"><strong>${label}</strong> — <span class="text-muted">${pattern}</span></div>
-        <div>
-          <button class="btn btn-sm btn-outline-primary ms-2" data-idx="${i}" data-type="button-edit">Edit</button>
+        <div class="flex-grow-1 text-truncate">
+          <div class="fw-semibold text-truncate">${label}</div>
+          <div class="small text-muted text-truncate">${pattern}</div>
+        </div>
+        <div class="ms-auto">
+          <button class="btn btn-sm btn-outline-secondary" data-idx="${i}" data-type="button-edit">Edit</button>
           <button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="button-delete">Delete</button>
         </div>
       `;
@@ -111,16 +146,22 @@ function renderButtons(btns){
 
 function renderTriggers(trigs){
   const out = document.getElementById('triggers-list');
-  if(!trigs.length){ out.innerHTML = '<div class="text-muted">No trigger templates</div>'; return }
+  if(!trigs.length){ out.innerHTML = '<div class="list-group-item text-muted">No trigger templates</div>'; return }
   out.innerHTML = '';
   trigs.forEach((t,i)=>{
     const div = document.createElement('div');
-    div.className = 'd-flex gap-2 align-items-center mb-2';
+    div.className = 'list-group-item d-flex gap-2 align-items-center';
     const times = Array.isArray(t.times) ? t.times : (t.times ? JSON.parse(t.times) : []);
     const count = times.length;
     div.innerHTML = `
-      <div class="flex-grow-1"><strong>${t.label}</strong> — <small class="text-muted">${count} trigger${count!==1?'s':''}</small></div>
-      <div><button class="btn btn-sm btn-outline-primary ms-2" data-idx="${i}" data-type="trigger-edit">Edit</button><button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="trigger-delete">Delete</button></div>
+      <div class="flex-grow-1 text-truncate">
+        <div class="fw-semibold text-truncate">${t.label}</div>
+        <div class="small text-muted">${count} trigger${count!==1?'s':''}</div>
+      </div>
+      <div class="ms-auto">
+        <button class="btn btn-sm btn-outline-secondary" data-idx="${i}" data-type="trigger-edit">Edit</button>
+        <button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="trigger-delete">Delete</button>
+      </div>
     `;
     out.appendChild(div);
   });

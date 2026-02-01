@@ -15,11 +15,10 @@ from datetime import datetime
 from typing import List, Optional
 
 from package.core import list_apps, get_app
-import package.apps  # noqa: F401
 from package.apps.calendar import storage, utils
 logger = utils.get_logger()
 
-from videohub import VideohubClient, get_videohub_client_from_config, DEFAULT_PORT as VIDEOHUB_DEFAULT_PORT
+from videohub import VideohubClient, get_videohub_client_from_config
 
 PID_FILE = "calendar.pid"
 

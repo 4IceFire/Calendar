@@ -7,10 +7,8 @@ import sys
 import subprocess
 import shlex
 from collections import deque
-import os
 import sqlite3
 import secrets
-from functools import wraps
 
 from werkzeug.serving import make_server
 import json
@@ -91,6 +89,24 @@ def _home_state_sync_from_disk() -> None:
         except Exception:
             pass
 
+        try:
+            v = st.get('last_videohub_preset')
+            if isinstance(v, dict):
+                for k in ('id', 'ts'):
+                    if k in v:
+                        _home_last_videohub_preset[k] = v.get(k)
+        except Exception:
+            pass
+
+        try:
+            r = st.get('last_videohub_route')
+            if isinstance(r, dict):
+                for k in ('output', 'input', 'monitor', 'ts'):
+                    if k in r:
+                        _home_last_videohub_route[k] = r.get(k)
+        except Exception:
+            pass
+
 
 def _home_state_persist() -> None:
     """Persist current in-memory Home overview state (best-effort)."""
@@ -102,22 +118,6 @@ def _home_state_persist() -> None:
         })
     except Exception:
         pass
-        try:
-            v = st.get('last_videohub_preset')
-            if isinstance(v, dict):
-                for k in ('id', 'ts'):
-                    if k in v:
-                        _home_last_videohub_preset[k] = v.get(k)
-        except Exception:
-            pass
-        try:
-            r = st.get('last_videohub_route')
-            if isinstance(r, dict):
-                for k in ('output', 'input', 'monitor', 'ts'):
-                    if k in r:
-                        _home_last_videohub_route[k] = r.get(k)
-        except Exception:
-            pass
 
 
 # Seed from disk on startup so Home can show prior state.
@@ -187,7 +187,6 @@ def _home_set_last_videohub_route(*, output: int, input_: int, monitor: bool) ->
         _home_state_persist()
 
 from package.core import list_apps, get_app
-import package.apps  # noqa: F401
 try:
     from package.apps.calendar import utils
 except Exception:

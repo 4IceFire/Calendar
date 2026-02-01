@@ -9,13 +9,18 @@
     <link rel="stylesheet" href="/static/style.css">
   </head>
   <body>
-    <nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom">
+    <nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom tdeck-navbar">
       <div class="container-fluid">
         <a class="navbar-brand d-flex align-items-center gap-2" href="/">
           <img src="/static/tdeck-icon.svg" alt="" width="22" height="22" style="display:block">
           <span class="tdeck-accent">TDeck</span>
         </a>
-        <div class="collapse navbar-collapse">
+
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#tdeckNav" aria-controls="tdeckNav" aria-expanded="false" aria-label="Toggle navigation">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+
+        <div class="collapse navbar-collapse" id="tdeckNav">
           <ul class="navbar-nav me-auto mb-2 mb-lg-0">
             {% if not auth_enabled or can_access('page:home') %}<li class="nav-item"><a class="nav-link" href="/">Home</a></li>{% endif %}
             {% if not auth_enabled or can_access('page:timers') %}<li class="nav-item"><a class="nav-link" href="/timers">Timers</a></li>{% endif %}
@@ -81,7 +86,7 @@
       </div>
     </nav>
 
-    <div class="container mt-4">
+    <div class="container py-4">
       {% if page_title is defined and page_title %}
         <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
           <div>
