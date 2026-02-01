@@ -71,6 +71,26 @@ class ClockScheduler:
 
     def start(self) -> None:
         self._dbg(f"Scheduler starting (file={self.events_file}, poll={self.poll_interval}s)")
+
+        # Startup efficiency: the scheduler does one intentional initial load
+        # (via `_reload_needed = True`). Seed the mtimes BEFORE the watcher
+        # starts so the first watcher iteration doesn't also flag both files
+        # as "changed" and cause extra reloads.
+        try:
+            self._last_mtime = __import__("os").path.getmtime(self.events_file)
+        except FileNotFoundError:
+            self._last_mtime = None
+        except Exception:
+            # Best-effort; leave as-is
+            pass
+
+        try:
+            self._last_config_mtime = __import__("os").path.getmtime(utils.CONFIG_FILE)
+        except FileNotFoundError:
+            self._last_config_mtime = None
+        except Exception:
+            pass
+
         threading.Thread(target=self._watch_file, daemon=True).start()
         self._run_forever()
 

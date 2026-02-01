@@ -90,6 +90,23 @@ html[data-bs-theme="dark"] .card{
   font-size: 0.75rem;
 }
 
+/* Timers: big borderless play/apply button */
+.timer-apply-btn{
+  border: 0;
+  background: transparent;
+  padding: 0.15rem 0.35rem;
+  line-height: 1;
+  font-size: 1.25rem;
+  color: var(--tdeck-accent-text);
+}
+.timer-apply-btn:hover{
+  background: var(--tdeck-accent-soft-bg);
+  color: var(--tdeck-accent);
+}
+.timer-apply-btn:focus{
+  box-shadow: 0 0 0 0.25rem var(--tdeck-accent-border);
+}
+
 /* Timer "Button Presses" editor readability */
 .timer-press-header{
   display: grid;

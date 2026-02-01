@@ -87,11 +87,47 @@ setInterval(updateCompanion, 10000);
 setInterval(updateProPresenter, 10000);
 setInterval(updateVideoHub, 10000);
 
+function _uiMessageTimeoutMs() {
+  try {
+    const ms = window.TDECK_UI && window.TDECK_UI.messageTimeoutMs;
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  } catch (e) {
+    return 0;
+  }
+}
+
+function _uiClearAutoHide(el) {
+  if (!el) return;
+  const id = el._tdeckAutoHideTimeoutId;
+  if (id) {
+    clearTimeout(id);
+    el._tdeckAutoHideTimeoutId = null;
+  }
+}
+
+function _uiScheduleAutoHide(el, clearFn) {
+  if (!el) return;
+  _uiClearAutoHide(el);
+  const ms = _uiMessageTimeoutMs();
+  if (!ms) return;
+  el._tdeckAutoHideTimeoutId = setTimeout(() => {
+    el._tdeckAutoHideTimeoutId = null;
+    try {
+      clearFn();
+    } catch (e) {
+      // ignore
+    }
+  }, ms);
+}
+
 // --- Routing page (quick VideoHub route) ---
 function _routingSetStatus(msg, kind) {
   const el = document.getElementById('routing-status');
   if (!el) return;
   if (!msg) {
+    _uiClearAutoHide(el);
     el.className = '';
     el.textContent = '';
     return;
@@ -99,6 +135,10 @@ function _routingSetStatus(msg, kind) {
   const cls = kind === 'error' ? 'alert alert-danger' : (kind === 'warn' ? 'alert alert-warning' : 'alert alert-success');
   el.className = cls;
   el.textContent = msg;
+  _uiScheduleAutoHide(el, () => {
+    el.className = '';
+    el.textContent = '';
+  });
 }
 
 function _routingLabel(item) {
@@ -294,6 +334,10 @@ if (document.getElementById('routing-page')) {
 function _configSetStatus(msg, kind) {
   const el = document.getElementById('config-status');
   if (!el) return;
+  if (!msg) {
+    _configClearStatus();
+    return;
+  }
   let cls;
   if (kind === 'error') cls = 'alert alert-danger';
   else if (kind === 'warn') cls = 'alert alert-warning';
@@ -303,11 +347,16 @@ function _configSetStatus(msg, kind) {
 
   // allow html for link/warning UX
   el.innerHTML = msg;
+
+  _uiScheduleAutoHide(el, () => {
+    _configClearStatus();
+  });
 }
 
 function _configClearStatus() {
   const el = document.getElementById('config-status');
   if (!el) return;
+  _uiClearAutoHide(el);
   el.className = '';
   el.textContent = '';
 }
@@ -347,6 +396,11 @@ const CONFIG_META = {
   dark_mode: {
     label: 'Dark Mode',
     help: 'Enable dark theme for the Web UI.',
+  },
+
+  webui_message_timeout_seconds: {
+    label: 'Message Timeout (seconds)',
+    help: 'How long status messages stay visible before auto-hiding. Set to 0 to disable auto-hide.',
   },
 
   auth_enabled: {
@@ -526,14 +580,66 @@ function _renderConfigField(key, value) {
 }
 
 function _renderConfigGroups(cfg) {
-  const container = document.getElementById('config-groups');
-  if (!container) return;
-  container.innerHTML = '';
+  const nav = document.getElementById('config-nav');
+  const panels = document.getElementById('config-panels');
+  const legacyContainer = document.getElementById('config-groups');
+  if (!nav || !panels) {
+    // Backward-compatible: if template didn't get updated, do nothing.
+    if (legacyContainer) legacyContainer.innerHTML = '';
+    return;
+  }
+  nav.innerHTML = '';
+  panels.innerHTML = '';
+
+  const NAV_STORAGE_KEY = 'tdeck.config.activeGroup';
+
+  function _groupIdFromTitle(title) {
+    return String(title || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .trim() || 'group';
+  }
+
+  function _readActiveGroupId(defaultId) {
+    try {
+      const h = String(window.location.hash || '');
+      if (h.startsWith('#cfg-')) return h.slice(5);
+    } catch (e) {
+      // ignore
+    }
+    try {
+      const v = window.localStorage.getItem(NAV_STORAGE_KEY);
+      if (v) return v;
+    } catch (e) {
+      // ignore
+    }
+    return defaultId;
+  }
+
+  function _setActiveGroupId(id) {
+    const groupId = String(id || '').trim();
+    if (!groupId) return;
+    for (const btn of Array.from(nav.querySelectorAll('[data-group-id]'))) {
+      btn.classList.toggle('active', String(btn.dataset.groupId) === groupId);
+    }
+    for (const panel of Array.from(panels.querySelectorAll('[data-group-id]'))) {
+      panel.style.display = (String(panel.dataset.groupId) === groupId) ? '' : 'none';
+    }
+    try {
+      window.localStorage.setItem(NAV_STORAGE_KEY, groupId);
+    } catch (e) {
+      // ignore
+    }
+    try {
+      window.location.hash = `cfg-${groupId}`;
+    } catch (e) {
+      // ignore
+    }
+  }
 
   // Legacy keys that should not be edited anymore.
   const hiddenKeys = new Set(['videohub_allowed_outputs', 'videohub_allowed_inputs']);
-
-  const mainTitles = new Set(['Web UI', 'Companion', 'ProPresenter', 'VideoHub']);
   const schedulingKeys = ['EVENTS_FILE'];
   const authKeys = [
     'auth_enabled',
@@ -542,11 +648,17 @@ function _renderConfigGroups(cfg) {
     'auth_min_password_length',
     'flask_secret_key',
   ];
+  const proPresenterTimingKeys = [
+    'propresenter_is_latest',
+    'propresenter_timer_wait_stop_ms',
+    'propresenter_timer_wait_set_ms',
+    'propresenter_timer_wait_reset_ms',
+  ];
 
-  const groups = [
+  const baseGroups = [
     {
       title: 'Web UI',
-      keys: ['webserver_port', 'server_port', 'poll_interval', 'debug', 'dark_mode'],
+      keys: ['webserver_port', 'server_port'],
     },
     {
       title: 'Companion',
@@ -566,107 +678,128 @@ function _renderConfigGroups(cfg) {
   for (const hk of hiddenKeys) {
     if (Object.prototype.hasOwnProperty.call(cfg, hk)) used.add(hk);
   }
-  let proPresenterBody = null;
+
+  const renderedGroups = [];
   let webUiBody = null;
 
-  for (const g of groups) {
-    const presentKeys = (g.keys || []).filter(
-      k => Object.prototype.hasOwnProperty.call(cfg, k) && !hiddenKeys.has(k)
-    );
-    if (!presentKeys.length) continue;
+  function _addGroupPanel({title, keys, postRender}) {
+    const presentKeys = (keys || []).filter(k => Object.prototype.hasOwnProperty.call(cfg, k) && !hiddenKeys.has(k));
+    if (!presentKeys.length) return;
+
+    const id = _groupIdFromTitle(title);
     for (const k of presentKeys) used.add(k);
 
-    const isMain = mainTitles.has(String(g.title || ''));
-    const col = document.createElement('div');
-    col.className = isMain ? 'col-12 col-md-6' : 'col-12';
+    const panel = document.createElement('div');
+    panel.dataset.groupId = id;
 
     const card = document.createElement('div');
-    card.className = isMain ? 'card h-100' : 'card';
+    card.className = 'card';
     const body = document.createElement('div');
     body.className = 'card-body';
-    const h = document.createElement('h2');
-    h.className = 'h5';
-    h.textContent = g.title;
 
+    const h = document.createElement('h2');
+    h.className = 'h5 mb-3';
+    h.textContent = title;
     body.appendChild(h);
+
     for (const k of presentKeys) {
       body.appendChild(_renderConfigField(k, cfg[k]));
     }
 
-    // Remember key bodies so we can add nested sub-boxes later.
-    if (String(g.title) === 'ProPresenter') proPresenterBody = body;
-    if (String(g.title) === 'Web UI') webUiBody = body;
+    if (typeof postRender === 'function') {
+      postRender(body);
+    }
 
     card.appendChild(body);
-    col.appendChild(card);
-    container.appendChild(col);
+    panel.appendChild(card);
+    panels.appendChild(panel);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'list-group-item list-group-item-action';
+    btn.textContent = title;
+    btn.dataset.groupId = id;
+    btn.addEventListener('click', () => _setActiveGroupId(id));
+    nav.appendChild(btn);
+
+    renderedGroups.push(id);
+    if (title === 'Web UI') webUiBody = body;
   }
 
-  // Scheduling: render inside Web UI as a nested sub-box.
-  const presentSchedulingKeys = schedulingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
-  if (webUiBody && presentSchedulingKeys.length) {
-    for (const k of presentSchedulingKeys) used.add(k);
-    const sub = document.createElement('div');
-    sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
-    const h = document.createElement('div');
-    h.className = 'fw-semibold mb-2';
-    h.textContent = 'Scheduling';
-    sub.appendChild(h);
-    for (const k of presentSchedulingKeys) {
-      sub.appendChild(_renderConfigField(k, cfg[k]));
-    }
-    webUiBody.appendChild(sub);
+  for (const g of baseGroups) {
+    _addGroupPanel({
+      title: g.title,
+      keys: g.keys,
+      postRender: (body) => {
+        if (g.title !== 'Web UI') return;
+
+        const presentSchedulingKeys = schedulingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
+        if (presentSchedulingKeys.length) {
+          for (const k of presentSchedulingKeys) used.add(k);
+          const sub = document.createElement('div');
+          sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+          const hh = document.createElement('div');
+          hh.className = 'fw-semibold mb-2';
+          hh.textContent = 'Scheduling';
+          sub.appendChild(hh);
+          for (const k of presentSchedulingKeys) {
+            sub.appendChild(_renderConfigField(k, cfg[k]));
+          }
+          body.appendChild(sub);
+        }
+
+        const presentAuthKeys = authKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
+        if (presentAuthKeys.length) {
+          for (const k of presentAuthKeys) used.add(k);
+          const sub = document.createElement('div');
+          sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+          const hh = document.createElement('div');
+          hh.className = 'fw-semibold mb-2';
+          hh.textContent = 'Authentication';
+          sub.appendChild(hh);
+          for (const k of presentAuthKeys) {
+            sub.appendChild(_renderConfigField(k, cfg[k]));
+          }
+          body.appendChild(sub);
+        }
+      },
+    });
   }
 
-  // Authentication: render inside Web UI as a nested sub-box.
-  const presentAuthKeys = authKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
-  if (webUiBody && presentAuthKeys.length) {
-    for (const k of presentAuthKeys) used.add(k);
-    const sub = document.createElement('div');
-    sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
-    const h = document.createElement('div');
-    h.className = 'fw-semibold mb-2';
-    h.textContent = 'Authentication';
-    sub.appendChild(h);
-    for (const k of presentAuthKeys) {
-      sub.appendChild(_renderConfigField(k, cfg[k]));
-    }
-    webUiBody.appendChild(sub);
-  }
-
-  // Everything else (sorted) gets included inside ProPresenter.
-  const otherKeys = Object.keys(cfg || {}).filter(k => !used.has(k) && !hiddenKeys.has(k)).sort();
-  if (otherKeys.length) {
-    if (proPresenterBody) {
+  // ProPresenter: render timing-related keys as a nested sub-box.
+  const proPresenterPanel = Array.from(panels.querySelectorAll('[data-group-id]'))
+    .find(p => String(p.dataset.groupId) === _groupIdFromTitle('ProPresenter'));
+  if (proPresenterPanel) {
+    const body = proPresenterPanel.querySelector('.card-body');
+    const presentTimingKeys = proPresenterTimingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
+    if (body && presentTimingKeys.length) {
+      for (const k of presentTimingKeys) used.add(k);
       const sub = document.createElement('div');
       sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
       const h = document.createElement('div');
       h.className = 'fw-semibold mb-2';
-      h.textContent = 'Other';
+      h.textContent = 'Timings';
       sub.appendChild(h);
-      for (const k of otherKeys) {
+      for (const k of presentTimingKeys) {
         sub.appendChild(_renderConfigField(k, cfg[k]));
       }
-      proPresenterBody.appendChild(sub);
-    } else {
-      // Fallback: if ProPresenter group isn't present, still show these somewhere.
-      const col = document.createElement('div');
-      col.className = 'col-12';
-      const card = document.createElement('div');
-      card.className = 'card';
-      const body = document.createElement('div');
-      body.className = 'card-body';
-      const h = document.createElement('h2');
-      h.className = 'h5';
-      h.textContent = 'Other';
-      body.appendChild(h);
-      for (const k of otherKeys) {
-        body.appendChild(_renderConfigField(k, cfg[k]));
-      }
-      card.appendChild(body);
-      col.appendChild(card);
-      container.appendChild(col);
+      body.appendChild(sub);
     }
+  }
+
+  // Everything else (sorted) gets its own section so it's easy to find.
+  const otherKeys = Object.keys(cfg || {}).filter(k => !used.has(k) && !hiddenKeys.has(k)).sort();
+  if (otherKeys.length) {
+    _addGroupPanel({title: 'Other', keys: otherKeys});
+  }
+
+  // Activate a section.
+  const first = renderedGroups.length ? renderedGroups[0] : null;
+  const active = _readActiveGroupId(first);
+  if (active && renderedGroups.includes(active)) {
+    _setActiveGroupId(active);
+  } else if (first) {
+    _setActiveGroupId(first);
   }
 }
 
@@ -702,6 +835,198 @@ function _readConfigFromUI(originalCfg) {
 if (document.getElementById('config-page')) {
   let _configOriginal = {};
 
+  // --- Unsaved changes tracking / navigation guard ---
+  let _configBaselineJson = '';
+  let _configDirty = false;
+  let _configDirtyDebounce = null;
+  let _configPendingNavUrl = null;
+  let _configAllowUnloadOnce = false;
+
+  function _configStableStringify(v) {
+    try {
+      const seen = new WeakSet();
+      const normalize = (x) => {
+        if (x === null || x === undefined) return null;
+        if (typeof x !== 'object') return x;
+        if (seen.has(x)) return null;
+        seen.add(x);
+        if (Array.isArray(x)) return x.map(normalize);
+        const out = {};
+        for (const k of Object.keys(x).sort()) {
+          out[k] = normalize(x[k]);
+        }
+        return out;
+      };
+      return JSON.stringify(normalize(v));
+    } catch (e) {
+      try {
+        return JSON.stringify(v);
+      } catch (e2) {
+        return '';
+      }
+    }
+  }
+
+  function _configComputeCurrentJson() {
+    // If there are invalid fields, treat it as "dirty" so the user gets warned.
+    try {
+      const cfg = _readConfigFromUI(_configOriginal);
+      return _configStableStringify(cfg);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function _configSetDirtyFlagFromUI() {
+    const cur = _configComputeCurrentJson();
+    const isDirty = (cur === null) ? true : (cur !== _configBaselineJson);
+    _configDirty = !!isDirty;
+  }
+
+  function _configScheduleDirtyRecalc() {
+    if (_configDirtyDebounce) {
+      clearTimeout(_configDirtyDebounce);
+      _configDirtyDebounce = null;
+    }
+    _configDirtyDebounce = setTimeout(() => {
+      _configDirtyDebounce = null;
+      _configSetDirtyFlagFromUI();
+    }, 150);
+  }
+
+  function _configEnsureUnsavedModal() {
+    let modalEl = document.getElementById('config-unsaved-modal');
+    if (modalEl) return modalEl;
+
+    modalEl = document.createElement('div');
+    modalEl.id = 'config-unsaved-modal';
+    modalEl.className = 'modal fade';
+    modalEl.tabIndex = -1;
+    modalEl.setAttribute('aria-hidden', 'true');
+    modalEl.innerHTML = `
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Unsaved changes</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            You have unsaved changes in Config.
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-action="cancel" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-outline-danger" data-action="discard">Continue without saving</button>
+            <button type="button" class="btn btn-primary" data-action="save">Save and continue</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modalEl);
+    return modalEl;
+  }
+
+  function _configShowUnsavedPrompt(navigateUrl) {
+    _configPendingNavUrl = String(navigateUrl || '').trim() || null;
+    const modalEl = _configEnsureUnsavedModal();
+
+    // Bind buttons (idempotent)
+    if (!modalEl._tdeckBound) {
+      modalEl._tdeckBound = true;
+      modalEl.addEventListener('click', async (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-action]') : null;
+        if (!btn) return;
+        const action = String(btn.getAttribute('data-action') || '');
+        if (action === 'discard') {
+          try {
+            const inst = window.bootstrap && window.bootstrap.Modal ? window.bootstrap.Modal.getInstance(modalEl) : null;
+            if (inst) inst.hide();
+          } catch (e) {}
+          if (_configPendingNavUrl) {
+            _configAllowUnloadOnce = true;
+            setTimeout(() => { _configAllowUnloadOnce = false; }, 2000);
+            window.location.href = _configPendingNavUrl;
+          }
+        } else if (action === 'save') {
+          const ok = await _configSaveNow({ showStatus: true });
+          if (ok) {
+            try {
+              const inst = window.bootstrap && window.bootstrap.Modal ? window.bootstrap.Modal.getInstance(modalEl) : null;
+              if (inst) inst.hide();
+            } catch (e) {}
+            if (_configPendingNavUrl) {
+              _configAllowUnloadOnce = true;
+              setTimeout(() => { _configAllowUnloadOnce = false; }, 2000);
+              window.location.href = _configPendingNavUrl;
+            }
+          }
+        }
+      });
+    }
+
+    try {
+      if (window.bootstrap && window.bootstrap.Modal) {
+        const m = new window.bootstrap.Modal(modalEl);
+        m.show();
+      } else {
+        // Fallback if Bootstrap isn't loaded for some reason.
+        const ok = window.confirm('You have unsaved changes. Leave without saving?');
+        if (ok && _configPendingNavUrl) window.location.href = _configPendingNavUrl;
+      }
+    } catch (e) {
+      const ok = window.confirm('You have unsaved changes. Leave without saving?');
+      if (ok && _configPendingNavUrl) window.location.href = _configPendingNavUrl;
+    }
+  }
+
+  // Warn on tab close / reload.
+  window.addEventListener('beforeunload', (e) => {
+    if (_configAllowUnloadOnce) return;
+    try {
+      _configSetDirtyFlagFromUI();
+    } catch (err) {
+      _configDirty = true;
+    }
+    if (!_configDirty) return;
+    e.preventDefault();
+    // Most browsers ignore custom text; returning a value triggers the prompt.
+    e.returnValue = '';
+    return '';
+  });
+
+  // Intercept in-app navigation clicks to offer Save/Discard/Cancel.
+  document.addEventListener('click', (e) => {
+    // Compute just-in-time so fast click-after-edit still prompts.
+    try {
+      _configSetDirtyFlagFromUI();
+    } catch (err) {
+      _configDirty = true;
+    }
+    if (!_configDirty) return;
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    const href = String(a.getAttribute('href') || '').trim();
+    if (!href) return;
+    // Ignore section hash changes and noop links.
+    if (href.startsWith('#')) return;
+    if (href.toLowerCase().startsWith('javascript:')) return;
+    // Ignore ctrl/cmd clicks and other "open in new tab" behaviors.
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+
+    // Only guard same-origin navigations.
+    try {
+      const url = new URL(href, window.location.href);
+      if (url.origin !== window.location.origin) return;
+      // If it's just changing the hash on the same page, ignore.
+      if ((url.pathname === window.location.pathname) && (url.search === window.location.search)) {
+        if (url.hash && url.hash.startsWith('#cfg-')) return;
+      }
+      e.preventDefault();
+      _configShowUnsavedPrompt(url.href);
+    } catch (err) {
+      // If URL parsing fails, don't block navigation.
+    }
+  }, true);
+
   (async () => {
     try {
       const res = await fetch('/api/config');
@@ -709,39 +1034,66 @@ if (document.getElementById('config-page')) {
       const cfg = await res.json();
       _configOriginal = cfg || {};
       _renderConfigGroups(_configOriginal);
+
+      _configBaselineJson = _configStableStringify(_configOriginal);
+      _configDirty = false;
     } catch (e) {
       _configSetStatus(String(e.message || e), 'error');
     }
   })();
 
-  const saveBtn = document.getElementById('config-save');
-  if (saveBtn) {
-    saveBtn.addEventListener('click', async () => {
-      _configClearStatus();
-      saveBtn.disabled = true;
-      try {
-        const cfg = _readConfigFromUI(_configOriginal);
-        const res = await fetch('/api/config', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(cfg),
-        });
+  // Track changes as the user edits fields.
+  document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    if (!t.getAttribute('data-cfg-key')) return;
+    _configScheduleDirtyRecalc();
+  }, true);
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    if (!t.getAttribute('data-cfg-key')) return;
+    _configSetDirtyFlagFromUI();
+  }, true);
 
-        // Server may restart if webserver_port changes, so response can fail.
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) {
-          throw new Error(data.error || 'Save failed');
-        }
+  async function _configSaveNow({ showStatus = true } = {}) {
+    const saveBtn = document.getElementById('config-save');
+    if (saveBtn) saveBtn.disabled = true;
+    if (showStatus) _configClearStatus();
+    try {
+      const cfg = _readConfigFromUI(_configOriginal);
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(cfg),
+      });
 
-        _configOriginal = data.config || cfg;
-        _renderConfigGroups(_configOriginal);
+      // Server may restart if webserver_port changes, so response can fail.
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Save failed');
+      }
 
-        // Apply theme immediately (no reload required)
-        if (Object.prototype.hasOwnProperty.call(_configOriginal, 'dark_mode')) {
-          const theme = _configOriginal.dark_mode ? 'dark' : 'light';
-          document.documentElement.setAttribute('data-bs-theme', theme);
-        }
+      _configOriginal = data.config || cfg;
+      _renderConfigGroups(_configOriginal);
 
+      _configBaselineJson = _configStableStringify(_configOriginal);
+      _configDirty = false;
+
+      // Apply message timeout immediately (no reload required)
+      if (window.TDECK_UI && Object.prototype.hasOwnProperty.call(_configOriginal, 'webui_message_timeout_seconds')) {
+        const s = Number(_configOriginal.webui_message_timeout_seconds);
+        const clampedSeconds = Math.max(0, Math.min(600, Number.isFinite(s) ? s : 0));
+        window.TDECK_UI.messageTimeoutMs = Math.floor(clampedSeconds * 1000);
+      }
+
+      // Apply theme immediately (no reload required)
+      if (Object.prototype.hasOwnProperty.call(_configOriginal, 'dark_mode')) {
+        const theme = _configOriginal.dark_mode ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-bs-theme', theme);
+      }
+
+      if (showStatus) {
         if (data.restart_required && data.port) {
           const proto = window.location.protocol;
           const host = window.location.hostname;
@@ -754,11 +1106,22 @@ if (document.getElementById('config-page')) {
         } else {
           _configSetStatus('Saved.', 'ok');
         }
-      } catch (e) {
-        _configSetStatus(String(e.message || e), 'error');
-      } finally {
-        saveBtn.disabled = false;
       }
+
+      return true;
+    } catch (e) {
+      if (showStatus) _configSetStatus(String(e.message || e), 'error');
+      return false;
+    } finally {
+      const saveBtn2 = document.getElementById('config-save');
+      if (saveBtn2) saveBtn2.disabled = false;
+    }
+  }
+
+  const saveBtn = document.getElementById('config-save');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      await _configSaveNow({ showStatus: true });
     });
   }
 }
@@ -768,6 +1131,7 @@ function _consoleSetStatus(msg, kind) {
   const el = document.getElementById('console-status');
   if (!el) return;
   if (!msg) {
+    _uiClearAutoHide(el);
     el.className = '';
     el.textContent = '';
     return;
@@ -775,6 +1139,10 @@ function _consoleSetStatus(msg, kind) {
   const cls = kind === 'error' ? 'alert alert-danger' : 'alert alert-success';
   el.className = cls;
   el.textContent = msg;
+  _uiScheduleAutoHide(el, () => {
+    el.className = '';
+    el.textContent = '';
+  });
 }
 
 if (document.getElementById('console-page')) {
@@ -865,20 +1233,143 @@ if (document.getElementById('console-page')) {
 
 // --- Timers page ---
 let _timersButtonTemplates = [];
+let _timersLastSavedPresets = null;
+let _timersLastSavedJson = '';
+let _timersAutoSaveHandle = null;
+let _timersSaveInFlight = false;
+let _timersSaveQueued = false;
 
 function _timersSetStatus(msg, kind) {
   const el = document.getElementById('timers-status');
   if (!el) return;
-  const cls = kind === 'error' ? 'alert alert-danger' : 'alert alert-success';
-  el.className = cls;
+  // Timers page: only show error messages.
+  if (kind !== 'error') {
+    _timersClearStatus();
+    return;
+  }
+  el.className = 'alert alert-danger';
   el.textContent = msg;
+  _uiScheduleAutoHide(el, () => {
+    _timersClearStatus();
+  });
 }
 
 function _timersClearStatus() {
   const el = document.getElementById('timers-status');
   if (!el) return;
+  _uiClearAutoHide(el);
   el.className = '';
   el.textContent = '';
+}
+
+function _timersStableStringify(v) {
+  try {
+    return JSON.stringify(v || []);
+  } catch (e) {
+    return '';
+  }
+}
+
+function _timersSetLastSaved(presets) {
+  // Deep-copy to keep it immutable.
+  try {
+    _timersLastSavedPresets = JSON.parse(JSON.stringify(presets || []));
+  } catch (e) {
+    _timersLastSavedPresets = Array.isArray(presets) ? presets.slice() : [];
+  }
+  _timersLastSavedJson = _timersStableStringify(_timersLastSavedPresets);
+}
+
+async function _timersSaveInternal({showStatus = true} = {}) {
+  const presets = _timersReadPresetsFromUI();
+  const currentJson = _timersStableStringify(presets);
+  if (currentJson && currentJson === _timersLastSavedJson) {
+    return {ok: true, changed: false};
+  }
+
+  const payload = {
+    timer_presets: presets,
+  };
+
+  const res = await fetch('/api/timers', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Save failed');
+  }
+
+  _timersSetLastSaved(data.timer_presets || presets);
+  if (showStatus) _timersSetStatus('', 'ok');
+  return {ok: true, changed: true};
+}
+
+async function _timersAutoSaveNow({showStatus = true} = {}) {
+  if (_timersSaveInFlight) {
+    _timersSaveQueued = true;
+    return {ok: true, queued: true};
+  }
+  _timersSaveInFlight = true;
+  try {
+    const r = await _timersSaveInternal({showStatus});
+    return r;
+  } catch (e) {
+    // Per requirements: show error and revert to last-saved data.
+    _timersSetStatus(String(e.message || e), 'error');
+    if (_timersLastSavedPresets) {
+      _timersRenderPresets(_timersLastSavedPresets);
+    }
+    return {ok: false, error: String(e.message || e)};
+  } finally {
+    _timersSaveInFlight = false;
+    if (_timersSaveQueued) {
+      _timersSaveQueued = false;
+      // Run once more, but don't spam status.
+      _timersAutoSaveNow({showStatus: false});
+    }
+  }
+}
+
+function _timersScheduleAutoSave({delayMs = 600, showStatus = false} = {}) {
+  if (_timersAutoSaveHandle) {
+    clearTimeout(_timersAutoSaveHandle);
+    _timersAutoSaveHandle = null;
+  }
+  _timersAutoSaveHandle = setTimeout(() => {
+    _timersAutoSaveHandle = null;
+    _timersAutoSaveNow({showStatus});
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+async function _timersFlushAutoSave() {
+  if (_timersAutoSaveHandle) {
+    clearTimeout(_timersAutoSaveHandle);
+    _timersAutoSaveHandle = null;
+  }
+  const r = await _timersAutoSaveNow({showStatus: true});
+  return !!r.ok;
+}
+
+async function _timersApplyPreset(presetNumber) {
+  const res = await fetch('/api/timers/apply', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({preset: presetNumber}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Apply failed');
+  }
+
+  // The server may return ok=true with an 'error' describing ProPresenter problems.
+  if (data.error) {
+    _timersSetStatus(String(data.error), 'error');
+  } else {
+    _timersSetStatus('', 'ok');
+  }
+  return data;
 }
 
 function _timersNormalizeButtonURL(buttonURL) {
@@ -1084,6 +1575,16 @@ function _timersRenderPresets(presets) {
 
     const presetObj = (t && typeof t === 'object') ? t : {time: String(t || ''), name: ''};
 
+    const runTd = document.createElement('td');
+    const runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.className = 'btn timer-apply-btn';
+    runBtn.textContent = '▶';
+    runBtn.title = 'Apply this preset';
+    runBtn.setAttribute('aria-label', 'Apply this preset');
+    runBtn.dataset.action = 'apply';
+    runTd.appendChild(runBtn);
+
     const orderTd = document.createElement('td');
     orderTd.textContent = String(idx + 1);
 
@@ -1164,6 +1665,7 @@ function _timersRenderPresets(presets) {
     actTd.appendChild(movePresetWrap);
     actTd.appendChild(delBtn);
 
+    tr.appendChild(runTd);
     tr.appendChild(orderTd);
     tr.appendChild(nameTd);
     tr.appendChild(timeTd);
@@ -1238,42 +1740,14 @@ async function _timersLoad() {
   if (!res.ok) throw new Error('Failed to load timers');
   const data = await res.json();
 
-  _timersRenderPresets(data.timer_presets || []);
-}
-
-async function _timersSave() {
-  _timersClearStatus();
-
-  const presets = _timersReadPresetsFromUI();
-  const payload = {
-    timer_presets: presets,
-  };
-
-  const res = await fetch('/api/timers', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) {
-    throw new Error(data.error || 'Save failed');
-  }
-
-  _timersSetStatus('Saved.', 'ok');
-  _timersRenderPresets(data.timer_presets || presets);
+  const presets = data.timer_presets || [];
+  _timersSetLastSaved(presets);
+  _timersRenderPresets(presets);
 }
 
 if (document.getElementById('timers-page')) {
   // Initial load
   _timersLoad().catch(e => _timersSetStatus(String(e.message || e), 'error'));
-
-  // Save
-  const saveBtn = document.getElementById('timers-save');
-  if (saveBtn) {
-    saveBtn.addEventListener('click', () => {
-      _timersSave().catch(e => _timersSetStatus(String(e.message || e), 'error'));
-    });
-  }
 
   // Add
   const addBtn = document.getElementById('timers-add');
@@ -1282,6 +1756,7 @@ if (document.getElementById('timers-page')) {
       const presets = _timersReadPresetsFromUI();
       presets.push({time: '00:00', name: ''});
       _timersRenderPresets(presets);
+      _timersScheduleAutoSave({delayMs: 0, showStatus: false});
     });
   }
 
@@ -1323,11 +1798,26 @@ if (document.getElementById('timers-page')) {
 
       // Preset-row actions
       const action = btn.dataset.action;
-      if (!action || !['delete', 'up', 'down'].includes(action)) return;
+      if (!action || !['delete', 'up', 'down', 'apply'].includes(action)) return;
       const tr = btn.closest('tr');
       if (!tr) return;
       const idx = Number(tr.dataset.index);
       if (!Number.isFinite(idx)) return;
+
+      if (action === 'apply') {
+        (async () => {
+          _timersClearStatus();
+          const ok = await _timersFlushAutoSave();
+          if (!ok) return;
+          try {
+            await _timersApplyPreset(idx + 1);
+          } catch (e) {
+            _timersSetStatus(String(e.message || e), 'error');
+          }
+        })();
+        return;
+      }
+
       const presets = _timersReadPresetsFromUI();
 
       if (action === 'delete') {
@@ -1343,6 +1833,25 @@ if (document.getElementById('timers-page')) {
       }
 
       _timersRenderPresets(presets);
+      _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+    });
+
+    // Auto-save on edits
+    body.addEventListener('input', (ev) => {
+      const el = ev.target;
+      if (!el) return;
+      // NOTE: For custom press URLs, do NOT auto-save while typing.
+      // Save happens on blur/change instead.
+      if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]'))) {
+        _timersScheduleAutoSave({delayMs: 600, showStatus: false});
+      }
+    });
+    body.addEventListener('change', (ev) => {
+      const el = ev.target;
+      if (!el) return;
+      if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]') || el.matches('select[data-role="press-template"]') || el.matches('input[data-role="press-url"]'))) {
+        _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+      }
     });
 
     // Template selection autofill behavior
@@ -1365,6 +1874,224 @@ if (document.getElementById('timers-page')) {
       } else {
         inp.disabled = false;
       }
+
+      _timersScheduleAutoSave({delayMs: 0, showStatus: false});
     });
   }
+}
+
+// --- Access Levels page (roles) ---
+if (document.getElementById('access-levels-page')) {
+  const ROLE_STORAGE_KEY = 'tdeck_accessLevels_selectedRoleId';
+  const roleList = document.getElementById('access-levels-role-list');
+  const roleItems = Array.from(document.querySelectorAll('[data-role-item][data-role-id]'));
+  const rolePanels = Array.from(document.querySelectorAll('[data-role-panel][data-role-id]'));
+
+  function _rolePanelById(roleId) {
+    const id = String(roleId || '').trim();
+    return rolePanels.find(p => String(p.getAttribute('data-role-id')) === id) || null;
+  }
+
+  function _roleSetError(panel, msg) {
+    if (!panel) return;
+    const el = panel.querySelector('[data-role-error]');
+    if (!el) return;
+    if (!msg) {
+      _uiClearAutoHide(el);
+      el.textContent = '';
+      el.classList.add('d-none');
+      return;
+    }
+    el.className = 'alert alert-danger';
+    el.textContent = String(msg);
+    el.classList.remove('d-none');
+    _uiScheduleAutoHide(el, () => {
+      el.textContent = '';
+      el.classList.add('d-none');
+    });
+  }
+
+  function _readSelectedRoleFromHash() {
+    try {
+      const h = String(window.location.hash || '');
+      const m = h.match(/^#role-(\d+)$/);
+      return m ? String(m[1]) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function _readSelectedRoleFromStorage() {
+    try {
+      const v = window.localStorage.getItem(ROLE_STORAGE_KEY);
+      return v ? String(v) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function _setSelectedRole(roleId, { persist = true, updateHash = true } = {}) {
+    const id = String(roleId || '').trim();
+    if (!id) return;
+
+    // mark list selection
+    roleItems.forEach(item => {
+      const match = String(item.getAttribute('data-role-id')) === id;
+      item.classList.toggle('active', match);
+    });
+
+    // show one panel at a time
+    rolePanels.forEach(panel => {
+      const match = String(panel.getAttribute('data-role-id')) === id;
+      panel.classList.toggle('d-none', !match);
+    });
+
+    if (persist) {
+      try { window.localStorage.setItem(ROLE_STORAGE_KEY, id); } catch (e) {}
+    }
+    if (updateHash) {
+      try { window.location.hash = `role-${id}`; } catch (e) {}
+    }
+  }
+
+  // Init selection
+  const initialId = _readSelectedRoleFromHash() || _readSelectedRoleFromStorage() || (roleItems[0] ? String(roleItems[0].getAttribute('data-role-id')) : null);
+  if (initialId) _setSelectedRole(initialId, { persist: true, updateHash: false });
+
+  // Clicking a role selects it
+  if (roleList) {
+    roleList.addEventListener('click', (e) => {
+      const t = e.target;
+      const btn = t && t.closest ? t.closest('[data-role-select][data-role-id]') : null;
+      if (!btn) return;
+      const id = btn.getAttribute('data-role-id');
+      if (id) _setSelectedRole(id, { persist: true, updateHash: true });
+    });
+  }
+
+  // If user navigates via hash
+  window.addEventListener('hashchange', () => {
+    const id = _readSelectedRoleFromHash();
+    if (id) _setSelectedRole(id, { persist: true, updateHash: false });
+  });
+
+  // --- Auto-save per role ---
+  const _saveTimers = new Map();
+  const _saveInFlight = new Map();
+  const _saveQueued = new Map();
+
+  function _applyRoutingFieldState(panel) {
+    if (!panel) return;
+    const form = panel.querySelector('form[data-role-form]');
+    if (!form) return;
+    const routingCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:routing"]');
+    const outEl = form.querySelector('[data-role="vh-outputs"]');
+    const inEl = form.querySelector('[data-role="vh-inputs"]');
+    if (!routingCb || !outEl || !inEl) return;
+    const enabled = !!routingCb.checked;
+    outEl.disabled = !enabled;
+    inEl.disabled = !enabled;
+  }
+
+  function _roleReadPayload(panel) {
+    const form = panel.querySelector('form[data-role-form]');
+    if (!form) return null;
+    const roleId = String(form.getAttribute('data-role-id') || '').trim();
+    if (!roleId) return null;
+
+    const pageKeys = Array.from(form.querySelectorAll('input[type="checkbox"][name="page_keys"]:checked')).map(cb => String(cb.value));
+    const outEl = form.querySelector('input[name="videohub_allowed_outputs_role"]');
+    const inEl = form.querySelector('input[name="videohub_allowed_inputs_role"]');
+
+    return {
+      page_keys: pageKeys,
+      videohub_allowed_outputs_role: outEl ? String(outEl.value || '') : '',
+      videohub_allowed_inputs_role: inEl ? String(inEl.value || '') : '',
+    };
+  }
+
+  async function _roleSaveNow(roleId) {
+    const id = String(roleId || '').trim();
+    const panel = _rolePanelById(id);
+    if (!panel) return false;
+    const payload = _roleReadPayload(panel);
+    if (!payload) return false;
+
+    if (_saveInFlight.get(id)) {
+      _saveQueued.set(id, true);
+      return true;
+    }
+
+    _saveInFlight.set(id, true);
+    _roleSetError(panel, '');
+
+    try {
+      const res = await fetch(`/api/admin/roles/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data || !data.ok) {
+        throw new Error((data && data.error) ? data.error : 'Save failed');
+      }
+      return true;
+    } catch (e) {
+      _roleSetError(panel, String(e.message || e));
+      return false;
+    } finally {
+      _saveInFlight.set(id, false);
+      if (_saveQueued.get(id)) {
+        _saveQueued.set(id, false);
+        // Small delay so we don't hammer the server.
+        _roleScheduleSave(id, { delayMs: 250 });
+      }
+    }
+  }
+
+  function _roleScheduleSave(roleId, { delayMs = 500 } = {}) {
+    const id = String(roleId || '').trim();
+    if (!id) return;
+    const prior = _saveTimers.get(id);
+    if (prior) {
+      clearTimeout(prior);
+      _saveTimers.delete(id);
+    }
+    const t = setTimeout(() => {
+      _saveTimers.delete(id);
+      _roleSaveNow(id);
+    }, Math.max(0, Number(delayMs) || 0));
+    _saveTimers.set(id, t);
+  }
+
+  // Wire up each role panel
+  rolePanels.forEach(panel => {
+    _applyRoutingFieldState(panel);
+
+    const form = panel.querySelector('form[data-role-form]');
+    if (!form) return;
+    const roleId = String(form.getAttribute('data-role-id') || '').trim();
+    if (!roleId) return;
+
+    // Checkboxes save quickly
+    form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        _applyRoutingFieldState(panel);
+        _roleScheduleSave(roleId, { delayMs: 0 });
+      });
+    });
+
+    // Text inputs: debounce while typing, flush on blur
+    form.querySelectorAll('input[type="text"], input:not([type])').forEach(inp => {
+      inp.addEventListener('input', () => {
+        _roleScheduleSave(roleId, { delayMs: 600 });
+      });
+      inp.addEventListener('change', () => {
+        _roleScheduleSave(roleId, { delayMs: 0 });
+      });
+      inp.addEventListener('blur', () => {
+        _roleScheduleSave(roleId, { delayMs: 0 });
+      });
+    });
+  });
 }

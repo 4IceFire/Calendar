@@ -3,7 +3,7 @@
 {% set page_title = 'Timers' %}
 
 {% block page_actions %}
-		<button id="timers-save" class="btn btn-primary">Save</button>
+{# Auto-saves on change; no Save button needed. #}
 {% endblock %}
 
 {% block content %}
@@ -17,6 +17,7 @@
 		<table class="table table-sm align-top">
 			<thead>
 				<tr>
+					<th style="width: 70px;"></th>
 					<th style="width: 90px;">Order</th>
 					<th style="width: 260px;">Name</th>
 					<th>Time (HH:MM)</th>

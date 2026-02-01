@@ -49,6 +49,10 @@ except Exception:
         "debug": False,
         "dark_mode": True,
 
+        # Web UI message/alert auto-hide timeout
+        # 0 disables auto-hide.
+        "webui_message_timeout_seconds": 4,
+
         # Auth (Web UI pages only)
         "auth_enabled": True,
         "auth_idle_timeout_enabled": True,
@@ -191,6 +195,13 @@ def _init_auth_db() -> None:
             cols = [str(r['name']) for r in conn.execute('PRAGMA table_info(roles)').fetchall()]
         except Exception:
             cols = []
+        # Per-role idle logout timeout override (minutes). NULL => inherit from config.
+        # 0 => disable idle logout for that role.
+        if 'auth_idle_timeout_minutes_override' not in cols:
+            try:
+                conn.execute('ALTER TABLE roles ADD COLUMN auth_idle_timeout_minutes_override INTEGER')
+            except Exception:
+                pass
         if 'videohub_allowed_outputs' not in cols:
             try:
                 conn.execute('ALTER TABLE roles ADD COLUMN videohub_allowed_outputs TEXT')
@@ -517,6 +528,65 @@ def _role_allows_page(role_id: int | None, role_name: str | None, page_key: str)
         conn.close()
 
 
+def _role_idle_timeout_override_minutes(role_id: int | None) -> int | None:
+    if role_id is None:
+        return None
+    conn = _db()
+    try:
+        row = conn.execute(
+            'SELECT auth_idle_timeout_minutes_override FROM roles WHERE id=?',
+            (int(role_id),),
+        ).fetchone()
+        if not row:
+            return None
+        v = row['auth_idle_timeout_minutes_override']
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except Exception:
+            return None
+    finally:
+        conn.close()
+
+
+def _parse_idle_timeout_override_raw(raw: str | None) -> int | None:
+    """Parse a per-role idle timeout override.
+
+    Returns:
+      None => inherit from global config
+      0 => disable idle logout for this role
+      N (>=1) => override minutes
+    """
+    try:
+        s = str(raw or '').strip().lower()
+    except Exception:
+        s = ''
+    if not s or s in ('inherit', 'default', 'global', 'none'):
+        return None
+    try:
+        n = int(s)
+    except Exception:
+        return None
+    # Clamp: 0 disables; otherwise 1..1440 minutes.
+    if n <= 0:
+        return 0
+    return max(1, min(n, 24 * 60))
+
+
+def _set_role_idle_timeout_override(role_id: int, raw: str | None) -> None:
+    v = _parse_idle_timeout_override_raw(raw)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE roles SET auth_idle_timeout_minutes_override=? WHERE id=?',
+            (v, int(role_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class _User(UserMixin):
     def __init__(self, row: sqlite3.Row):
         self.id = int(row['id'])
@@ -572,11 +642,19 @@ def _validate_csrf() -> bool:
 
 @app.context_processor
 def _inject_auth():
+    # Flask-Login's `is_authenticated` is a property in newer versions and a
+    # method in older versions. Templates/JS need a real boolean.
+    try:
+        v = getattr(current_user, 'is_authenticated', False)
+        is_authed = bool(v() if callable(v) else v)
+    except Exception:
+        is_authed = False
     return {
         'auth_enabled': _auth_enabled(),
         'can_access': can_access,
         'csrf_token': _csrf_token,
         'current_user': current_user,
+        'is_authenticated': is_authed,
     }
 
 
@@ -623,7 +701,22 @@ def _auth_gate():
             logout_user()
             session.clear()
             return redirect(url_for('login_page', timeout=1))
-        session['_last_activity'] = now
+
+        # Don't let background heartbeat requests keep the session alive.
+        if p != '/auth/ping':
+            session['_last_activity'] = now
+
+    # Auth heartbeat endpoints: allow without page-key authorization.
+    # - /auth/ping: detects timeout and redirects via the idle check above
+    # - /auth/touch: refreshes last-activity when the user interacts on a page
+    if p == '/auth/ping':
+        return ('', 204)
+    if p == '/auth/touch':
+        try:
+            session['_last_activity'] = int(time.time())
+        except Exception:
+            pass
+        return ('', 204)
 
     # CSRF protect non-API mutating requests
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
@@ -645,6 +738,18 @@ def _auth_gate():
     return None
 
 
+@app.route('/auth/ping', methods=['GET'])
+def auth_ping():
+    # Handled by _auth_gate (returns 204 or redirects on timeout)
+    return ('', 204)
+
+
+@app.route('/auth/touch', methods=['GET'])
+def auth_touch():
+    # Handled by _auth_gate (refreshes last-activity and returns 204)
+    return ('', 204)
+
+
 @app.context_processor
 def _inject_theme():
     try:
@@ -652,9 +757,16 @@ def _inject_theme():
         dark_mode = bool(cfg.get('dark_mode', False))
     except Exception:
         dark_mode = False
+        cfg = {}
+    try:
+        timeout_s = int(cfg.get('webui_message_timeout_seconds', 4))
+    except Exception:
+        timeout_s = 4
+    timeout_s = max(0, min(timeout_s, 600))
     return {
         'dark_mode': dark_mode,
         'bs_theme': 'dark' if dark_mode else 'light',
+        'message_timeout_ms': int(timeout_s * 1000),
     }
 
 
@@ -1296,6 +1408,7 @@ def admin_roles_page():
             rid = int(r['id'])
         except Exception:
             continue
+
         # Store raw text for editing; blank means "allow all".
         out_raw = r['videohub_allowed_outputs']
         in_raw = r['videohub_allowed_inputs']
@@ -1324,6 +1437,53 @@ def admin_roles_page():
         role_to_pages=role_to_pages,
         role_to_vh=role_to_vh,
     )
+
+
+@app.route('/api/admin/roles/<int:role_id>', methods=['POST'])
+@require_page('page:admin', 'Admin')
+def api_admin_role_update(role_id: int):
+    """Update role settings via JSON (used by Access Levels auto-save UI)."""
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+
+    rid = int(role_id)
+    role_name = ''
+    try:
+        conn = _db()
+        try:
+            rr = conn.execute('SELECT name FROM roles WHERE id=?', (rid,)).fetchone()
+            role_name = str(rr['name'] or '') if rr else ''
+        finally:
+            conn.close()
+    except Exception:
+        role_name = ''
+
+    # Admin role is allow-all and not editable for page keys/allow-lists.
+    if role_name != 'Admin':
+        try:
+            keys = data.get('page_keys')
+            if not isinstance(keys, list):
+                keys = []
+            keys = [str(k) for k in keys]
+            _set_role_pages(rid, keys)
+            _audit('role_pages_update', f'role_id={rid} keys={len(keys)}')
+        except Exception:
+            pass
+
+        # Per-role Routing allow-lists (only update if routing page is selected)
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:routing' in keys_set:
+                outs_raw = data.get('videohub_allowed_outputs_role')
+                ins_raw = data.get('videohub_allowed_inputs_role')
+                _set_role_videohub_allowlists(rid, outs_raw, ins_raw)
+                _audit('role_videohub_allowlists_update', f'role_id={rid}')
+        except Exception:
+            pass
+
+    return jsonify({'ok': True})
 
 
 @app.route('/admin/users', methods=['GET', 'POST'])

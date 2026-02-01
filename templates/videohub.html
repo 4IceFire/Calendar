@@ -78,12 +78,42 @@ let _vhLabels = { inputs: [], outputs: [], configured: false };
 let _vhRouting = []; // index 0 => output #1, value => input number (1-based)
 let _vhLocked = false;
 
+let _vhAutoHideTimeoutId = null;
+
+function _vhMessageTimeoutMs(){
+  try{
+    const ms = window.TDECK_UI && window.TDECK_UI.messageTimeoutMs;
+    const n = Number(ms);
+    if(!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  }catch(e){
+    return 0;
+  }
+}
+
+function _vhClearAutoHide(){
+  if(_vhAutoHideTimeoutId){
+    clearTimeout(_vhAutoHideTimeoutId);
+    _vhAutoHideTimeoutId = null;
+  }
+}
+
 function _vhSetStatus(msg, kind){
   const el = document.getElementById('vh-status');
   if(!el) return;
-  if(!msg){ el.className=''; el.textContent=''; return; }
+  if(!msg){ _vhClearAutoHide(); el.className=''; el.textContent=''; return; }
+  _vhClearAutoHide();
   el.className = kind==='error' ? 'alert alert-danger' : (kind==='warn' ? 'alert alert-warning' : 'alert alert-success');
   el.textContent = msg;
+
+  const ms = _vhMessageTimeoutMs();
+  if(ms){
+    _vhAutoHideTimeoutId = setTimeout(() => {
+      _vhAutoHideTimeoutId = null;
+      el.className = '';
+      el.textContent = '';
+    }, ms);
+  }
 }
 
 function _safeHtml(s){

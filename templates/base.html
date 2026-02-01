@@ -44,14 +44,14 @@
           <div class="dropdown">
             <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
               {% if auth_enabled %}
-                {% if current_user and current_user.is_authenticated %}{{ current_user.username }}{% else %}Account{% endif %}
+                {% if is_authenticated %}{{ current_user.username }}{% else %}Account{% endif %}
               {% else %}
                 Admin
               {% endif %}
             </button>
             <ul class="dropdown-menu dropdown-menu-end">
               {% if auth_enabled %}
-                {% if current_user and current_user.is_authenticated %}
+                {% if is_authenticated %}
                   {% if can_access('page:account') %}
                     <li><a class="dropdown-item" href="/account/password">Change Password</a></li>
                   {% endif %}
@@ -100,6 +100,77 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      window.TDECK_UI = {
+        messageTimeoutMs: {{ (message_timeout_ms|default(0))|tojson }}
+      };
+    </script>
+    <script>
+      (function(){
+        try{
+          const authEnabled = {{ auth_enabled|tojson }};
+          const isAuthed = {{ is_authenticated|tojson }};
+          if(!authEnabled || !isAuthed) return;
+
+          const PING_URL = '/auth/ping';
+          const TOUCH_URL = '/auth/touch';
+          const PING_INTERVAL_MS = 5_000;
+          const TOUCH_THROTTLE_MS = 15_000;
+          const TOUCH_DEBOUNCE_MS = 400;
+
+          let lastTouchSent = 0;
+          let touchInFlight = false;
+          let touchDebounce = null;
+
+          function sendTouch(){
+            const now = Date.now();
+            if(touchInFlight) return;
+            if((now - lastTouchSent) < TOUCH_THROTTLE_MS) return;
+            touchInFlight = true;
+            fetch(TOUCH_URL, {cache: 'no-store'}).catch(function(){}).finally(function(){
+              touchInFlight = false;
+              lastTouchSent = now;
+            });
+          }
+
+          function onActivity(){
+            if(touchDebounce) return;
+            touchDebounce = setTimeout(function(){
+              touchDebounce = null;
+              sendTouch();
+            }, TOUCH_DEBOUNCE_MS);
+          }
+
+          // User activity should keep the session alive.
+          ['keydown','click','mousemove','touchstart','scroll','wheel'].forEach(function(ev){
+            window.addEventListener(ev, onActivity, {passive: true});
+          });
+
+          // Initial touch so a freshly loaded page doesn't immediately timeout.
+          sendTouch();
+
+          async function ping(){
+            try{
+              const res = await fetch(PING_URL, {cache: 'no-store'});
+              if(res && res.redirected && res.url && res.url.indexOf('/login') !== -1){
+                window.location = res.url;
+              }
+            }catch(e){
+              // ignore
+            }
+          }
+
+          setInterval(ping, PING_INTERVAL_MS);
+          // Run immediately and when returning to the tab.
+          ping();
+          document.addEventListener('visibilitychange', function(){
+            if(!document.hidden) ping();
+          });
+        }catch(e){
+          // ignore
+        }
+      })();
+    </script>
     <script src="/static/app.js"></script>
   </body>
 </html>

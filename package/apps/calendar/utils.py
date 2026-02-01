@@ -40,6 +40,10 @@ _defaults = {
     # Web UI theme
     "dark_mode": True,
 
+    # Web UI message/alert auto-hide timeout
+    # 0 disables auto-hide.
+    "webui_message_timeout_seconds": 4,
+
     # Auth (Web UI pages only)
     # NOTE: /api/* endpoints are intentionally left open for Companion.
     "auth_enabled": True,
