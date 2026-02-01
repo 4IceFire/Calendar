@@ -415,15 +415,6 @@ const CONFIG_META = {
     help: 'JSON file where VideoHub routing presets are stored.',
   },
 
-  videohub_allowed_outputs: {
-    label: 'Allowed Outputs (1-based list)',
-    help: 'Optional list of output numbers allowed in the Routing page. Example: [1,2,3]. Empty = all outputs.',
-  },
-  videohub_allowed_inputs: {
-    label: 'Allowed Inputs (1-based list)',
-    help: 'Optional list of input numbers allowed in the Routing page. Example: [1,2,3]. Empty = all inputs.',
-  },
-
   EVENTS_FILE: {
     label: 'Events File',
     help: 'JSON file used to store scheduled events.',
@@ -539,6 +530,9 @@ function _renderConfigGroups(cfg) {
   if (!container) return;
   container.innerHTML = '';
 
+  // Legacy keys that should not be edited anymore.
+  const hiddenKeys = new Set(['videohub_allowed_outputs', 'videohub_allowed_inputs']);
+
   const mainTitles = new Set(['Web UI', 'Companion', 'ProPresenter', 'VideoHub']);
   const schedulingKeys = ['EVENTS_FILE'];
   const authKeys = [
@@ -564,16 +558,21 @@ function _renderConfigGroups(cfg) {
     },
     {
       title: 'VideoHub',
-      keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file', 'videohub_allowed_outputs', 'videohub_allowed_inputs'],
+      keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
     },
   ];
 
   const used = new Set();
+  for (const hk of hiddenKeys) {
+    if (Object.prototype.hasOwnProperty.call(cfg, hk)) used.add(hk);
+  }
   let proPresenterBody = null;
   let webUiBody = null;
 
   for (const g of groups) {
-    const presentKeys = (g.keys || []).filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
+    const presentKeys = (g.keys || []).filter(
+      k => Object.prototype.hasOwnProperty.call(cfg, k) && !hiddenKeys.has(k)
+    );
     if (!presentKeys.length) continue;
     for (const k of presentKeys) used.add(k);
 
@@ -636,7 +635,7 @@ function _renderConfigGroups(cfg) {
   }
 
   // Everything else (sorted) gets included inside ProPresenter.
-  const otherKeys = Object.keys(cfg || {}).filter(k => !used.has(k)).sort();
+  const otherKeys = Object.keys(cfg || {}).filter(k => !used.has(k) && !hiddenKeys.has(k)).sort();
   if (otherKeys.length) {
     if (proPresenterBody) {
       const sub = document.createElement('div');

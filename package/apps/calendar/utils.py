@@ -55,10 +55,6 @@ _defaults = {
     "videohub_port": 9990,
     "videohub_timeout": 2,
     "videohub_presets_file": "videohub_presets.json",
-
-    # Routing page allow-lists (1-based indices). Empty list => allow all.
-    "videohub_allowed_outputs": [],
-    "videohub_allowed_inputs": [],
 }
 
 

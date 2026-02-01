@@ -41,12 +41,16 @@
             <span id="videohub-label">VideoHub: Checking...</span>
           </div>
 
-          {% if auth_enabled %}
-            <div class="dropdown">
-              <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+          <div class="dropdown">
+            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+              {% if auth_enabled %}
                 {% if current_user and current_user.is_authenticated %}{{ current_user.username }}{% else %}Account{% endif %}
-              </button>
-              <ul class="dropdown-menu dropdown-menu-end">
+              {% else %}
+                Admin
+              {% endif %}
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end">
+              {% if auth_enabled %}
                 {% if current_user and current_user.is_authenticated %}
                   {% if can_access('page:account') %}
                     <li><a class="dropdown-item" href="/account/password">Change Password</a></li>
@@ -64,9 +68,15 @@
                 {% else %}
                   <li><a class="dropdown-item" href="/login">Login</a></li>
                 {% endif %}
-              </ul>
-            </div>
-          {% endif %}
+              {% else %}
+                <li><span class="dropdown-item-text small text-muted">Authentication is disabled</span></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="/config">Config</a></li>
+                <li><a class="dropdown-item" href="/admin/users">Users</a></li>
+                <li><a class="dropdown-item" href="/admin/roles">Access Levels</a></li>
+              {% endif %}
+            </ul>
+          </div>
         </div>
       </div>
     </nav>

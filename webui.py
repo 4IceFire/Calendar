@@ -44,10 +44,6 @@ except Exception:
         "videohub_port": 9990,
         "videohub_timeout": 2,
         "videohub_presets_file": "videohub_presets.json",
-
-        # Routing page allow-lists (1-based indices). Empty list => allow all.
-        "videohub_allowed_outputs": [],
-        "videohub_allowed_inputs": [],
         "webserver_port": 5000,
         "poll_interval": 1,
         "debug": False,
@@ -190,6 +186,21 @@ def _init_auth_db() -> None:
             )
             """
         )
+        # Per-role VideoHub allow-lists (stored as JSON string or NULL for inherit)
+        try:
+            cols = [str(r['name']) for r in conn.execute('PRAGMA table_info(roles)').fetchall()]
+        except Exception:
+            cols = []
+        if 'videohub_allowed_outputs' not in cols:
+            try:
+                conn.execute('ALTER TABLE roles ADD COLUMN videohub_allowed_outputs TEXT')
+            except Exception:
+                pass
+        if 'videohub_allowed_inputs' not in cols:
+            try:
+                conn.execute('ALTER TABLE roles ADD COLUMN videohub_allowed_inputs TEXT')
+            except Exception:
+                pass
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -226,6 +237,99 @@ def _init_auth_db() -> None:
               ip TEXT
             )
             """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _coerce_allow_list(v):
+    """Coerce stored allow-list value into a sorted unique list of positive ints."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        # try JSON list first
+        try:
+            v = json.loads(s)
+        except Exception:
+            # fallback: comma/space-separated
+            parts = [p.strip() for p in s.replace('\n', ',').replace('\t', ',').split(',')]
+            nums = []
+            for p in parts:
+                if not p:
+                    continue
+                try:
+                    n = int(p)
+                except Exception:
+                    continue
+                if n > 0:
+                    nums.append(n)
+            return sorted(set(nums))
+    if not isinstance(v, list):
+        return []
+    out = []
+    for item in v:
+        try:
+            n = int(item)
+        except Exception:
+            continue
+        if n > 0:
+            out.append(n)
+    return sorted(set(out))
+
+
+def _parse_role_allowlist_field(raw: str | None) -> list[int]:
+    """Parse a role allow-list input.
+
+    Semantics:
+      - Blank/NULL => allow all
+      - "all" or "*" => allow all
+      - JSON list or comma-separated => allow only those numbers
+    """
+    if raw is None:
+        return []
+    s = str(raw).strip()
+    if not s:
+        return []
+    if s.lower() in ('all', '*', 'inherit', 'default', 'global'):
+        # Backward-friendly aliases; all mean "allow all" now.
+        return []
+    return _coerce_allow_list(s)
+
+
+def _get_role_videohub_allowlists(role_id: int | None) -> tuple[list[int], list[int]]:
+    if role_id is None:
+        return ([], [])
+    conn = _db()
+    try:
+        row = conn.execute(
+            'SELECT videohub_allowed_outputs, videohub_allowed_inputs FROM roles WHERE id=?',
+            (int(role_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return ([], [])
+    outs = _parse_role_allowlist_field(row['videohub_allowed_outputs'])
+    ins = _parse_role_allowlist_field(row['videohub_allowed_inputs'])
+    return (outs, ins)
+
+
+def _set_role_videohub_allowlists(role_id: int, outputs_raw: str | None, inputs_raw: str | None) -> None:
+    outs = _parse_role_allowlist_field(outputs_raw)
+    ins = _parse_role_allowlist_field(inputs_raw)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE roles SET videohub_allowed_outputs=?, videohub_allowed_inputs=? WHERE id=?',
+            (
+                json.dumps(outs),
+                json.dumps(ins),
+                int(role_id),
+            ),
         )
         conn.commit()
     finally:
@@ -1090,6 +1194,16 @@ def account_password_page():
 @app.route('/admin/roles', methods=['GET', 'POST'])
 @require_page('page:admin', 'Admin')
 def admin_roles_page():
+    # When auth is disabled, admin pages are still reachable; make sure the DB
+    # and default roles exist so the page can render.
+    try:
+        _bootstrap_default_users_roles()
+    except Exception:
+        try:
+            _init_auth_db()
+        except Exception:
+            pass
+
     if request.method == 'POST':
         action = str(request.form.get('action') or '').strip()
 
@@ -1129,17 +1243,41 @@ def admin_roles_page():
             except Exception:
                 rid = None
             if rid:
-                # Admin role is allow-all; still allow saving but not required.
-                keys = request.form.getlist('page_keys')
+                # Admin role is allow-all and not editable here.
+                role_name = ''
                 try:
-                    _set_role_pages(rid, [str(k) for k in keys])
-                    _audit('role_pages_update', f'role_id={rid} keys={len(keys)}')
+                    conn = _db()
+                    try:
+                        rr = conn.execute('SELECT name FROM roles WHERE id=?', (rid,)).fetchone()
+                        role_name = str(rr['name'] or '') if rr else ''
+                    finally:
+                        conn.close()
                 except Exception:
-                    pass
+                    role_name = ''
+
+                if role_name != 'Admin':
+                    keys = request.form.getlist('page_keys')
+                    try:
+                        _set_role_pages(rid, [str(k) for k in keys])
+                        _audit('role_pages_update', f'role_id={rid} keys={len(keys)}')
+                    except Exception:
+                        pass
+
+                    # Per-role Routing allow-lists (only update if routing page is selected)
+                    try:
+                        if 'page:routing' in [str(k) for k in keys]:
+                            outs_raw = request.form.get('videohub_allowed_outputs_role')
+                            ins_raw = request.form.get('videohub_allowed_inputs_role')
+                            _set_role_videohub_allowlists(rid, outs_raw, ins_raw)
+                            _audit('role_videohub_allowlists_update', f'role_id={rid}')
+                    except Exception:
+                        pass
 
     conn = _db()
     try:
-        roles = conn.execute('SELECT id,name FROM roles ORDER BY lower(name)').fetchall()
+        roles = conn.execute(
+            'SELECT id,name,videohub_allowed_outputs,videohub_allowed_inputs FROM roles ORDER BY lower(name)'
+        ).fetchall()
         role_pages = conn.execute('SELECT role_id,page_key FROM role_pages').fetchall()
     finally:
         conn.close()
@@ -1152,12 +1290,55 @@ def admin_roles_page():
         except Exception:
             continue
 
-    return render_template('admin_roles.html', page_title='Access Levels', roles=roles, pages=pages, role_to_pages=role_to_pages)
+    role_to_vh: dict[int, dict[str, str]] = {}
+    for r in roles or []:
+        try:
+            rid = int(r['id'])
+        except Exception:
+            continue
+        # Store raw text for editing; blank means "allow all".
+        out_raw = r['videohub_allowed_outputs']
+        in_raw = r['videohub_allowed_inputs']
+        try:
+            out_s = '' if out_raw is None else str(out_raw).strip()
+        except Exception:
+            out_s = ''
+        try:
+            in_s = '' if in_raw is None else str(in_raw).strip()
+        except Exception:
+            in_s = ''
+        if out_s == '[]':
+            out_s = ''
+        if in_s == '[]':
+            in_s = ''
+        role_to_vh[rid] = {
+            'outputs': out_s,
+            'inputs': in_s,
+        }
+
+    return render_template(
+        'admin_roles.html',
+        page_title='Access Levels',
+        roles=roles,
+        pages=pages,
+        role_to_pages=role_to_pages,
+        role_to_vh=role_to_vh,
+    )
 
 
 @app.route('/admin/users', methods=['GET', 'POST'])
 @require_page('page:admin', 'Admin')
 def admin_users_page():
+    # When auth is disabled, admin pages are still reachable; make sure the DB
+    # and default roles exist so the page can render.
+    try:
+        _bootstrap_default_users_roles()
+    except Exception:
+        try:
+            _init_auth_db()
+        except Exception:
+            pass
+
     cfg = _auth_cfg()
     try:
         min_len = int(cfg.get('auth_min_password_length', 6))
@@ -1604,36 +1785,22 @@ def videohub_page():
 @app.route('/routing')
 @require_page('page:routing', 'Routing')
 def routing_page():
-    # Allow-lists are configured in config.json as 1-based indices.
+    # Allow-lists are configured as 1-based indices, per role.
+    # Blank/NULL => allow all.
+    allowed_outputs: list[int] = []
+    allowed_inputs: list[int] = []
     try:
-        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
+            # Admin is allow-all by design.
+            if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
+                allowed_outputs = []
+                allowed_inputs = []
+            else:
+                ro, ri = _get_role_videohub_allowlists(getattr(current_user, 'role_id', None))
+                allowed_outputs = ro
+                allowed_inputs = ri
     except Exception:
-        cfg = {}
-
-    def _coerce_allow_list(v):
-        if v is None:
-            return []
-        if isinstance(v, str):
-            # try JSON list, else ignore
-            try:
-                v = json.loads(v)
-            except Exception:
-                return []
-        if not isinstance(v, list):
-            return []
-        out = []
-        for item in v:
-            try:
-                n = int(item)
-            except Exception:
-                continue
-            if n > 0:
-                out.append(n)
-        # unique + sorted
-        return sorted(set(out))
-
-    allowed_outputs = _coerce_allow_list(cfg.get('videohub_allowed_outputs'))
-    allowed_inputs = _coerce_allow_list(cfg.get('videohub_allowed_inputs'))
+        pass
 
     return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs)
 
@@ -2273,6 +2440,12 @@ def api_get_config():
             return jsonify({'ok': False, 'error': 'forbidden'}), 403
     try:
         cfg = utils.get_config()
+        # Legacy: global Routing allow-lists are no longer used (now per Access Level).
+        try:
+            cfg.pop('videohub_allowed_outputs', None)
+            cfg.pop('videohub_allowed_inputs', None)
+        except Exception:
+            pass
         return jsonify(cfg)
     except Exception:
         return jsonify({})
@@ -2301,6 +2474,11 @@ def api_set_config():
 
         # merge provided values
         cfg.update(new)
+
+        # Legacy: global Routing allow-lists are no longer used (now per Access Level).
+        cfg.pop('videohub_allowed_outputs', None)
+        cfg.pop('videohub_allowed_inputs', None)
+
         # persist
         utils.save_config(cfg)
         utils.reload_config(force=True)

@@ -58,31 +58,91 @@
                 <div class="small text-muted">Role ID: {{ r.id }}</div>
               </div>
 
-              <form method="post">
-                <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-                <input type="hidden" name="action" value="save_pages">
-                <input type="hidden" name="role_id" value="{{ r.id }}">
+              {% if r.name == 'Admin' %}
+                <div class="small text-muted">Admin always has access to every page and has no Routing restrictions.</div>
+              {% else %}
+                <form method="post">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="save_pages">
+                  <input type="hidden" name="role_id" value="{{ r.id }}">
 
-                <div class="row">
-                  {% for key, label in pages %}
-                    <div class="col-md-6">
-                      <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="page_keys" value="{{ key }}"
-                          {% if role_to_pages.get(r.id) and (key in role_to_pages.get(r.id)) %}checked{% endif %}>
-                        <label class="form-check-label">{{ label }}</label>
+                  <div class="row">
+                    {% for key, label in pages %}
+                      <div class="col-md-6">
+                        <div class="form-check">
+                          <input class="form-check-input" type="checkbox" name="page_keys" value="{{ key }}"
+                            {% if role_to_pages.get(r.id) and (key in role_to_pages.get(r.id)) %}checked{% endif %}>
+                          <label class="form-check-label">{{ label }}</label>
+                        </div>
+                      </div>
+                    {% endfor %}
+                  </div>
+
+                  <hr class="my-3">
+
+                  <div class="row g-3">
+                    <div class="col-12">
+                      <div class="fw-semibold">Routing allow-lists (VideoHub)</div>
+                      <div class="small text-muted">
+                        These restrict what Outputs and Inputs show on the <strong>Routing</strong> page for this role.
+                        Leave blank (or use <code>all</code>) to allow all.
+                        Accepts JSON (<code>[1,2,3]</code>) or comma-separated (<code>1,2,3</code>).
                       </div>
                     </div>
-                  {% endfor %}
-                </div>
 
-                <div class="mt-3">
-                  <button class="btn btn-primary" type="submit">Save</button>
-                </div>
-              </form>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label">Allowed Outputs</label>
+                      <input class="form-control" name="videohub_allowed_outputs_role"
+                             value="{{ (role_to_vh.get(r.id).outputs if role_to_vh and role_to_vh.get(r.id) else '') }}"
+                             placeholder="all / [1,2,3] / 1,2,3"
+                             data-role="vh-outputs">
+                    </div>
+
+                    <div class="col-12 col-md-6">
+                      <label class="form-label">Allowed Inputs</label>
+                      <input class="form-control" name="videohub_allowed_inputs_role"
+                             value="{{ (role_to_vh.get(r.id).inputs if role_to_vh and role_to_vh.get(r.id) else '') }}"
+                             placeholder="all / [1,2,3] / 1,2,3"
+                             data-role="vh-inputs">
+                    </div>
+
+                    <div class="col-12">
+                      <div class="form-text">Editing is enabled only when this role has the Routing page permission.</div>
+                    </div>
+                  </div>
+
+                  <div class="mt-3">
+                    <button class="btn btn-primary" type="submit">Save</button>
+                  </div>
+                </form>
+              {% endif %}
             </div>
           {% endfor %}
         </div>
       </div>
     </div>
   </div>
+
+  <script>
+    (function(){
+      function initRoleBox(form){
+        if(!form) return;
+        const routingCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:routing"]');
+        const outEl = form.querySelector('[data-role="vh-outputs"]');
+        const inEl = form.querySelector('[data-role="vh-inputs"]');
+        if(!outEl || !inEl || !routingCb) return;
+
+        function applyState(){
+          const enabled = !!routingCb.checked;
+          outEl.disabled = !enabled;
+          inEl.disabled = !enabled;
+        }
+
+        routingCb.addEventListener('change', applyState);
+        applyState();
+      }
+
+      document.querySelectorAll('form').forEach(initRoleBox);
+    })();
+  </script>
 {% endblock %}
