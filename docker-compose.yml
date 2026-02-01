@@ -2,6 +2,7 @@ services:
   tdeck:
     build: .
     image: tdeck:latest
+    pull_policy: never
     container_name: tdeck
     restart: unless-stopped
 
