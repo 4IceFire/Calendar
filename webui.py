@@ -20,6 +20,172 @@ from datetime import datetime, timedelta
 from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
 
+
+# --- Home overview state (best-effort, in-memory) ---
+_home_overview_lock = threading.Lock()
+_home_last_timer_preset: dict = {'preset': None, 'name': None, 'time': None, 'ts': None}
+_home_last_videohub_preset: dict = {'id': None, 'ts': None}
+_home_last_videohub_route: dict = {'output': None, 'input': None, 'monitor': None, 'ts': None}
+
+
+def _home_state_path() -> Path:
+    """Store lightweight dashboard state.
+
+    Prefer /data when present (Docker volume), otherwise fall back to alongside auth.db.
+    """
+    try:
+        data_dir = Path('/data')
+        if data_dir.exists() and data_dir.is_dir():
+            return data_dir / 'home_state.json'
+    except Exception:
+        pass
+
+    try:
+        return _AUTH_DB_PATH.with_name('home_state.json')
+    except Exception:
+        return Path(__file__).resolve().parent / 'home_state.json'
+
+
+def _home_state_load() -> dict:
+    p = _home_state_path()
+    try:
+        if not p.exists():
+            return {}
+        raw = p.read_text(encoding='utf-8')
+        obj = json.loads(raw or '{}')
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _home_state_save(payload: dict) -> None:
+    p = _home_state_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    try:
+        tmp = p.with_suffix('.tmp')
+        tmp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        tmp.replace(p)
+    except Exception:
+        try:
+            p.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        except Exception:
+            pass
+
+
+def _home_state_sync_from_disk() -> None:
+    """Best-effort sync disk state into memory (for multi-process / restart safety)."""
+    st = _home_state_load()
+    if not isinstance(st, dict):
+        return
+    with _home_overview_lock:
+        try:
+            t = st.get('last_timer_preset')
+            if isinstance(t, dict):
+                for k in ('preset', 'name', 'time', 'ts'):
+                    if k in t:
+                        _home_last_timer_preset[k] = t.get(k)
+        except Exception:
+            pass
+
+
+def _home_state_persist() -> None:
+    """Persist current in-memory Home overview state (best-effort)."""
+    try:
+        _home_state_save({
+            'last_timer_preset': dict(_home_last_timer_preset),
+            'last_videohub_preset': dict(_home_last_videohub_preset),
+            'last_videohub_route': dict(_home_last_videohub_route),
+        })
+    except Exception:
+        pass
+        try:
+            v = st.get('last_videohub_preset')
+            if isinstance(v, dict):
+                for k in ('id', 'ts'):
+                    if k in v:
+                        _home_last_videohub_preset[k] = v.get(k)
+        except Exception:
+            pass
+        try:
+            r = st.get('last_videohub_route')
+            if isinstance(r, dict):
+                for k in ('output', 'input', 'monitor', 'ts'):
+                    if k in r:
+                        _home_last_videohub_route[k] = r.get(k)
+        except Exception:
+            pass
+
+
+# Seed from disk on startup so Home can show prior state.
+try:
+    _home_state_sync_from_disk()
+except Exception:
+    pass
+
+
+def _home_set_last_timer_preset(*, preset_number: int, selected) -> None:
+    try:
+        n = int(preset_number)
+    except Exception:
+        return
+    if n <= 0:
+        return
+
+    name = None
+    time_str = None
+    try:
+        if isinstance(selected, dict):
+            name = str(selected.get('name', '')).strip() or None
+            time_str = str(selected.get('time', '')).strip() or None
+        else:
+            time_str = str(selected).strip() or None
+            name = time_str
+    except Exception:
+        pass
+
+    with _home_overview_lock:
+        _home_last_timer_preset['preset'] = n
+        _home_last_timer_preset['name'] = name
+        _home_last_timer_preset['time'] = time_str
+        _home_last_timer_preset['ts'] = time.time()
+
+        _home_state_persist()
+
+
+def _home_set_last_videohub_preset(*, preset_id: int) -> None:
+    try:
+        pid = int(preset_id)
+    except Exception:
+        return
+    if pid <= 0:
+        return
+    with _home_overview_lock:
+        _home_last_videohub_preset['id'] = pid
+        _home_last_videohub_preset['ts'] = time.time()
+
+        _home_state_persist()
+
+
+def _home_set_last_videohub_route(*, output: int, input_: int, monitor: bool) -> None:
+    try:
+        out_n = int(output)
+        in_n = int(input_)
+    except Exception:
+        return
+    if out_n <= 0 or in_n <= 0:
+        return
+    with _home_overview_lock:
+        _home_last_videohub_route['output'] = out_n
+        _home_last_videohub_route['input'] = in_n
+        _home_last_videohub_route['monitor'] = bool(monitor)
+        _home_last_videohub_route['ts'] = time.time()
+
+        _home_state_persist()
+
 from package.core import list_apps, get_app
 import package.apps  # noqa: F401
 try:
@@ -2825,6 +2991,10 @@ def api_videohub_presets_apply(preset_id: int):
     try:
         result = app_inst.apply_preset(cfg, preset_id)  # type: ignore[attr-defined]
         try:
+            _home_set_last_videohub_preset(preset_id=preset_id)
+        except Exception:
+            pass
+        try:
             _console_append(f"[VIDEOHUB] Applied preset #{preset_id}\n")
         except Exception:
             pass
@@ -2998,6 +3168,122 @@ def api_videohub_state():
             'outputs': nums,
             'routing': [i for i in range(1, fallback_count + 1)],
         })
+
+
+@app.route('/api/home/overview', methods=['GET'])
+def api_home_overview():
+    """Lightweight Home dashboard data.
+
+    Best-effort and intentionally minimal.
+    """
+
+    # Timers
+    try:
+        timer_presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        timer_presets = []
+
+    # Sync from disk first so multi-process deployments stay consistent.
+    try:
+        _home_state_sync_from_disk()
+    except Exception:
+        pass
+
+    with _home_overview_lock:
+        last_timer = dict(_home_last_timer_preset)
+        last_vh = dict(_home_last_videohub_preset)
+        last_vh_route = dict(_home_last_videohub_route)
+
+    def _timer_info(n: int):
+        try:
+            idx = int(n) - 1
+        except Exception:
+            return None
+        if idx < 0 or idx >= len(timer_presets):
+            return None
+        p = timer_presets[idx]
+        if isinstance(p, dict):
+            name = str(p.get('name', '')).strip() or str(p.get('time', '')).strip()
+            t = str(p.get('time', '')).strip()
+        else:
+            t = str(p).strip()
+            name = t
+        return {'preset': int(n), 'name': name, 'time': t}
+
+    last_timer_num = None
+    try:
+        if last_timer.get('preset') is not None:
+            last_timer_num = int(last_timer.get('preset'))
+    except Exception:
+        last_timer_num = None
+
+    # If nothing has been pressed yet, treat preset 1 as the "next" suggestion.
+    next_timer_num = None
+    if timer_presets:
+        if last_timer_num is None:
+            next_timer_num = 1
+        else:
+            cand = last_timer_num + 1
+            if 1 <= cand <= len(timer_presets):
+                next_timer_num = cand
+
+    timers_payload = {
+        'last': _timer_info(last_timer_num) if last_timer_num else None,
+        'next': _timer_info(next_timer_num) if next_timer_num else None,
+        'preset_count': len(timer_presets),
+        'last_ts': last_timer.get('ts'),
+    }
+
+    # VideoHub last applied preset name (best-effort)
+    videohub_payload = {
+        'last': None,
+        'last_ts': last_vh.get('ts'),
+        'route': None,
+        'route_ts': last_vh_route.get('ts'),
+    }
+    try:
+        last_id = last_vh.get('id')
+        if last_id is not None:
+            last_id = int(last_id)
+            name = None
+            try:
+                app_inst = _get_videohub_app()
+                if app_inst is not None and hasattr(app_inst, 'list_presets'):
+                    cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+                    presets = app_inst.list_presets(cfg)  # type: ignore[attr-defined]
+                    if isinstance(presets, list):
+                        for p in presets:
+                            try:
+                                pid = int(p.get('id')) if isinstance(p, dict) and p.get('id') is not None else None
+                            except Exception:
+                                pid = None
+                            if pid == last_id:
+                                try:
+                                    name = str(p.get('name', '')).strip() if isinstance(p, dict) else None
+                                except Exception:
+                                    name = None
+                                break
+            except Exception:
+                name = None
+
+            videohub_payload['last'] = {'id': last_id, 'name': name or f"Preset #{last_id}"}
+    except Exception:
+        pass
+
+    # Include last route action (useful when operators route directly instead of applying presets)
+    try:
+        out_n = last_vh_route.get('output')
+        in_n = last_vh_route.get('input')
+        if out_n is not None and in_n is not None:
+            videohub_payload['route'] = {
+                'output': int(out_n),
+                'input': int(in_n),
+                'monitor': bool(last_vh_route.get('monitor') or False),
+            }
+    except Exception:
+        pass
+
+    return jsonify({'ok': True, 'timers': timers_payload, 'videohub': videohub_payload, 'ts': time.time()})
 
 
 @app.route('/api/console/logs', methods=['GET'])
@@ -3860,6 +4146,11 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
         return ({'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}, 400)
 
     selected = presets[preset_index]
+    # Home dashboard: remember the last preset that was applied.
+    try:
+        _home_set_last_timer_preset(preset_number=int(preset_number), selected=selected)
+    except Exception:
+        pass
     if isinstance(selected, dict):
         time_str = str(selected.get('time', '')).strip()
     else:
@@ -4536,6 +4827,11 @@ def api_videohub_route():
         vh.route_video_output(output=output_idx, input_=input_idx, monitoring=monitor)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+    try:
+        _home_set_last_videohub_route(output=output_n, input_=input_n, monitor=monitor)
+    except Exception:
+        pass
 
     return jsonify({'ok': True, 'output': output_n, 'input': input_n, 'monitor': monitor, 'zero_based': zero_based})
 

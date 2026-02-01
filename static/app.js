@@ -4,23 +4,33 @@ async function updateCompanion() {
     const res = await fetch('/api/companion_status');
     if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    const dot = document.getElementById('companion-dot');
-    const label = document.getElementById('companion-label');
-    if (data.connected) {
-      dot.classList.remove('bg-danger');
-      dot.classList.add('bg-success');
-      label.textContent = 'Companion: Online';
-    } else {
+    const apply = (dotId, labelId) => {
+      const dot = document.getElementById(dotId);
+      const label = document.getElementById(labelId);
+      if (!dot || !label) return;
+      if (data.connected) {
+        dot.classList.remove('bg-danger');
+        dot.classList.add('bg-success');
+        label.textContent = 'Companion: Online';
+      } else {
+        dot.classList.remove('bg-success');
+        dot.classList.add('bg-danger');
+        label.textContent = 'Companion: Offline';
+      }
+    };
+    apply('companion-dot', 'companion-label');
+    apply('companion-dot-home', 'companion-label-home');
+  } catch (e) {
+    const apply = (dotId, labelId) => {
+      const dot = document.getElementById(dotId);
+      const label = document.getElementById(labelId);
+      if (!dot || !label) return;
       dot.classList.remove('bg-success');
       dot.classList.add('bg-danger');
-      label.textContent = 'Companion: Offline';
-    }
-  } catch (e) {
-    const dot = document.getElementById('companion-dot');
-    const label = document.getElementById('companion-label');
-    dot.classList.remove('bg-success');
-    dot.classList.add('bg-danger');
-    label.textContent = 'Companion: Unknown';
+      label.textContent = 'Companion: Unknown';
+    };
+    apply('companion-dot', 'companion-label');
+    apply('companion-dot-home', 'companion-label-home');
   }
 }
 
@@ -30,23 +40,33 @@ async function updateProPresenter() {
     const res = await fetch('/api/propresenter_status');
     if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    const dot = document.getElementById('propresenter-dot');
-    const label = document.getElementById('propresenter-label');
-    if (data.connected) {
-      dot.classList.remove('bg-danger');
-      dot.classList.add('bg-success');
-      label.textContent = 'ProPresenter: Online';
-    } else {
+    const apply = (dotId, labelId) => {
+      const dot = document.getElementById(dotId);
+      const label = document.getElementById(labelId);
+      if (!dot || !label) return;
+      if (data.connected) {
+        dot.classList.remove('bg-danger');
+        dot.classList.add('bg-success');
+        label.textContent = 'ProPresenter: Online';
+      } else {
+        dot.classList.remove('bg-success');
+        dot.classList.add('bg-danger');
+        label.textContent = 'ProPresenter: Offline';
+      }
+    };
+    apply('propresenter-dot', 'propresenter-label');
+    apply('propresenter-dot-home', 'propresenter-label-home');
+  } catch (e) {
+    const apply = (dotId, labelId) => {
+      const dot = document.getElementById(dotId);
+      const label = document.getElementById(labelId);
+      if (!dot || !label) return;
       dot.classList.remove('bg-success');
       dot.classList.add('bg-danger');
-      label.textContent = 'ProPresenter: Offline';
-    }
-  } catch (e) {
-    const dot = document.getElementById('propresenter-dot');
-    const label = document.getElementById('propresenter-label');
-    dot.classList.remove('bg-success');
-    dot.classList.add('bg-danger');
-    label.textContent = 'ProPresenter: Unknown';
+      label.textContent = 'ProPresenter: Unknown';
+    };
+    apply('propresenter-dot', 'propresenter-label');
+    apply('propresenter-dot-home', 'propresenter-label-home');
   }
 }
 
@@ -56,25 +76,33 @@ async function updateVideoHub() {
     const res = await fetch('/api/videohub_status');
     if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    const dot = document.getElementById('videohub-dot');
-    const label = document.getElementById('videohub-label');
-    if (!dot || !label) return;
-    if (data.connected) {
-      dot.classList.remove('bg-danger');
-      dot.classList.add('bg-success');
-      label.textContent = 'VideoHub: Online';
-    } else {
+    const apply = (dotId, labelId) => {
+      const dot = document.getElementById(dotId);
+      const label = document.getElementById(labelId);
+      if (!dot || !label) return;
+      if (data.connected) {
+        dot.classList.remove('bg-danger');
+        dot.classList.add('bg-success');
+        label.textContent = 'VideoHub: Online';
+      } else {
+        dot.classList.remove('bg-success');
+        dot.classList.add('bg-danger');
+        label.textContent = 'VideoHub: Offline';
+      }
+    };
+    apply('videohub-dot', 'videohub-label');
+    apply('videohub-dot-home', 'videohub-label-home');
+  } catch (e) {
+    const apply = (dotId, labelId) => {
+      const dot = document.getElementById(dotId);
+      const label = document.getElementById(labelId);
+      if (!dot || !label) return;
       dot.classList.remove('bg-success');
       dot.classList.add('bg-danger');
-      label.textContent = 'VideoHub: Offline';
-    }
-  } catch (e) {
-    const dot = document.getElementById('videohub-dot');
-    const label = document.getElementById('videohub-label');
-    if (!dot || !label) return;
-    dot.classList.remove('bg-success');
-    dot.classList.add('bg-danger');
-    label.textContent = 'VideoHub: Unknown';
+      label.textContent = 'VideoHub: Unknown';
+    };
+    apply('videohub-dot', 'videohub-label');
+    apply('videohub-dot-home', 'videohub-label-home');
   }
 }
 
