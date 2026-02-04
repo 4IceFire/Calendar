@@ -34,6 +34,33 @@
 		</div>
 	</div>
 
+	<div id="timers-stage-message" class="tdeck-soft rounded-3 p-3 mt-3">
+		<div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+			<div>
+				<h2 class="h5 mb-0">Stage Message</h2>
+				<div class="small text-muted">Send the stream start stage message from a timer preset.</div>
+			</div>
+			<div class="d-flex flex-wrap gap-2">
+				<button id="timers-stage-send" class="btn btn-primary btn-sm">Send Stage Message</button>
+				<button id="timers-stage-clear" class="btn btn-outline-secondary btn-sm">Clear Stage Message</button>
+			</div>
+		</div>
+
+		<div class="row g-2 align-items-end">
+			<div class="col-lg-7">
+				<label for="timers-stage-preset" class="form-label mb-1">Stream Start Preset</label>
+				<input id="timers-stage-preset" class="form-control form-control-sm" list="timers-stage-preset-list" placeholder="Type preset ID or name">
+				<datalist id="timers-stage-preset-list"></datalist>
+				<input type="hidden" id="timers-stage-preset-id">
+				<div id="timers-stage-hint" class="form-text text-muted">Type a preset ID or name, then select it from the list.</div>
+			</div>
+			<div class="col-lg-5">
+				<div class="small text-muted">Output:</div>
+				<div id="timers-stage-preview" class="text-muted small mt-1"></div>
+			</div>
+		</div>
+	</div>
+
 	<div id="timers-status" class="mt-3"></div>
 </div>
 {% endblock %}

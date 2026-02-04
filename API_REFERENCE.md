@@ -96,6 +96,7 @@ Trigger entry shape (simplified):
 - **GET** `/api/timers`
 - **Returns:**
   - `propresenter_timer_index` (1-based index)
+  - `stream_start_preset` (1-based index, or `0` when not configured)
   - `timer_presets` (array)
 
 ### Save timer presets + ProPresenter timer index
@@ -104,6 +105,7 @@ Trigger entry shape (simplified):
 ```json
 {
   "propresenter_timer_index": 1,
+  "stream_start_preset": 4,
   "timer_presets": [
     {
       "time": "08:15",
@@ -114,6 +116,7 @@ Trigger entry shape (simplified):
 }
 ```
 - **Notes:** Presets are persisted to `timer_presets.json` (not stored inline in `config.json`).
+  - `stream_start_preset` is optional. Use `0` or omit to disable stream-start stage messages.
 
 ### Update one timer preset time (no full list required)
 - **PATCH** (or **POST**) `/api/timers/preset`
@@ -178,6 +181,27 @@ Timer selection is either:
 ```json
 { "timer_index": 2 }
 ```
+
+---
+
+## ProPresenter Stage Messages
+
+### Send a stage message
+- **POST** `/api/propresenter/stage/message`
+- **Body:**
+```json
+{ "message": "STREAM START 9:30AM" }
+```
+- **Notes:** Use this generic endpoint for future custom stage messages.
+
+### Send stream-start stage message
+- **POST** `/api/propresenter/stage/stream_start`
+- **Body:** none required.
+- **Notes:** Uses `stream_start_preset` and `timer_presets` to build a message like `STREAM START 9:30AM`.
+
+### Clear stage message
+- **POST** `/api/propresenter/stage/clear`
+- **Body:** none required.
 
 ---
 

@@ -1262,6 +1262,7 @@ if (document.getElementById('console-page')) {
 // --- Timers page ---
 let _timersButtonTemplates = [];
 let _timersLastSavedPresets = null;
+let _timersLastSavedStagePreset = 0;
 let _timersLastSavedJson = '';
 let _timersAutoSaveHandle = null;
 let _timersSaveInFlight = false;
@@ -1292,32 +1293,38 @@ function _timersClearStatus() {
 
 function _timersStableStringify(v) {
   try {
-    return JSON.stringify(v || []);
+    return JSON.stringify(v || {});
   } catch (e) {
     return '';
   }
 }
 
-function _timersSetLastSaved(presets) {
+function _timersSetLastSaved(presets, stagePreset) {
   // Deep-copy to keep it immutable.
   try {
     _timersLastSavedPresets = JSON.parse(JSON.stringify(presets || []));
   } catch (e) {
     _timersLastSavedPresets = Array.isArray(presets) ? presets.slice() : [];
   }
-  _timersLastSavedJson = _timersStableStringify(_timersLastSavedPresets);
+  const n = Number(stagePreset);
+  _timersLastSavedStagePreset = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  _timersLastSavedJson = _timersStableStringify({
+    timer_presets: _timersLastSavedPresets,
+    stream_start_preset: _timersLastSavedStagePreset,
+  });
 }
 
 async function _timersSaveInternal({showStatus = true} = {}) {
   const presets = _timersReadPresetsFromUI();
-  const currentJson = _timersStableStringify(presets);
+  const stagePreset = _timersReadStagePresetFromUI();
+  const payload = {
+    timer_presets: presets,
+    stream_start_preset: stagePreset,
+  };
+  const currentJson = _timersStableStringify(payload);
   if (currentJson && currentJson === _timersLastSavedJson) {
     return {ok: true, changed: false};
   }
-
-  const payload = {
-    timer_presets: presets,
-  };
 
   const res = await fetch('/api/timers', {
     method: 'POST',
@@ -1329,7 +1336,8 @@ async function _timersSaveInternal({showStatus = true} = {}) {
     throw new Error(data.error || 'Save failed');
   }
 
-  _timersSetLastSaved(data.timer_presets || presets);
+  _timersSetLastSaved(data.timer_presets || presets, data.stream_start_preset ?? stagePreset);
+  _timersApplyStagePresetId(data.stream_start_preset ?? stagePreset);
   if (showStatus) _timersSetStatus('', 'ok');
   return {ok: true, changed: true};
 }
@@ -1343,14 +1351,12 @@ async function _timersAutoSaveNow({showStatus = true} = {}) {
   try {
     const r = await _timersSaveInternal({showStatus});
     return r;
-  } catch (e) {
-    // Per requirements: show error and revert to last-saved data.
-    _timersSetStatus(String(e.message || e), 'error');
-    if (_timersLastSavedPresets) {
-      _timersRenderPresets(_timersLastSavedPresets);
-    }
-    return {ok: false, error: String(e.message || e)};
-  } finally {
+    } catch (e) {
+      // Per requirements: show error and revert to last-saved data.
+      _timersSetStatus(String(e.message || e), 'error');
+      _timersRestoreLastSaved();
+      return {ok: false, error: String(e.message || e)};
+    } finally {
     _timersSaveInFlight = false;
     if (_timersSaveQueued) {
       _timersSaveQueued = false;
@@ -1592,6 +1598,178 @@ function _timersWirePressesDetailsAnimation(detailsEl) {
   });
 }
 
+function _timersStageFormatTime(timeStr) {
+  const s = String(timeStr || '').trim();
+  if (!/^\d{2}:\d{2}$/.test(s)) return '';
+  const parts = s.split(':');
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return '';
+  const hour = ((h % 12) === 0) ? 12 : (h % 12);
+  const suffix = h < 12 ? 'AM' : 'PM';
+  return `${hour}:${String(m).padStart(2, '0')}${suffix}`;
+}
+
+function _timersStageMessageForPreset(preset) {
+  if (!preset) return '';
+  const pretty = _timersStageFormatTime(preset.time);
+  if (!pretty) return '';
+  return `STREAM START ${pretty}`;
+}
+
+function _timersReadPresetsForStage() {
+  const body = document.getElementById('timers-presets-body');
+  if (!body) return [];
+  const rows = Array.from(body.querySelectorAll('tr'));
+  const out = [];
+  rows.forEach((r) => {
+    const timeInp = r.querySelector('input[data-role="preset-time"]');
+    const nameInp = r.querySelector('input[data-role="preset-name"]');
+    const time = String((timeInp && timeInp.value) || '').trim();
+    if (!time) return;
+    const name = String((nameInp && nameInp.value) || '').trim();
+    out.push({time, name});
+  });
+  return out;
+}
+
+function _timersStagePresetLabel(preset, id) {
+  const time = String((preset && preset.time) || '').trim();
+  const name = String((preset && preset.name) || '').trim();
+  const label = name && name !== time ? `${name} (${time})` : time;
+  return `${id} - ${label}`.trim();
+}
+
+function _timersStageRenderOptions(presets) {
+  const list = document.getElementById('timers-stage-preset-list');
+  if (!list) return;
+  list.innerHTML = '';
+  (presets || []).forEach((p, idx) => {
+    const opt = document.createElement('option');
+    opt.value = _timersStagePresetLabel(p, idx + 1);
+    list.appendChild(opt);
+  });
+}
+
+function _timersStageResolvePresetId(raw, presets) {
+  const s = String(raw || '').trim();
+  if (!s) return 0;
+  const m = s.match(/^(\d+)/);
+  if (m) {
+    const id = parseInt(m[1], 10);
+    if (Number.isFinite(id) && id >= 1 && id <= (presets || []).length) return id;
+  }
+  const lower = s.toLowerCase();
+  const matches = [];
+  (presets || []).forEach((p, idx) => {
+    const name = String((p && p.name) || '').trim().toLowerCase();
+    const time = String((p && p.time) || '').trim().toLowerCase();
+    if ((name && name === lower) || (!name && time === lower) || time === lower) {
+      matches.push(idx + 1);
+    }
+  });
+  if (matches.length === 1) return matches[0];
+  return 0;
+}
+
+function _timersReadStagePresetFromUI() {
+  const hidden = document.getElementById('timers-stage-preset-id');
+  if (!hidden) return 0;
+  const n = parseInt(String(hidden.value || ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function _timersStageSetHint(msg, kind) {
+  const el = document.getElementById('timers-stage-hint');
+  if (!el) return;
+  if (!msg) {
+    el.textContent = '';
+    el.className = 'form-text text-muted';
+    return;
+  }
+  el.textContent = String(msg || '');
+  if (kind === 'error') {
+    el.className = 'form-text text-danger';
+  } else if (kind === 'warn') {
+    el.className = 'form-text text-warning';
+  } else {
+    el.className = 'form-text text-muted';
+  }
+}
+
+function _timersStageSetPreview(presetId, presets) {
+  const el = document.getElementById('timers-stage-preview');
+  if (!el) return;
+  const id = Number(presetId) || 0;
+  if (id < 1 || id > (presets || []).length) {
+    el.textContent = 'STREAM START 9:30AM';
+    return;
+  }
+  const msg = _timersStageMessageForPreset(presets[id - 1]);
+  el.textContent = msg || 'STREAM START 9:30AM';
+}
+
+function _timersStageSetButtonsEnabled(enabled) {
+  const btn = document.getElementById('timers-stage-send');
+  if (btn) btn.disabled = !enabled;
+}
+
+function _timersApplyStagePresetId(presetId) {
+  const input = document.getElementById('timers-stage-preset');
+  const hidden = document.getElementById('timers-stage-preset-id');
+  const presets = _timersReadPresetsForStage();
+  const id = Number(presetId);
+  const value = Number.isFinite(id) && id > 0 ? Math.floor(id) : 0;
+  if (hidden) hidden.value = value > 0 ? String(value) : '';
+  if (input) {
+    if (value > 0 && value <= presets.length) {
+      input.value = _timersStagePresetLabel(presets[value - 1], value);
+    } else if (!value) {
+      input.value = '';
+    }
+  }
+  _timersStageSetHint(value ? '' : 'No stream-start preset selected.', value ? '' : 'warn');
+  _timersStageSetPreview(value, presets);
+  _timersStageSetButtonsEnabled(value > 0 && value <= presets.length);
+}
+
+function _timersRestoreLastSaved() {
+  if (_timersLastSavedPresets) {
+    _timersRenderPresets(_timersLastSavedPresets);
+  }
+  _timersApplyStagePresetId(_timersLastSavedStagePreset);
+}
+
+async function _timersSendStreamStartMessage() {
+  const res = await fetch('/api/propresenter/stage/stream_start', {
+    method: 'POST',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Stage message failed');
+  }
+  if (!data.sent) {
+    throw new Error('Stage message failed to send');
+  }
+  return data;
+}
+
+async function _timersClearStageMessage() {
+  const res = await fetch('/api/propresenter/stage/clear', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Clear stage message failed');
+  }
+  if (!data.cleared) {
+    throw new Error('Clear stage message failed');
+  }
+  return data;
+}
+
 function _timersRenderPresets(presets) {
   const body = document.getElementById('timers-presets-body');
   if (!body) return;
@@ -1708,6 +1886,10 @@ function _timersRenderPresets(presets) {
     }
     _timersUpdatePressSummary(tr);
   });
+  _timersStageRenderOptions(presets || []);
+  const stagePresetId = _timersReadStagePresetFromUI();
+  _timersStageSetPreview(stagePresetId, presets || []);
+  _timersStageSetButtonsEnabled(stagePresetId > 0 && stagePresetId <= (presets || []).length);
 }
 
 function _timersReadPresetsFromUI() {
@@ -1769,8 +1951,10 @@ async function _timersLoad() {
   const data = await res.json();
 
   const presets = data.timer_presets || [];
-  _timersSetLastSaved(presets);
+  const stagePreset = Number(data.stream_start_preset || 0);
+  _timersSetLastSaved(presets, stagePreset);
   _timersRenderPresets(presets);
+  _timersApplyStagePresetId(stagePreset);
 }
 
 if (document.getElementById('timers-page')) {
@@ -1785,6 +1969,88 @@ if (document.getElementById('timers-page')) {
       presets.push({time: '00:00', name: ''});
       _timersRenderPresets(presets);
       _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+    });
+  }
+
+  // Stage message preset selection
+  const stageInput = document.getElementById('timers-stage-preset');
+  if (stageInput) {
+    const previewUpdate = () => {
+      const presets = _timersReadPresetsForStage();
+      const raw = String(stageInput.value || '').trim();
+      if (!raw) {
+        _timersStageSetHint('No stream-start preset selected.', 'warn');
+        _timersStageSetPreview(0, presets);
+        _timersStageSetButtonsEnabled(false);
+        return;
+      }
+      const id = _timersStageResolvePresetId(raw, presets);
+      if (id) {
+        _timersStageSetHint('', '');
+        _timersStageSetPreview(id, presets);
+        _timersStageSetButtonsEnabled(true);
+      } else {
+        _timersStageSetHint('No matching preset found.', 'error');
+        _timersStageSetPreview(0, presets);
+        _timersStageSetButtonsEnabled(false);
+      }
+    };
+
+    const commitSelection = () => {
+      const presets = _timersReadPresetsForStage();
+      const raw = String(stageInput.value || '').trim();
+      if (!raw) {
+        _timersApplyStagePresetId(0);
+        _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+        return;
+      }
+      const id = _timersStageResolvePresetId(raw, presets);
+      if (id) {
+        _timersApplyStagePresetId(id);
+        _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+      } else {
+        _timersStageSetHint('No matching preset found.', 'error');
+        _timersApplyStagePresetId(_timersReadStagePresetFromUI());
+      }
+    };
+
+    stageInput.addEventListener('input', previewUpdate);
+    stageInput.addEventListener('change', commitSelection);
+    stageInput.addEventListener('blur', commitSelection);
+  }
+
+  const stageSendBtn = document.getElementById('timers-stage-send');
+  if (stageSendBtn) {
+    stageSendBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      (async () => {
+        _timersClearStatus();
+        try {
+          const presetId = _timersReadStagePresetFromUI();
+          if (!presetId) {
+            _timersSetStatus('Select a stream start preset first.', 'error');
+            return;
+          }
+          await _timersSendStreamStartMessage();
+        } catch (e) {
+          _timersSetStatus(String(e.message || e), 'error');
+        }
+      })();
+    });
+  }
+
+  const stageClearBtn = document.getElementById('timers-stage-clear');
+  if (stageClearBtn) {
+    stageClearBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      (async () => {
+        _timersClearStatus();
+        try {
+          await _timersClearStageMessage();
+        } catch (e) {
+          _timersSetStatus(String(e.message || e), 'error');
+        }
+      })();
     });
   }
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time
 from typing import Optional, Any, Dict, Literal
+import json
 
 import requests
 
@@ -58,6 +59,7 @@ class ProPresentor:
         self.session = requests.Session()
         self.debug = bool(debug)
         self._connected = False
+        self.last_stage_message_error: str | None = None
 
         if verify_on_init:
             self._connected = self.check_connection()
@@ -222,6 +224,46 @@ class ProPresentor:
 
     def set_timer_and_operation(self, timer_id: int | str, operation: TimerOperation, payload: dict) -> bool:
         return self.put_command(f"timer/{timer_id}/{operation}", json=payload)
+
+    # --- Stage display message endpoints (OpenAPI) ---
+
+    def set_stage_message(self, message: str) -> bool:
+        """Display a stage message (text overlay) on ProPresenter stage display."""
+        self.last_stage_message_error = None
+        try:
+            msg = str(message or '').strip()
+        except Exception:
+            msg = ''
+        if not msg:
+            self.last_stage_message_error = 'empty message'
+            return False
+        url = self._build_api_url("stage/message")
+        # ProPresenter expects a JSON string body for v1/stage/message.
+        try:
+            payload = json.dumps(msg)
+            self._dbg(f"PUT {url} (json string)")
+            resp = self.session.put(
+                url,
+                data=payload.encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                timeout=self.timeout,
+            )
+            self._dbg(f"-> {resp.status_code}")
+            if 200 <= resp.status_code < 300:
+                return True
+            try:
+                detail = resp.text.strip()
+            except Exception:
+                detail = ''
+            self.last_stage_message_error = f"PUT json string -> {resp.status_code} {detail}".strip()
+            return False
+        except Exception:
+            self.last_stage_message_error = "PUT json string -> request error"
+            return False
+
+    def clear_stage_message(self) -> bool:
+        """Clear the current stage message."""
+        return self.delete_command("stage/message")
         
     def SetCountdownToTime(self, index, timeStr) -> bool:
         time = datetime.strptime(timeStr, "%H:%M")
