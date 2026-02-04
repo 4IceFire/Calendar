@@ -32,6 +32,9 @@ _defaults = {
     "propresenter_timer_wait_stop_ms": 200,
     "propresenter_timer_wait_set_ms": 600,
     "propresenter_timer_wait_reset_ms": 1000,
+    # Timer preset (1-based) used to build the stream-start stage message.
+    # 0 means "not configured".
+    "stream_start_preset": 0,
     # Web UI port
     "webserver_port": 5000,
     "poll_interval": 1,

@@ -205,6 +205,7 @@ except Exception:
         "propresenter_timer_wait_stop_ms": 200,
         "propresenter_timer_wait_set_ms": 600,
         "propresenter_timer_wait_reset_ms": 1000,
+        "stream_start_preset": 0,
         "videohub_ip": "172.20.10.11",
         "videohub_port": 9990,
         "videohub_timeout": 2,
@@ -3503,6 +3504,49 @@ def _resolve_time_hhmm_input(time_value: object, *, body: dict) -> tuple[str | N
     return s, None, False
 
 
+def _format_time_hhmm_ampm(time_str: str) -> str:
+    """Convert HH:MM -> H:MMAM (no space). Falls back to original on errors."""
+    try:
+        dt = datetime.strptime(str(time_str).strip(), '%H:%M')
+    except Exception:
+        return str(time_str or '').strip()
+    hour = dt.hour % 12
+    if hour == 0:
+        hour = 12
+    suffix = 'AM' if dt.hour < 12 else 'PM'
+    return f"{hour}:{dt.minute:02d}{suffix}"
+
+
+def _resolve_stream_start_preset(cfg: dict, presets: list[dict]) -> tuple[int, dict] | None:
+    """Return (1-based preset number, preset dict) for stream-start message."""
+    try:
+        preset_number = int(cfg.get('stream_start_preset', 0))
+    except Exception:
+        preset_number = 0
+    if preset_number < 1:
+        return None
+    if preset_number > len(presets):
+        return None
+    try:
+        preset = presets[preset_number - 1]
+    except Exception:
+        return None
+    return preset_number, preset
+
+
+def _build_stream_start_message(preset: dict) -> str | None:
+    try:
+        t = str((preset or {}).get('time', '')).strip()
+    except Exception:
+        t = ''
+    if not t:
+        return None
+    if not _validate_time_hhmm(t):
+        return None
+    pretty = _format_time_hhmm_ampm(t)
+    return f"STREAM START {pretty}"
+
+
 _BTN_FULL_RE = re.compile(r'^location/\d+/\d+/\d+/press$')
 _BTN_SHORT_RE = re.compile(r'^\d+/\d+/\d+$')
 
@@ -3813,9 +3857,16 @@ def api_get_timers():
         propresenter_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
     except Exception:
         propresenter_timer_index = 1
+    try:
+        stream_start_preset = int(cfg.get('stream_start_preset', 0))
+    except Exception:
+        stream_start_preset = 0
+    if stream_start_preset < 1:
+        stream_start_preset = 0
 
     return jsonify({
         'propresenter_timer_index': propresenter_timer_index,
+        'stream_start_preset': stream_start_preset,
         'timer_presets': presets,
     })
 
@@ -3898,6 +3949,26 @@ def api_set_timers():
     except Exception:
         propresenter_timer_index = None
 
+    stream_start_raw = body.get('stream_start_preset')
+    if stream_start_raw is None:
+        stream_start_raw = body.get('streamStartPreset')
+
+    stream_start_preset: int | None = None
+    if stream_start_raw is not None:
+        try:
+            if str(stream_start_raw).strip() == '':
+                stream_start_preset = 0
+            else:
+                stream_start_preset = int(stream_start_raw)
+        except Exception:
+            return jsonify({'ok': False, 'error': 'stream_start_preset must be an integer (1-based)'}), 400
+
+        if stream_start_preset != 0 and not (1 <= stream_start_preset <= len(normalized_presets)):
+            return jsonify({
+                'ok': False,
+                'error': f'stream_start_preset out of range (1..{len(normalized_presets)})'
+            }), 400
+
 
     try:
         cfg = utils.get_config()
@@ -3914,6 +3985,8 @@ def api_set_timers():
         cfg['propresenter_timer_index'] = propresenter_timer_index
         # remove legacy key if present
         cfg.pop('timer_index', None)
+    if stream_start_preset is not None:
+        cfg['stream_start_preset'] = stream_start_preset
 
     try:
         utils.save_config(cfg)
@@ -3975,6 +4048,7 @@ def api_set_timers():
             'ok': True,
             'timer_presets': normalized_presets,
             'propresenter_timer_index': cfg.get('propresenter_timer_index', 1),
+            'stream_start_preset': cfg.get('stream_start_preset', 0),
             'companion_names_updated': companion_updated,
             'companion_names_failed': companion_failed,
         })
@@ -4765,6 +4839,160 @@ def api_prop_reset_timer():
         pass
 
     return jsonify({'ok': True, 'timer_id': timer_id, 'reset': ok, 'propresenter_ip': ip, 'propresenter_port': port})
+
+
+@app.route('/api/propresenter/stage/message', methods=['POST'])
+def api_prop_stage_message():
+    """Send a stage display message to ProPresenter."""
+    body = request.get_json(silent=True) or {}
+    msg = body.get('message')
+    if msg is None:
+        msg = body.get('text') or body.get('value')
+
+    try:
+        message = str(msg or '').strip()
+    except Exception:
+        message = ''
+    if not message:
+        return jsonify({'ok': False, 'error': 'message is required'}), 400
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    try:
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
+
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
+
+    pp = ProPresentor(ip, port)
+    sent = bool(pp.set_stage_message(message))
+    detail = getattr(pp, 'last_stage_message_error', None)
+
+    try:
+        extra = f" ({detail})" if detail and not sent else ""
+        _console_append(f"[PP] /api/propresenter/stage/message -> {'OK' if sent else 'FAIL'}{extra}\n")
+    except Exception:
+        pass
+
+    return jsonify({
+        'ok': True,
+        'message': message,
+        'sent': sent,
+        'detail': detail if not sent else None,
+        'propresenter_ip': ip,
+        'propresenter_port': port,
+    })
+
+
+@app.route('/api/propresenter/stage/clear', methods=['POST'])
+def api_prop_stage_clear():
+    """Clear the stage display message in ProPresenter."""
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    try:
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
+
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
+
+    pp = ProPresentor(ip, port)
+    cleared = bool(pp.clear_stage_message())
+
+    try:
+        _console_append(f"[PP] /api/propresenter/stage/clear -> {'OK' if cleared else 'FAIL'}\n")
+    except Exception:
+        pass
+
+    return jsonify({
+        'ok': True,
+        'cleared': cleared,
+        'propresenter_ip': ip,
+        'propresenter_port': port,
+    })
+
+
+@app.route('/api/propresenter/stage/stream_start', methods=['POST'])
+def api_prop_stage_stream_start():
+    """Send stream-start stage message based on the configured timer preset."""
+    # Log incoming request (Companion visibility)
+    try:
+        body_for_log = request.get_json(silent=True)
+    except Exception:
+        body_for_log = None
+    try:
+        _console_append(
+            f"[COMPANION] Received /api/propresenter/stage/stream_start from {request.remote_addr} "
+            f"args={_truncate_for_log(dict(request.args))} "
+            f"json={_truncate_for_log(body_for_log)}\n"
+        )
+    except Exception:
+        pass
+
+    try:
+        presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        presets = []
+
+    if not presets:
+        return jsonify({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)'}), 400
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    resolved = _resolve_stream_start_preset(cfg, presets)
+    if not resolved:
+        return jsonify({'ok': False, 'error': 'stream_start_preset not configured'}), 400
+    preset_number, preset = resolved
+
+    message = _build_stream_start_message(preset)
+    if not message:
+        return jsonify({'ok': False, 'error': 'invalid stream_start_preset time'}), 400
+
+    try:
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
+
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
+
+    pp = ProPresentor(ip, port)
+    sent = bool(pp.set_stage_message(message))
+    detail = getattr(pp, 'last_stage_message_error', None)
+
+    try:
+        extra = f" ({detail})" if detail and not sent else ""
+        _console_append(
+            f"[PP] /api/propresenter/stage/stream_start preset={preset_number} -> {'OK' if sent else 'FAIL'}{extra}\n"
+        )
+    except Exception:
+        pass
+
+    return jsonify({
+        'ok': True,
+        'preset_number': preset_number,
+        'preset_name': (preset or {}).get('name', ''),
+        'preset_time': (preset or {}).get('time', ''),
+        'message': message,
+        'sent': sent,
+        'detail': detail if not sent else None,
+        'propresenter_ip': ip,
+        'propresenter_port': port,
+    })
 
 
 @app.route('/api/videohub/ping', methods=['GET'])

@@ -200,6 +200,7 @@ This project can also act as a small “glue” service between Bitfocus Compani
 - `propresenter_timer_wait_stop_ms`: legacy-only delay after stop (default 200ms)
 - `propresenter_timer_wait_set_ms`: legacy-only delay after setting time (default 600ms)
 - `propresenter_timer_wait_reset_ms`: legacy-only delay after reset (default 1000ms)
+- `stream_start_preset`: (optional) 1-based timer preset used to build the stream-start stage message
 - `companion_ip` / `companion_port`: Companion host/port
 - `companion_timer_name`: prefix for Companion timer-name variables (default: `timer_name_`)
 
@@ -210,6 +211,10 @@ This project can also act as a small “glue” service between Bitfocus Compani
 - Add/update **Name** and **Time** rows, then click **Save**
 
 Presets are stored in `timer_presets.json`.
+
+Stage message setup (same page):
+- In the **Stage Message** section, choose which preset represents your stream start time.
+- The UI shows a preview like `STREAM START 9:30AM` and has buttons to send/clear the message.
 
 3) Configure Companion
 
@@ -244,6 +249,21 @@ Quick test from PowerShell:
 ```powershell
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5000/api/timers/apply" -ContentType "application/json" -Body '{"preset":1}'
 ```
+
+### Stage Message (Stream Start)
+
+Endpoint (Web UI):
+
+- Method: `POST`
+- URL: `http://<app_host>:<webserver_port>/api/propresenter/stage/stream_start`
+- Body: none required
+
+This uses the configured stream-start preset to send a stage display message like `STREAM START 9:30AM`.
+
+Clear the stage message:
+
+- Method: `POST`
+- URL: `http://<app_host>:<webserver_port>/api/propresenter/stage/clear`
 
 This repo also includes a small ProPresenter HTTP API client focused on timer control.
 
