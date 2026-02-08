@@ -115,6 +115,31 @@
                     </div>
                   </div>
 
+                  <hr class="my-3">
+
+                  <div class="row g-3">
+                    <div class="col-12">
+                      <div class="fw-semibold">VideoHub preset visibility</div>
+                      <div class="small text-muted">
+                        These restrict which preset IDs are visible on the <strong>VideoHub</strong> page for this role.
+                        Leave blank (or use <code>all</code>) to allow all.
+                        Accepts JSON (<code>[1,2,3]</code>) or comma-separated (<code>1,2,3</code>).
+                      </div>
+                    </div>
+
+                    <div class="col-12 col-md-6">
+                      <label class="form-label">Allowed Preset IDs</label>
+                      <input class="form-control" name="videohub_allowed_presets_role"
+                             value="{{ (role_to_vh.get(r.id).presets if role_to_vh and role_to_vh.get(r.id) else '') }}"
+                             placeholder="all / [1,2,3] / 1,2,3"
+                             data-role="vh-presets">
+                    </div>
+
+                    <div class="col-12">
+                      <div class="form-text">Editing is enabled only when this role has the VideoHub page permission.</div>
+                    </div>
+                  </div>
+
                   <noscript>
                     <div class="mt-3">
                       <button class="btn btn-primary" type="submit">Save</button>

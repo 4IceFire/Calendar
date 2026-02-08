@@ -22,6 +22,8 @@
   .vh-tile-sub{ font-size: .75rem; opacity: .75; }
 </style>
 
+<div id="vh-page" data-allowed-presets='{{ allowed_preset_ids|tojson }}'>
+
 <div id="vh-status" class="mb-3"></div>
 
 <div class="row g-3">
@@ -73,6 +75,7 @@
 
 <script>
 let _vhPresets = [];
+let _vhAllowedPresetIds = [];
 let _vhCurrentId = null;
 let _vhLabels = { inputs: [], outputs: [], configured: false };
 let _vhRouting = []; // index 0 => output #1, value => input number (1-based)
@@ -118,6 +121,20 @@ function _vhSetStatus(msg, kind){
 
 function _safeHtml(s){
   return String(s || '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _vhParseAllowList(raw){
+  const s = String(raw || '').trim();
+  if(!s) return [];
+  try{
+    const parsed = JSON.parse(s);
+    if(!Array.isArray(parsed)) return [];
+    return parsed
+      .map((x) => parseInt(x, 10))
+      .filter((n) => Number.isFinite(n) && n > 0);
+  }catch(e){
+    return [];
+  }
 }
 
 function _parseNumberFromSelect(value){
@@ -301,7 +318,13 @@ async function _loadPresets(){
   const res = await fetch('/api/videohub/presets?_ts=' + Date.now(), {cache:'no-store'});
   const data = await res.json().catch(()=>({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load presets');
-  _vhPresets = data.presets || [];
+  const allPresets = Array.isArray(data.presets) ? data.presets : [];
+  if(Array.isArray(_vhAllowedPresetIds) && _vhAllowedPresetIds.length){
+    const allow = new Set(_vhAllowedPresetIds);
+    _vhPresets = allPresets.filter((p) => allow.has(parseInt(p.id, 10)));
+  } else {
+    _vhPresets = allPresets;
+  }
   _renderList();
   if(_vhCurrentId != null){
     const cur = _vhPresets.find(p => p.id === _vhCurrentId);
@@ -457,6 +480,8 @@ document.getElementById('vh-list').addEventListener('click', async (ev) => {
 // init
 (async () => {
   try{
+    const root = document.getElementById('vh-page');
+    _vhAllowedPresetIds = _vhParseAllowList(root ? root.getAttribute('data-allowed-presets') : '');
     await _loadState();
     await _loadPresets();
     _loadEditor(null);
@@ -465,4 +490,5 @@ document.getElementById('vh-list').addEventListener('click', async (ev) => {
   }
 })();
 </script>
+</div>
 {% endblock %}

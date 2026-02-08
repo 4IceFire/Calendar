@@ -190,14 +190,14 @@ Timer selection is either:
 - **POST** `/api/propresenter/stage/message`
 - **Body:**
 ```json
-{ "message": "STREAM START 9:30AM" }
+{ "message": "STREAM 9:30AM" }
 ```
 - **Notes:** Use this generic endpoint for future custom stage messages.
 
 ### Send stream-start stage message
 - **POST** `/api/propresenter/stage/stream_start`
 - **Body:** none required.
-- **Notes:** Uses `stream_start_preset` and `timer_presets` to build a message like `STREAM START 9:30AM`.
+- **Notes:** Uses `stream_start_preset` and `timer_presets` to build a message like `STREAM 9:30AM`.
 
 ### Clear stage message
 - **POST** `/api/propresenter/stage/clear`

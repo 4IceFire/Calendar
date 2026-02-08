@@ -1614,7 +1614,7 @@ function _timersStageMessageForPreset(preset) {
   if (!preset) return '';
   const pretty = _timersStageFormatTime(preset.time);
   if (!pretty) return '';
-  return `STREAM START ${pretty}`;
+  return `STREAM ${pretty}`;
 }
 
 function _timersReadPresetsForStage() {
@@ -1702,11 +1702,11 @@ function _timersStageSetPreview(presetId, presets) {
   if (!el) return;
   const id = Number(presetId) || 0;
   if (id < 1 || id > (presets || []).length) {
-    el.textContent = 'STREAM START 9:30AM';
+    el.textContent = 'STREAM 9:30AM';
     return;
   }
   const msg = _timersStageMessageForPreset(presets[id - 1]);
-  el.textContent = msg || 'STREAM START 9:30AM';
+  el.textContent = msg || 'STREAM 9:30AM';
 }
 
 function _timersStageSetButtonsEnabled(enabled) {
@@ -2274,17 +2274,24 @@ if (document.getElementById('access-levels-page')) {
   const _saveInFlight = new Map();
   const _saveQueued = new Map();
 
-  function _applyRoutingFieldState(panel) {
+  function _applyRoleFieldState(panel) {
     if (!panel) return;
     const form = panel.querySelector('form[data-role-form]');
     if (!form) return;
     const routingCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:routing"]');
+    const videohubCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:videohub"]');
     const outEl = form.querySelector('[data-role="vh-outputs"]');
     const inEl = form.querySelector('[data-role="vh-inputs"]');
-    if (!routingCb || !outEl || !inEl) return;
-    const enabled = !!routingCb.checked;
-    outEl.disabled = !enabled;
-    inEl.disabled = !enabled;
+    const presetsEl = form.querySelector('[data-role="vh-presets"]');
+    if (routingCb && outEl && inEl) {
+      const routingEnabled = !!routingCb.checked;
+      outEl.disabled = !routingEnabled;
+      inEl.disabled = !routingEnabled;
+    }
+    if (videohubCb && presetsEl) {
+      const videohubEnabled = !!videohubCb.checked;
+      presetsEl.disabled = !videohubEnabled;
+    }
   }
 
   function _roleReadPayload(panel) {
@@ -2296,11 +2303,13 @@ if (document.getElementById('access-levels-page')) {
     const pageKeys = Array.from(form.querySelectorAll('input[type="checkbox"][name="page_keys"]:checked')).map(cb => String(cb.value));
     const outEl = form.querySelector('input[name="videohub_allowed_outputs_role"]');
     const inEl = form.querySelector('input[name="videohub_allowed_inputs_role"]');
+    const presetsEl = form.querySelector('input[name="videohub_allowed_presets_role"]');
 
     return {
       page_keys: pageKeys,
       videohub_allowed_outputs_role: outEl ? String(outEl.value || '') : '',
       videohub_allowed_inputs_role: inEl ? String(inEl.value || '') : '',
+      videohub_allowed_presets_role: presetsEl ? String(presetsEl.value || '') : '',
     };
   }
 
@@ -2360,7 +2369,7 @@ if (document.getElementById('access-levels-page')) {
 
   // Wire up each role panel
   rolePanels.forEach(panel => {
-    _applyRoutingFieldState(panel);
+    _applyRoleFieldState(panel);
 
     const form = panel.querySelector('form[data-role-form]');
     if (!form) return;
@@ -2370,7 +2379,7 @@ if (document.getElementById('access-levels-page')) {
     // Checkboxes save quickly
     form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.addEventListener('change', () => {
-        _applyRoutingFieldState(panel);
+        _applyRoleFieldState(panel);
         _roleScheduleSave(roleId, { delayMs: 0 });
       });
     });

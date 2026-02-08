@@ -40,3 +40,8 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 ## Configuration & Security Tips
 - Keep secrets and environment-specific values out of Git; use `config.json` and local overrides.
 - If you change `webserver_port`, update Docker port mappings (`docker-compose.yml`) accordingly.
+
+## Auth Model Notes
+- UI pages are protected by role-based page access in the Web UI (`require_page` checks).
+- API endpoints are intentionally callable without login unless an endpoint is explicitly marked otherwise.
+- For VideoHub preset visibility, enforce role restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
