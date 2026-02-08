@@ -378,6 +378,11 @@ def _init_auth_db() -> None:
                 conn.execute('ALTER TABLE roles ADD COLUMN videohub_allowed_inputs TEXT')
             except Exception:
                 pass
+        if 'videohub_allowed_presets' not in cols:
+            try:
+                conn.execute('ALTER TABLE roles ADD COLUMN videohub_allowed_presets TEXT')
+            except Exception:
+                pass
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -505,6 +510,38 @@ def _set_role_videohub_allowlists(role_id: int, outputs_raw: str | None, inputs_
             (
                 json.dumps(outs),
                 json.dumps(ins),
+                int(role_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_role_videohub_allowed_preset_ids(role_id: int | None) -> list[int]:
+    if role_id is None:
+        return []
+    conn = _db()
+    try:
+        row = conn.execute(
+            'SELECT videohub_allowed_presets FROM roles WHERE id=?',
+            (int(role_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return []
+    return _parse_role_allowlist_field(row['videohub_allowed_presets'])
+
+
+def _set_role_videohub_allowed_preset_ids(role_id: int, presets_raw: str | None) -> None:
+    preset_ids = _parse_role_allowlist_field(presets_raw)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE roles SET videohub_allowed_presets=? WHERE id=?',
+            (
+                json.dumps(preset_ids),
                 int(role_id),
             ),
         )
@@ -1551,10 +1588,19 @@ def admin_roles_page():
                     except Exception:
                         pass
 
+                    # Per-role VideoHub preset visibility (only update if VideoHub page is selected)
+                    try:
+                        if 'page:videohub' in [str(k) for k in keys]:
+                            preset_ids_raw = request.form.get('videohub_allowed_presets_role')
+                            _set_role_videohub_allowed_preset_ids(rid, preset_ids_raw)
+                            _audit('role_videohub_preset_allowlist_update', f'role_id={rid}')
+                    except Exception:
+                        pass
+
     conn = _db()
     try:
         roles = conn.execute(
-            'SELECT id,name,videohub_allowed_outputs,videohub_allowed_inputs FROM roles ORDER BY lower(name)'
+            'SELECT id,name,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets FROM roles ORDER BY lower(name)'
         ).fetchall()
         role_pages = conn.execute('SELECT role_id,page_key FROM role_pages').fetchall()
     finally:
@@ -1578,6 +1624,7 @@ def admin_roles_page():
         # Store raw text for editing; blank means "allow all".
         out_raw = r['videohub_allowed_outputs']
         in_raw = r['videohub_allowed_inputs']
+        preset_raw = r['videohub_allowed_presets']
         try:
             out_s = '' if out_raw is None else str(out_raw).strip()
         except Exception:
@@ -1586,13 +1633,20 @@ def admin_roles_page():
             in_s = '' if in_raw is None else str(in_raw).strip()
         except Exception:
             in_s = ''
+        try:
+            preset_s = '' if preset_raw is None else str(preset_raw).strip()
+        except Exception:
+            preset_s = ''
         if out_s == '[]':
             out_s = ''
         if in_s == '[]':
             in_s = ''
+        if preset_s == '[]':
+            preset_s = ''
         role_to_vh[rid] = {
             'outputs': out_s,
             'inputs': in_s,
+            'presets': preset_s,
         }
 
     return render_template(
@@ -1646,6 +1700,16 @@ def api_admin_role_update(role_id: int):
                 ins_raw = data.get('videohub_allowed_inputs_role')
                 _set_role_videohub_allowlists(rid, outs_raw, ins_raw)
                 _audit('role_videohub_allowlists_update', f'role_id={rid}')
+        except Exception:
+            pass
+
+        # Per-role VideoHub preset visibility (only update if VideoHub page is selected)
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:videohub' in keys_set:
+                preset_ids_raw = data.get('videohub_allowed_presets_role')
+                _set_role_videohub_allowed_preset_ids(rid, preset_ids_raw)
+                _audit('role_videohub_preset_allowlist_update', f'role_id={rid}')
         except Exception:
             pass
 
@@ -2105,7 +2169,20 @@ def api_reference_page():
 @app.route('/videohub')
 @require_page('page:videohub', 'VideoHub')
 def videohub_page():
-    return render_template('videohub.html')
+    # Allow-list is configured as 1-based preset IDs, per role.
+    # Blank/NULL => allow all.
+    allowed_preset_ids: list[int] = []
+    try:
+        if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
+            # Admin is allow-all by design.
+            if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
+                allowed_preset_ids = []
+            else:
+                allowed_preset_ids = _get_role_videohub_allowed_preset_ids(getattr(current_user, 'role_id', None))
+    except Exception:
+        pass
+
+    return render_template('videohub.html', allowed_preset_ids=allowed_preset_ids)
 
 
 @app.route('/routing')
@@ -3544,7 +3621,7 @@ def _build_stream_start_message(preset: dict) -> str | None:
     if not _validate_time_hhmm(t):
         return None
     pretty = _format_time_hhmm_ampm(t)
-    return f"STREAM START {pretty}"
+    return f"STREAM {pretty}"
 
 
 _BTN_FULL_RE = re.compile(r'^location/\d+/\d+/\d+/press$')
