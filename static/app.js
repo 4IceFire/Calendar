@@ -2283,14 +2283,16 @@ if (document.getElementById('access-levels-page')) {
     const outEl = form.querySelector('[data-role="vh-outputs"]');
     const inEl = form.querySelector('[data-role="vh-inputs"]');
     const presetsEl = form.querySelector('[data-role="vh-presets"]');
+    const editPresetsEl = form.querySelector('[data-role="vh-edit-presets"]');
     if (routingCb && outEl && inEl) {
       const routingEnabled = !!routingCb.checked;
       outEl.disabled = !routingEnabled;
       inEl.disabled = !routingEnabled;
     }
-    if (videohubCb && presetsEl) {
+    if (videohubCb && (presetsEl || editPresetsEl)) {
       const videohubEnabled = !!videohubCb.checked;
-      presetsEl.disabled = !videohubEnabled;
+      if (presetsEl) presetsEl.disabled = !videohubEnabled;
+      if (editPresetsEl) editPresetsEl.disabled = !videohubEnabled;
     }
   }
 
@@ -2304,12 +2306,14 @@ if (document.getElementById('access-levels-page')) {
     const outEl = form.querySelector('input[name="videohub_allowed_outputs_role"]');
     const inEl = form.querySelector('input[name="videohub_allowed_inputs_role"]');
     const presetsEl = form.querySelector('input[name="videohub_allowed_presets_role"]');
+    const canEditEl = form.querySelector('input[name="videohub_can_edit_presets_role"]');
 
     return {
       page_keys: pageKeys,
       videohub_allowed_outputs_role: outEl ? String(outEl.value || '') : '',
       videohub_allowed_inputs_role: inEl ? String(inEl.value || '') : '',
       videohub_allowed_presets_role: presetsEl ? String(presetsEl.value || '') : '',
+      videohub_can_edit_presets_role: canEditEl ? !!canEditEl.checked : true,
     };
   }
 
