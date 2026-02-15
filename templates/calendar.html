@@ -127,14 +127,17 @@ async function loadEvents(){
       const tr = document.createElement('tr');
       const triggers = Array.isArray(e.times) ? e.times : [];
       const triggerRows = triggers.map(t => {
+        const isEnabled = (t && t.enabled !== false);
         const parts = friendlyTriggerParts(t);
         const target = parts.target || '';
         const typeCls = parts.rawType ? `cal-trigger-${String(parts.rawType).toLowerCase()}` : '';
         const targetCls = parts.targetKind ? `cal-trigger-${parts.targetKind}` : '';
+        const disabledCls = isEnabled ? '' : 'opacity-50';
+        const off = isEnabled ? '' : ' (off)';
         return `
-          <div class="cal-trigger-row">
+          <div class="cal-trigger-row ${disabledCls}">
             <span class="cal-trigger-offset ${typeCls}">${escapeHtml(parts.offsetLabel || '')}</span>
-            <span class="cal-trigger-target ${targetCls}">${escapeHtml(target)}</span>
+            <span class="cal-trigger-target ${targetCls}">${escapeHtml(target + off)}</span>
           </div>
         `;
       }).join('');

@@ -454,7 +454,7 @@ class ClockScheduler:
                             # no upcoming jobs
                             self._next_due = None
                             self._announced_thresholds.clear()
-                if job.event.repeating and job.trigger_index == (len(job.event.times) - 1):
+                if job.event.repeating and is_last_enabled_trigger(job.event, job.trigger_index):
                     next_occ = next_weekly_occurrence(job.event, job.occurrence + timedelta(seconds=1))
                     if next_occ is not None:
                         with self._cv:
@@ -472,6 +472,11 @@ def next_weekly_occurrence(event: Event, now: datetime) -> Optional[datetime]:
     def _has_future_trigger(occurrence: datetime) -> bool:
         # A trigger is still pending if its computed due time is in the future.
         for trig in getattr(event, "times", []):
+            try:
+                if not bool(getattr(trig, "enabled", True)):
+                    continue
+            except Exception:
+                pass
             due = (occurrence + timedelta(minutes=trig.timer)).replace(microsecond=0)
             if due > now:
                 return True
@@ -518,6 +523,31 @@ def push_triggers_for_occurrence(
     now: datetime,
 ) -> None:
     for idx, trig in enumerate(event.times):
+        try:
+            if not bool(getattr(trig, "enabled", True)):
+                continue
+        except Exception:
+            pass
         due = (occurrence + timedelta(minutes=trig.timer)).replace(microsecond=0)
         if due > now:
             heapq.heappush(heap, TriggerJob(due, event, occurrence, idx, trig))
+
+
+def is_last_enabled_trigger(event: Event, trigger_index: int) -> bool:
+    """Return True if trigger_index points to the last enabled trigger in event.times.
+
+    event.times is sorted by trigger offset (TimeOfTrigger.__lt__). The background
+    scheduler uses this to determine when to enqueue the next weekly occurrence.
+    """
+    last_idx = None
+    try:
+        for i, trig in enumerate(getattr(event, "times", []) or []):
+            try:
+                if bool(getattr(trig, "enabled", True)):
+                    last_idx = i
+            except Exception:
+                last_idx = i
+    except Exception:
+        last_idx = None
+
+    return last_idx is not None and int(trigger_index) == int(last_idx)

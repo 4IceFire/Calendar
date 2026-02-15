@@ -107,7 +107,12 @@ function newTriggerRow(templates){
         <option value="companion">Companion Button</option>
         <option value="api">API Call</option>
       </select>
-      <button class="btn btn-sm btn-outline-danger ms-auto remove-trigger">Remove</button>
+      <div class="ms-auto d-flex align-items-center gap-2">
+        <div class="form-check form-switch mb-0" title="Enable/disable this trigger">
+          <input class="form-check-input" type="checkbox" name="enabled" checked>
+        </div>
+        <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
+      </div>
     </div>
 
     <div class="mt-2 gap-2 align-items-center companion-fields" style="display:flex">
@@ -214,6 +219,9 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           row.querySelector('input[name="minutes"]').value = t.minutes;
           row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
           row.querySelector('select[name="actionType"]').value = (t.actionType || 'companion');
+          const en = (t && t.enabled !== false);
+          const enInput = row.querySelector('input[name="enabled"]');
+          if(enInput) enInput.checked = !!en;
           if(typeof row.__syncActionFields === 'function') row.__syncActionFields();
           if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
 
@@ -313,6 +321,9 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       row.querySelector('input[name="minutes"]').value = t.minutes;
       row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
       row.querySelector('select[name="actionType"]').value = (t.actionType || 'companion');
+      const en = (t && t.enabled !== false);
+      const enInput = row.querySelector('input[name="enabled"]');
+      if(enInput) enInput.checked = !!en;
       if(typeof row.__syncActionFields === 'function') row.__syncActionFields();
       if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
 
@@ -384,6 +395,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       let minsRaw = row.querySelector('input[name="minutes"]').value;
       const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
         const actionType = String(row.querySelector('select[name="actionType"]').value || 'companion').toLowerCase();
+        const enabled = !!(row.querySelector('input[name="enabled"]') ? row.querySelector('input[name="enabled"]').checked : true);
         const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
         let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
 
@@ -412,7 +424,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         }
         const api = {method, path: normPath};
         if(body !== undefined) api.body = body;
-        times.push({minutes: mins, typeOfTrigger: type, actionType: 'api', api});
+        times.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'api', api});
         continue;
       }
 
@@ -434,7 +446,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         alert('buttonURL must be like "1/2/3" or "location/1/2/3/press"'); return;
       }
 
-      times.push({minutes: mins, typeOfTrigger: type, actionType: 'companion', buttonURL});
+      times.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'companion', buttonURL});
     }
 
     const active = document.getElementById('activeCheck').checked === true;

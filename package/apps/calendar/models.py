@@ -29,12 +29,14 @@ class TimeOfTrigger:
         *,
         actionType: str = "companion",
         api: Optional[Dict[str, Any]] = None,
+        enabled: bool = True,
     ) -> None:
         self.minutes = minutes
         self.typeOfTrigger = typeOfTrigger
         self.buttonURL = buttonURL
         self.actionType = (actionType or "companion").lower()
         self.api: Optional[Dict[str, Any]] = api if isinstance(api, dict) else None
+        self.enabled = bool(enabled)
 
         if typeOfTrigger == TypeofTime.BEFORE:
             self.timer = -minutes
@@ -49,6 +51,7 @@ class TimeOfTrigger:
         out: dict[str, Any] = {
             "minutes": int(self.minutes),
             "typeOfTrigger": self.typeOfTrigger.name,
+            "enabled": bool(getattr(self, "enabled", True)),
         }
 
         if self.actionType == "api":
