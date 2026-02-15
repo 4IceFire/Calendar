@@ -4,8 +4,10 @@
 {% set page_subtitle = 'Edit a 40-output snapshot and save/apply presets' %}
 
 {% block page_actions %}
+{% if can_edit_presets %}
 <button id="vh-new" class="btn btn-primary">New Preset</button>
 <button id="vh-save-from-device" class="btn btn-outline-success">Save From Device</button>
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -22,7 +24,7 @@
   .vh-tile-sub{ font-size: .75rem; opacity: .75; }
 </style>
 
-<div id="vh-page" data-allowed-presets='{{ allowed_preset_ids|tojson }}'>
+<div id="vh-page" data-allowed-presets='{{ allowed_preset_ids|tojson }}' data-can-edit-presets="{{ '1' if can_edit_presets else '0' }}">
 
 <div id="vh-status" class="mb-3"></div>
 
@@ -76,6 +78,7 @@
 <script>
 let _vhPresets = [];
 let _vhAllowedPresetIds = [];
+let _vhCanEditPresets = true;
 let _vhCurrentId = null;
 let _vhLabels = { inputs: [], outputs: [], configured: false };
 let _vhRouting = []; // index 0 => output #1, value => input number (1-based)
@@ -210,16 +213,17 @@ function _renderGrid(){
 
 function _applyEditorLockState(){
   const locked = !!_vhLocked;
+  const canEdit = !!_vhCanEditPresets;
   const nameEl = document.getElementById('vh-name');
   const saveEl = document.getElementById('vh-save');
   const delEl = document.getElementById('vh-delete');
-  if(nameEl) nameEl.disabled = locked;
-  if(saveEl) saveEl.disabled = locked;
-  if(delEl) delEl.disabled = locked || (_vhCurrentId == null);
+  if(nameEl) nameEl.disabled = locked || !canEdit;
+  if(saveEl) saveEl.disabled = locked || !canEdit;
+  if(delEl) delEl.disabled = locked || !canEdit || (_vhCurrentId == null);
 
   const grid = document.getElementById('vh-grid');
   if(grid){
-    grid.querySelectorAll('input.vh-in').forEach((el) => { el.disabled = locked; });
+    grid.querySelectorAll('input.vh-in').forEach((el) => { el.disabled = locked || !canEdit; });
   }
 }
 
@@ -260,6 +264,12 @@ function _renderList(){
     `;
     el.appendChild(div);
   });
+
+  // If a role is allowed to view/apply but not edit, hide edit-only controls.
+  if(!_vhCanEditPresets){
+    el.querySelectorAll('button[data-act="toggle-lock"]').forEach((btn) => btn.remove());
+    el.querySelectorAll('button[data-act="select"]').forEach((btn) => { btn.textContent = 'View'; });
+  }
 }
 
 function _loadEditor(p){
@@ -403,15 +413,25 @@ async function _deleteCurrent(){
 
 // UI wiring
 
-document.getElementById('vh-new').addEventListener('click', () => {
-  _vhSetStatus('', '');
-  _loadEditor(null);
-});
+{
+  const btn = document.getElementById('vh-new');
+  if(btn){
+    btn.addEventListener('click', () => {
+      _vhSetStatus('', '');
+      _loadEditor(null);
+    });
+  }
+}
 
-document.getElementById('vh-save-from-device').addEventListener('click', async () => {
-  try{ _vhSetStatus('', ''); await _savePresetFromDevice(); }
-  catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
-});
+{
+  const btn = document.getElementById('vh-save-from-device');
+  if(btn){
+    btn.addEventListener('click', async () => {
+      try{ _vhSetStatus('', ''); await _savePresetFromDevice(); }
+      catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+    });
+  }
+}
 
 document.getElementById('vh-save').addEventListener('click', async () => {
   try{ _vhSetStatus('', ''); await _savePreset(); }
@@ -482,6 +502,7 @@ document.getElementById('vh-list').addEventListener('click', async (ev) => {
   try{
     const root = document.getElementById('vh-page');
     _vhAllowedPresetIds = _vhParseAllowList(root ? root.getAttribute('data-allowed-presets') : '');
+    _vhCanEditPresets = String(root ? root.getAttribute('data-can-edit-presets') : '1').trim() !== '0';
     await _loadState();
     await _loadPresets();
     _loadEditor(null);

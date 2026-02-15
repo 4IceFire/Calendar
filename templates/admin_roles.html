@@ -127,6 +127,15 @@
                       </div>
                     </div>
 
+                    <div class="col-12">
+                      <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="videohub_can_edit_presets_role"
+                               {% if role_to_vh.get(r.id) and role_to_vh.get(r.id).can_edit_presets %}checked{% endif %}
+                               data-role="vh-edit-presets">
+                        <label class="form-check-label">Allow editing presets (create/save/delete/lock)</label>
+                      </div>
+                    </div>
+
                     <div class="col-12 col-md-6">
                       <label class="form-label">Allowed Preset IDs</label>
                       <input class="form-control" name="videohub_allowed_presets_role"
