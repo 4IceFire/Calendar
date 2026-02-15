@@ -42,6 +42,15 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                 for trig in ev.get("times", []):
                     action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
                     api = trig.get("api") if isinstance(trig, dict) else None
+                    enabled = True
+                    try:
+                        if isinstance(trig, dict):
+                            if "enabled" in trig:
+                                enabled = bool(trig.get("enabled"))
+                            elif "active" in trig:
+                                enabled = bool(trig.get("active"))
+                    except Exception:
+                        enabled = True
 
                     # Backward compatible inference: if api exists, treat as API action.
                     if not action_type:
@@ -55,6 +64,7 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                                 "",
                                 actionType="api",
                                 api=api if isinstance(api, dict) else {},
+                                enabled=enabled,
                             )
                         )
                     else:
@@ -64,6 +74,7 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                                 TypeofTime[trig.get("typeOfTrigger", "AT")],
                                 trig.get("buttonURL", ""),
                                 actionType="companion",
+                                enabled=enabled,
                             )
                         )
 
@@ -97,6 +108,13 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                 for trig in ev.get("times", []):
                     if not isinstance(trig, dict):
                         continue
+
+                    if "enabled" not in trig:
+                        try:
+                            trig["enabled"] = bool(trig.get("active", True))
+                        except Exception:
+                            trig["enabled"] = True
+                        changed = True
 
                     action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
                     if not action_type:
@@ -163,6 +181,7 @@ def save_events(events_list: List[Event], path: str = DEFAULT_EVENTS_FILE) -> No
                 trig.to_dict() if hasattr(trig, "to_dict") else {
                     "minutes": trig.minutes,
                     "typeOfTrigger": trig.typeOfTrigger.name,
+                    "enabled": bool(getattr(trig, "enabled", True)),
                     "buttonURL": getattr(trig, "buttonURL", ""),
                 }
                 for trig in event.times

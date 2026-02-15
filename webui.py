@@ -2687,6 +2687,7 @@ def api_ui_events():
                     {
                         'minutes': t.minutes,
                         'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)),
+                        'enabled': bool(getattr(t, 'enabled', True)),
                         'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
                         'buttonURL': t.buttonURL,
                         'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
@@ -3675,6 +3676,17 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
         return None, 'trigger must be an object'
 
     out: dict = {}
+
+    # enabled flag (default True); support legacy 'active' key too.
+    try:
+        if 'enabled' in raw:
+            out['enabled'] = bool(raw.get('enabled'))
+        elif 'active' in raw:
+            out['enabled'] = bool(raw.get('active'))
+        else:
+            out['enabled'] = True
+    except Exception:
+        out['enabled'] = True
 
     # typeOfTrigger + minutes are normalized by callers, but keep safe defaults.
     try:
@@ -5195,6 +5207,7 @@ def api_get_event_ui(ident: int):
                 {
                     'minutes': t.minutes,
                     'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)),
+                    'enabled': bool(getattr(t, 'enabled', True)),
                     'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
                     'buttonURL': t.buttonURL,
                     'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
@@ -5274,8 +5287,9 @@ def api_update_event_ui(ident: int):
             action_type = str(t3.get('actionType') or 'companion').lower()
             btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
             api_obj = t3.get('api') if action_type == 'api' else None
+            enabled = bool(t3.get('enabled', True))
 
-            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj))
+            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj, enabled=enabled))
 
         # replace fields on existing event object
         ev.name = name
@@ -5363,8 +5377,9 @@ def api_create_event_ui():
             action_type = str(t3.get('actionType') or 'companion').lower()
             btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
             api_obj = t3.get('api') if action_type == 'api' else None
+            enabled = bool(t3.get('enabled', True))
 
-            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj))
+            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj, enabled=enabled))
 
         ev = Event(name, new_id, WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday, date_obj, time_obj, repeating, times, active)
         events.append(ev)

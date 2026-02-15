@@ -3,8 +3,18 @@
 {% set page_title = 'Templates' %}
 
 {% block content %}
+<div class="tdeck-soft rounded-3 p-2 mb-3">
+  <ul class="nav nav-pills" id="templates-tab-nav">
+    <li class="nav-item">
+      <button class="nav-link active" type="button" data-tab="buttons">Buttons</button>
+    </li>
+    <li class="nav-item ms-2">
+      <button class="nav-link" type="button" data-tab="triggers">Triggers</button>
+    </li>
+  </ul>
+</div>
 <div class="row g-3">
-  <div class="col-lg-6">
+  <div class="col-12" id="templates-tab-buttons" data-templates-tab="buttons">
     <div class="tdeck-soft rounded-3 p-3">
       <div class="d-flex align-items-center justify-content-between mb-2">
         <div>
@@ -13,7 +23,7 @@
         </div>
       </div>
 
-      <div class="tdeck-soft rounded-3 overflow-hidden mb-3" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+      <div id="buttons-list-wrap" class="tdeck-soft rounded-3 overflow-hidden mb-3" style="background: transparent; border-color: rgba(127,127,127,0.20)">
         <div id="buttons-list" class="list-group list-group-flush">Loading…</div>
       </div>
 
@@ -33,7 +43,7 @@
     </div>
   </div>
 
-  <div class="col-lg-6">
+  <div class="col-12 d-none" id="templates-tab-triggers" data-templates-tab="triggers">
     <div class="tdeck-soft rounded-3 p-3">
       <div class="d-flex align-items-center justify-content-between mb-2">
         <div>
@@ -42,19 +52,52 @@
         </div>
       </div>
 
-      <div class="tdeck-soft rounded-3 overflow-hidden mb-3" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+      <div class="tdeck-soft rounded-3 overflow-hidden mb-3" style="display:none; background: transparent; border-color: rgba(127,127,127,0.20)">
         <div id="triggers-list" class="list-group list-group-flush">Loading…</div>
       </div>
 
-  <!-- Compose multiple triggers, then save as a single trigger-template -->
-      <!-- Compose multiple triggers, then save as a single trigger-template -->
-      <div id="add-trigger-composer" class="mb-1">
-        <div id="add-trigger-triggers-container"></div>
-        <form id="add-trigger-form" class="d-flex flex-wrap gap-2 align-items-center mt-2">
-          <input name="label" class="form-control" placeholder="Template Label" style="width:220px">
-          <button id="add-one-trigger" type="button" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
-          <button id="save-template-btn" class="btn btn-sm btn-primary">Save Template</button>
-        </form>
+      <div class="row g-3">
+        <div class="col-md-5">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <div class="small text-muted">Templates</div>
+            <button id="trigger-template-new" class="btn btn-sm btn-outline-primary">New</button>
+          </div>
+          <div class="tdeck-soft rounded-3 overflow-hidden" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+            <div id="triggers-list-ui" class="list-group list-group-flush">Loading...</div>
+          </div>
+        </div>
+
+        <div class="col-md-7">
+          <div class="tdeck-soft rounded-3 p-2" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+            <div class="d-flex align-items-start justify-content-between gap-2 mb-2">
+              <div>
+                <div class="fw-semibold" id="trigger-editor-title">New Trigger Template</div>
+                <div class="small text-muted" id="trigger-editor-hint">Build a reusable set of triggers, then apply it to events.</div>
+              </div>
+              <div class="d-flex gap-2">
+                <button id="trigger-template-cancel" class="btn btn-sm btn-outline-secondary">Cancel</button>
+                <button id="trigger-template-delete" class="btn btn-sm btn-outline-danger" disabled>Delete</button>
+              </div>
+            </div>
+
+            <div class="mb-2">
+              <label class="form-label small text-muted mb-1">Label</label>
+              <input id="trigger-template-label" class="form-control form-control-sm" placeholder="e.g. Sunday pre-service">
+            </div>
+
+            <div class="d-flex align-items-center justify-content-between mb-1">
+              <div class="small text-muted">Triggers</div>
+              <button id="trigger-template-add-trigger" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
+            </div>
+
+            <div id="trigger-editor-triggers-container"></div>
+
+            <div class="d-flex justify-content-between align-items-center mt-2">
+              <div class="small text-muted">Tip: use Move Up/Down to reorder.</div>
+              <button id="trigger-template-save" class="btn btn-sm btn-primary">Save Template</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -76,16 +119,70 @@ function displayApiPath(p){
   return s;
 }
 
+// --- Templates page tabs (Buttons / Triggers) ---
+let _templatesActiveTab = 'buttons';
+
+function _setTemplatesActiveTab(tab, {pushHash = true} = {}){
+  const next = (tab === 'triggers') ? 'triggers' : 'buttons';
+  _templatesActiveTab = next;
+
+  const btns = Array.from(document.querySelectorAll('#templates-tab-nav [data-tab]'));
+  for(const b of btns){
+    const t = String(b.getAttribute('data-tab') || '');
+    b.classList.toggle('active', t === next);
+  }
+
+  const panes = Array.from(document.querySelectorAll('[data-templates-tab]'));
+  for(const p of panes){
+    const t = String(p.getAttribute('data-templates-tab') || '');
+    p.classList.toggle('d-none', t !== next);
+  }
+
+  try{ localStorage.setItem('templates_active_tab', next); }catch(e){}
+
+  if(pushHash){
+    try{
+      const h = (next === 'triggers') ? '#triggers' : '#buttons';
+      if(window.location.hash !== h) history.replaceState(null, '', h);
+    }catch(e){}
+  }
+}
+
+function _readInitialTemplatesTab(){
+  const h = String(window.location.hash || '').toLowerCase();
+  if(h === '#triggers') return 'triggers';
+  if(h === '#buttons') return 'buttons';
+  try{
+    const saved = String(localStorage.getItem('templates_active_tab') || '');
+    if(saved === 'triggers' || saved === 'buttons') return saved;
+  }catch(e){}
+  return 'buttons';
+}
+
 async function loadTemplates(){
   try{
     const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
     const data = await resp.json();
     window.__buttonTemplates = data.buttons || [];
     renderButtons(data.buttons || []);
-    renderTriggers(data.triggers || []);
+    renderTriggerTemplates(data.triggers || []);
+
+    if(window.__selectLastTriggerTemplate){
+      window.__selectLastTriggerTemplate = false;
+      const last = (Array.isArray(window.__triggerTemplates) ? window.__triggerTemplates.length : 0) - 1;
+      if(last >= 0){
+        _populateTriggerEditorFromTemplate(last);
+      }else{
+        _clearTriggerEditor();
+      }
+    }else{
+      // If an index is selected, re-render editor title/list highlighting.
+      _setTriggerEditorTitle();
+    }
   }catch(e){
     document.getElementById('buttons-list').innerText = 'Error loading';
-    document.getElementById('triggers-list').innerText = 'Error loading';
+    const tl = document.getElementById('triggers-list-ui');
+    if(tl) tl.innerText = 'Error loading';
     console.error(e);
   }
 }
@@ -144,25 +241,256 @@ function renderButtons(btns){
     });
 }
 
-function renderTriggers(trigs){
-  const out = document.getElementById('triggers-list');
-  if(!trigs.length){ out.innerHTML = '<div class="list-group-item text-muted">No trigger templates</div>'; return }
+// --- Unsaved changes guard for Trigger Templates editor ---
+let _tplBaselineJson = '';
+let _tplDirty = false;
+let _tplDirtyDebounce = null;
+let _tplPendingAction = null;
+let _tplAllowUnloadOnce = false;
+
+function _tplStableStringify(v){
+  try{
+    const seen = new WeakSet();
+    const normalize = (x) => {
+      if(x === null || x === undefined) return null;
+      if(typeof x !== 'object') return x;
+      if(seen.has(x)) return null;
+      seen.add(x);
+      if(Array.isArray(x)) return x.map(normalize);
+      const out = {};
+      for(const k of Object.keys(x).sort()){
+        out[k] = normalize(x[k]);
+      }
+      return out;
+    };
+    return JSON.stringify(normalize(v));
+  }catch(e){
+    try{ return JSON.stringify(v); }catch(e2){ return ''; }
+  }
+}
+
+function _tplReadEditorStateRaw(){
+  const labelEl = document.getElementById('trigger-template-label');
+  const container = document.getElementById('trigger-editor-triggers-container');
+  if(!labelEl || !container) return null;
+
+  const idx = (window.__selectedTriggerIndex !== undefined && window.__selectedTriggerIndex !== null)
+    ? parseInt(window.__selectedTriggerIndex, 10)
+    : null;
+
+  const rows = Array.from(container.children || []);
+  const times = rows.map((row) => {
+    const minutes = row.querySelector('input[name="minutes"]')?.value;
+    const typeOfTrigger = row.querySelector('select[name="typeOfTrigger"]')?.value;
+    const actionType = row.querySelector('select[name="actionType"]')?.value;
+    const enabled = !!(row.querySelector('input[name="enabled"]') ? row.querySelector('input[name="enabled"]').checked : true);
+
+    const buttonTemplate = row.querySelector('select[name="buttonTemplate"]')?.value;
+    const buttonURL = row.querySelector('input[name="buttonURL"]')?.value;
+
+    const apiMethod = row.querySelector('select[name="apiMethod"]')?.value;
+    const apiPath = row.querySelector('input[name="apiPath"]')?.value;
+    const apiBody = row.querySelector('textarea[name="apiBody"]')?.value;
+
+    return {
+      enabled,
+      minutes: (minutes === undefined) ? null : String(minutes),
+      typeOfTrigger: (typeOfTrigger === undefined) ? null : String(typeOfTrigger),
+      actionType: (actionType === undefined) ? null : String(actionType),
+      buttonTemplate: (buttonTemplate === undefined) ? null : String(buttonTemplate),
+      buttonURL: (buttonURL === undefined) ? null : String(buttonURL),
+      apiMethod: (apiMethod === undefined) ? null : String(apiMethod),
+      apiPath: (apiPath === undefined) ? null : String(apiPath),
+      apiBody: (apiBody === undefined) ? null : String(apiBody),
+    };
+  });
+
+  return {
+    selectedIndex: idx,
+    label: String(labelEl.value || ''),
+    times,
+  };
+}
+
+function _tplComputeCurrentJson(){
+  const state = _tplReadEditorStateRaw();
+  if(state === null) return null;
+  return _tplStableStringify(state);
+}
+
+function _tplSetBaselineFromUI(){
+  const cur = _tplComputeCurrentJson();
+  _tplBaselineJson = (cur === null) ? '' : cur;
+  _tplDirty = false;
+}
+
+function _tplSetDirtyFlagFromUI(){
+  const cur = _tplComputeCurrentJson();
+  _tplDirty = (cur === null) ? true : (cur !== _tplBaselineJson);
+}
+
+function _tplScheduleDirtyRecalc(){
+  if(_tplDirtyDebounce){
+    clearTimeout(_tplDirtyDebounce);
+    _tplDirtyDebounce = null;
+  }
+  _tplDirtyDebounce = setTimeout(() => {
+    _tplDirtyDebounce = null;
+    _tplSetDirtyFlagFromUI();
+  }, 150);
+}
+
+function _tplEnsureUnsavedModal(){
+  let modalEl = document.getElementById('templates-unsaved-modal');
+  if(modalEl) return modalEl;
+
+  modalEl = document.createElement('div');
+  modalEl.id = 'templates-unsaved-modal';
+  modalEl.className = 'modal fade';
+  modalEl.tabIndex = -1;
+  modalEl.setAttribute('aria-hidden', 'true');
+  modalEl.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Unsaved changes</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          You have unsaved changes in Trigger Templates.
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-action="cancel" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-outline-danger" data-action="discard">Continue without saving</button>
+          <button type="button" class="btn btn-primary" data-action="save">Save and continue</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modalEl);
+
+  modalEl.addEventListener('click', async (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('button[data-action]') : null;
+    if(!btn) return;
+    const action = String(btn.getAttribute('data-action') || '');
+    if(action === 'discard'){
+      const act = _tplPendingAction;
+      _tplPendingAction = null;
+      _tplAllowUnloadOnce = true;
+      try{ _tplSetBaselineFromUI(); }catch(err){}
+      try{
+        if(window.bootstrap && window.bootstrap.Modal){
+          const m = window.bootstrap.Modal.getInstance(modalEl) || new window.bootstrap.Modal(modalEl);
+          m.hide();
+        }
+      }catch(err){}
+      if(typeof act === 'function') act();
+    }else if(action === 'save'){
+      btn.disabled = true;
+      try{
+        const ok = await _triggerTemplateSaveNow({silent: true});
+        if(ok){
+          const act = _tplPendingAction;
+          _tplPendingAction = null;
+          _tplAllowUnloadOnce = true;
+          try{
+            if(window.bootstrap && window.bootstrap.Modal){
+              const m = window.bootstrap.Modal.getInstance(modalEl) || new window.bootstrap.Modal(modalEl);
+              m.hide();
+            }
+          }catch(err){}
+          if(typeof act === 'function') act();
+        }
+      }catch(err){}
+      btn.disabled = false;
+    }
+  });
+
+  return modalEl;
+}
+
+function _tplShowUnsavedPrompt(pendingAction){
+  _tplPendingAction = pendingAction;
+  const modalEl = _tplEnsureUnsavedModal();
+  try{
+    if(window.bootstrap && window.bootstrap.Modal){
+      const m = new window.bootstrap.Modal(modalEl);
+      m.show();
+    }else{
+      const ok = window.confirm('You have unsaved changes. Leave without saving?');
+      if(ok){
+        const act = _tplPendingAction;
+        _tplPendingAction = null;
+        if(typeof act === 'function') act();
+      }
+    }
+  }catch(e){
+    const ok = window.confirm('You have unsaved changes. Leave without saving?');
+    if(ok){
+      const act = _tplPendingAction;
+      _tplPendingAction = null;
+      if(typeof act === 'function') act();
+    }
+  }
+}
+
+function _tplGuardOrRun(action){
+  try{
+    _tplSetDirtyFlagFromUI();
+  }catch(e){
+    _tplDirty = true;
+  }
+  if(!_tplDirty){
+    if(typeof action === 'function') action();
+    return true;
+  }
+  _tplShowUnsavedPrompt(action);
+  return false;
+}
+
+function _safeParseTimes(v){
+  if(Array.isArray(v)) return v;
+  if(!v) return [];
+  try{
+    const parsed = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed : [];
+  }catch(e){
+    return [];
+  }
+}
+
+function renderTriggerTemplates(trigs){
+  window.__triggerTemplates = Array.isArray(trigs) ? trigs : [];
+  const out = document.getElementById('triggers-list-ui');
+  if(!out) return;
+  if(!window.__triggerTemplates.length){
+    out.innerHTML = '<div class="list-group-item text-muted">No trigger templates</div>';
+    return;
+  }
+
+  const selected = (window.__selectedTriggerIndex !== undefined) ? window.__selectedTriggerIndex : null;
+
   out.innerHTML = '';
-  trigs.forEach((t,i)=>{
+  window.__triggerTemplates.forEach((t,i)=>{
     const div = document.createElement('div');
-    div.className = 'list-group-item d-flex gap-2 align-items-center';
-    const times = Array.isArray(t.times) ? t.times : (t.times ? JSON.parse(t.times) : []);
+    const times = _safeParseTimes(t.times);
     const count = times.length;
+    const enabledCount = times.filter(x => x && x.enabled !== false).length;
+    const isSelected = (selected !== null && selected !== undefined && parseInt(selected,10) === i);
+
+    div.className = 'list-group-item d-flex gap-2 align-items-center' + (isSelected ? ' active' : '');
+    div.setAttribute('data-idx', String(i));
+
     div.innerHTML = `
       <div class="flex-grow-1 text-truncate">
-        <div class="fw-semibold text-truncate">${t.label}</div>
-        <div class="small text-muted">${count} trigger${count!==1?'s':''}</div>
+        <div class="fw-semibold text-truncate">${String(t.label || 'Template')}</div>
+        <div class="small ${isSelected ? 'text-light' : 'text-muted'}">${enabledCount}/${count} enabled</div>
       </div>
       <div class="ms-auto">
-        <button class="btn btn-sm btn-outline-secondary" data-idx="${i}" data-type="trigger-edit">Edit</button>
-        <button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="trigger-delete">Delete</button>
+        <button class="btn btn-sm ${isSelected ? 'btn-light' : 'btn-outline-danger'}" data-idx="${i}" data-type="trigger-delete">Delete</button>
       </div>
     `;
+
     out.appendChild(div);
   });
 }
@@ -182,7 +510,14 @@ function newTriggerRow(templates){
         <option value="companion">Companion Button</option>
         <option value="api">API Call</option>
       </select>
-      <button class="btn btn-sm btn-outline-danger ms-auto remove-trigger">Remove</button>
+      <div class="ms-auto d-flex align-items-center gap-2">
+        <button type="button" class="btn btn-sm btn-outline-secondary move-up" title="Move up">↑</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary move-down" title="Move down">↓</button>
+        <div class="form-check form-switch mb-0" title="Enable/disable this trigger">
+          <input class="form-check-input" type="checkbox" name="enabled" checked>
+        </div>
+        <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
+      </div>
     </div>
 
     <div class="mt-2 gap-2 align-items-center companion-fields" style="display:flex">
@@ -295,96 +630,259 @@ document.getElementById('add-button-form').addEventListener('submit', async (ev)
   }catch(e){ console.error(e); alert('Error adding'); }
 });
 
-// handle add trigger
-// add individual trigger row to composer
-document.getElementById('add-one-trigger').addEventListener('click', async (ev)=>{
-  ev.preventDefault();
-  const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
-  const data = await resp.json();
-  const btns = data.buttons || [];
-  const row = newTriggerRow(btns);
-  document.getElementById('add-trigger-triggers-container').appendChild(row);
-});
+function _setTriggerEditorTitle(){
+  const titleEl = document.getElementById('trigger-editor-title');
+  const deleteBtn = document.getElementById('trigger-template-delete');
+  const idx = (window.__selectedTriggerIndex !== undefined) ? window.__selectedTriggerIndex : null;
+  const isEditing = (idx !== null && idx !== undefined);
+  if(deleteBtn) deleteBtn.disabled = !isEditing;
 
-// remove trigger delegate
-document.getElementById('add-trigger-triggers-container').addEventListener('click', (ev)=>{
-  const btn = ev.target.closest('.remove-trigger');
-  if(!btn) return;
-  const row = btn.closest('.trigger-row');
-  if(row) row.remove();
-});
+  if(!titleEl) return;
+  if(!isEditing){
+    titleEl.textContent = 'New Trigger Template';
+    return;
+  }
+  const t = (Array.isArray(window.__triggerTemplates) ? window.__triggerTemplates : [])[parseInt(idx,10)];
+  const label = t ? String(t.label || 'Template') : 'Template';
+  titleEl.textContent = `Edit: ${label}`;
+}
 
-// submit composed trigger template (multiple triggers)
-document.getElementById('add-trigger-form').addEventListener('submit', async (ev)=>{
-  ev.preventDefault();
-  const form = ev.target;
-  const label = form.label.value.trim();
-  if(!label) return alert('Label required');
-  const container = document.getElementById('add-trigger-triggers-container');
-  const rows = Array.from(container.children);
-  if(rows.length === 0) return alert('Add at least one trigger to the template');
+function _clearTriggerEditor(){
+  window.__selectedTriggerIndex = null;
+  const labelEl = document.getElementById('trigger-template-label');
+  const container = document.getElementById('trigger-editor-triggers-container');
+  if(labelEl) labelEl.value = '';
+  if(container) container.innerHTML = '';
+  _setTriggerEditorTitle();
+  renderTriggerTemplates(window.__triggerTemplates || []);
+  _tplSetBaselineFromUI();
+}
+
+function _populateTriggerEditorFromTemplate(idx){
+  const i = parseInt(idx,10);
+  const trigs = Array.isArray(window.__triggerTemplates) ? window.__triggerTemplates : [];
+  const t = trigs[i];
+  if(!t) return;
+
+  window.__selectedTriggerIndex = i;
+
+  const labelEl = document.getElementById('trigger-template-label');
+  const container = document.getElementById('trigger-editor-triggers-container');
+  if(labelEl) labelEl.value = String(t.label || '');
+  if(container) container.innerHTML = '';
+
+  const btns = Array.isArray(window.__buttonTemplates) ? window.__buttonTemplates : [];
+  const times = _safeParseTimes(t.times);
+  for(const s of times){
+    const row = newTriggerRow(btns);
+    row.querySelector('input[name="minutes"]').value = s.minutes;
+    row.querySelector('select[name="typeOfTrigger"]').value = s.typeOfTrigger;
+    row.querySelector('select[name="actionType"]').value = (s.actionType || 'companion');
+    const en = (s && s.enabled !== false);
+    const enInput = row.querySelector('input[name="enabled"]');
+    if(enInput) enInput.checked = !!en;
+    if(typeof row.__syncActionFields === 'function') row.__syncActionFields();
+    if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
+
+    if(String(s.actionType || 'companion').toLowerCase() === 'api'){
+      row.querySelector('select[name="apiMethod"]').value = (s.api && s.api.method) ? String(s.api.method).toUpperCase() : 'POST';
+      row.querySelector('input[name="apiPath"]').value = (s.api && s.api.path) ? displayApiPath(String(s.api.path)) : '';
+      row.querySelector('textarea[name="apiBody"]').value = (s.api && s.api.body !== undefined) ? JSON.stringify(s.api.body) : '';
+    }else{
+      // try to match a button template
+      let matched = false;
+      btns.forEach((b,bi)=>{
+        if(matched) return;
+        const bu = b.buttonURL || (b.pattern ? `location/${b.pattern}/press` : null);
+        if(bu === s.buttonURL){
+          row.querySelector('select[name="buttonTemplate"]').value = bi;
+          matched = true;
+        }
+      });
+      const inp = row.querySelector('input[name="buttonURL"]');
+      if(matched){
+        inp.value = (btns[parseInt(row.querySelector('select[name="buttonTemplate"]').value,10)] || {}).pattern || '';
+        inp.disabled = true;
+      }else{
+        inp.value = s.buttonURL || '';
+        inp.disabled = false;
+      }
+    }
+
+    if(container) container.appendChild(row);
+  }
+
+  _setTriggerEditorTitle();
+  renderTriggerTemplates(window.__triggerTemplates || []);
+  _tplSetBaselineFromUI();
+}
+
+function _collectTriggerSpecsFromEditor(){
+  const labelEl = document.getElementById('trigger-template-label');
+  const label = String(labelEl ? labelEl.value : '').trim();
+  if(!label) return {ok:false, error:'Label required'};
+
+  const container = document.getElementById('trigger-editor-triggers-container');
+  const rows = container ? Array.from(container.children) : [];
+  if(!rows.length) return {ok:false, error:'Add at least one trigger'};
+
+  const btns = Array.isArray(window.__buttonTemplates) ? window.__buttonTemplates : [];
   const specs = [];
-  // fetch latest buttons to resolve template indices
-  const respButtons = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
-  const dataAll = await respButtons.json();
-  const btns = dataAll.buttons || [];
+
   for(const row of rows){
     let minsRaw = row.querySelector('input[name="minutes"]').value;
     const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
     const actionType = String(row.querySelector('select[name="actionType"]').value || 'companion').toLowerCase();
-    const tmplSel = row.querySelector('select[name="buttonTemplate"]');
-    const tmplIdx = tmplSel ? tmplSel.value : '';
-    let buttonURL = (row.querySelector('input[name="buttonURL"]')?.value) || '';
+    const enabledInput = row.querySelector('input[name="enabled"]');
+    const enabled = !!(enabledInput ? enabledInput.checked : true);
+
     if(String(type).toUpperCase() === 'AT'){
       minsRaw = '0';
       const mi = row.querySelector('input[name="minutes"]');
       if(mi){ mi.value = '0'; mi.disabled = true; }
     }else if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
-      alert('Minutes required for non-AT triggers');
-      return;
+      return {ok:false, error:'Minutes required for non-AT triggers'};
     }
+
     const mins = parseInt(minsRaw,10);
-    if(Number.isNaN(mins) || mins < 0){ alert('Minutes must be a non-negative integer'); return; }
+    if(Number.isNaN(mins) || mins < 0) return {ok:false, error:'Minutes must be a non-negative integer'};
 
     if(actionType === 'api'){
       const method = String(row.querySelector('select[name="apiMethod"]').value || 'POST').toUpperCase();
       const path = String(row.querySelector('input[name="apiPath"]').value || '').trim();
       const bodyRaw = String(row.querySelector('textarea[name="apiBody"]').value || '').trim();
       const normPath = normalizeApiPath(path);
-      if(!normPath || !normPath.startsWith('/api/')){ alert('API path must be like /videohub/... (the /api prefix is added automatically)'); return; }
+      if(!normPath || !normPath.startsWith('/api/')) return {ok:false, error:'API path must be like /videohub/... (the /api prefix is added automatically)'};
       let body = undefined;
       if(bodyRaw){
         try{ body = JSON.parse(bodyRaw); }
-        catch(e){ alert('API body must be valid JSON'); return; }
+        catch(e){ return {ok:false, error:'API body must be valid JSON'}; }
       }
       const api = {method, path: normPath};
       if(body !== undefined) api.body = body;
-      specs.push({minutes: mins, typeOfTrigger: type, actionType: 'api', api});
+      specs.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'api', api});
       continue;
     }
+
+    const tmplSel = row.querySelector('select[name="buttonTemplate"]');
+    const tmplIdx = tmplSel ? String(tmplSel.value || '') : '';
+    let buttonURL = (row.querySelector('input[name="buttonURL"]')?.value) || '';
 
     if(tmplIdx !== ''){
       const t = btns[parseInt(tmplIdx,10)];
       if(t) buttonURL = t.buttonURL || (t.pattern ? `location/${t.pattern}/press` : buttonURL);
     }
-    if(!buttonURL || String(buttonURL).trim() === ''){ alert('Each trigger must have a button template selected or a valid button URL'); return; }
+
+    if(!buttonURL || String(buttonURL).trim() === '') return {ok:false, error:'Each trigger must have a button template selected or a valid button URL'};
     if(/^\d+\/\d+\/\d+$/.test(buttonURL)) buttonURL = `location/${buttonURL}/press`;
-    if(!/^location\/\d+\/\d+\/\d+\/press$/.test(buttonURL)){ alert('buttonURL must be like "1/2/3" or "location/1/2/3/press"'); return; }
-    specs.push({minutes: mins, typeOfTrigger: type, actionType: 'companion', buttonURL});
+    if(!/^location\/\d+\/\d+\/\d+\/press$/.test(buttonURL)) return {ok:false, error:'buttonURL must be like \"1/2/3\" or \"location/1/2/3/press\"'};
+
+    specs.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'companion', buttonURL});
   }
+
+  return {ok:true, label, times: specs};
+}
+
+async function _triggerTemplateSaveNow({silent = false} = {}){
+  const collected = _collectTriggerSpecsFromEditor();
+  if(!collected.ok){
+    if(!silent) alert(collected.error || 'Invalid template');
+    return false;
+  }
+
+  const idx = (window.__selectedTriggerIndex !== undefined) ? window.__selectedTriggerIndex : null;
   try{
-    // if editing, use PUT
-    if(window.__editingTriggerIndex !== undefined && window.__editingTriggerIndex !== null){
-      const idx = window.__editingTriggerIndex;
-      const r = await fetch('/api/templates/trigger/'+encodeURIComponent(idx),{method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, times: specs})});
-      if(r.ok){ await loadTemplates(); form.reset(); document.getElementById('add-trigger-triggers-container').innerHTML = ''; window.__editingTriggerIndex = null; document.getElementById('save-template-btn').innerText = 'Save Template'; }
-      else { alert('Failed to update'); }
-    }else{
-      const r = await fetch('/api/templates/trigger',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, times: specs})});
-      if(r.ok){ await loadTemplates(); form.reset(); document.getElementById('add-trigger-triggers-container').innerHTML = ''; }
-      else { alert('Failed to add'); }
+    if(idx === null || idx === undefined){
+      const r = await fetch('/api/templates/trigger', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({label: collected.label, times: collected.times}),
+      });
+      if(!r.ok){
+        if(!silent) alert('Failed to save');
+        return false;
+      }
+      window.__selectLastTriggerTemplate = true;
+      await loadTemplates();
+      return true;
     }
-  }catch(e){ console.error(e); alert('Error adding'); }
+
+    const r = await fetch('/api/templates/trigger/' + encodeURIComponent(idx), {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({label: collected.label, times: collected.times}),
+    });
+    if(!r.ok){
+      if(!silent) alert('Failed to update');
+      return false;
+    }
+    await loadTemplates();
+    _populateTriggerEditorFromTemplate(idx);
+    return true;
+  }catch(e){
+    console.error(e);
+    if(!silent) alert('Error saving');
+    return false;
+  }
+}
+
+document.getElementById('trigger-template-new').addEventListener('click', (ev)=>{
+  ev.preventDefault();
+  _tplGuardOrRun(() => _clearTriggerEditor());
+});
+
+document.getElementById('trigger-template-add-trigger').addEventListener('click', (ev)=>{
+  ev.preventDefault();
+  const container = document.getElementById('trigger-editor-triggers-container');
+  if(!container) return;
+  const btns = Array.isArray(window.__buttonTemplates) ? window.__buttonTemplates : [];
+  container.appendChild(newTriggerRow(btns));
+});
+
+document.getElementById('trigger-template-cancel').addEventListener('click', (ev)=>{
+  ev.preventDefault();
+  const idx = (window.__selectedTriggerIndex !== undefined) ? window.__selectedTriggerIndex : null;
+  const act = () => {
+    if(idx === null || idx === undefined){
+      _clearTriggerEditor();
+    }else{
+      _populateTriggerEditorFromTemplate(idx);
+    }
+  };
+  _tplGuardOrRun(act);
+});
+
+document.getElementById('trigger-template-delete').addEventListener('click', async (ev)=>{
+  ev.preventDefault();
+  const idx = (window.__selectedTriggerIndex !== undefined) ? window.__selectedTriggerIndex : null;
+  if(idx === null || idx === undefined) return;
+
+  // Deleting discards the current editor state; confirm if dirty.
+  try{ _tplSetDirtyFlagFromUI(); }catch(e){ _tplDirty = true; }
+  if(_tplDirty){
+    const ok = confirm('You have unsaved changes. Delete this template anyway?');
+    if(!ok) return;
+  }
+
+  if(!confirm('Delete trigger template?')) return;
+  try{
+    const r = await fetch('/api/templates/trigger/' + encodeURIComponent(idx), {method:'DELETE'});
+    if(!r.ok) return alert('Delete failed');
+    window.__selectedTriggerIndex = null;
+    await loadTemplates();
+    _clearTriggerEditor();
+  }catch(e){
+    console.error(e);
+    alert('Error deleting');
+  }
+});
+
+document.getElementById('trigger-template-save').addEventListener('click', async (ev)=>{
+  ev.preventDefault();
+  const ok = await _triggerTemplateSaveNow();
+  if(ok){
+    _tplSetBaselineFromUI();
+  }
 });
 
 // delegate deletes
@@ -454,58 +952,131 @@ document.getElementById('buttons-list').addEventListener('keydown', (ev)=>{
   }
 });
 
-document.getElementById('triggers-list').addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button'); if(!btn) return; const idx = btn.getAttribute('data-idx'); const type = btn.getAttribute('data-type');
-  if(type === 'trigger-delete'){
-    if(!confirm('Delete trigger template?')) return; try{ const r = await fetch('/api/templates/trigger/'+encodeURIComponent(idx), {method:'DELETE'}); if(r.ok) loadTemplates(); else alert('Delete failed'); }catch(e){alert('Error');}
-  }else if(type === 'trigger-edit'){
-    // load template and populate composer for editing
-    try{
-      const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
-      const data = await resp.json();
-      const trigs = data.triggers || [];
-      const tpl = trigs[parseInt(idx,10)];
-      if(!tpl) return alert('Template not found');
-      // set edit index
-      window.__editingTriggerIndex = parseInt(idx,10);
-      const form = document.getElementById('add-trigger-form');
-      form.label.value = tpl.label || '';
-      document.getElementById('add-trigger-triggers-container').innerHTML = '';
-      const btns = data.buttons || [];
-      const times = Array.isArray(tpl.times) ? tpl.times : (tpl.times ? JSON.parse(tpl.times) : []);
-      times.forEach(s=>{
-        const row = newTriggerRow(btns);
-        // populate
-        row.querySelector('input[name="minutes"]').value = s.minutes;
-        row.querySelector('select[name="typeOfTrigger"]').value = s.typeOfTrigger;
-        row.querySelector('select[name="actionType"]').value = (s.actionType || 'companion');
-        if(typeof row.__syncActionFields === 'function') row.__syncActionFields();
-        if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
+document.getElementById('triggers-list-ui').addEventListener('click', async (ev)=>{
+  const deleteBtn = ev.target.closest('button[data-type="trigger-delete"]');
+  if(deleteBtn){
+    ev.preventDefault();
+    ev.stopPropagation();
+    const idx = deleteBtn.getAttribute('data-idx');
+    if(idx === null || idx === undefined) return;
+    // Deleting from the list discards current editor state; guard if dirty.
+    const proceed = async () => {
+      if(!confirm('Delete trigger template?')) return;
+      try{
+        const r = await fetch('/api/templates/trigger/' + encodeURIComponent(idx), {method:'DELETE'});
+        if(!r.ok) return alert('Delete failed');
+        window.__selectedTriggerIndex = null;
+        await loadTemplates();
+        _clearTriggerEditor();
+      }catch(e){
+        console.error(e);
+        alert('Error deleting');
+      }
+    };
 
-        if(String(s.actionType || 'companion').toLowerCase() === 'api'){
-          row.querySelector('select[name="apiMethod"]').value = (s.api && s.api.method) ? String(s.api.method).toUpperCase() : 'POST';
-          row.querySelector('input[name="apiPath"]').value = (s.api && s.api.path) ? displayApiPath(String(s.api.path)) : '';
-          row.querySelector('textarea[name="apiBody"]').value = (s.api && s.api.body !== undefined) ? JSON.stringify(s.api.body) : '';
-        }else{
-          // try to match a button template
-          let matched = false;
-          btns.forEach((b,bi)=>{ if(!matched){ const bu = b.buttonURL || (b.pattern?`location/${b.pattern}/press`:null); if(bu === s.buttonURL){ row.querySelector('select[name="buttonTemplate"]').value = bi; matched = true; } }});
-          if(matched){
-            const inp = row.querySelector('input[name="buttonURL"]');
-            inp.value = (btns[parseInt(row.querySelector('select[name="buttonTemplate"]').value,10)] || {}).pattern || '';
-            inp.disabled = true;
-          }else{
-            const inp = row.querySelector('input[name="buttonURL"]');
-            inp.value = s.buttonURL;
-            inp.disabled = false;
-          }
-        }
-        document.getElementById('add-trigger-triggers-container').appendChild(row);
-      });
-      document.getElementById('save-template-btn').innerText = 'Update Template';
-    }catch(e){ console.error(e); alert('Error loading template for edit'); }
+    if(!_tplGuardOrRun(() => { proceed(); })){
+      return;
+    }
+    return;
+  }
+
+  const row = ev.target.closest('.list-group-item[data-idx]');
+  if(!row) return;
+  const idx = row.getAttribute('data-idx');
+  if(idx === null || idx === undefined) return;
+  _tplGuardOrRun(() => _populateTriggerEditorFromTemplate(idx));
+});
+
+document.getElementById('trigger-editor-triggers-container').addEventListener('click', (ev)=>{
+  const rm = ev.target.closest('.remove-trigger');
+  if(rm){
+    ev.preventDefault();
+    const row = rm.closest('.trigger-row');
+    if(row) row.remove();
+    return;
+  }
+
+  const up = ev.target.closest('.move-up');
+  if(up){
+    ev.preventDefault();
+    const row = up.closest('.trigger-row');
+    if(!row || !row.parentElement) return;
+    const prev = row.previousElementSibling;
+    if(prev) row.parentElement.insertBefore(row, prev);
+    return;
+  }
+
+  const down = ev.target.closest('.move-down');
+  if(down){
+    ev.preventDefault();
+    const row = down.closest('.trigger-row');
+    if(!row || !row.parentElement) return;
+    const next = row.nextElementSibling;
+    if(next) row.parentElement.insertBefore(next, row);
+    return;
   }
 });
+
+// --- Tab init + navigation guards ---
+_setTemplatesActiveTab(_readInitialTemplatesTab(), {pushHash: false});
+
+document.getElementById('templates-tab-nav').addEventListener('click', (ev) => {
+  const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-tab]') : null;
+  if(!btn) return;
+  ev.preventDefault();
+  const tab = String(btn.getAttribute('data-tab') || '');
+  if(!tab) return;
+  if(tab === _templatesActiveTab) return;
+
+  const act = () => _setTemplatesActiveTab(tab);
+  if(_templatesActiveTab === 'triggers'){
+    _tplGuardOrRun(act);
+  }else{
+    act();
+  }
+});
+
+// Track edits in the trigger-template editor.
+const triggersPane = document.getElementById('templates-tab-triggers');
+if(triggersPane){
+  triggersPane.addEventListener('input', () => _tplScheduleDirtyRecalc(), true);
+  triggersPane.addEventListener('change', () => { try{ _tplSetDirtyFlagFromUI(); }catch(e){ _tplDirty = true; } }, true);
+}
+
+// Warn on tab close / reload.
+window.addEventListener('beforeunload', (e) => {
+  if(_tplAllowUnloadOnce) return;
+  try{ _tplSetDirtyFlagFromUI(); }catch(err){ _tplDirty = true; }
+  if(!_tplDirty) return;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
+// Intercept in-app navigation (including switching to other pages).
+document.addEventListener('click', (e) => {
+  try{ _tplSetDirtyFlagFromUI(); }catch(err){ _tplDirty = true; }
+  if(!_tplDirty) return;
+  const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+  if(!a) return;
+  const href = String(a.getAttribute('href') || '').trim();
+  if(!href) return;
+  if(href.startsWith('#')) return;
+  if(href.toLowerCase().startsWith('javascript:')) return;
+  if(e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+
+  try{
+    const url = new URL(href, window.location.href);
+    if(url.origin !== window.location.origin) return;
+    e.preventDefault();
+    _tplShowUnsavedPrompt(() => { window.location.href = url.href; });
+  }catch(err){
+    // ignore
+  }
+}, true);
+
+// Seed baseline for the editor.
+try{ _tplSetBaselineFromUI(); }catch(e){}
 
 // initial load
 loadTemplates();
