@@ -42,6 +42,7 @@
       <option value="">(select template)</option>
     </select>
     <button id="load-trigger-template-btn" class="btn btn-sm btn-outline-primary">Load Template</button>
+    <button id="save-trigger-template-btn" class="btn btn-sm btn-outline-success" type="button" disabled>Save As Template</button>
   </div>
   <div id="triggers-container"></div>
   <div class="mb-3 mt-2">
@@ -190,6 +191,81 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   const tplSel = document.getElementById('trigger-template-select');
   triggerTemplates.forEach((t,i)=>{ const opt = document.createElement('option'); opt.value = i; opt.text = t.label + ' — ' + (Array.isArray(t.times)?t.times.length: (t.spec? (Array.isArray(t.spec)?t.spec.length:'1'):'0')) + ' triggers'; tplSel.appendChild(opt); });
   const container = document.getElementById('triggers-container');
+  const saveTplBtn = document.getElementById('save-trigger-template-btn');
+
+  function _refreshTriggerTemplateSelect(list){
+    const sel = document.getElementById('trigger-template-select');
+    if(!sel) return;
+    sel.innerHTML = '<option value="">(select template)</option>';
+    (Array.isArray(list) ? list : []).forEach((t,i)=> {
+      const opt = document.createElement('option');
+      opt.value = i;
+      const n = Array.isArray(t.times) ? t.times.length : (t.spec ? (Array.isArray(t.spec) ? t.spec.length : 1) : 0);
+      opt.text = String(t.label || 'Template') + ' - ' + String(n) + ' triggers';
+      sel.appendChild(opt);
+    });
+  }
+
+  function _collectTimesFromUI(){
+    const times = [];
+    for(const row of container.children){
+      let minsRaw = row.querySelector('input[name="minutes"]').value;
+      const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
+      const actionType = String(row.querySelector('select[name="actionType"]').value || 'companion').toLowerCase();
+      const enabled = !!(row.querySelector('input[name="enabled"]') ? row.querySelector('input[name="enabled"]').checked : true);
+      const tmplIdx = row.querySelector('select[name="buttonTemplate"]').value;
+      let buttonURL = row.querySelector('input[name="buttonURL"]').value || '';
+
+      // Minutes: required unless type==AT (AT is always saved as 0)
+      if(String(type).toUpperCase() === 'AT'){
+        minsRaw = '0';
+        const mi = row.querySelector('input[name="minutes"]');
+        if(mi){ mi.value = '0'; mi.disabled = true; }
+      }else if((minsRaw === null || minsRaw === undefined || String(minsRaw).trim() === '')){
+        throw new Error('Minutes required for non-AT triggers');
+      }
+      const mins = parseInt(minsRaw,10);
+      if(Number.isNaN(mins) || mins < 0){ throw new Error('Minutes must be a non-negative integer'); }
+
+      if(actionType === 'api'){
+        const method = String(row.querySelector('select[name="apiMethod"]').value || 'POST').toUpperCase();
+        const path = String(row.querySelector('input[name="apiPath"]').value || '').trim();
+        const bodyRaw = String(row.querySelector('textarea[name="apiBody"]').value || '').trim();
+        const normPath = normalizeApiPath(path);
+        if(!normPath || !normPath.startsWith('/api/')){ throw new Error('API path must be like /videohub/... (the /api prefix is added automatically)'); }
+        let body = undefined;
+        if(bodyRaw){
+          try{ body = JSON.parse(bodyRaw); }
+          catch(e){ throw new Error('API body must be valid JSON'); }
+        }
+        const api = {method, path: normPath};
+        if(body !== undefined) api.body = body;
+        times.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'api', api});
+        continue;
+      }
+
+      // If a template selected, use its buttonURL (and ignore user input)
+      if(tmplIdx !== ''){
+        const t = templates[parseInt(tmplIdx,10)];
+        if(t){
+          if(t.buttonURL) buttonURL = t.buttonURL;
+          else if(t.pattern && /^\d+\/\d+\/\d+$/.test(t.pattern)) buttonURL = `location/${t.pattern}/press`;
+        }
+      }
+
+      // buttonURL must be present and valid now
+      if(!buttonURL || buttonURL.trim() === ''){ throw new Error('Each trigger must have a button template selected or a valid button URL'); }
+      // allow short form or full, but normalize short here into full
+      if(/^\d+\/\d+\/\d+$/.test(buttonURL)){
+        buttonURL = `location/${buttonURL}/press`;
+      } else if(!/^location\/\d+\/\d+\/\d+\/press$/.test(buttonURL)){
+        throw new Error('buttonURL must be like "1/2/3" or "location/1/2/3/press"');
+      }
+
+      times.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'companion', buttonURL});
+    }
+    return times;
+  }
 
   // detect edit mode from URL: /calendar/edit/<id>
   const m = window.location.pathname.match(/\/calendar\/edit\/(\d+)$/);
@@ -255,6 +331,38 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         }
       }
     }catch(e){ console.error('Failed loading event for edit', e); }
+  }
+
+  // Enable "Save As Template" only when editing an existing event.
+  if(saveTplBtn) saveTplBtn.disabled = !editId;
+  if(saveTplBtn){
+    saveTplBtn.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      if(!editId) return;
+      try{
+        const times = _collectTimesFromUI();
+        if(!times.length){ alert('This event has no triggers to save.'); return; }
+        const defaultLabel = String(document.querySelector('input[name="name"]').value || '').trim() || `Event ${editId}`;
+        const label = String(prompt('Trigger template label:', defaultLabel) || '').trim();
+        if(!label) return;
+
+        const r = await fetch('/api/templates/trigger', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({label, times}),
+        });
+        const data = await r.json().catch(() => ({}));
+        if(!r.ok || !data.ok){
+          throw new Error((data && data.error) ? data.error : 'Save failed');
+        }
+
+        const all = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'}).then(r => r.json()).catch(() => ({}));
+        _refreshTriggerTemplateSelect(all.triggers || []);
+        alert('Saved trigger template.');
+      }catch(e){
+        alert('Failed to save trigger template: ' + String(e.message || e));
+      }
+    });
   }
 
   document.getElementById('add-trigger-btn').addEventListener('click', (ev)=>{
