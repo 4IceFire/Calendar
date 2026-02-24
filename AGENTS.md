@@ -45,3 +45,20 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - UI pages are protected by role-based page access in the Web UI (`require_page` checks).
 - API endpoints are intentionally callable without login unless an endpoint is explicitly marked otherwise.
 - For VideoHub preset visibility, enforce role restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
+
+## VideoHub Role Controls (Where To Look)
+- Storage: role settings live in `auth.db` table `roles` and are migrated/used in `webui.py`.
+- Routing page allow-lists (per role):
+  - Columns: `videohub_allowed_outputs`, `videohub_allowed_inputs`
+  - Semantics: blank/NULL/"all" => allow all; otherwise JSON list or CSV of 1-based port numbers.
+  - UI: configured on Access Levels page; enforced on `/routing` page.
+- VideoHub presets visibility (per role, UI-only):
+  - Column: `videohub_allowed_presets`
+  - Semantics: blank/NULL/"all" => all presets visible; otherwise JSON list or CSV of 1-based preset IDs.
+  - UI config: `templates/admin_roles.html` + autosave payload in `static/app.js`.
+  - Enforcement: only in the VideoHub page UI (the `/api/videohub/presets*` endpoints remain unauthenticated by design).
+- VideoHub preset editing toggle (per role, UI-only):
+  - Column: `videohub_can_edit_presets` (INTEGER, default allow when NULL for backward compatibility).
+  - Meaning: when off, VideoHub page allows applying presets but disables create/save/delete/lock and grid/name edits.
+  - UI config: checkbox on Access Levels page; autosave in `static/app.js`.
+  - Enforcement: `webui.py` passes `can_edit_presets` into `templates/videohub.html` via `data-can-edit-presets`.

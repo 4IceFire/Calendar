@@ -45,6 +45,8 @@ async function loadEvents(){
       fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'})
     ]);
     const data = await resp.json();
+    // cache for action handlers (e.g. Save Template)
+    try{ window.__calendarEvents = Array.isArray(data) ? data : []; }catch(e){}
     const tplData = await tplResp.json().catch(()=>({buttons:[]}));
     const buttons = Array.isArray(tplData.buttons) ? tplData.buttons : [];
     // build mapping of buttonURL and short-pattern -> label
@@ -152,6 +154,7 @@ async function loadEvents(){
         <td>${triggersHtml}</td>
         <td>
           <div class="btn-group" role="group">
+            <button class="btn btn-sm btn-outline-success save-template" data-id="${e.id}">Save Template</button>
             <button class="btn btn-sm btn-outline-primary edit-event" data-id="${e.id}">Edit</button>
             <button class="btn btn-sm btn-outline-danger delete-event" data-id="${e.id}">Delete</button>
           </div>
@@ -179,6 +182,37 @@ document.getElementById('add-event').addEventListener('click', async ()=>{
 document.getElementById('events-body').addEventListener('click', async (ev) => {
   const btn = ev.target.closest('button');
   if(!btn) return;
+  if(btn.classList.contains('save-template')){
+    const id = btn.getAttribute('data-id');
+    if(!id) return;
+    const events = Array.isArray(window.__calendarEvents) ? window.__calendarEvents : [];
+    const evObj = events.find(x => String(x.id) === String(id));
+    if(!evObj) { alert('Event not found'); return; }
+    const times = Array.isArray(evObj.times) ? evObj.times : [];
+    if(!times.length){ alert('This event has no triggers to save.'); return; }
+
+    const defaultLabel = String(evObj.name || '').trim() || `Event ${id}`;
+    const label = String(prompt('Trigger template label:', defaultLabel) || '').trim();
+    if(!label) return;
+
+    try{
+      const r = await fetch('/api/templates/trigger', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({label, times}),
+      });
+      const data = await r.json().catch(() => ({}));
+      if(!r.ok || !data.ok){
+        throw new Error((data && data.error) ? data.error : 'Save failed');
+      }
+      if(confirm('Saved trigger template. Open Templates page?')){
+        window.location.href = '/templates#triggers';
+      }
+    }catch(e){
+      alert('Failed to save trigger template: ' + String(e.message || e));
+    }
+    return;
+  }
   if(btn.classList.contains('edit-event')){
     const id = btn.getAttribute('data-id');
     // TODO: implement edit UI
