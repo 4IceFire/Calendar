@@ -906,7 +906,7 @@ document.getElementById('buttons-list').addEventListener('click', async (ev)=>{
     renderButtons(window.__buttonTemplates || []);
   }else if(type === 'button-save'){
     const i = parseInt(idx, 10);
-    const row = btn.closest('.d-flex.align-items-center.mb-1');
+    const row = btn.closest('.list-group-item');
     const labelInput = row ? row.querySelector('[data-role="button-label"]') : null;
     const patternInput = row ? row.querySelector('[data-role="button-pattern"]') : null;
     const label = String(labelInput ? labelInput.value : '').trim();
@@ -944,7 +944,7 @@ document.getElementById('buttons-list').addEventListener('keydown', (ev)=>{
   if(ev.key !== 'Enter') return;
   const input = ev.target.closest('[data-role="button-label"], [data-role="button-pattern"]');
   if(!input) return;
-  const row = input.closest('.d-flex.align-items-center.mb-1');
+  const row = input.closest('.list-group-item');
   const saveBtn = row ? row.querySelector('button[data-type="button-save"]') : null;
   if(saveBtn){
     ev.preventDefault();
