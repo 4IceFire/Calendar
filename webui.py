@@ -9,6 +9,7 @@ import shlex
 from collections import deque
 import sqlite3
 import secrets
+import uuid
 
 from werkzeug.serving import make_server
 import json
@@ -2059,7 +2060,13 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
     # Map buttonURL -> template info (for nicer display)
     tpl_by_url: dict[str, dict] = {}
     try:
-        arr = _read_json_file(BUTTON_TEMPLATES)
+        tree, btn_changed = _load_button_templates_tree()
+        if btn_changed:
+            try:
+                _save_button_templates_tree(tree)
+            except Exception:
+                pass
+        arr = _flatten_button_templates_tree(tree)
         for tpl in arr or []:
             if not isinstance(tpl, dict):
                 continue
@@ -2146,6 +2153,21 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
             if not button_pattern:
                 button_pattern = pattern
 
+            # Prefer explicit trigger name; otherwise fall back per action type.
+            trig_name = ''
+            try:
+                trig_name = str(getattr(trig, 'name', '') or '').strip() if trig is not None else ''
+            except Exception:
+                trig_name = ''
+            if not trig_name:
+                if action_type == 'api':
+                    try:
+                        trig_name = str((api or {}).get('path') or '').strip() if isinstance(api, dict) else ''
+                    except Exception:
+                        trig_name = ''
+                else:
+                    trig_name = button_label or url or ''
+
             out.append(
                 {
                     'due_ms': due_ms,
@@ -2154,6 +2176,7 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
                     'event_id': event_id,
                     'offset_min': offset_min,
                     'offset': offset_label,
+                    'name': trig_name,
                     'actionType': action_type,
                     'buttonURL': url if action_type != 'api' else '',
                     'api': api if (action_type == 'api' and isinstance(api, dict)) else None,
@@ -2376,13 +2399,22 @@ def _button_template_effective_url(tpl: dict) -> str:
     return ''
 
 
-def _find_duplicate_button_template(arr: list, *, url: str, pattern: str, exclude_idx: int | None = None) -> dict | None:
+def _find_duplicate_button_template(
+    arr: list,
+    *,
+    url: str,
+    pattern: str,
+    exclude_idx: int | None = None,
+    exclude_id: str | None = None,
+) -> dict | None:
     url = (url or '').strip()
     pattern = (pattern or '').strip()
     if not url and not pattern:
         return None
     for i, tpl in enumerate(arr or []):
         if exclude_idx is not None and i == exclude_idx:
+            continue
+        if exclude_id is not None and str(tpl.get('id') or '').strip() == str(exclude_id).strip():
             continue
         if not isinstance(tpl, dict):
             continue
@@ -2391,6 +2423,7 @@ def _find_duplicate_button_template(arr: list, *, url: str, pattern: str, exclud
         if url and existing_url == url:
             return {
                 'index': i,
+                'id': str(tpl.get('id') or '').strip() or None,
                 'label': (tpl.get('label') or '').strip(),
                 'pattern': existing_pattern,
                 'buttonURL': existing_url,
@@ -2398,11 +2431,161 @@ def _find_duplicate_button_template(arr: list, *, url: str, pattern: str, exclud
         if pattern and existing_pattern == pattern:
             return {
                 'index': i,
+                'id': str(tpl.get('id') or '').strip() or None,
                 'label': (tpl.get('label') or '').strip(),
                 'pattern': existing_pattern,
                 'buttonURL': existing_url,
             }
     return None
+
+
+def _uuid4_str() -> str:
+    try:
+        return str(uuid.uuid4())
+    except Exception:
+        # Extremely defensive fallback
+        return str(int(time.time() * 1000))
+
+
+def _load_button_templates_tree() -> tuple[dict, bool]:
+    """Load button templates as a folder tree (with backward compatible migration).
+
+    File formats supported:
+    - Legacy: list[template]
+    - Current: {version, folders, templates}
+    """
+    raw = _read_json_file(BUTTON_TEMPLATES)
+    changed = False
+
+    if isinstance(raw, dict):
+        folders = raw.get('folders') if isinstance(raw.get('folders'), list) else []
+        templates = raw.get('templates') if isinstance(raw.get('templates'), list) else []
+    elif isinstance(raw, list):
+        folders = []
+        templates = raw
+        changed = True
+    else:
+        folders = []
+        templates = []
+        changed = True
+
+    # Normalize folders
+    norm_folders: list[dict] = []
+    folder_ids: set[str] = set()
+    for i, f in enumerate(folders):
+        if not isinstance(f, dict):
+            changed = True
+            continue
+        fid = str(f.get('id') or '').strip() or _uuid4_str()
+        if fid in folder_ids:
+            fid = _uuid4_str()
+            changed = True
+        folder_ids.add(fid)
+        name = str(f.get('name') or '').strip() or 'Folder'
+        parent_id = str(f.get('parentId') or '').strip() or None
+        order = f.get('order', i)
+        try:
+            order = int(order)
+        except Exception:
+            order = i
+            changed = True
+        norm_folders.append({'id': fid, 'name': name, 'parentId': parent_id, 'order': order})
+
+    # Normalize templates
+    norm_templates: list[dict] = []
+    for i, t in enumerate(templates):
+        if not isinstance(t, dict):
+            changed = True
+            continue
+        tid = str(t.get('id') or '').strip() or _uuid4_str()
+        label = str(t.get('label') or '').strip()
+        pattern = str(t.get('pattern') or '').strip()
+        url = str(t.get('buttonURL') or '').strip()
+        if not url and pattern:
+            url = f'location/{pattern}/press'
+            changed = True
+        folder_id = str(t.get('folderId') or '').strip() or None
+        order = t.get('order', i)
+        try:
+            order = int(order)
+        except Exception:
+            order = i
+            changed = True
+        norm_templates.append(
+            {
+                'id': tid,
+                'label': label,
+                'pattern': pattern,
+                'buttonURL': url,
+                'folderId': folder_id,
+                'order': order,
+            }
+        )
+
+    # Ensure folder references are valid (drop to root if missing)
+    folder_ids = {f['id'] for f in norm_folders}
+    for t in norm_templates:
+        if t.get('folderId') and t['folderId'] not in folder_ids:
+            t['folderId'] = None
+            changed = True
+    for f in norm_folders:
+        pid = f.get('parentId')
+        if pid and pid not in folder_ids:
+            f['parentId'] = None
+            changed = True
+
+    tree = {'version': 2, 'folders': norm_folders, 'templates': norm_templates}
+    return tree, changed
+
+
+def _save_button_templates_tree(tree: dict) -> bool:
+    if not isinstance(tree, dict):
+        return False
+    out = {
+        'version': 2,
+        'folders': tree.get('folders') if isinstance(tree.get('folders'), list) else [],
+        'templates': tree.get('templates') if isinstance(tree.get('templates'), list) else [],
+    }
+    return _write_json_file(BUTTON_TEMPLATES, out)
+
+
+def _flatten_button_templates_tree(tree: dict) -> list[dict]:
+    """Return templates in a stable UI order (root + depth-first by folder order)."""
+    templates = tree.get('templates') if isinstance(tree, dict) else None
+    folders = tree.get('folders') if isinstance(tree, dict) else None
+    templates = templates if isinstance(templates, list) else []
+    folders = folders if isinstance(folders, list) else []
+
+    # Build folder children map
+    folder_children: dict[str | None, list[dict]] = {}
+    for f in folders:
+        if not isinstance(f, dict):
+            continue
+        pid = f.get('parentId') if f.get('parentId') else None
+        folder_children.setdefault(pid, []).append(f)
+    for pid in list(folder_children.keys()):
+        folder_children[pid].sort(key=lambda x: int(x.get('order', 0)))
+
+    # Build template children map
+    tpl_children: dict[str | None, list[dict]] = {}
+    for t in templates:
+        if not isinstance(t, dict):
+            continue
+        fid = t.get('folderId') if t.get('folderId') else None
+        tpl_children.setdefault(fid, []).append(t)
+    for fid in list(tpl_children.keys()):
+        tpl_children[fid].sort(key=lambda x: int(x.get('order', 0)))
+
+    out: list[dict] = []
+
+    def walk_folder(parent_id: str | None) -> None:
+        for t in tpl_children.get(parent_id, []):
+            out.append(t)
+        for f in folder_children.get(parent_id, []):
+            walk_folder(str(f.get('id')))
+
+    walk_folder(None)
+    return out
 
 
 def _replace_button_url_everywhere(old_url: str, new_url: str) -> dict:
@@ -2520,7 +2703,14 @@ def _replace_button_url_everywhere(old_url: str, new_url: str) -> dict:
 
 @app.route('/api/templates')
 def api_get_templates():
-    btns = _read_json_file(BUTTON_TEMPLATES)
+    tree, btn_changed = _load_button_templates_tree()
+    if btn_changed:
+        try:
+            _save_button_templates_tree(tree)
+        except Exception:
+            pass
+    btns = _flatten_button_templates_tree(tree)
+
     trigs = _read_json_file(TRIGGER_TEMPLATES)
     # normalize older 'spec' entries to 'times'
     normalized = []
@@ -2528,6 +2718,10 @@ def api_get_templates():
     for t in trigs:
         if not isinstance(t, dict):
             normalized.append(t); continue
+        if not str(t.get('id') or '').strip():
+            t = dict(t)
+            t['id'] = _uuid4_str()
+            changed = True
         if 'times' not in t and 'spec' in t:
             val = t.get('spec')
             if isinstance(val, str):
@@ -2540,6 +2734,22 @@ def api_get_templates():
             t['times'] = val_parsed
             t.pop('spec', None)
             changed = True
+
+        times = _coerce_trigger_times_list(t.get('times'))
+        norm_times = []
+        for spec in times:
+            if not isinstance(spec, dict):
+                norm_times.append(spec)
+                continue
+            if not str(spec.get('uid') or '').strip():
+                spec = dict(spec)
+                spec['uid'] = _uuid4_str()
+                changed = True
+            norm_times.append(spec)
+        if t.get('times') != norm_times:
+            t = dict(t)
+            t['times'] = norm_times
+            changed = True
         normalized.append(t)
     trigs = normalized
     # if we normalized old entries, persist the normalized form back to file
@@ -2548,7 +2758,7 @@ def api_get_templates():
             _write_json_file(TRIGGER_TEMPLATES, trigs)
         except Exception:
             pass
-    return jsonify({'buttons': btns, 'triggers': trigs})
+    return jsonify({'buttons': btns, 'buttons_tree': tree, 'triggers': trigs})
 
 
 @app.route('/api/templates/button', methods=['POST'])
@@ -2556,13 +2766,15 @@ def api_add_button_template():
     body = request.get_json() or {}
     label = (body.get('label') or '').strip()
     pattern = (body.get('pattern') or '').strip()
+    folder_id = (body.get('folderId') or body.get('folder_id') or '').strip() or None
     if not label or not pattern:
         return jsonify({'ok': False, 'error': 'label and pattern required'}), 400
     # validate pattern: must be three integers separated by '/'
     if not re.match(r'^\d+\/\d+\/\d+$', pattern):
         return jsonify({'ok': False, 'error': 'pattern must be like "1/0/1" (three integers separated by "/")'}), 400
 
-    arr = _read_json_file(BUTTON_TEMPLATES)
+    tree, changed = _load_button_templates_tree()
+    arr = tree.get('templates') if isinstance(tree.get('templates'), list) else []
     button_url = f"location/{pattern}/press"
     dup = _find_duplicate_button_template(arr, url=button_url, pattern=pattern)
     if dup:
@@ -2571,27 +2783,44 @@ def api_add_button_template():
             'error': 'duplicate button template',
             'existing': dup,
         }), 409
-    arr.append({'label': label, 'pattern': pattern, 'buttonURL': button_url})
-    ok = _write_json_file(BUTTON_TEMPLATES, arr)
+
+    # order within the target folder/root (append)
+    try:
+        max_order = max([int(t.get('order', -1)) for t in arr if isinstance(t, dict) and (t.get('folderId') or None) == folder_id] or [-1])
+    except Exception:
+        max_order = -1
+
+    tpl = {'id': _uuid4_str(), 'label': label, 'pattern': pattern, 'buttonURL': button_url, 'folderId': folder_id, 'order': int(max_order) + 1}
+    arr.append(tpl)
+    tree['templates'] = arr
+    ok = _save_button_templates_tree(tree)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
-    return jsonify({'ok': True, 'template': arr[-1]})
+    return jsonify({'ok': True, 'template': tpl})
 
 
-@app.route('/api/templates/button/<int:idx>', methods=['DELETE'])
-def api_delete_button_template(idx: int):
-    arr = _read_json_file(BUTTON_TEMPLATES)
-    if idx < 0 or idx >= len(arr):
-        return jsonify({'ok': False, 'error': 'index out of range'}), 404
-    removed = arr.pop(idx)
-    ok = _write_json_file(BUTTON_TEMPLATES, arr)
+@app.route('/api/templates/button/<tpl_id>', methods=['DELETE'])
+def api_delete_button_template(tpl_id: str):
+    tpl_id = str(tpl_id or '').strip()
+    tree, changed = _load_button_templates_tree()
+    arr = tree.get('templates') if isinstance(tree.get('templates'), list) else []
+    idx = None
+    for i, t in enumerate(arr):
+        if isinstance(t, dict) and str(t.get('id') or '').strip() == tpl_id:
+            idx = i
+            break
+    if idx is None:
+        return jsonify({'ok': False, 'error': 'template not found'}), 404
+    removed = arr.pop(int(idx))
+    tree['templates'] = arr
+    ok = _save_button_templates_tree(tree)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
     return jsonify({'ok': True, 'removed': removed})
 
 
-@app.route('/api/templates/button/<int:idx>', methods=['PUT'])
-def api_update_button_template(idx: int):
+@app.route('/api/templates/button/<tpl_id>', methods=['PUT'])
+def api_update_button_template(tpl_id: str):
     body = request.get_json() or {}
     label = (body.get('label') or '').strip()
     pattern = (body.get('pattern') or '').strip()
@@ -2611,11 +2840,18 @@ def api_update_button_template(idx: int):
 
     new_url = f'location/{pattern}/press'
 
-    arr = _read_json_file(BUTTON_TEMPLATES)
-    if idx < 0 or idx >= len(arr):
-        return jsonify({'ok': False, 'error': 'index out of range'}), 404
+    tpl_id = str(tpl_id or '').strip()
+    tree, changed = _load_button_templates_tree()
+    arr = tree.get('templates') if isinstance(tree.get('templates'), list) else []
+    idx = None
+    for i, t in enumerate(arr):
+        if isinstance(t, dict) and str(t.get('id') or '').strip() == tpl_id:
+            idx = i
+            break
+    if idx is None:
+        return jsonify({'ok': False, 'error': 'template not found'}), 404
 
-    dup = _find_duplicate_button_template(arr, url=new_url, pattern=pattern, exclude_idx=idx)
+    dup = _find_duplicate_button_template(arr, url=new_url, pattern=pattern, exclude_idx=int(idx), exclude_id=tpl_id)
     if dup:
         return jsonify({
             'ok': False,
@@ -2623,20 +2859,53 @@ def api_update_button_template(idx: int):
             'existing': dup,
         }), 409
 
-    old = arr[idx] if isinstance(arr[idx], dict) else {}
+    old = arr[int(idx)] if isinstance(arr[int(idx)], dict) else {}
     try:
         old_url = str(old.get('buttonURL') or (f"location/{old.get('pattern')}/press" if old.get('pattern') else '')).strip()
     except Exception:
         old_url = ''
 
-    arr[idx] = {'label': label, 'pattern': pattern, 'buttonURL': new_url}
-    ok = _write_json_file(BUTTON_TEMPLATES, arr)
+    arr[int(idx)] = {
+        'id': tpl_id,
+        'label': label,
+        'pattern': pattern,
+        'buttonURL': new_url,
+        'folderId': old.get('folderId') if isinstance(old, dict) else None,
+        'order': old.get('order') if isinstance(old, dict) else 0,
+    }
+    tree['templates'] = arr
+    ok = _save_button_templates_tree(tree)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
 
     # Propagate URL change across stored data
     replace_stats = _replace_button_url_everywhere(old_url, new_url)
-    return jsonify({'ok': True, 'template': arr[idx], 'replaced': {'old': old_url, 'new': new_url}, **replace_stats})
+    return jsonify({'ok': True, 'template': arr[int(idx)], 'replaced': {'old': old_url, 'new': new_url}, **replace_stats})
+
+
+@app.route('/api/templates/buttons_tree', methods=['GET'])
+def api_get_buttons_tree():
+    tree, changed = _load_button_templates_tree()
+    if changed:
+        try:
+            _save_button_templates_tree(tree)
+        except Exception:
+            pass
+    return jsonify({'ok': True, 'tree': tree})
+
+
+@app.route('/api/templates/buttons_tree', methods=['PUT'])
+def api_put_buttons_tree():
+    body = request.get_json() or {}
+    tree = body.get('tree') if isinstance(body, dict) else None
+    if not isinstance(tree, dict):
+        return jsonify({'ok': False, 'error': 'tree required'}), 400
+
+    # Save as-is (UI is the authority). A subsequent GET /api/templates will normalize.
+    ok = _save_button_templates_tree(tree)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    return jsonify({'ok': True})
 
 
 @app.route('/api/templates/trigger', methods=['POST'])
@@ -2675,9 +2944,12 @@ def api_add_trigger_template():
         if err:
             return jsonify({'ok': False, 'error': err}), 400
         if t3:
+            if not str(t3.get('uid') or '').strip():
+                t3 = dict(t3)
+                t3['uid'] = _uuid4_str()
             normalized_times.append(t3)
     arr = _read_json_file(TRIGGER_TEMPLATES)
-    arr.append({'label': label, 'times': normalized_times})
+    arr.append({'id': _uuid4_str(), 'label': label, 'times': normalized_times})
     ok = _write_json_file(TRIGGER_TEMPLATES, arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
@@ -2729,11 +3001,16 @@ def api_update_trigger_template(idx: int):
         if err:
             return jsonify({'ok': False, 'error': err}), 400
         if t3:
+            if not str(t3.get('uid') or '').strip():
+                t3 = dict(t3)
+                t3['uid'] = _uuid4_str()
             normalized_times.append(t3)
     arr = _read_json_file(TRIGGER_TEMPLATES)
     if idx < 0 or idx >= len(arr):
         return jsonify({'ok': False, 'error': 'index out of range'}), 404
-    arr[idx] = {'label': label, 'times': normalized_times}
+    prev = arr[idx] if isinstance(arr[idx], dict) else {}
+    tpl_id = str(prev.get('id') or '').strip() or _uuid4_str()
+    arr[idx] = {'id': tpl_id, 'label': label, 'times': normalized_times}
     ok = _write_json_file(TRIGGER_TEMPLATES, arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
@@ -2765,6 +3042,8 @@ def api_ui_events():
                     {
                         'minutes': t.minutes,
                         'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)),
+                        'uid': getattr(t, 'uid', None),
+                        'name': str(getattr(t, 'name', '') or '').strip(),
                         'enabled': bool(getattr(t, 'enabled', True)),
                         'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
                         'buttonURL': t.buttonURL,
@@ -3775,6 +4054,20 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
         out['minutes'] = int(raw.get('minutes', 0) or 0)
     except Exception:
         out['minutes'] = 0
+
+    # Optional display name + stable uid (used for UI organization)
+    try:
+        name = str(raw.get('name') or '').strip()
+    except Exception:
+        name = ''
+    if name:
+        out['name'] = name
+    try:
+        uid_val = str(raw.get('uid') or '').strip()
+    except Exception:
+        uid_val = ''
+    if uid_val:
+        out['uid'] = uid_val
 
     action_type = str(raw.get('actionType') or raw.get('action_type') or '').strip().lower()
 
@@ -5285,6 +5578,8 @@ def api_get_event_ui(ident: int):
                 {
                     'minutes': t.minutes,
                     'typeOfTrigger': getattr(t.typeOfTrigger, 'name', str(t.typeOfTrigger)),
+                    'uid': getattr(t, 'uid', None),
+                    'name': str(getattr(t, 'name', '') or '').strip(),
                     'enabled': bool(getattr(t, 'enabled', True)),
                     'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
                     'buttonURL': t.buttonURL,
@@ -5366,8 +5661,21 @@ def api_update_event_ui(ident: int):
             btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
             api_obj = t3.get('api') if action_type == 'api' else None
             enabled = bool(t3.get('enabled', True))
+            trig_name = str(t3.get('name') or '').strip()
+            trig_uid = str(t3.get('uid') or '').strip() or _uuid4_str()
 
-            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj, enabled=enabled))
+            times.append(
+                TimeOfTrigger(
+                    mins,
+                    typ,
+                    btn_final,
+                    name=trig_name,
+                    uid=trig_uid,
+                    actionType=action_type,
+                    api=api_obj,
+                    enabled=enabled,
+                )
+            )
 
         # replace fields on existing event object
         ev.name = name
@@ -5377,7 +5685,6 @@ def api_update_event_ui(ident: int):
         ev.repeating = repeating
         ev.active = active
         ev.times = times
-        ev.times.sort()
 
         storage.save_events(events, events_file)
         return jsonify({'ok': True, 'id': ident})
@@ -5456,8 +5763,21 @@ def api_create_event_ui():
             btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
             api_obj = t3.get('api') if action_type == 'api' else None
             enabled = bool(t3.get('enabled', True))
+            trig_name = str(t3.get('name') or '').strip()
+            trig_uid = str(t3.get('uid') or '').strip() or _uuid4_str()
 
-            times.append(TimeOfTrigger(mins, typ, btn_final, actionType=action_type, api=api_obj, enabled=enabled))
+            times.append(
+                TimeOfTrigger(
+                    mins,
+                    typ,
+                    btn_final,
+                    name=trig_name,
+                    uid=trig_uid,
+                    actionType=action_type,
+                    api=api_obj,
+                    enabled=enabled,
+                )
+            )
 
         ev = Event(name, new_id, WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday, date_obj, time_obj, repeating, times, active)
         events.append(ev)
