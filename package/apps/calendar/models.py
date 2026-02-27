@@ -27,6 +27,8 @@ class TimeOfTrigger:
         typeOfTrigger: TypeofTime,
         buttonURL: str = "",
         *,
+        name: str = "",
+        uid: str | None = None,
         actionType: str = "companion",
         api: Optional[Dict[str, Any]] = None,
         enabled: bool = True,
@@ -34,6 +36,8 @@ class TimeOfTrigger:
         self.minutes = minutes
         self.typeOfTrigger = typeOfTrigger
         self.buttonURL = buttonURL
+        self.name = str(name or "").strip()
+        self.uid = str(uid).strip() if uid is not None else None
         self.actionType = (actionType or "companion").lower()
         self.api: Optional[Dict[str, Any]] = api if isinstance(api, dict) else None
         self.enabled = bool(enabled)
@@ -53,6 +57,11 @@ class TimeOfTrigger:
             "typeOfTrigger": self.typeOfTrigger.name,
             "enabled": bool(getattr(self, "enabled", True)),
         }
+
+        if self.uid:
+            out["uid"] = self.uid
+        if self.name:
+            out["name"] = self.name
 
         if self.actionType == "api":
             out["actionType"] = "api"
@@ -92,7 +101,6 @@ class Event:
         self.repeating = repeating
         self.active = active
         self.times = times
-        self.times.sort()
 
     def __str__(self) -> str:
         idpart = f"#{self.id} " if getattr(self, "id", None) is not None else ""
@@ -104,5 +112,5 @@ class TriggerJob:
     due: datetime
     event: Event = field(compare=False)
     occurrence: datetime = field(compare=False)
-    trigger_index: int = field(compare=False)
+    trigger_index: int = field(compare=True)
     trigger: TimeOfTrigger = field(compare=False)

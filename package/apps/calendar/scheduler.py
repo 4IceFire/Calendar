@@ -11,6 +11,88 @@ from package.apps.calendar.models import Event, TriggerJob
 from package.apps.calendar import storage, utils
 logger = utils.get_logger()
 
+_button_templates_cache: dict = {"mtime": None, "labels_by_url": {}}
+
+
+def _read_button_templates_any() -> list[dict]:
+    """Read button_templates.json in either legacy list or tree format."""
+    path = Path.cwd() / "button_templates.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8") or "[]")
+    except Exception:
+        return []
+
+    if isinstance(raw, dict):
+        templates = raw.get("templates")
+        return templates if isinstance(templates, list) else []
+    if isinstance(raw, list):
+        return raw
+    return []
+
+
+def _button_template_effective_url(tpl: dict) -> str:
+    if not isinstance(tpl, dict):
+        return ""
+    url = str(tpl.get("buttonURL") or "").strip()
+    if url:
+        return url
+    pattern = str(tpl.get("pattern") or "").strip()
+    if pattern:
+        return f"location/{pattern}/press"
+    return ""
+
+
+def _get_button_template_labels_by_url() -> dict[str, str]:
+    path = Path.cwd() / "button_templates.json"
+    try:
+        mtime = path.stat().st_mtime
+    except Exception:
+        mtime = None
+
+    if mtime is not None and _button_templates_cache.get("mtime") == mtime:
+        try:
+            return dict(_button_templates_cache.get("labels_by_url") or {})
+        except Exception:
+            return {}
+
+    labels: dict[str, str] = {}
+    try:
+        for tpl in _read_button_templates_any():
+            if not isinstance(tpl, dict):
+                continue
+            url = _button_template_effective_url(tpl)
+            if not url:
+                continue
+            label = str(tpl.get("label") or "").strip()
+            if label:
+                labels[url] = label
+    except Exception:
+        labels = {}
+
+    _button_templates_cache["mtime"] = mtime
+    _button_templates_cache["labels_by_url"] = labels
+    return dict(labels)
+
+
+def _resolve_trigger_display_name(trigger) -> str:
+    try:
+        n = str(getattr(trigger, "name", "") or "").strip()
+    except Exception:
+        n = ""
+    if n:
+        return n
+
+    action_type = str(getattr(trigger, "actionType", "companion") or "companion").lower()
+    if action_type == "api":
+        api = getattr(trigger, "api", None)
+        if isinstance(api, dict):
+            return str(api.get("path") or "").strip()
+        return "API"
+
+    url = str(getattr(trigger, "buttonURL", "") or "").strip()
+    labels = _get_button_template_labels_by_url()
+    return str(labels.get(url) or url or "").strip()
+
 
 class ClockScheduler:
     def __init__(self, events_file: str = storage.DEFAULT_EVENTS_FILE, poll_interval: float = 1.0, *, debug: bool = False) -> None:
@@ -198,6 +280,7 @@ class ClockScheduler:
             for job in sorted(self._heap):
                 action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
                 api = getattr(job.trigger, "api", None)
+                name = _resolve_trigger_display_name(job.trigger)
                 out.append(
                     {
                         "due": job.due.strftime("%Y-%m-%d %H:%M:%S"),
@@ -206,6 +289,7 @@ class ClockScheduler:
                         "event_id": getattr(job.event, "id", None),
                         "trigger_index": job.trigger_index,
                         "offset_min": job.trigger.timer,
+                        "name": name,
                         "actionType": action_type,
                         "url": job.trigger.buttonURL,
                         "api": api if isinstance(api, dict) else None,
@@ -320,18 +404,19 @@ class ClockScheduler:
 
     def _handle_trigger(self, job: TriggerJob) -> None:
         action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
+        name = _resolve_trigger_display_name(job.trigger)
         if action_type == "api":
             api = getattr(job.trigger, "api", None)
             m = str((api or {}).get("method") or "POST").upper() if isinstance(api, dict) else "POST"
             p = str((api or {}).get("path") or "") if isinstance(api, dict) else ""
             print(
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
-                f"offset={job.trigger.timer}min | api={m} {p}"
+                f"name='{name}' | offset={job.trigger.timer}min | api={m} {p}"
             )
         else:
             print(
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
-                f"offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
+                f"name='{name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
             )
 
         if action_type == "api":
@@ -454,15 +539,26 @@ class ClockScheduler:
                             # no upcoming jobs
                             self._next_due = None
                             self._announced_thresholds.clear()
-                if job.event.repeating and is_last_enabled_trigger(job.event, job.trigger_index):
-                    next_occ = next_weekly_occurrence(job.event, job.occurrence + timedelta(seconds=1))
-                    if next_occ is not None:
-                        with self._cv:
-                            push_triggers_for_occurrence(self._heap, job.event, next_occ, datetime.now())
-                            heapq.heapify(self._heap)
-                            self._dbg(
-                                f"Rescheduled weekly event #{getattr(job.event,'id',None)} '{job.event.name}' for {next_occ.strftime('%Y-%m-%d %H:%M:%S')}"
-                            )
+                if job.event.repeating:
+                    # Reschedule only after all triggers for the current occurrence have fired.
+                    still_pending = False
+                    with self._cv:
+                        for j in self._heap:
+                            try:
+                                if j.event is job.event and j.occurrence == job.occurrence:
+                                    still_pending = True
+                                    break
+                            except Exception:
+                                continue
+                    if not still_pending:
+                        next_occ = next_weekly_occurrence(job.event, job.occurrence + timedelta(seconds=1))
+                        if next_occ is not None:
+                            with self._cv:
+                                push_triggers_for_occurrence(self._heap, job.event, next_occ, datetime.now())
+                                heapq.heapify(self._heap)
+                                self._dbg(
+                                    f"Rescheduled weekly event #{getattr(job.event,'id',None)} '{job.event.name}' for {next_occ.strftime('%Y-%m-%d %H:%M:%S')}"
+                                )
 
 
 # Helper scheduling functions
@@ -533,21 +629,3 @@ def push_triggers_for_occurrence(
             heapq.heappush(heap, TriggerJob(due, event, occurrence, idx, trig))
 
 
-def is_last_enabled_trigger(event: Event, trigger_index: int) -> bool:
-    """Return True if trigger_index points to the last enabled trigger in event.times.
-
-    event.times is sorted by trigger offset (TimeOfTrigger.__lt__). The background
-    scheduler uses this to determine when to enqueue the next weekly occurrence.
-    """
-    last_idx = None
-    try:
-        for i, trig in enumerate(getattr(event, "times", []) or []):
-            try:
-                if bool(getattr(trig, "enabled", True)):
-                    last_idx = i
-            except Exception:
-                last_idx = i
-    except Exception:
-        last_idx = None
-
-    return last_idx is not None and int(trigger_index) == int(last_idx)

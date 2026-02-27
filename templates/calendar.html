@@ -67,6 +67,7 @@ async function loadEvents(){
       const mins = Number(t.minutes) || 0;
 
       const actionType = String(t.actionType || 'companion').toLowerCase();
+      const trigName = String((t && t.name) ? t.name : '').trim();
 
       // Represent BEFORE/AT/AFTER as a signed offset so it reads at-a-glance.
       // BEFORE => -Xm, AT => 0m, AFTER => +Xm
@@ -83,7 +84,7 @@ async function loadEvents(){
         return {
           rawType,
           offsetLabel,
-          target: `API: ${m} ${p}`,
+          target: trigName || `API: ${m} ${p}`,
           targetKind: 'api',
         };
       }
@@ -109,7 +110,7 @@ async function loadEvents(){
       return {
         rawType,
         offsetLabel,
-        target,
+        target: trigName || target,
         targetKind: label ? 'template' : (shortBtn ? 'button' : ''),
       };
     }

@@ -1,10 +1,10 @@
-{% extends 'base.html' %}
+﻿{% extends 'base.html' %}
 
 {% set page_title = 'Home' %}
 {% block content %}
   <div class="row g-3">
     <div class="col-md-8">
-      <p class="text-muted">Overview of what’s happening right now.</p>
+      <p class="text-muted">Overview of what's happening right now.</p>
 
       <div class="tdeck-soft rounded-3 p-3">
         <div class="d-flex align-items-center gap-2">
@@ -22,11 +22,11 @@
           <h5 class="mb-0">Next 3 Triggers</h5>
           <button id="refresh-upcoming-triggers" class="btn btn-sm btn-outline-secondary">Refresh</button>
         </div>
-        <div class="small text-muted mt-1" id="next-trigger-countdown">Loading…</div>
+        <div class="small text-muted mt-1" id="next-trigger-countdown">Loading...</div>
         <div class="list-group list-group-flush mt-2" id="next-triggers-list">
-          <div class="list-group-item text-muted">Loading…</div>
+            <div class="list-group-item text-muted">Loading...</div>
+          </div>
         </div>
-      </div>
 
       <div class="tdeck-soft rounded-3 p-3">
         <h5 class="mb-2">Event Times</h5>
@@ -87,7 +87,7 @@
             <div class="d-flex justify-content-between align-items-center">
               <div class="text-truncate">
                 <div class="small text-muted">Last preset pressed</div>
-                <div class="fw-semibold text-truncate" id="home-timer-last-label">—</div>
+                <div class="fw-semibold text-truncate" id="home-timer-last-label">â€”</div>
               </div>
               <button class="btn btn-sm btn-primary" id="home-timer-last-apply" disabled>Apply</button>
             </div>
@@ -95,7 +95,7 @@
             <div class="d-flex justify-content-between align-items-center">
               <div class="text-truncate">
                 <div class="small text-muted">Next preset</div>
-                <div class="fw-semibold text-truncate" id="home-timer-next-label">—</div>
+                <div class="fw-semibold text-truncate" id="home-timer-next-label">â€”</div>
               </div>
               <button class="btn btn-sm btn-outline-primary" id="home-timer-next-apply" disabled>Apply</button>
             </div>
@@ -112,7 +112,7 @@
           </div>
           <div class="tdeck-soft rounded-3 p-3">
             <div class="small text-muted">Latest preset applied</div>
-            <div class="fw-semibold text-truncate" id="home-videohub-last">—</div>
+            <div class="fw-semibold text-truncate" id="home-videohub-last">â€”</div>
             <div class="small text-muted" id="home-videohub-last-meta"></div>
           </div>
         </div>
@@ -182,14 +182,15 @@
         const button = (actionType === 'api')
           ? `API: ${(t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST'} ${t.api && t.api.path ? prettyApiPath(t.api.path) : ''}`
           : ((t.button && (t.button.label || t.button.pattern))
-            ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
+            ? `${t.button.label ? t.button.label + ' â€” ' : ''}${t.button.pattern || ''}`
             : (t.buttonURL || ''));
+        const name = String((t && t.name) ? t.name : '').trim() || button || '';
         const row = document.createElement('div');
         row.className = 'list-group-item d-flex justify-content-between align-items-center';
         row.innerHTML = `
           <div class="text-truncate">
             <div class="fw-semibold text-truncate">${t.event || '(unnamed)'} <span class="text-muted">(${t.offset || ''})</span></div>
-            <div class="small text-muted text-truncate">${button || ''}</div>
+            <div class="small text-muted text-truncate">${name}</div>
           </div>
           <div class="text-muted ms-2" style="white-space:nowrap">${formatDue(t.due_ms)}</div>
         `;
@@ -276,12 +277,12 @@
     }
 
     function fmtPreset(p){
-      if(!p) return '—';
+      if(!p) return 'â€”';
       const n = (p.preset != null) ? `#${p.preset}` : '';
       const name = String(p.name || '').trim();
       const t = String(p.time || '').trim();
       const label = name && t && name !== t ? `${name} (${t})` : (name || t || '');
-      return n && label ? `${n} — ${label}` : (label || n || '—');
+      return n && label ? `${n} â€” ${label}` : (label || n || 'â€”');
     }
 
     async function applyPreset(presetNumber){
@@ -350,9 +351,9 @@
             vhLast.textContent = String(vhLastObj.name || `Preset #${vhLastObj.id}`);
           }else if(vhRoute && vhRoute.output != null && vhRoute.input != null){
             const m = vhRoute.monitor ? ' (monitor)' : '';
-            vhLast.textContent = `Route: Out ${vhRoute.output} → In ${vhRoute.input}${m}`;
+            vhLast.textContent = `Route: Out ${vhRoute.output} â†’ In ${vhRoute.input}${m}`;
           }else{
-            vhLast.textContent = '—';
+            vhLast.textContent = 'â€”';
           }
         }
         if(vhMeta){
@@ -360,7 +361,7 @@
           const ago = formatAgo(vh.last_ts);
           const routeAgo = formatAgo(vh.route_ts);
           if(vhLastObj){
-            vhMeta.textContent = (idTxt && ago) ? `${idTxt} • ${ago}` : (idTxt || ago || '');
+            vhMeta.textContent = (idTxt && ago) ? `${idTxt} â€¢ ${ago}` : (idTxt || ago || '');
           }else if(vhRoute){
             vhMeta.textContent = routeAgo ? routeAgo : '';
           }else{
@@ -387,3 +388,5 @@
   })();
   </script>
 {% endblock %}
+
+

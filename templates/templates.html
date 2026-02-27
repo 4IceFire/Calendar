@@ -1,4 +1,4 @@
-{% extends 'base.html' %}
+﻿{% extends 'base.html' %}
 
 {% set page_title = 'Templates' %}
 
@@ -22,21 +22,35 @@
           <div class="small text-muted">Reusable Companion button shortcuts.</div>
         </div>
       </div>
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div class="small text-muted">Folders</div>
+        <div class="d-flex gap-2">
+          <button id="button-folder-new" class="btn btn-sm btn-outline-primary" type="button">New Folder</button>
+          <button id="button-folders-expand" class="btn btn-sm btn-outline-secondary" type="button">Expand all</button>
+          <button id="button-folders-collapse" class="btn btn-sm btn-outline-secondary" type="button">Collapse all</button>
+        </div>
+      </div>
 
-      <div id="buttons-list-wrap" class="tdeck-soft rounded-3 overflow-hidden mb-3" style="background: transparent; border-color: rgba(127,127,127,0.20)">
-        <div id="buttons-list" class="list-group list-group-flush">Loading…</div>
+      <div id="buttons-tree-wrap" class="tdeck-soft rounded-3 overflow-hidden mb-3" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+        <div id="buttons-tree" class="list-group list-group-flush">Loading...</div>
       </div>
 
       <form id="add-button-form" class="row g-2 align-items-end">
-        <div class="col-md-6">
+        <div class="col-md-5">
           <label class="form-label small text-muted mb-1">Label</label>
           <input class="form-control" name="label" placeholder="e.g. Stream Start">
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
           <label class="form-label small text-muted mb-1">Pattern</label>
           <input class="form-control" name="pattern" placeholder="1/0/1">
         </div>
-        <div class="col-md-2 d-grid">
+        <div class="col-md-3">
+          <label class="form-label small text-muted mb-1">Folder (optional)</label>
+          <select id="add-button-folder" class="form-select">
+            <option value="">(no folder)</option>
+          </select>
+        </div>
+        <div class="col-md-1 d-grid">
           <button class="btn btn-sm btn-primary">Add</button>
         </div>
       </form>
@@ -53,7 +67,7 @@
       </div>
 
       <div class="tdeck-soft rounded-3 overflow-hidden mb-3" style="display:none; background: transparent; border-color: rgba(127,127,127,0.20)">
-        <div id="triggers-list" class="list-group list-group-flush">Loading…</div>
+        <div id="triggers-list" class="list-group list-group-flush">Loading...</div>
       </div>
 
       <div class="row g-3">
@@ -87,7 +101,10 @@
 
             <div class="d-flex align-items-center justify-content-between mb-1">
               <div class="small text-muted">Triggers</div>
-              <button id="trigger-template-add-trigger" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
+              <div class="d-flex gap-2">
+                <button id="trigger-template-sort-by-time" class="btn btn-sm btn-outline-secondary" type="button" title="Sort triggers by execution time (earliest first)">Sort by time</button>
+                <button id="trigger-template-add-trigger" class="btn btn-sm btn-outline-secondary">Add Trigger</button>
+              </div>
             </div>
 
             <div id="trigger-editor-triggers-container"></div>
@@ -164,7 +181,8 @@ async function loadTemplates(){
     const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
     const data = await resp.json();
     window.__buttonTemplates = data.buttons || [];
-    renderButtons(data.buttons || []);
+    window.__buttonsTree = data.buttons_tree || {version: 2, folders: [], templates: (data.buttons || [])};
+    renderButtonsTree(window.__buttonsTree);
     renderTriggerTemplates(data.triggers || []);
 
     if(window.__selectLastTriggerTemplate){
@@ -180,65 +198,236 @@ async function loadTemplates(){
       _setTriggerEditorTitle();
     }
   }catch(e){
-    document.getElementById('buttons-list').innerText = 'Error loading';
+    document.getElementById('buttons-tree').innerText = 'Error loading';
     const tl = document.getElementById('triggers-list-ui');
     if(tl) tl.innerText = 'Error loading';
     console.error(e);
   }
 }
 
-function renderButtons(btns){
-  const out = document.getElementById('buttons-list');
-  if(!btns.length){ out.innerHTML = '<div class="list-group-item text-muted">No button templates</div>'; return }
-  out.innerHTML = '';
-  btns.forEach((b,i)=>{
-    const div = document.createElement('div');
-    div.className = 'list-group-item d-flex align-items-center gap-2';
+function _btUuid(){
+  try{ return crypto.randomUUID(); }catch(e){}
+  return 'id_' + String(Date.now()) + '_' + String(Math.floor(Math.random()*1e9));
+}
 
-    const isEditing = (window.__editingButtonIndex === i);
-    const label = b.label || '';
-    const pattern = b.pattern || '';
+function _btTreeCoerce(tree){
+  const t = (tree && typeof tree === 'object') ? tree : {version:2, folders:[], templates:[]};
+  const folders = Array.isArray(t.folders) ? t.folders : [];
+  const templates = Array.isArray(t.templates) ? t.templates : [];
+  return {version: 2, folders, templates};
+}
 
-    if(isEditing){
-      div.innerHTML = `
-        <div class="flex-grow-1 d-flex flex-wrap gap-2 align-items-center">
-          <input class="form-control form-control-sm" style="max-width: 260px" data-role="button-label" value="${label.replace(/"/g,'&quot;')}">
-          <input class="form-control form-control-sm" style="max-width: 160px" data-role="button-pattern" value="${pattern.replace(/"/g,'&quot;')}" placeholder="1/0/1">
-          <small class="text-muted">Format: 1/0/1</small>
-        </div>
-        <div class="ms-2">
-          <button class="btn btn-sm btn-success" data-idx="${i}" data-type="button-save">Save</button>
-          <button class="btn btn-sm btn-outline-secondary ms-2" data-idx="${i}" data-type="button-cancel">Cancel</button>
-        </div>
-      `;
-    }else{
-      // Keep URL in short format (pattern only)
-      div.innerHTML = `
-        <div class="flex-grow-1 text-truncate">
-          <div class="fw-semibold text-truncate">${label}</div>
-          <div class="small text-muted text-truncate">${pattern}</div>
-        </div>
-        <div class="ms-auto">
-          <button class="btn btn-sm btn-outline-secondary" data-idx="${i}" data-type="button-edit">Edit</button>
-          <button class="btn btn-sm btn-outline-danger ms-2" data-idx="${i}" data-type="button-delete">Delete</button>
-        </div>
-      `;
-    }
-    out.appendChild(div);
+function _btGetFolderChildren(tree, parentId){
+  return tree.folders
+    .filter(f => (f && typeof f === 'object') && ((f.parentId || null) === (parentId || null)))
+    .sort((a,b)=>Number(a.order||0) - Number(b.order||0));
+}
+
+function _btGetTemplateChildren(tree, folderId){
+  return tree.templates
+    .filter(t => (t && typeof t === 'object') && ((t.folderId || null) === (folderId || null)))
+    .sort((a,b)=>Number(a.order||0) - Number(b.order||0));
+}
+
+function _btNormalizeOrders(tree){
+  // folders
+  const byParent = new Map();
+  tree.folders.forEach(f=>{
+    if(!f || typeof f !== 'object') return;
+    const k = String(f.parentId || '');
+    if(!byParent.has(k)) byParent.set(k, []);
+    byParent.get(k).push(f);
   });
-    // also populate buttonTemplate selects in the trigger add form
-    const btSelects = document.querySelectorAll('select[name="buttonTemplate"]');
-    btSelects.forEach(sel=>{
-      // clear existing options except first
-      const first = sel.querySelector('option[value=""]');
-      sel.innerHTML = '';
-      sel.appendChild(first || document.createElement('option'));
-      sel.querySelector('option').value = '';
-      sel.querySelector('option').text = '(none)';
-      btns.forEach((b,i)=>{
-        const opt = document.createElement('option'); opt.value = i; opt.text = `${b.label} — ${b.pattern}`; sel.appendChild(opt);
-      });
+  for(const [k, arr] of byParent.entries()){
+    arr.sort((a,b)=>Number(a.order||0) - Number(b.order||0));
+    arr.forEach((f,i)=>{ f.order = i; });
+  }
+
+  // templates
+  const byFolder = new Map();
+  tree.templates.forEach(t=>{
+    if(!t || typeof t !== 'object') return;
+    const k = String(t.folderId || '');
+    if(!byFolder.has(k)) byFolder.set(k, []);
+    byFolder.get(k).push(t);
+  });
+  for(const [k, arr] of byFolder.entries()){
+    arr.sort((a,b)=>Number(a.order||0) - Number(b.order||0));
+    arr.forEach((t,i)=>{ t.order = i; });
+  }
+}
+
+function _btFolderIsDescendant(tree, folderId, maybeAncestorId){
+  // True if folderId is inside maybeAncestorId (at any depth).
+  const parentById = new Map();
+  tree.folders.forEach(f=>{
+    if(!f || typeof f !== 'object') return;
+    parentById.set(String(f.id || ''), String(f.parentId || ''));
+  });
+  let cur = String(folderId || '');
+  const target = String(maybeAncestorId || '');
+  const seen = new Set();
+  while(cur && !seen.has(cur)){
+    seen.add(cur);
+    const p = parentById.get(cur) || '';
+    if(!p) return false;
+    if(p === target) return true;
+    cur = p;
+  }
+  return false;
+}
+
+function _btSetFolderOpen(folderId, isOpen){
+  try{ localStorage.setItem('bt_folder_open:' + String(folderId||''), isOpen ? '1' : '0'); }catch(e){}
+}
+function _btIsFolderOpen(folderId){
+  try{
+    const v = localStorage.getItem('bt_folder_open:' + String(folderId||''));
+    if(v === null) return true;
+    return v === '1';
+  }catch(e){
+    return true;
+  }
+}
+
+async function _btSaveTree(){
+  _btNormalizeOrders(window.__buttonsTree);
+  const resp = await fetch('/api/templates/buttons_tree', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({tree: window.__buttonsTree}),
+  });
+  const data = await resp.json().catch(()=>({}));
+  if(!resp.ok || !data.ok) throw new Error(data.error || ('Save failed (HTTP ' + resp.status + ')'));
+}
+
+function _btPopulateFolderSelect(tree){
+  const sel = document.getElementById('add-button-folder');
+  if(!sel) return;
+  const cur = String(sel.value || '');
+  sel.innerHTML = '<option value="">(no folder)</option>';
+  const walk = (parentId, depth) => {
+    const kids = _btGetFolderChildren(tree, parentId);
+    kids.forEach(f=>{
+      const opt = document.createElement('option');
+      opt.value = String(f.id || '');
+      opt.textContent = `${'  '.repeat(depth)}${String(f.name || 'Folder')}`;
+      sel.appendChild(opt);
+      walk(String(f.id || ''), depth+1);
     });
+  };
+  walk(null, 0);
+  // restore if still present
+  Array.from(sel.options).forEach(o=>{ if(String(o.value) === cur) sel.value = cur; });
+}
+
+function renderButtonsTree(treeRaw){
+  const out = document.getElementById('buttons-tree');
+  if(!out) return;
+  const tree = _btTreeCoerce(treeRaw);
+  window.__buttonsTree = tree;
+
+  // Ensure templates have ids (server should, but be defensive)
+  tree.templates.forEach((t,i)=>{
+    if(!t || typeof t !== 'object') return;
+    if(!t.id) t.id = _btUuid();
+    if(t.order === undefined || t.order === null) t.order = i;
+  });
+  tree.folders.forEach((f,i)=>{
+    if(!f || typeof f !== 'object') return;
+    if(!f.id) f.id = _btUuid();
+    if(f.order === undefined || f.order === null) f.order = i;
+  });
+
+  _btNormalizeOrders(tree);
+  _btPopulateFolderSelect(tree);
+
+  const editingId = String(window.__editingButtonId || '');
+
+  function renderFolder(parentId, depth){
+    const frag = document.createDocumentFragment();
+
+    const templates = _btGetTemplateChildren(tree, parentId);
+    templates.forEach(t=>{
+      const row = document.createElement('div');
+      row.className = 'list-group-item d-flex align-items-center gap-2';
+      row.setAttribute('data-type', 'template');
+      row.setAttribute('data-id', String(t.id || ''));
+      row.draggable = true;
+      row.style.paddingLeft = (12 + depth * 18) + 'px';
+
+      const isEditing = editingId && String(t.id || '') === editingId;
+      const label = String(t.label || '');
+      const pattern = String(t.pattern || '');
+
+      if(isEditing){
+        row.innerHTML = `
+          <div class="flex-grow-1 d-flex flex-wrap gap-2 align-items-center">
+            <input class="form-control form-control-sm" style="max-width: 260px" data-role="button-label" value="${label.replace(/"/g,'&quot;')}">
+            <input class="form-control form-control-sm" style="max-width: 160px" data-role="button-pattern" value="${pattern.replace(/"/g,'&quot;')}" placeholder="1/0/1">
+            <small class="text-muted">Format: 1/0/1</small>
+          </div>
+          <div class="ms-auto d-flex gap-2">
+            <button class="btn btn-sm btn-success" data-type="button-save">Save</button>
+            <button class="btn btn-sm btn-outline-secondary" data-type="button-cancel">Cancel</button>
+          </div>
+        `;
+      }else{
+        row.innerHTML = `
+          <div class="flex-grow-1 text-truncate">
+            <div class="fw-semibold text-truncate">${label || '(no label)'}</div>
+            <div class="small text-muted text-truncate">${pattern || ''}</div>
+          </div>
+          <div class="ms-auto d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary" data-type="button-up" title="Move up">↑</button>
+            <button class="btn btn-sm btn-outline-secondary" data-type="button-down" title="Move down">↓</button>
+            <button class="btn btn-sm btn-outline-secondary" data-type="button-edit">Edit</button>
+            <button class="btn btn-sm btn-outline-danger" data-type="button-delete">Delete</button>
+          </div>
+        `;
+      }
+      frag.appendChild(row);
+    });
+
+    const folders = _btGetFolderChildren(tree, parentId);
+    folders.forEach(f=>{
+      const open = _btIsFolderOpen(f.id);
+      const row = document.createElement('div');
+      row.className = 'list-group-item d-flex align-items-center gap-2';
+      row.setAttribute('data-type', 'folder');
+      row.setAttribute('data-id', String(f.id || ''));
+      row.draggable = true;
+      row.style.paddingLeft = (12 + depth * 18) + 'px';
+      row.innerHTML = `
+        <button class="btn btn-sm btn-outline-secondary" data-type="folder-toggle" title="Expand/collapse" style="width:32px">${open ? '▾' : '▸'}</button>
+        <div class="flex-grow-1 text-truncate">
+          <div class="fw-semibold text-truncate">${String(f.name || 'Folder')}</div>
+        </div>
+        <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-secondary" data-type="folder-up" title="Move up">↑</button>
+          <button class="btn btn-sm btn-outline-secondary" data-type="folder-down" title="Move down">↓</button>
+          <button class="btn btn-sm btn-outline-secondary" data-type="folder-new-child" title="New subfolder">+</button>
+          <button class="btn btn-sm btn-outline-secondary" data-type="folder-rename" title="Rename">Rename</button>
+          <button class="btn btn-sm btn-outline-danger" data-type="folder-delete" title="Delete">Delete</button>
+        </div>
+      `;
+      frag.appendChild(row);
+
+      if(open){
+        const kids = renderFolder(String(f.id || ''), depth+1);
+        frag.appendChild(kids);
+      }
+    });
+
+    return frag;
+  }
+
+  out.innerHTML = '';
+  if(!tree.templates.length && !tree.folders.length){
+    out.innerHTML = '<div class="list-group-item text-muted">No button templates</div>';
+    return;
+  }
+  out.appendChild(renderFolder(null, 0));
 }
 
 // --- Unsaved changes guard for Trigger Templates editor ---
@@ -280,6 +469,8 @@ function _tplReadEditorStateRaw(){
 
   const rows = Array.from(container.children || []);
   const times = rows.map((row) => {
+    const name = row.querySelector('input[name="name"]')?.value;
+    const uid = row.querySelector('input[name="uid"]')?.value;
     const minutes = row.querySelector('input[name="minutes"]')?.value;
     const typeOfTrigger = row.querySelector('select[name="typeOfTrigger"]')?.value;
     const actionType = row.querySelector('select[name="actionType"]')?.value;
@@ -294,6 +485,8 @@ function _tplReadEditorStateRaw(){
 
     return {
       enabled,
+      name: (name === undefined) ? null : String(name),
+      uid: (uid === undefined) ? null : String(uid),
       minutes: (minutes === undefined) ? null : String(minutes),
       typeOfTrigger: (typeOfTrigger === undefined) ? null : String(typeOfTrigger),
       actionType: (actionType === undefined) ? null : String(actionType),
@@ -388,8 +581,16 @@ function _tplEnsureUnsavedModal(){
     }else if(action === 'save'){
       btn.disabled = true;
       try{
-        const ok = await _triggerTemplateSaveNow({silent: true});
-        if(ok){
+        const ok = await _triggerTemplateSaveNow({silent: false});
+        if(!ok){
+          _tplPendingAction = null;
+          try{
+            if(window.bootstrap && window.bootstrap.Modal){
+              const m = window.bootstrap.Modal.getInstance(modalEl) || new window.bootstrap.Modal(modalEl);
+              m.hide();
+            }
+          }catch(err){}
+        }else{
           const act = _tplPendingAction;
           _tplPendingAction = null;
           _tplAllowUnloadOnce = true;
@@ -496,49 +697,66 @@ function renderTriggerTemplates(trigs){
 }
 
 function newTriggerRow(templates){
+  const uid = _btUuid(); // stable per trigger row (may be overwritten when loading existing specs)
   const div = document.createElement('div');
   div.className = 'trigger-row border rounded p-2 mb-2';
+  div.setAttribute('data-uid', uid);
   div.innerHTML = `
     <div class="d-flex gap-2 align-items-center">
-      <input name="minutes" placeholder="minutes" class="form-control form-control-sm" style="width:100px">
-      <select name="typeOfTrigger" class="form-select form-select-sm" style="width:140px">
-        <option value="BEFORE">Before</option>
-        <option value="AT">At</option>
-        <option value="AFTER">After</option>
-      </select>
-      <select name="actionType" class="form-select form-select-sm" style="width:160px">
-        <option value="companion">Companion Button</option>
-        <option value="api">API Call</option>
-      </select>
-      <div class="ms-auto d-flex align-items-center gap-2">
-        <button type="button" class="btn btn-sm btn-outline-secondary move-up" title="Move up">↑</button>
-        <button type="button" class="btn btn-sm btn-outline-secondary move-down" title="Move down">↓</button>
-        <div class="form-check form-switch mb-0" title="Enable/disable this trigger">
-          <input class="form-check-input" type="checkbox" name="enabled" checked>
+      <button type="button" class="btn btn-sm btn-outline-secondary toggle-collapse" title="Collapse/expand" style="width:32px">▾</button>
+      <input name="name" placeholder="Trigger name (optional)" class="form-control form-control-sm" style="max-width: 360px">
+      <div class="ms-auto small text-muted" data-role="trigger-summary" style="white-space:nowrap"></div>
+    </div>
+
+    <input type="hidden" name="uid" value="${uid}">
+
+    <div class="trigger-body mt-2">
+      <div class="d-flex gap-2 align-items-center">
+        <input name="minutes" placeholder="minutes" class="form-control form-control-sm" style="width:100px">
+        <select name="typeOfTrigger" class="form-select form-select-sm" style="width:140px">
+          <option value="BEFORE">Before</option>
+          <option value="AT">At</option>
+          <option value="AFTER">After</option>
+        </select>
+        <select name="actionType" class="form-select form-select-sm" style="width:160px">
+          <option value="companion">Companion Button</option>
+          <option value="api">API Call</option>
+        </select>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-outline-secondary move-up" title="Move up">↑</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary move-down" title="Move down">↓</button>
+          <div class="form-check form-switch mb-0" title="Enable/disable this trigger">
+            <input class="form-check-input" type="checkbox" name="enabled" checked>
+          </div>
+          <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
         </div>
-        <button class="btn btn-sm btn-outline-danger remove-trigger">Remove</button>
       </div>
-    </div>
 
-    <div class="mt-2 gap-2 align-items-center companion-fields" style="display:flex">
-      <select name="buttonTemplate" class="form-select form-select-sm" style="min-width:220px">
-        <option value="">(none)</option>
-        ${templates.map((t,i)=>`<option value="${i}">${t.label} — ${t.pattern}</option>`).join('')}
-      </select>
-      <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
-      <small class="text-muted" style="white-space:nowrap" title="Companion short button format: bank/page/button">(bank/page/button, e.g. 1/2/3)</small>
-    </div>
+        <div class="mt-2 gap-2 align-items-center companion-fields" style="display:flex">
+         <select name="buttonTemplate" class="form-select form-select-sm" style="min-width:220px">
+            <option value="">(none)</option>
+            ${templates.map((t,i)=>{
+              const label = String((t && t.label) ? t.label : '').trim();
+              const fallback = String((t && t.pattern) ? t.pattern : '').trim();
+              const display = label || fallback || '(no label)';
+              return `<option value="${i}">${display}</option>`;
+            }).join('')}
+          </select>
+          <input name="buttonURL" placeholder="button URL (optional)" class="form-control form-control-sm">
+        <small class="text-muted" style="white-space:nowrap" title="Companion short button format: bank/page/button">(bank/page/button, e.g. 1/2/3)</small>
+      </div>
 
-    <div class="mt-2 gap-2 align-items-start api-fields" style="display:none">
-      <select name="apiMethod" class="form-select form-select-sm" style="width:120px">
-        <option value="POST">POST</option>
-        <option value="GET">GET</option>
-        <option value="PUT">PUT</option>
-        <option value="PATCH">PATCH</option>
-        <option value="DELETE">DELETE</option>
-      </select>
-      <input name="apiPath" placeholder="/videohub/presets/1/apply" class="form-control form-control-sm">
-      <textarea name="apiBody" placeholder='JSON body (optional)' class="form-control form-control-sm" rows="2" style="max-width:340px"></textarea>
+      <div class="mt-2 gap-2 align-items-start api-fields" style="display:none">
+        <select name="apiMethod" class="form-select form-select-sm" style="width:120px">
+          <option value="POST">POST</option>
+          <option value="GET">GET</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+        </select>
+        <input name="apiPath" placeholder="/videohub/presets/1/apply" class="form-control form-control-sm">
+        <textarea name="apiBody" placeholder='JSON body (optional)' class="form-control form-control-sm" rows="2" style="max-width:340px"></textarea>
+      </div>
     </div>
   `;
 
@@ -558,6 +776,23 @@ function newTriggerRow(templates){
   if(typeSelect) typeSelect.addEventListener('change', syncMinutesDisabled);
   syncMinutesDisabled();
   div.__syncMinutesDisabled = syncMinutesDisabled;
+
+  const summaryEl = div.querySelector('[data-role="trigger-summary"]');
+  const syncSummary = ()=>{
+    if(!summaryEl || !typeSelect || !minutesInput) return;
+    const typ = String(typeSelect.value || 'AT').toUpperCase();
+    const mins = parseInt(String(minutesInput.value || '0'), 10);
+    if(typ === 'AT'){
+      summaryEl.textContent = 'At (0m)';
+      return;
+    }
+    const m = Number.isFinite(mins) ? mins : 0;
+    summaryEl.textContent = (typ === 'BEFORE') ? `Before ${m}m` : `After ${m}m`;
+  };
+  if(typeSelect) typeSelect.addEventListener('change', syncSummary);
+  if(minutesInput) minutesInput.addEventListener('input', syncSummary);
+  syncSummary();
+  div.__syncSummary = syncSummary;
 
   // If a template is selected, disable custom URL input (like other pages)
   const sel = div.querySelector('select[name="buttonTemplate"]');
@@ -601,6 +836,24 @@ function newTriggerRow(templates){
   syncActionFields();
   div.__syncActionFields = syncActionFields;
 
+  // Apply persisted collapse state (per template id + trigger uid)
+  const applyCollapsed = ()=>{
+    const tplIdx = (window.__selectedTriggerIndex !== undefined && window.__selectedTriggerIndex !== null) ? parseInt(window.__selectedTriggerIndex, 10) : null;
+    const tpl = (tplIdx !== null && Array.isArray(window.__triggerTemplates)) ? window.__triggerTemplates[tplIdx] : null;
+    const tplId = tpl && tpl.id ? String(tpl.id) : 'new';
+    const uidEl = div.querySelector('input[name="uid"]');
+    const uidVal = uidEl ? String(uidEl.value || '').trim() : String(div.getAttribute('data-uid') || '').trim();
+    const key = `tplTrigCollapsed:${tplId}:${uidVal}`;
+    let collapsed = false;
+    try{ collapsed = localStorage.getItem(key) === '1'; }catch(e){}
+    const body = div.querySelector('.trigger-body');
+    const btn = div.querySelector('.toggle-collapse');
+    if(body) body.style.display = collapsed ? 'none' : '';
+    if(btn) btn.textContent = collapsed ? '▸' : '▾';
+  };
+  applyCollapsed();
+  div.__applyCollapsed = applyCollapsed;
+
   return div;
 }
 
@@ -610,13 +863,15 @@ document.getElementById('add-button-form').addEventListener('submit', async (ev)
   const form = ev.target;
   const label = form.label.value.trim();
   const pattern = form.pattern.value.trim();
+  const folderSel = document.getElementById('add-button-folder');
+  const folderId = folderSel ? String(folderSel.value || '').trim() : '';
   if(!label || !pattern) return alert('Label and pattern required');
   // client-side validation: ensure pattern is three integers separated by '/'
   if(!/^\d+\/\d+\/\d+$/.test(pattern)){
     return alert('Pattern must be like "1/0/1" (three integers separated by "/")');
   }
   try{
-    const resp = await fetch('/api/templates/button',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, pattern})});
+    const resp = await fetch('/api/templates/button',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label, pattern, folderId: folderId || null})});
     const data = await resp.json().catch(()=>null);
     if(resp.ok){ await loadTemplates(); form.reset(); }
     else {
@@ -675,6 +930,12 @@ function _populateTriggerEditorFromTemplate(idx){
   const times = _safeParseTimes(t.times);
   for(const s of times){
     const row = newTriggerRow(btns);
+    row.querySelector('input[name="name"]').value = String((s && s.name) ? s.name : '');
+    if(s && s.uid){
+      const uidEl = row.querySelector('input[name="uid"]');
+      if(uidEl) uidEl.value = String(s.uid);
+      row.setAttribute('data-uid', String(s.uid));
+    }
     row.querySelector('input[name="minutes"]').value = s.minutes;
     row.querySelector('select[name="typeOfTrigger"]').value = s.typeOfTrigger;
     row.querySelector('select[name="actionType"]').value = (s.actionType || 'companion');
@@ -683,6 +944,8 @@ function _populateTriggerEditorFromTemplate(idx){
     if(enInput) enInput.checked = !!en;
     if(typeof row.__syncActionFields === 'function') row.__syncActionFields();
     if(typeof row.__syncMinutesDisabled === 'function') row.__syncMinutesDisabled();
+    if(typeof row.__syncSummary === 'function') row.__syncSummary();
+    if(typeof row.__applyCollapsed === 'function') row.__applyCollapsed();
 
     if(String(s.actionType || 'companion').toLowerCase() === 'api'){
       row.querySelector('select[name="apiMethod"]').value = (s.api && s.api.method) ? String(s.api.method).toUpperCase() : 'POST';
@@ -730,6 +993,8 @@ function _collectTriggerSpecsFromEditor(){
   const specs = [];
 
   for(const row of rows){
+    const name = String(row.querySelector('input[name="name"]')?.value || '').trim();
+    const uid = String(row.querySelector('input[name="uid"]')?.value || '').trim();
     let minsRaw = row.querySelector('input[name="minutes"]').value;
     const type = row.querySelector('select[name="typeOfTrigger"]').value || 'AT';
     const actionType = String(row.querySelector('select[name="actionType"]').value || 'companion').toLowerCase();
@@ -760,7 +1025,7 @@ function _collectTriggerSpecsFromEditor(){
       }
       const api = {method, path: normPath};
       if(body !== undefined) api.body = body;
-      specs.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'api', api});
+      specs.push({uid, name, minutes: mins, typeOfTrigger: type, enabled, actionType: 'api', api});
       continue;
     }
 
@@ -777,7 +1042,7 @@ function _collectTriggerSpecsFromEditor(){
     if(/^\d+\/\d+\/\d+$/.test(buttonURL)) buttonURL = `location/${buttonURL}/press`;
     if(!/^location\/\d+\/\d+\/\d+\/press$/.test(buttonURL)) return {ok:false, error:'buttonURL must be like \"1/2/3\" or \"location/1/2/3/press\"'};
 
-    specs.push({minutes: mins, typeOfTrigger: type, enabled, actionType: 'companion', buttonURL});
+    specs.push({uid, name, minutes: mins, typeOfTrigger: type, enabled, actionType: 'companion', buttonURL});
   }
 
   return {ok:true, label, times: specs};
@@ -839,6 +1104,45 @@ document.getElementById('trigger-template-add-trigger').addEventListener('click'
   container.appendChild(newTriggerRow(btns));
 });
 
+function _tplOffsetMinutesFromRow(row){
+  try{
+    const type = String(row.querySelector('select[name="typeOfTrigger"]')?.value || 'AT').toUpperCase();
+    const mins = parseInt(String(row.querySelector('input[name="minutes"]')?.value || '0'), 10);
+    const m = Number.isFinite(mins) ? mins : 0;
+    if(type === 'BEFORE') return -m;
+    if(type === 'AFTER') return +m;
+    return 0;
+  }catch(e){
+    return 0;
+  }
+}
+
+function _sortTriggerTemplateEditorByTime(){
+  const container = document.getElementById('trigger-editor-triggers-container');
+  if(!container) return;
+  const rows = Array.from(container.children || []).filter(x => x && x.classList && x.classList.contains('trigger-row'));
+  if(rows.length < 2) return;
+
+  rows.forEach(r=>{
+    try{ if(typeof r.__syncMinutesDisabled === 'function') r.__syncMinutesDisabled(); }catch(e){}
+    try{ if(typeof r.__syncSummary === 'function') r.__syncSummary(); }catch(e){}
+  });
+
+  const decorated = rows.map((r, i) => ({r, i, off: _tplOffsetMinutesFromRow(r)}));
+  decorated.sort((a,b) => (a.off - b.off) || (a.i - b.i));
+  for(const d of decorated){
+    container.appendChild(d.r);
+  }
+}
+
+const sortTplBtn = document.getElementById('trigger-template-sort-by-time');
+if(sortTplBtn){
+  sortTplBtn.addEventListener('click', (ev)=>{
+    ev.preventDefault();
+    _sortTriggerTemplateEditorByTime();
+  });
+}
+
 document.getElementById('trigger-template-cancel').addEventListener('click', (ev)=>{
   ev.preventDefault();
   const idx = (window.__selectedTriggerIndex !== undefined) ? window.__selectedTriggerIndex : null;
@@ -885,72 +1189,311 @@ document.getElementById('trigger-template-save').addEventListener('click', async
   }
 });
 
-// delegate deletes
-document.getElementById('buttons-list').addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button');
-  if(!btn) return;
-  const idx = btn.getAttribute('data-idx');
-  const type = btn.getAttribute('data-type');
-  if(type === 'button-delete'){
-    if(!confirm('Delete button template?')) return;
+let _btDrag = null;
+const _btTreeEl = document.getElementById('buttons-tree');
+
+function _btFindTemplateById(tplId){
+  const tree = window.__buttonsTree;
+  if(!tree || !Array.isArray(tree.templates)) return null;
+  return tree.templates.find(t => t && String(t.id || '') === String(tplId || '')) || null;
+}
+function _btFindFolderById(folderId){
+  const tree = window.__buttonsTree;
+  if(!tree || !Array.isArray(tree.folders)) return null;
+  return tree.folders.find(f => f && String(f.id || '') === String(folderId || '')) || null;
+}
+
+async function _btMoveTemplateToFolder(tplId, folderId){
+  const tree = window.__buttonsTree;
+  const t = _btFindTemplateById(tplId);
+  if(!tree || !t) return;
+  const targetFolderId = folderId ? String(folderId) : null;
+  t.folderId = targetFolderId;
+  try{
+    const siblings = tree.templates.filter(x => x && (x.folderId || null) === targetFolderId);
+    const maxOrder = Math.max(-1, ...siblings.map(x => Number(x.order || 0)));
+    t.order = maxOrder + 1;
+  }catch(e){}
+  await _btSaveTree();
+  renderButtonsTree(tree);
+}
+
+async function _btMoveFolderToFolder(folderId, parentFolderId){
+  const tree = window.__buttonsTree;
+  const f = _btFindFolderById(folderId);
+  if(!tree || !f) return;
+  const target = parentFolderId ? String(parentFolderId) : null;
+  if(target && String(f.id || '') === target) return;
+  if(target && _btFolderIsDescendant(tree, target, String(f.id || ''))) return;
+  f.parentId = target;
+  try{
+    const siblings = tree.folders.filter(x => x && (x.parentId || null) === target);
+    const maxOrder = Math.max(-1, ...siblings.map(x => Number(x.order || 0)));
+    f.order = maxOrder + 1;
+  }catch(e){}
+  await _btSaveTree();
+  renderButtonsTree(tree);
+}
+
+async function _btDeleteFolder(folderId){
+  const tree = window.__buttonsTree;
+  if(!tree) return;
+  const f = _btFindFolderById(folderId);
+  if(!f) return;
+  const parentId = f.parentId ? String(f.parentId) : null;
+
+  tree.templates.forEach(t=>{
+    if(!t || typeof t !== 'object') return;
+    if((t.folderId || null) === String(f.id || '')) t.folderId = parentId;
+  });
+  tree.folders.forEach(ch=>{
+    if(!ch || typeof ch !== 'object') return;
+    if((ch.parentId || null) === String(f.id || '')) ch.parentId = parentId;
+  });
+  tree.folders = tree.folders.filter(x => x && String(x.id || '') !== String(f.id || ''));
+  await _btSaveTree();
+  renderButtonsTree(tree);
+}
+
+async function _btMoveUp(kind, id){
+  const tree = window.__buttonsTree;
+  if(!tree) return;
+  if(kind === 'template'){
+    const t = _btFindTemplateById(id);
+    if(!t) return;
+    const fid = t.folderId || null;
+    const siblings = tree.templates.filter(x => x && (x.folderId || null) === fid).sort((a,b)=>Number(a.order||0)-Number(b.order||0));
+    const idx = siblings.findIndex(x => String(x.id||'') === String(id||''));
+    if(idx <= 0) return;
+    const a = siblings[idx-1], b = siblings[idx];
+    const tmp = a.order; a.order = b.order; b.order = tmp;
+  }else if(kind === 'folder'){
+    const f = _btFindFolderById(id);
+    if(!f) return;
+    const pid = f.parentId || null;
+    const siblings = tree.folders.filter(x => x && (x.parentId || null) === pid).sort((a,b)=>Number(a.order||0)-Number(b.order||0));
+    const idx = siblings.findIndex(x => String(x.id||'') === String(id||''));
+    if(idx <= 0) return;
+    const a = siblings[idx-1], b = siblings[idx];
+    const tmp = a.order; a.order = b.order; b.order = tmp;
+  }
+  await _btSaveTree();
+  renderButtonsTree(tree);
+}
+
+async function _btMoveDown(kind, id){
+  const tree = window.__buttonsTree;
+  if(!tree) return;
+  if(kind === 'template'){
+    const t = _btFindTemplateById(id);
+    if(!t) return;
+    const fid = t.folderId || null;
+    const siblings = tree.templates.filter(x => x && (x.folderId || null) === fid).sort((a,b)=>Number(a.order||0)-Number(b.order||0));
+    const idx = siblings.findIndex(x => String(x.id||'') === String(id||''));
+    if(idx < 0 || idx >= siblings.length-1) return;
+    const a = siblings[idx], b = siblings[idx+1];
+    const tmp = a.order; a.order = b.order; b.order = tmp;
+  }else if(kind === 'folder'){
+    const f = _btFindFolderById(id);
+    if(!f) return;
+    const pid = f.parentId || null;
+    const siblings = tree.folders.filter(x => x && (x.parentId || null) === pid).sort((a,b)=>Number(a.order||0)-Number(b.order||0));
+    const idx = siblings.findIndex(x => String(x.id||'') === String(id||''));
+    if(idx < 0 || idx >= siblings.length-1) return;
+    const a = siblings[idx], b = siblings[idx+1];
+    const tmp = a.order; a.order = b.order; b.order = tmp;
+  }
+  await _btSaveTree();
+  renderButtonsTree(tree);
+}
+
+if(_btTreeEl){
+  _btTreeEl.addEventListener('dragstart', (ev)=>{
+    const row = ev.target.closest('.list-group-item[data-type][data-id]');
+    if(!row) return;
+    const type = row.getAttribute('data-type');
+    const id = row.getAttribute('data-id');
+    if(!type || !id) return;
+    _btDrag = {type, id};
+    try{ ev.dataTransfer.setData('text/plain', type + ':' + id); }catch(e){}
+  });
+  _btTreeEl.addEventListener('dragover', (ev)=>{
+    if(!_btDrag) return;
+    ev.preventDefault();
+  });
+  _btTreeEl.addEventListener('drop', async (ev)=>{
+    if(!_btDrag) return;
+    ev.preventDefault();
+    const targetFolderRow = ev.target.closest('.list-group-item[data-type=\"folder\"][data-id]');
+    const targetFolderId = targetFolderRow ? String(targetFolderRow.getAttribute('data-id') || '') : null;
+    const dragged = _btDrag;
+    _btDrag = null;
     try{
-      const r = await fetch('/api/templates/button/'+encodeURIComponent(idx), {method:'DELETE'});
-      if(r.ok) loadTemplates();
-      else alert('Delete failed');
-    }catch(e){alert('Error');}
-  }else if(type === 'button-edit'){
-    window.__editingButtonIndex = parseInt(idx, 10);
-    renderButtons(window.__buttonTemplates || []);
-  }else if(type === 'button-cancel'){
-    window.__editingButtonIndex = null;
-    renderButtons(window.__buttonTemplates || []);
-  }else if(type === 'button-save'){
-    const i = parseInt(idx, 10);
-    const row = btn.closest('.list-group-item');
-    const labelInput = row ? row.querySelector('[data-role="button-label"]') : null;
-    const patternInput = row ? row.querySelector('[data-role="button-pattern"]') : null;
-    const label = String(labelInput ? labelInput.value : '').trim();
-    const pattern = String(patternInput ? patternInput.value : '').trim();
-    if(!label || !pattern) return alert('Label and pattern required');
-    if(!/^\d+\/\d+\/\d+$/.test(pattern)){
-      return alert('Pattern must be like "1/0/1" (three integers separated by "/")');
-    }
-    try{
-      const r = await fetch('/api/templates/button/'+encodeURIComponent(i), {
-        method: 'PUT',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({label, pattern})
-      });
-      const data = await r.json().catch(()=>null);
-      if(!r.ok || !data || !data.ok){
-        if(r.status === 409 && data && data.existing){
-          const ex = data.existing;
-          alert(`That button is already saved as:\n\nName: ${ex.label || '(no name)'}\nButton: ${ex.pattern || ''}\nURL: ${ex.buttonURL || ''}`);
-          return;
-        }
-        return alert((data && data.error) ? data.error : 'Update failed');
+      if(dragged.type === 'template'){
+        await _btMoveTemplateToFolder(dragged.id, targetFolderId);
+      }else if(dragged.type === 'folder'){
+        await _btMoveFolderToFolder(dragged.id, targetFolderId);
       }
-      window.__editingButtonIndex = null;
-      await loadTemplates();
     }catch(e){
       console.error(e);
-      alert('Error updating');
+      alert('Move failed');
     }
-  }
-});
+  });
 
-// Save inline edit on Enter
-document.getElementById('buttons-list').addEventListener('keydown', (ev)=>{
-  if(ev.key !== 'Enter') return;
-  const input = ev.target.closest('[data-role="button-label"], [data-role="button-pattern"]');
-  if(!input) return;
-  const row = input.closest('.list-group-item');
-  const saveBtn = row ? row.querySelector('button[data-type="button-save"]') : null;
-  if(saveBtn){
+  _btTreeEl.addEventListener('click', async (ev)=>{
+    const btn = ev.target.closest('button[data-type]');
+    const row = ev.target.closest('.list-group-item[data-type][data-id]');
+    const rowType = row ? row.getAttribute('data-type') : null;
+    const rowId = row ? row.getAttribute('data-id') : null;
+
+    if(btn && rowType === 'folder' && rowId){
+      const action = btn.getAttribute('data-type');
+      if(action === 'folder-toggle'){
+        const open = !_btIsFolderOpen(rowId);
+        _btSetFolderOpen(rowId, open);
+        renderButtonsTree(window.__buttonsTree);
+        return;
+      }
+      if(action === 'folder-new-child'){
+        const name = prompt('Folder name?');
+        if(!name) return;
+        const tree = window.__buttonsTree;
+        tree.folders = Array.isArray(tree.folders) ? tree.folders : [];
+        const kids = tree.folders.filter(x => x && (x.parentId || null) === String(rowId));
+        const maxOrder = Math.max(-1, ...kids.map(x => Number(x.order || 0)));
+        tree.folders.push({id: _btUuid(), name: String(name).trim(), parentId: String(rowId), order: maxOrder+1});
+        await _btSaveTree();
+        _btSetFolderOpen(rowId, true);
+        renderButtonsTree(tree);
+        return;
+      }
+      if(action === 'folder-rename'){
+        const f = _btFindFolderById(rowId);
+        const name = prompt('Rename folder:', f ? String(f.name || '') : '');
+        if(name === null) return;
+        if(f) f.name = String(name).trim() || 'Folder';
+        await _btSaveTree();
+        renderButtonsTree(window.__buttonsTree);
+        return;
+      }
+      if(action === 'folder-delete'){
+        if(!confirm('Delete folder? Items inside will be moved to the parent.')) return;
+        await _btDeleteFolder(rowId);
+        return;
+      }
+      if(action === 'folder-up'){ await _btMoveUp('folder', rowId); return; }
+      if(action === 'folder-down'){ await _btMoveDown('folder', rowId); return; }
+    }
+
+    if(btn && rowType === 'template' && rowId){
+      const action = btn.getAttribute('data-type');
+      if(action === 'button-up'){ await _btMoveUp('template', rowId); return; }
+      if(action === 'button-down'){ await _btMoveDown('template', rowId); return; }
+      if(action === 'button-delete'){
+        if(!confirm('Delete button template?')) return;
+        try{
+          const r = await fetch('/api/templates/button/' + encodeURIComponent(rowId), {method:'DELETE'});
+          const data = await r.json().catch(()=>({}));
+          if(!r.ok || !data.ok) return alert(data.error || 'Delete failed');
+          await loadTemplates();
+        }catch(e){ console.error(e); alert('Error'); }
+        return;
+      }
+      if(action === 'button-edit'){
+        window.__editingButtonId = String(rowId);
+        renderButtonsTree(window.__buttonsTree);
+        return;
+      }
+      if(action === 'button-cancel'){
+        window.__editingButtonId = null;
+        renderButtonsTree(window.__buttonsTree);
+        return;
+      }
+      if(action === 'button-save'){
+        const rowEl = btn.closest('.list-group-item');
+        const labelInput = rowEl ? rowEl.querySelector('[data-role=\"button-label\"]') : null;
+        const patternInput = rowEl ? rowEl.querySelector('[data-role=\"button-pattern\"]') : null;
+        const label = String(labelInput ? labelInput.value : '').trim();
+        const pattern = String(patternInput ? patternInput.value : '').trim();
+        if(!label || !pattern) return alert('Label and pattern required');
+          if(!/^\d+\/\d+\/\d+$/.test(pattern)) return alert('Pattern must be like "1/0/1" (three integers separated by "/")');
+        try{
+          const r = await fetch('/api/templates/button/' + encodeURIComponent(rowId), {
+            method: 'PUT',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({label, pattern})
+          });
+          const data = await r.json().catch(()=>({}));
+          if(!r.ok || !data.ok){
+            if(r.status === 409 && data && data.existing){
+              const ex = data.existing;
+              alert(`That button is already saved as:\\n\\nName: ${ex.label || '(no name)'}\\nButton: ${ex.pattern || ''}\\nURL: ${ex.buttonURL || ''}`);
+              return;
+            }
+            return alert(data.error || 'Update failed');
+          }
+          window.__editingButtonId = null;
+          await loadTemplates();
+        }catch(e){
+          console.error(e);
+          alert('Error updating');
+        }
+        return;
+      }
+    }
+  });
+
+  _btTreeEl.addEventListener('keydown', (ev)=>{
+    if(ev.key !== 'Enter') return;
+    const input = ev.target.closest('[data-role=\"button-label\"], [data-role=\"button-pattern\"]');
+    if(!input) return;
+    const row = input.closest('.list-group-item');
+    const saveBtn = row ? row.querySelector('button[data-type=\"button-save\"]') : null;
+    if(saveBtn){
+      ev.preventDefault();
+      saveBtn.click();
+    }
+  });
+}
+
+const _newFolderBtn = document.getElementById('button-folder-new');
+if(_newFolderBtn){
+  _newFolderBtn.addEventListener('click', async (ev)=>{
     ev.preventDefault();
-    saveBtn.click();
-  }
-});
+    const name = prompt('Folder name?');
+    if(!name) return;
+    const tree = window.__buttonsTree || {version:2, folders:[], templates:[]};
+    tree.folders = Array.isArray(tree.folders) ? tree.folders : [];
+    const kids = tree.folders.filter(x => x && !(x.parentId));
+    const maxOrder = Math.max(-1, ...kids.map(x => Number(x.order || 0)));
+    const id = _btUuid();
+    tree.folders.push({id, name: String(name).trim(), parentId: null, order: maxOrder+1});
+    await _btSaveTree();
+    _btSetFolderOpen(id, true);
+    renderButtonsTree(tree);
+  });
+}
+
+const _expBtn = document.getElementById('button-folders-expand');
+if(_expBtn){
+  _expBtn.addEventListener('click', (ev)=>{
+    ev.preventDefault();
+    const tree = window.__buttonsTree;
+    if(!tree || !Array.isArray(tree.folders)) return;
+    tree.folders.forEach(f=>{ if(f && f.id) _btSetFolderOpen(f.id, true); });
+    renderButtonsTree(tree);
+  });
+}
+const _colBtn = document.getElementById('button-folders-collapse');
+if(_colBtn){
+  _colBtn.addEventListener('click', (ev)=>{
+    ev.preventDefault();
+    const tree = window.__buttonsTree;
+    if(!tree || !Array.isArray(tree.folders)) return;
+    tree.folders.forEach(f=>{ if(f && f.id) _btSetFolderOpen(f.id, false); });
+    renderButtonsTree(tree);
+  });
+}
 
 document.getElementById('triggers-list-ui').addEventListener('click', async (ev)=>{
   const deleteBtn = ev.target.closest('button[data-type="trigger-delete"]');
@@ -988,6 +1531,24 @@ document.getElementById('triggers-list-ui').addEventListener('click', async (ev)
 });
 
 document.getElementById('trigger-editor-triggers-container').addEventListener('click', (ev)=>{
+  const toggle = ev.target.closest('.toggle-collapse');
+  if(toggle){
+    ev.preventDefault();
+    const row = toggle.closest('.trigger-row');
+    if(!row) return;
+    const body = row.querySelector('.trigger-body');
+    const tplIdx = (window.__selectedTriggerIndex !== undefined && window.__selectedTriggerIndex !== null) ? parseInt(window.__selectedTriggerIndex, 10) : null;
+    const tpl = (tplIdx !== null && Array.isArray(window.__triggerTemplates)) ? window.__triggerTemplates[tplIdx] : null;
+    const tplId = tpl && tpl.id ? String(tpl.id) : 'new';
+    const uid = String(row.querySelector('input[name=\"uid\"]')?.value || row.getAttribute('data-uid') || '').trim();
+    const key = `tplTrigCollapsed:${tplId}:${uid}`;
+    const collapsed = !(body && body.style.display === 'none');
+    if(body) body.style.display = collapsed ? 'none' : '';
+    toggle.textContent = collapsed ? '▸' : '▾';
+    try{ localStorage.setItem(key, collapsed ? '1' : '0'); }catch(e){}
+    return;
+  }
+
   const rm = ev.target.closest('.remove-trigger');
   if(rm){
     ev.preventDefault();
@@ -1083,3 +1644,4 @@ loadTemplates();
 </script>
 
 {% endblock %}
+

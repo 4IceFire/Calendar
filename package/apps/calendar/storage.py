@@ -1,6 +1,7 @@
 import json
 import os
 import time as t
+import uuid
 from datetime import datetime
 from typing import List
 
@@ -43,6 +44,9 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                     action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
                     api = trig.get("api") if isinstance(trig, dict) else None
                     enabled = True
+                    trig_name = str(trig.get("name") or "").strip() if isinstance(trig, dict) else ""
+                    trig_uid = str(trig.get("uid") or "").strip() if isinstance(trig, dict) else ""
+                    trig_uid = trig_uid or None
                     try:
                         if isinstance(trig, dict):
                             if "enabled" in trig:
@@ -62,6 +66,8 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                                 trig.get("minutes", 0),
                                 TypeofTime[trig.get("typeOfTrigger", "AT")],
                                 "",
+                                name=trig_name,
+                                uid=trig_uid,
                                 actionType="api",
                                 api=api if isinstance(api, dict) else {},
                                 enabled=enabled,
@@ -73,6 +79,8 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                                 trig.get("minutes", 0),
                                 TypeofTime[trig.get("typeOfTrigger", "AT")],
                                 trig.get("buttonURL", ""),
+                                name=trig_name,
+                                uid=trig_uid,
                                 actionType="companion",
                                 enabled=enabled,
                             )
@@ -131,6 +139,10 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                         if "buttonURL" not in trig:
                             trig["buttonURL"] = ""
                             changed = True
+
+                    if "uid" not in trig or not str(trig.get("uid") or "").strip():
+                        trig["uid"] = str(uuid.uuid4())
+                        changed = True
                 # ensure id exists
                 if "id" not in ev or not isinstance(ev.get("id"), int):
                     max_id += 1
