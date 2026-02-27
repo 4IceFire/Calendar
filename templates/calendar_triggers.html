@@ -10,12 +10,12 @@
 
 {% block content %}
   <div class="d-flex justify-content-between align-items-center mb-2">
-    <div class="text-muted small" id="upcoming-meta">Loading…</div>
+    <div class="text-muted small" id="upcoming-meta">Loading...</div>
   </div>
 
   <div class="tdeck-soft rounded-3 overflow-hidden">
     <div class="list-group list-group-flush" id="upcoming-list">
-      <div class="list-group-item text-muted">Loading…</div>
+      <div class="list-group-item text-muted">Loading...</div>
     </div>
   </div>
 
@@ -75,12 +75,16 @@
       listEl.innerHTML = '';
 
       for(const t of arr){
-        const actionType = (t.actionType || 'companion');
-        const button = (actionType === 'api')
-           ? `API: ${(t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST'} ${t.api && t.api.path ? prettyApiPath(t.api.path) : ''}`
-          : ((t.button && (t.button.label || t.button.pattern))
-            ? `${t.button.label ? t.button.label + ' — ' : ''}${t.button.pattern || ''}`
-            : (t.buttonURL || ''));
+        const actionType = String(t.actionType || 'companion').toLowerCase();
+        const trigName = String((t && t.name) ? t.name : '').trim();
+        const method = (t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST';
+        const apiPath = (t.api && t.api.path) ? prettyApiPath(t.api.path) : '';
+        const fallback = (actionType === 'api')
+          ? (apiPath ? `API: ${method} ${apiPath}` : `API: ${method}`)
+          : (String((t.button && t.button.label) ? t.button.label : '').trim()
+            || String((t.button && t.button.pattern) ? t.button.pattern : '').trim()
+            || String(t.buttonURL || '').trim());
+        const displayLine = trigName || fallback || '';
 
         const eventLabel = t.event || '(unnamed)';
         const eventId = (t.event_id !== undefined && t.event_id !== null) ? String(t.event_id) : '';
@@ -93,7 +97,7 @@
         row.innerHTML = `
           <div class="text-truncate">
             <div class="fw-semibold text-truncate">${eventHtml} <span class="text-muted">(${escapeHtml(t.offset || '')})</span></div>
-            <div class="small text-muted text-truncate">${escapeHtml(button || '')}</div>
+            <div class="small text-muted text-truncate">${escapeHtml(displayLine)}</div>
           </div>
           <div class="text-muted ms-2" style="white-space:nowrap">${escapeHtml(formatDue(t.due_ms))}</div>
         `;
