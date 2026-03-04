@@ -77,6 +77,39 @@ function displayApiPath(p){
   return s;
 }
 
+function _parseEventBaseDtFromForm(){
+  try{
+    const date = String(document.querySelector('input[name="date"]')?.value || '').trim();
+    const time = String(document.querySelector('input[name="time"]')?.value || '').trim();
+    if(!date || !time) return null;
+    const timeWithSeconds = time.includes(':') && time.split(':').length === 2 ? (time + ':00') : time;
+    const dt = new Date(`${date}T${timeWithSeconds}`);
+    if(Number.isNaN(dt.getTime())) return null;
+    return dt;
+  }catch(e){
+    return null;
+  }
+}
+
+function _formatTriggerFireTime(dt){
+  try{
+    return dt.toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true});
+  }catch(e){
+    return '';
+  }
+}
+
+function _triggerFireTimeLabel({baseDt, typeOfTrigger, minutes}){
+  if(!baseDt) return '';
+  const typ = String(typeOfTrigger || 'AT').toUpperCase();
+  const mins = Number(minutes) || 0;
+  let deltaMin = 0;
+  if(typ === 'BEFORE') deltaMin = -mins;
+  else if(typ === 'AFTER') deltaMin = mins;
+  const due = new Date(baseDt.getTime() + deltaMin * 60000);
+  return _formatTriggerFireTime(due);
+}
+
 async function loadButtonTemplates(){
   try{
     const resp = await fetch('/api/templates');
@@ -178,12 +211,12 @@ function newTriggerRow(templates){
     if(!summaryEl || !typeSelect || !minutesInput) return;
     const typ = String(typeSelect.value || 'AT').toUpperCase();
     const mins = parseInt(String(minutesInput.value || '0'), 10);
-    if(typ === 'AT'){
-      summaryEl.textContent = 'At (0m)';
-      return;
-    }
     const m = Number.isFinite(mins) ? mins : 0;
-    summaryEl.textContent = (typ === 'BEFORE') ? `Before ${m}m` : `After ${m}m`;
+    const baseDt = _parseEventBaseDtFromForm();
+    const label = _triggerFireTimeLabel({baseDt, typeOfTrigger: typ, minutes: m});
+    const offsetHint = (typ === 'AT') ? 'At (0m)' : ((typ === 'BEFORE') ? `Before ${m}m` : `After ${m}m`);
+    summaryEl.textContent = label || offsetHint;
+    summaryEl.title = offsetHint;
   };
   if(typeSelect) typeSelect.addEventListener('change', syncSummary);
   if(minutesInput) minutesInput.addEventListener('input', syncSummary);
@@ -226,6 +259,19 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   triggerTemplates.forEach((t,i)=>{ const opt = document.createElement('option'); opt.value = i; opt.text = t.label + ' — ' + (Array.isArray(t.times)?t.times.length: (t.spec? (Array.isArray(t.spec)?t.spec.length:'1'):'0')) + ' triggers'; tplSel.appendChild(opt); });
   const container = document.getElementById('triggers-container');
   const saveTplBtn = document.getElementById('save-trigger-template-btn');
+
+  // When the event date/time changes, refresh each trigger's computed fire time label.
+  const dateEl = document.querySelector('input[name="date"]');
+  const timeEl = document.querySelector('input[name="time"]');
+  const syncAllTriggerSummaries = ()=>{
+    try{
+      container.querySelectorAll('.trigger-row').forEach((row)=>{
+        if(row && typeof row.__syncSummary === 'function') row.__syncSummary();
+      });
+    }catch(e){}
+  };
+  if(dateEl) dateEl.addEventListener('input', syncAllTriggerSummaries);
+  if(timeEl) timeEl.addEventListener('input', syncAllTriggerSummaries);
 
   function _eventCollapseKey(uid){
     const eid = (editId && String(editId).trim()) ? String(editId).trim() : 'new';
