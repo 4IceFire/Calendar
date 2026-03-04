@@ -18,11 +18,11 @@
       <thead>
         <tr>
           <th style="width:70px">ID</th>
+          <th style="width:90px">Active</th>
           <th style="min-width:220px">Name</th>
           <th style="width:140px">Date</th>
           <th style="width:110px">Time</th>
           <th style="width:100px">Repeating</th>
-          <th style="width:90px">Active</th>
           <th>Triggers</th>
           <th class="text-end" style="width:170px"></th>
         </tr>
@@ -37,7 +37,7 @@
 <script>
 async function loadEvents(){
   const tbody = document.getElementById('events-body');
-  tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">Loading…</td></tr>';
   try{
     // fetch events and templates so we can display template labels when available
     const [resp, tplResp] = await Promise.all([
@@ -62,20 +62,65 @@ async function loadEvents(){
       return;
     }
     tbody.innerHTML = '';
-    function friendlyTriggerParts(t){
+
+    function parseEventBaseDt(e){
+      try{
+        const date = String(e?.date || '').trim();
+        const time = String(e?.time || '').trim();
+        if(!date || !time) return null;
+        const dt = new Date(`${date}T${time}`);
+        if(Number.isNaN(dt.getTime())) return null;
+        return dt;
+      }catch(e){
+        return null;
+      }
+    }
+
+    function formatTriggerTime(dt){
+      try{
+        return dt.toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true});
+      }catch(e){
+        return '';
+      }
+    }
+
+    function triggerTimeLabel({baseDt, rawType, mins}){
+      if(!baseDt) return '';
+      const m = Number(mins) || 0;
+      let deltaMin = 0;
+      if(rawType === 'BEFORE') deltaMin = -m;
+      else if(rawType === 'AFTER') deltaMin = m;
+      else deltaMin = 0;
+
+      const due = new Date(baseDt.getTime() + (deltaMin * 60000));
+      let label = formatTriggerTime(due);
+
+      // If the trigger falls on a different date, add a small day offset hint.
+      try{
+        const baseDay = new Date(baseDt.getTime());
+        baseDay.setHours(0,0,0,0);
+        const dueDay = new Date(due.getTime());
+        dueDay.setHours(0,0,0,0);
+        const deltaDays = Math.round((dueDay.getTime() - baseDay.getTime()) / 86400000);
+        if(deltaDays !== 0){
+          label += ` (${deltaDays > 0 ? '+' : ''}${deltaDays}d)`;
+        }
+      }catch(e){}
+
+      return label;
+    }
+
+    function friendlyTriggerParts(t, baseDt){
       const rawType = String(t.typeOfTrigger || '').toUpperCase();
       const mins = Number(t.minutes) || 0;
 
       const actionType = String(t.actionType || 'companion').toLowerCase();
       const trigName = String((t && t.name) ? t.name : '').trim();
 
-      // Represent BEFORE/AT/AFTER as a signed offset so it reads at-a-glance.
-      // BEFORE => -Xm, AT => 0m, AFTER => +Xm
-      let sign = '';
-      if (rawType === 'BEFORE') sign = '-';
-      else if (rawType === 'AFTER') sign = '+';
-      else sign = '';
-      const offsetLabel = `${sign}${mins}m`;
+      const timeLabel = triggerTimeLabel({baseDt, rawType, mins});
+      const offsetHint = (rawType === 'AT')
+        ? 'At (0m)'
+        : ((rawType === 'BEFORE') ? `Before ${mins}m` : `After ${mins}m`);
 
       if(actionType === 'api'){
         const m = (t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST';
@@ -83,7 +128,8 @@ async function loadEvents(){
         const p = rawP.startsWith('/api/') ? rawP.slice(4) : rawP;
         return {
           rawType,
-          offsetLabel,
+          timeLabel,
+          offsetHint,
           target: trigName || `API: ${m} ${p}`,
           targetKind: 'api',
         };
@@ -109,7 +155,8 @@ async function loadEvents(){
       const target = label ? String(label) : (shortBtn ? String(shortBtn) : '');
       return {
         rawType,
-        offsetLabel,
+        timeLabel,
+        offsetHint,
         target: trigName || target,
         targetKind: label ? 'template' : (shortBtn ? 'button' : ''),
       };
@@ -126,10 +173,11 @@ async function loadEvents(){
 
     for(const e of data){
       const tr = document.createElement('tr');
+      const baseDt = parseEventBaseDt(e);
       const triggers = Array.isArray(e.times) ? e.times : [];
       const triggerRows = triggers.map(t => {
         const isEnabled = (t && t.enabled !== false);
-        const parts = friendlyTriggerParts(t);
+        const parts = friendlyTriggerParts(t, baseDt);
         const target = parts.target || '';
         const typeCls = parts.rawType ? `cal-trigger-${String(parts.rawType).toLowerCase()}` : '';
         const targetCls = parts.targetKind ? `cal-trigger-${parts.targetKind}` : '';
@@ -137,19 +185,24 @@ async function loadEvents(){
         const off = isEnabled ? '' : ' (off)';
         return `
           <div class="cal-trigger-row ${disabledCls}">
-            <span class="cal-trigger-offset ${typeCls}">${escapeHtml(parts.offsetLabel || '')}</span>
+            <span class="cal-trigger-offset ${typeCls}" title="${escapeHtml(parts.offsetHint || '')}">${escapeHtml(parts.timeLabel || '')}</span>
             <span class="cal-trigger-target ${targetCls}">${escapeHtml(target + off)}</span>
           </div>
         `;
       }).join('');
       const triggersHtml = triggerRows ? `<div class="cal-triggers">${triggerRows}</div>` : '';
       tr.innerHTML = `
-        <td>${e.id ?? ''}</td>
-        <td>${e.name}</td>
-        <td>${e.date}</td>
-        <td>${e.time}</td>
+        <td>${escapeHtml(e.id ?? '')}</td>
+        <td>
+          <label class="tdeck-toggle" title="Toggle event active">
+            <input type="checkbox" class="event-active-toggle" data-id="${escapeHtml(e.id ?? '')}" ${e.active ? 'checked' : ''}>
+            <span class="tdeck-toggle-slider" aria-hidden="true"></span>
+          </label>
+        </td>
+        <td>${escapeHtml(e.name)}</td>
+        <td>${escapeHtml(e.date)}</td>
+        <td>${escapeHtml(e.time)}</td>
         <td>${e.repeating ? 'Yes' : 'No'}</td>
-        <td>${e.active ? 'Yes' : 'No'}</td>
         <td>${triggersHtml}</td>
         <td>
           <div class="btn-group" role="group">
@@ -202,6 +255,35 @@ document.getElementById('events-body').addEventListener('click', async (ev) => {
       console.error(e);
       alert('Error deleting event: ' + e.message);
     }
+  }
+});
+
+// Toggle active switch handler
+document.getElementById('events-body').addEventListener('change', async (ev) => {
+  const input = ev.target;
+  if(!input || !input.classList || !input.classList.contains('event-active-toggle')) return;
+  const id = input.getAttribute('data-id');
+  if(!id) return;
+
+  const nextActive = !!input.checked;
+  const prevActive = !nextActive;
+  input.disabled = true;
+  try{
+    const resp = await fetch(`/api/events/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({active: nextActive})
+    });
+    if(!resp.ok){
+      const txt = await resp.text();
+      throw new Error(txt || ('HTTP ' + resp.status));
+    }
+  }catch(e){
+    console.error(e);
+    input.checked = prevActive;
+    alert('Unable to update Active state: ' + (e && e.message ? e.message : String(e)));
+  }finally{
+    input.disabled = false;
   }
 });
 

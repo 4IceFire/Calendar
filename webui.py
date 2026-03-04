@@ -5630,52 +5630,57 @@ def api_update_event_ui(ident: int):
         date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
         time_obj = datetime.strptime(time_str, '%H:%M:%S').time() if len(time_str.split(':'))==3 else datetime.strptime(time_str, '%H:%M').time()
 
-        times = []
-        import re as _re
-        for t in body.get('times', []):
-            typ_name = t.get('typeOfTrigger', 'AT')
-            if typ_name not in TypeofTime.__members__:
-                return jsonify({'ok': False, 'error': f"Invalid typeOfTrigger: {typ_name}"}), 400
-            typ = TypeofTime[typ_name]
-
-            # Minutes: if type is AT, always save 0 (ignore client input)
-            if typ_name == 'AT':
-                mins = 0
-            else:
-                try:
-                    mins = int(t.get('minutes', 0) or 0)
-                except Exception:
-                    return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400
-                if mins < 0:
-                    return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400
-
-            t2 = dict(t)
-            t2['typeOfTrigger'] = typ_name
-            t2['minutes'] = mins
-            t3, err = _normalize_trigger_action_spec(t2)
-            if err:
-                return jsonify({'ok': False, 'error': err}), 400
-            if not t3:
-                continue
-            action_type = str(t3.get('actionType') or 'companion').lower()
-            btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
-            api_obj = t3.get('api') if action_type == 'api' else None
-            enabled = bool(t3.get('enabled', True))
-            trig_name = str(t3.get('name') or '').strip()
-            trig_uid = str(t3.get('uid') or '').strip() or _uuid4_str()
-
-            times.append(
-                TimeOfTrigger(
-                    mins,
-                    typ,
-                    btn_final,
-                    name=trig_name,
-                    uid=trig_uid,
-                    actionType=action_type,
-                    api=api_obj,
-                    enabled=enabled,
-                )
-            )
+        # Support partial updates (e.g., toggling active) without requiring the
+        # client to resend the full trigger list.
+        if 'times' not in body: 
+            times = ev.times 
+        else: 
+            times = [] 
+            import re as _re 
+            for t in body.get('times', []): 
+                typ_name = t.get('typeOfTrigger', 'AT') 
+                if typ_name not in TypeofTime.__members__: 
+                    return jsonify({'ok': False, 'error': f"Invalid typeOfTrigger: {typ_name}"}), 400 
+                typ = TypeofTime[typ_name] 
+ 
+                # Minutes: if type is AT, always save 0 (ignore client input) 
+                if typ_name == 'AT': 
+                    mins = 0 
+                else: 
+                    try: 
+                        mins = int(t.get('minutes', 0) or 0) 
+                    except Exception: 
+                        return jsonify({'ok': False, 'error': f"Invalid minutes value: {t.get('minutes')}"}), 400 
+                    if mins < 0: 
+                        return jsonify({'ok': False, 'error': f"Minutes must be >= 0: {mins}"}), 400 
+ 
+                t2 = dict(t) 
+                t2['typeOfTrigger'] = typ_name 
+                t2['minutes'] = mins 
+                t3, err = _normalize_trigger_action_spec(t2) 
+                if err: 
+                    return jsonify({'ok': False, 'error': err}), 400 
+                if not t3: 
+                    continue 
+                action_type = str(t3.get('actionType') or 'companion').lower() 
+                btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else '' 
+                api_obj = t3.get('api') if action_type == 'api' else None 
+                enabled = bool(t3.get('enabled', True)) 
+                trig_name = str(t3.get('name') or '').strip() 
+                trig_uid = str(t3.get('uid') or '').strip() or _uuid4_str() 
+ 
+                times.append( 
+                    TimeOfTrigger( 
+                        mins, 
+                        typ, 
+                        btn_final, 
+                        name=trig_name, 
+                        uid=trig_uid, 
+                        actionType=action_type, 
+                        api=api_obj, 
+                        enabled=enabled, 
+                    ) 
+                ) 
 
         # replace fields on existing event object
         ev.name = name
