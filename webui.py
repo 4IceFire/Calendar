@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory
 import logging
 import threading
 import time
@@ -12,6 +12,7 @@ import secrets
 import uuid
 
 from werkzeug.serving import make_server
+from werkzeug.utils import secure_filename
 import json
 import re
 from datetime import datetime, timedelta
@@ -600,6 +601,38 @@ def _set_role_videohub_can_edit_presets(role_id: int, enabled: bool) -> None:
         conn.close()
 
 
+def _can_manage_videohub_rooms_for_current_user() -> bool:
+    """Whether the current user should be allowed to access room management UI."""
+    try:
+        if not _auth_enabled():
+            return True
+    except Exception:
+        return False
+
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+    except Exception:
+        return False
+
+    try:
+        if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
+            return True
+    except Exception:
+        pass
+
+    try:
+        if not can_access('page:videohub'):
+            return False
+    except Exception:
+        return False
+
+    try:
+        return bool(_get_role_videohub_can_edit_presets(getattr(current_user, 'role_id', None)))
+    except Exception:
+        return False
+
+
 def _audit(action: str, detail: str | None = None) -> None:
     try:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -905,6 +938,7 @@ def _inject_auth():
     return {
         'auth_enabled': _auth_enabled(),
         'can_access': can_access,
+        'can_manage_videohub_rooms': _can_manage_videohub_rooms_for_current_user,
         'csrf_token': _csrf_token,
         'current_user': current_user,
         'is_authenticated': is_authed,
@@ -1295,8 +1329,12 @@ _server_lock = threading.Lock()
 _companion_status_cache = {'ts': 0.0, 'connected': False}
 _propresenter_status_cache = {'ts': 0.0, 'connected': False}
 _videohub_status_cache = {'ts': 0.0, 'connected': False}
+_videohub_labels_cache = {'ts': 0.0, 'payload': None}
+_videohub_state_cache = {'ts': 0.0, 'payload': None}
 _status_cache_lock = threading.Lock()
 _STATUS_CACHE_TTL_SECONDS = 2.0
+_VIDEOHUB_LABELS_CACHE_TTL_SECONDS = 10.0
+_VIDEOHUB_STATE_CACHE_TTL_SECONDS = 5.0
 
 # Track last-known connectivity so we can log state changes (ONLINE/OFFLINE)
 # without spamming the console on every poll.
@@ -2283,7 +2321,29 @@ def videohub_page():
     except Exception:
         pass
 
-    return render_template('videohub.html', allowed_preset_ids=allowed_preset_ids, can_edit_presets=bool(can_edit_presets))
+    return render_template(
+        'videohub.html',
+        allowed_preset_ids=allowed_preset_ids,
+        can_edit_presets=bool(can_edit_presets),
+        can_manage_rooms=bool(_can_manage_videohub_rooms_for_current_user()),
+    )
+
+
+@app.route('/videohub/rooms')
+@require_page('page:videohub', 'VideoHub')
+def videohub_rooms_page():
+    if not _can_manage_videohub_rooms_for_current_user():
+        return abort(403)
+    return render_template('videohub_rooms.html')
+
+
+@app.route('/videohub/input-select')
+@require_page('page:videohub', 'VideoHub')
+def videohub_input_select_page():
+    return render_template(
+        'videohub_input_select.html',
+        can_edit_presets=bool(_can_edit_videohub_presets_current_user()),
+    )
 
 
 @app.route('/routing')
@@ -2355,6 +2415,193 @@ def _write_json_file(p: Path, data):
         return True
     except Exception:
         return False
+
+
+_videohub_rooms_lock = threading.Lock()
+_VIDEOHUB_ROOM_ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
+_VIDEOHUB_ROOM_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _videohub_rooms_config_path() -> Path:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        raw = str(cfg.get('videohub_rooms_file') or '').strip()
+    except Exception:
+        raw = ''
+    if raw:
+        try:
+            return Path(raw)
+        except Exception:
+            pass
+    return Path(__file__).resolve().parent / 'videohub_rooms.json'
+
+
+def _videohub_rooms_images_dir() -> Path:
+    return Path(__file__).resolve().parent / 'videohub_room_images'
+
+
+def _default_videohub_rooms_config() -> dict:
+    return {
+        'version': 1,
+        'rooms': [],
+        'output_layouts': {},
+        'filtered_inputs': [],
+    }
+
+
+def _normalize_videohub_rooms_config(raw) -> dict:
+    data = raw if isinstance(raw, dict) else {}
+    out = _default_videohub_rooms_config()
+
+    rooms_raw = data.get('rooms')
+    rooms: list[dict] = []
+    seen_room_ids: set[str] = set()
+    if isinstance(rooms_raw, list):
+        for item in rooms_raw:
+            if not isinstance(item, dict):
+                continue
+            rid = str(item.get('id') or '').strip()
+            if not rid:
+                rid = uuid.uuid4().hex
+            if rid in seen_room_ids:
+                continue
+            seen_room_ids.add(rid)
+
+            name = str(item.get('name') or '').strip()
+            if not name:
+                name = f'Room {len(rooms) + 1}'
+
+            bg = str(item.get('background_image') or '').strip()
+            if bg:
+                bg = Path(bg).name
+            rooms.append({
+                'id': rid,
+                'name': name[:120],
+                'background_image': bg,
+            })
+    out['rooms'] = rooms
+
+    room_id_set = set([r['id'] for r in rooms])
+    layouts_raw = data.get('output_layouts')
+    layouts: dict[str, dict] = {}
+    if isinstance(layouts_raw, dict):
+        for k, v in layouts_raw.items():
+            try:
+                out_n = int(k)
+            except Exception:
+                continue
+            if out_n <= 0 or not isinstance(v, dict):
+                continue
+
+            rid = str(v.get('room_id') or '').strip()
+            if rid and rid not in room_id_set:
+                rid = ''
+
+            try:
+                x = float(v.get('x'))
+            except Exception:
+                x = 50.0
+            try:
+                y = float(v.get('y'))
+            except Exception:
+                y = 50.0
+            x = max(0.0, min(100.0, x))
+            y = max(0.0, min(100.0, y))
+            layouts[str(out_n)] = {'room_id': rid, 'x': x, 'y': y}
+    out['output_layouts'] = layouts
+
+    filt_raw = data.get('filtered_inputs')
+    filtered_inputs: list[int] = []
+    seen_inputs: set[int] = set()
+    if isinstance(filt_raw, list):
+        for item in filt_raw:
+            try:
+                n = int(item)
+            except Exception:
+                continue
+            if n <= 0 or n in seen_inputs:
+                continue
+            seen_inputs.add(n)
+            filtered_inputs.append(n)
+    out['filtered_inputs'] = filtered_inputs
+    return out
+
+
+def _load_videohub_rooms_config() -> dict:
+    p = _videohub_rooms_config_path()
+    with _videohub_rooms_lock:
+        try:
+            if not p.exists():
+                d = _default_videohub_rooms_config()
+                p.write_text(json.dumps(d, indent=2), encoding='utf-8')
+                return d
+            raw = json.loads(p.read_text(encoding='utf-8') or '{}')
+        except Exception:
+            return _default_videohub_rooms_config()
+    return _normalize_videohub_rooms_config(raw)
+
+
+def _save_videohub_rooms_config(data: dict) -> dict:
+    p = _videohub_rooms_config_path()
+    normalized = _normalize_videohub_rooms_config(data)
+    with _videohub_rooms_lock:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + '.tmp')
+        tmp.write_text(json.dumps(normalized, indent=2), encoding='utf-8')
+        tmp.replace(p)
+    return normalized
+
+
+def _can_edit_videohub_presets_current_user() -> bool:
+    try:
+        if not _auth_enabled():
+            return True
+    except Exception:
+        return False
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+    except Exception:
+        return False
+    try:
+        if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(_get_role_videohub_can_edit_presets(getattr(current_user, 'role_id', None)))
+    except Exception:
+        return False
+
+
+def _api_requires_videohub_edit() -> bool:
+    """API auth guard for room metadata mutating routes."""
+    try:
+        if not _auth_enabled():
+            return True
+    except Exception:
+        return False
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+    except Exception:
+        return False
+    return bool(_can_edit_videohub_presets_current_user())
+
+
+def _delete_room_background_image(filename: str) -> None:
+    fn = Path(str(filename or '')).name
+    if not fn:
+        return
+    try:
+        p = _videohub_rooms_images_dir() / fn
+        if p.exists() and p.is_file():
+            p.unlink()
+    except Exception:
+        pass
 
 
 def _coerce_trigger_times_list(val):
@@ -3521,34 +3768,50 @@ def api_videohub_labels():
     except Exception:
         cfg = {}
 
+    now = time.time()
+    force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+    with _status_cache_lock:
+        if not force and (now - float(_videohub_labels_cache.get('ts', 0.0))) < _VIDEOHUB_LABELS_CACHE_TTL_SECONDS:
+            cached = _videohub_labels_cache.get('payload')
+            if isinstance(cached, dict):
+                return jsonify(cached)
+
     vh = _get_videohub_client_from_config()
     if vh is None:
-        # Not configured.
         nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        return jsonify({
+        payload = {
             'ok': True,
             'configured': False,
             'inputs': nums,
             'outputs': nums,
-        })
+        }
+        with _status_cache_lock:
+            _videohub_labels_cache['ts'] = now
+            _videohub_labels_cache['payload'] = payload
+        return jsonify(payload)
 
     try:
         labels = vh.get_labels(fallback_count=fallback_count)
-        return jsonify({
+        payload = {
             'ok': True,
             'configured': True,
             'inputs': labels.get('inputs', []),
             'outputs': labels.get('outputs', []),
-        })
+        }
     except Exception as e:
         nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        return jsonify({
+        payload = {
             'ok': True,
             'configured': True,
             'error': str(e),
             'inputs': nums,
             'outputs': nums,
-        })
+        }
+
+    with _status_cache_lock:
+        _videohub_labels_cache['ts'] = now
+        _videohub_labels_cache['payload'] = payload
+    return jsonify(payload)
 
 
 @app.route('/api/videohub/state', methods=['GET'])
@@ -3561,16 +3824,28 @@ def api_videohub_state():
 
     fallback_count = 40
 
+    now = time.time()
+    force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+    with _status_cache_lock:
+        if not force and (now - float(_videohub_state_cache.get('ts', 0.0))) < _VIDEOHUB_STATE_CACHE_TTL_SECONDS:
+            cached = _videohub_state_cache.get('payload')
+            if isinstance(cached, dict):
+                return jsonify(cached)
+
     vh = _get_videohub_client_from_config()
     if vh is None:
         nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        return jsonify({
+        payload = {
             'ok': True,
             'configured': False,
             'inputs': nums,
             'outputs': nums,
             'routing': [i for i in range(1, fallback_count + 1)],
-        })
+        }
+        with _status_cache_lock:
+            _videohub_state_cache['ts'] = now
+            _videohub_state_cache['payload'] = payload
+        return jsonify(payload)
 
     try:
         if hasattr(vh, 'get_state'):
@@ -3579,30 +3854,203 @@ def api_videohub_state():
             outputs = st.get('outputs') or []
             routing = st.get('routing') or []
         else:
-            # Backwards compatibility if older client is present.
             labels = vh.get_labels(fallback_count=fallback_count)
             inputs = labels.get('inputs', [])
             outputs = labels.get('outputs', [])
             n = max(fallback_count, len(inputs), len(outputs))
             routing = [i for i in range(1, n + 1)]
-
-        return jsonify({
+        payload = {
             'ok': True,
             'configured': True,
             'inputs': inputs,
             'outputs': outputs,
             'routing': routing,
-        })
+        }
     except Exception as e:
         nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        return jsonify({
+        payload = {
             'ok': True,
             'configured': True,
             'error': str(e),
             'inputs': nums,
             'outputs': nums,
             'routing': [i for i in range(1, fallback_count + 1)],
-        })
+        }
+
+    with _status_cache_lock:
+        _videohub_state_cache['ts'] = now
+        _videohub_state_cache['payload'] = payload
+    return jsonify(payload)
+
+
+@app.route('/media/videohub_room_images/<path:filename>', methods=['GET'])
+@require_page('page:videohub', 'VideoHub')
+def api_videohub_room_image(filename: str):
+    fn = Path(str(filename or '')).name
+    if not fn:
+        return abort(404)
+    folder = _videohub_rooms_images_dir()
+    if not folder.exists():
+        return abort(404)
+    return send_from_directory(str(folder), fn)
+
+
+@app.route('/api/videohub/rooms/config', methods=['GET'])
+def api_videohub_rooms_config_get():
+    try:
+        cfg = _load_videohub_rooms_config()
+        rooms = []
+        for r in (cfg.get('rooms') or []):
+            if not isinstance(r, dict):
+                continue
+            rr = dict(r)
+            bg = str(rr.get('background_image') or '').strip()
+            rr['background_url'] = f"/media/videohub_room_images/{bg}" if bg else ''
+            rooms.append(rr)
+        cfg['rooms'] = rooms
+        return jsonify({'ok': True, 'config': cfg})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/videohub/rooms/config', methods=['PUT'])
+def api_videohub_rooms_config_put():
+    if not _api_requires_videohub_edit():
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid json'}), 400
+    if not isinstance(body, dict):
+        return jsonify({'ok': False, 'error': 'invalid payload'}), 400
+
+    old_cfg = _load_videohub_rooms_config()
+    new_cfg = _save_videohub_rooms_config(body)
+
+    # Cleanup orphaned images when rooms are deleted or image is replaced.
+    try:
+        old_map = {}
+        for r in (old_cfg.get('rooms') or []):
+            if isinstance(r, dict):
+                old_map[str(r.get('id') or '')] = str(r.get('background_image') or '')
+        new_map = {}
+        for r in (new_cfg.get('rooms') or []):
+            if isinstance(r, dict):
+                new_map[str(r.get('id') or '')] = str(r.get('background_image') or '')
+        for rid, old_img in old_map.items():
+            if not old_img:
+                continue
+            if rid not in new_map or str(new_map.get(rid) or '') != old_img:
+                _delete_room_background_image(old_img)
+    except Exception:
+        pass
+
+    try:
+        rooms = []
+        for r in (new_cfg.get('rooms') or []):
+            if not isinstance(r, dict):
+                continue
+            rr = dict(r)
+            bg = str(rr.get('background_image') or '').strip()
+            rr['background_url'] = f"/media/videohub_room_images/{bg}" if bg else ''
+            rooms.append(rr)
+        new_cfg['rooms'] = rooms
+    except Exception:
+        pass
+    return jsonify({'ok': True, 'config': new_cfg})
+
+
+@app.route('/api/videohub/rooms/background', methods=['POST'])
+def api_videohub_rooms_background_upload():
+    if not _api_requires_videohub_edit():
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
+
+    room_id = str(request.form.get('room_id') or '').strip()
+    if not room_id:
+        return jsonify({'ok': False, 'error': 'room_id is required'}), 400
+    upload = request.files.get('file')
+    if upload is None:
+        return jsonify({'ok': False, 'error': 'file is required'}), 400
+
+    cfg = _load_videohub_rooms_config()
+    room = None
+    for r in (cfg.get('rooms') or []):
+        if isinstance(r, dict) and str(r.get('id') or '') == room_id:
+            room = r
+            break
+    if room is None:
+        return jsonify({'ok': False, 'error': 'room not found'}), 404
+
+    original_name = secure_filename(str(upload.filename or '').strip())
+    ext = Path(original_name).suffix.lower()
+    if ext not in _VIDEOHUB_ROOM_ALLOWED_EXTS:
+        return jsonify({'ok': False, 'error': 'invalid file type'}), 400
+
+    try:
+        content = upload.read(_VIDEOHUB_ROOM_IMAGE_MAX_BYTES + 1)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'failed to read upload'}), 400
+    if not content:
+        return jsonify({'ok': False, 'error': 'empty file'}), 400
+    if len(content) > _VIDEOHUB_ROOM_IMAGE_MAX_BYTES:
+        return jsonify({'ok': False, 'error': 'file exceeds 10MB limit'}), 400
+
+    out_dir = _videohub_rooms_images_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    new_name = f"{room_id}_{uuid.uuid4().hex}{ext}"
+    out_path = out_dir / new_name
+    out_path.write_bytes(content)
+
+    old_name = str(room.get('background_image') or '').strip()
+    room['background_image'] = new_name
+    saved = _save_videohub_rooms_config(cfg)
+    if old_name and old_name != new_name:
+        _delete_room_background_image(old_name)
+
+    room_out = None
+    for r in (saved.get('rooms') or []):
+        if isinstance(r, dict) and str(r.get('id') or '') == room_id:
+            room_out = dict(r)
+            break
+    if room_out is None:
+        room_out = {'id': room_id, 'background_image': new_name}
+    room_out['background_url'] = f"/media/videohub_room_images/{new_name}"
+    return jsonify({'ok': True, 'room': room_out})
+
+
+@app.route('/api/videohub/rooms/<string:room_id>/background', methods=['DELETE'])
+def api_videohub_rooms_background_delete(room_id: str):
+    if not _api_requires_videohub_edit():
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
+
+    rid = str(room_id or '').strip()
+    if not rid:
+        return jsonify({'ok': False, 'error': 'room_id is required'}), 400
+
+    cfg = _load_videohub_rooms_config()
+    found = None
+    for r in (cfg.get('rooms') or []):
+        if isinstance(r, dict) and str(r.get('id') or '') == rid:
+            found = r
+            break
+    if found is None:
+        return jsonify({'ok': False, 'error': 'room not found'}), 404
+
+    old_name = str(found.get('background_image') or '').strip()
+    found['background_image'] = ''
+    saved = _save_videohub_rooms_config(cfg)
+    if old_name:
+        _delete_room_background_image(old_name)
+
+    room_out = None
+    for r in (saved.get('rooms') or []):
+        if isinstance(r, dict) and str(r.get('id') or '') == rid:
+            room_out = dict(r)
+            break
+    if room_out is None:
+        room_out = {'id': rid, 'background_image': ''}
+    room_out['background_url'] = ''
+    return jsonify({'ok': True, 'room': room_out})
 
 
 @app.route('/api/home/overview', methods=['GET'])

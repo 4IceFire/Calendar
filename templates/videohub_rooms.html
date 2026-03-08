@@ -1,0 +1,613 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'VideoHub Rooms' %}
+{% set page_subtitle = 'Global room layout and input filter configuration' %}
+
+{% block page_actions %}
+<a class="btn btn-outline-secondary" href="/videohub">Back to VideoHub</a>
+<button id="vhr-save" class="btn btn-success">Save Changes</button>
+{% endblock %}
+
+{% block content %}
+<style>
+  #vhr-page .card{ height: 100%; }
+  #vhr-room-list{ max-height: 62vh; overflow: auto; padding-right: .2rem; }
+  .vhr-stage{
+    position: relative;
+    min-height: 420px;
+    height: min(62vh, 560px);
+    border: 1px solid var(--bs-border-color);
+    border-radius: .5rem;
+    overflow: hidden;
+    background: #f8f9fa;
+    background-size: cover;
+    background-position: center;
+  }
+  .vhr-marker{
+    position: absolute;
+    transform: translate(-50%, -50%);
+    border: 1px solid var(--bs-border-color);
+    border-radius: .5rem;
+    background: var(--bs-body-bg);
+    padding: .22rem .35rem;
+    min-width: 76px;
+    font-size: .72rem;
+    cursor: grab;
+    user-select: none;
+  }
+  .vhr-room-item{
+    cursor: grab;
+  }
+  .vhr-room-item.active{
+    border-color: var(--bs-primary);
+    background: rgba(var(--bs-primary-rgb), .08);
+  }
+  #vhr-output-assignments .table-responsive{
+    max-height: 52vh;
+    overflow: auto;
+  }
+  #vhr-filtered-list{
+    max-height: 52vh;
+    overflow: auto;
+    padding-right: .2rem;
+  }
+  @media (max-width: 992px){
+    #vhr-room-list{ max-height: 30vh; }
+    .vhr-stage{ height: 52vh; min-height: 320px; }
+    #vhr-output-assignments .table-responsive,
+    #vhr-filtered-list{ max-height: 34vh; }
+  }
+  @media (max-width: 576px){
+    .vhr-stage{ height: 46vh; min-height: 260px; }
+    .vhr-marker{ min-width: 64px; font-size: .66rem; padding: .18rem .28rem; }
+  }
+</style>
+
+<div id="vhr-page">
+  <div id="vhr-status" class="mb-3"></div>
+  <div id="vhr-unsaved" class="alert alert-warning py-2 mb-3 d-none">You have unsaved changes.</div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-lg-4">
+      <div class="card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h2 class="h5 mb-0">Rooms</h2>
+            <button id="vhr-new-room" class="btn btn-sm btn-primary" type="button">New</button>
+          </div>
+          <div id="vhr-room-list" class="d-grid gap-2"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-8">
+      <div class="card">
+        <div class="card-body">
+          <div class="row g-2 mb-3">
+            <div class="col-md-8">
+              <label class="form-label">Room Name</label>
+              <input id="vhr-room-name" class="form-control" placeholder="Room name" />
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <button id="vhr-delete-room" class="btn btn-outline-danger w-100" type="button">Delete Room</button>
+            </div>
+          </div>
+
+          <div class="d-flex gap-2 mb-2 flex-wrap">
+            <input id="vhr-bg-file" type="file" class="form-control" accept=".jpg,.jpeg,.png,.webp" />
+            <button id="vhr-bg-upload" class="btn btn-outline-primary" type="button">Upload Image</button>
+            <button id="vhr-bg-delete" class="btn btn-outline-secondary" type="button">Remove Image</button>
+          </div>
+
+          <div id="vhr-stage" class="vhr-stage"></div>
+          <div class="form-text mt-2">Drag output markers to position them in the room layout.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-lg-7">
+      <div class="card">
+        <div class="card-body">
+          <h2 class="h5">Output Room Assignment</h2>
+          <div id="vhr-output-assignments"></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-5">
+      <div class="card">
+        <div class="card-body">
+          <h2 class="h5">Filtered Inputs</h2>
+          <div class="form-text mb-2">These are shown first in input selection when filter mode is enabled.</div>
+          <div class="d-flex gap-2 mb-2">
+            <select id="vhr-add-input-select" class="form-select"></select>
+            <button id="vhr-add-input" class="btn btn-outline-primary" type="button">Add</button>
+          </div>
+          <div id="vhr-filtered-list" class="d-grid gap-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let _vhrLabels = {inputs: [], outputs: []};
+let _vhrCfg = {rooms: [], output_layouts: {}, filtered_inputs: []};
+let _vhrCurrentRoomId = '';
+let _vhrDirty = false;
+let _vhrDragOutput = null;
+let _vhrRoomDragId = null;
+let _vhrAutoHideTimeoutId = null;
+
+function _vhrMessageTimeoutMs(){
+  try{
+    const ms = window.TDECK_UI && window.TDECK_UI.messageTimeoutMs;
+    const n = Number(ms);
+    if(!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  }catch(e){ return 0; }
+}
+
+function _vhrClearAutoHide(){
+  if(_vhrAutoHideTimeoutId){
+    clearTimeout(_vhrAutoHideTimeoutId);
+    _vhrAutoHideTimeoutId = null;
+  }
+}
+
+function _vhrSetStatus(msg, kind){
+  const el = document.getElementById('vhr-status');
+  if(!el) return;
+  if(!msg){ _vhrClearAutoHide(); el.className=''; el.textContent=''; return; }
+  _vhrClearAutoHide();
+  el.className = kind === 'error' ? 'alert alert-danger' : (kind === 'warn' ? 'alert alert-warning' : 'alert alert-success');
+  el.textContent = msg;
+  const ms = _vhrMessageTimeoutMs();
+  if(ms){
+    _vhrAutoHideTimeoutId = setTimeout(() => {
+      _vhrAutoHideTimeoutId = null;
+      el.className = '';
+      el.textContent = '';
+    }, ms);
+  }
+}
+
+function _safeHtml(s){
+  return String(s || '').replace(/[&<>\"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _vhrFmtLabel(list, number){
+  const n = parseInt(number, 10);
+  if(!Number.isFinite(n) || n <= 0) return String(number || '');
+  const item = (Array.isArray(list) ? list : []).find((x) => parseInt(x.number, 10) === n);
+  const label = item && item.label ? String(item.label).trim() : '';
+  return label ? `${n}: ${label}` : String(n);
+}
+
+function _vhrSetDirty(v){
+  _vhrDirty = !!v;
+  const el = document.getElementById('vhr-unsaved');
+  if(el) el.classList.toggle('d-none', !_vhrDirty);
+}
+
+function _vhrNOutputs(){
+  return Math.max(40, Array.isArray(_vhrLabels.outputs) ? _vhrLabels.outputs.length : 0);
+}
+
+function _vhrCurrentRoom(){
+  return (Array.isArray(_vhrCfg.rooms) ? _vhrCfg.rooms : []).find((r) => String(r.id) === String(_vhrCurrentRoomId)) || null;
+}
+
+function _vhrEnsureRoomSelected(){
+  const rooms = Array.isArray(_vhrCfg.rooms) ? _vhrCfg.rooms : [];
+  if(!rooms.length){
+    _vhrCurrentRoomId = '';
+    return;
+  }
+  if(!rooms.some((r) => String(r.id) === String(_vhrCurrentRoomId))){
+    _vhrCurrentRoomId = String(rooms[0].id);
+  }
+}
+
+function _vhrOutputsForRoom(roomId){
+  const layouts = _vhrCfg.output_layouts || {};
+  const out = [];
+  for(let o=1; o<=_vhrNOutputs(); o++){
+    const item = layouts[String(o)] || {};
+    if(String(item.room_id || '') === String(roomId)){
+      out.push(o);
+    }
+  }
+  return out;
+}
+
+function _vhrRenderRooms(){
+  _vhrEnsureRoomSelected();
+  const host = document.getElementById('vhr-room-list');
+  if(!host) return;
+  const rooms = Array.isArray(_vhrCfg.rooms) ? _vhrCfg.rooms : [];
+  if(!rooms.length){
+    host.innerHTML = '<div class="text-muted">No rooms yet.</div>';
+    return;
+  }
+  host.innerHTML = rooms.map((r) => {
+    const id = String(r.id || '');
+    const active = (id === String(_vhrCurrentRoomId));
+    return `<button class="btn btn-sm btn-outline-secondary text-start vhr-room-item ${active ? 'active' : ''}" draggable="true" data-room-id="${_safeHtml(id)}">${_safeHtml(r.name || id)}</button>`;
+  }).join('');
+}
+
+function _vhrRenderRoomEditor(){
+  const room = _vhrCurrentRoom();
+  const nameEl = document.getElementById('vhr-room-name');
+  const delBtn = document.getElementById('vhr-delete-room');
+  const stage = document.getElementById('vhr-stage');
+  const hasRoom = !!room;
+  if(nameEl){ nameEl.disabled = !hasRoom; nameEl.value = hasRoom ? String(room.name || '') : ''; }
+  if(delBtn) delBtn.disabled = !hasRoom;
+  if(!stage) return;
+  if(!hasRoom){
+    stage.style.backgroundImage = 'none';
+    stage.innerHTML = '<div class="p-3 text-muted">Create a room to begin.</div>';
+    return;
+  }
+  const bg = String(room.background_url || '');
+  stage.style.backgroundImage = bg ? `url("${_safeHtml(bg)}")` : 'none';
+  const outputs = _vhrOutputsForRoom(room.id);
+  stage.innerHTML = '';
+  if(!outputs.length){
+    stage.innerHTML = '<div class="p-3 text-muted">No outputs assigned to this room.</div>';
+    return;
+  }
+  outputs.forEach((o, idx) => {
+    const layout = (_vhrCfg.output_layouts || {})[String(o)] || {};
+    let x = parseFloat(layout.x);
+    let y = parseFloat(layout.y);
+    if(!Number.isFinite(x)) x = 10 + ((idx % 6) * 15);
+    if(!Number.isFinite(y)) y = 15 + (Math.floor(idx / 6) * 12);
+    x = Math.max(0, Math.min(100, x));
+    y = Math.max(0, Math.min(100, y));
+    const marker = document.createElement('div');
+    marker.className = 'vhr-marker';
+    marker.dataset.output = String(o);
+    marker.style.left = `${x}%`;
+    marker.style.top = `${y}%`;
+    marker.textContent = _vhrFmtLabel(_vhrLabels.outputs, o);
+    stage.appendChild(marker);
+  });
+}
+
+function _vhrRenderOutputAssignments(){
+  const host = document.getElementById('vhr-output-assignments');
+  if(!host) return;
+  const rooms = Array.isArray(_vhrCfg.rooms) ? _vhrCfg.rooms : [];
+  const options = ['<option value="">Unassigned</option>'].concat(
+    rooms.map((r) => `<option value="${_safeHtml(r.id)}">${_safeHtml(r.name || r.id)}</option>`)
+  ).join('');
+
+  let html = '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Output</th><th>Room</th></tr></thead><tbody>';
+  for(let o=1; o<=_vhrNOutputs(); o++){
+    const layout = (_vhrCfg.output_layouts || {})[String(o)] || {};
+    const roomId = String(layout.room_id || '');
+    html += `<tr><td>${_safeHtml(_vhrFmtLabel(_vhrLabels.outputs, o))}</td><td><select class="form-select form-select-sm" data-output-room="${o}">${options}</select></td></tr>`;
+  }
+  html += '</tbody></table></div>';
+  host.innerHTML = html;
+  host.querySelectorAll('select[data-output-room]').forEach((sel) => {
+    const outN = parseInt(sel.getAttribute('data-output-room') || '', 10);
+    const cur = (_vhrCfg.output_layouts || {})[String(outN)] || {};
+    sel.value = String(cur.room_id || '');
+  });
+}
+
+function _vhrRenderFilteredInputs(){
+  const host = document.getElementById('vhr-filtered-list');
+  const addSel = document.getElementById('vhr-add-input-select');
+  if(!host || !addSel) return;
+  const filt = Array.isArray(_vhrCfg.filtered_inputs) ? _vhrCfg.filtered_inputs.slice() : [];
+  host.innerHTML = filt.map((n) => `
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-secondary" type="button" data-filter-act="up" data-input="${n}">↑</button>
+      <button class="btn btn-sm btn-outline-secondary" type="button" data-filter-act="down" data-input="${n}">↓</button>
+      <div class="flex-grow-1">${_safeHtml(_vhrFmtLabel(_vhrLabels.inputs, n))}</div>
+      <button class="btn btn-sm btn-outline-danger" type="button" data-filter-act="remove" data-input="${n}">Remove</button>
+    </div>
+  `).join('') || '<div class="text-muted">No filtered inputs configured.</div>';
+
+  const used = new Set(filt.map((x) => parseInt(x, 10)));
+  const opts = ['<option value="">Select input...</option>'];
+  for(let i=1; i<=Math.max(40, _vhrLabels.inputs.length || 0); i++){
+    if(used.has(i)) continue;
+    opts.push(`<option value="${i}">${_safeHtml(_vhrFmtLabel(_vhrLabels.inputs, i))}</option>`);
+  }
+  addSel.innerHTML = opts.join('');
+}
+
+function _vhrRenderAll(){
+  _vhrRenderRooms();
+  _vhrRenderRoomEditor();
+  _vhrRenderOutputAssignments();
+  _vhrRenderFilteredInputs();
+}
+
+async function _vhrLoadStateAndConfig(){
+  const [stateRes, cfgRes] = await Promise.all([
+    fetch('/api/videohub/labels?_ts=' + Date.now(), {cache:'no-store'}),
+    fetch('/api/videohub/rooms/config?_ts=' + Date.now(), {cache:'no-store'}),
+  ]);
+  const st = await stateRes.json().catch(() => ({}));
+  const cfg = await cfgRes.json().catch(() => ({}));
+  if(!stateRes.ok || !st.ok) throw new Error(st.error || 'Failed to load VideoHub state');
+  if(!cfgRes.ok || !cfg.ok) throw new Error(cfg.error || 'Failed to load room config');
+  _vhrLabels.inputs = Array.isArray(st.inputs) ? st.inputs : [];
+  _vhrLabels.outputs = Array.isArray(st.outputs) ? st.outputs : [];
+  _vhrCfg = cfg.config || {rooms: [], output_layouts: {}, filtered_inputs: []};
+}
+
+async function _vhrSaveConfig(){
+  const res = await fetch('/api/videohub/rooms/config', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(_vhrCfg),
+  });
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to save rooms config');
+  _vhrCfg = data.config || _vhrCfg;
+  _vhrSetDirty(false);
+  _vhrRenderAll();
+  _vhrSetStatus('Saved room configuration.', 'ok');
+}
+
+function _vhrNewRoom(){
+  const name = String(prompt('Room name:', `Room ${(_vhrCfg.rooms || []).length + 1}`) || '').trim();
+  if(!name) return;
+  const id = `r_${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`;
+  if(!Array.isArray(_vhrCfg.rooms)) _vhrCfg.rooms = [];
+  _vhrCfg.rooms.push({id, name, background_image: '', background_url: ''});
+  _vhrCurrentRoomId = id;
+  _vhrSetDirty(true);
+  _vhrRenderAll();
+}
+
+function _vhrDeleteCurrentRoom(){
+  const room = _vhrCurrentRoom();
+  if(!room) return;
+  if(!confirm(`Delete room "${room.name}"? Outputs will move to Unassigned.`)) return;
+  _vhrCfg.rooms = (_vhrCfg.rooms || []).filter((r) => String(r.id) !== String(room.id));
+  const layouts = _vhrCfg.output_layouts || {};
+  Object.keys(layouts).forEach((k) => {
+    if(String((layouts[k] || {}).room_id || '') === String(room.id)){
+      layouts[k] = {
+        room_id: '',
+        x: Number.isFinite(parseFloat(layouts[k].x)) ? parseFloat(layouts[k].x) : 50,
+        y: Number.isFinite(parseFloat(layouts[k].y)) ? parseFloat(layouts[k].y) : 50,
+      };
+    }
+  });
+  _vhrSetDirty(true);
+  _vhrEnsureRoomSelected();
+  _vhrRenderAll();
+}
+
+async function _vhrUploadBackground(){
+  const room = _vhrCurrentRoom();
+  if(!room) return;
+  const fileEl = document.getElementById('vhr-bg-file');
+  if(!fileEl || !fileEl.files || !fileEl.files[0]) return;
+  const fd = new FormData();
+  fd.set('room_id', String(room.id));
+  fd.set('file', fileEl.files[0]);
+  const res = await fetch('/api/videohub/rooms/background', {method:'POST', body: fd});
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Upload failed');
+  const idx = (_vhrCfg.rooms || []).findIndex((r) => String(r.id) === String(room.id));
+  if(idx >= 0){
+    _vhrCfg.rooms[idx] = Object.assign({}, _vhrCfg.rooms[idx], data.room || {});
+  }
+  _vhrSetDirty(true);
+  _vhrRenderAll();
+}
+
+async function _vhrDeleteBackground(){
+  const room = _vhrCurrentRoom();
+  if(!room) return;
+  if(!confirm('Remove this room background image?')) return;
+  const res = await fetch(`/api/videohub/rooms/${encodeURIComponent(String(room.id))}/background`, {method:'DELETE'});
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to remove background');
+  const idx = (_vhrCfg.rooms || []).findIndex((r) => String(r.id) === String(room.id));
+  if(idx >= 0){
+    _vhrCfg.rooms[idx] = Object.assign({}, _vhrCfg.rooms[idx], data.room || {});
+  }
+  _vhrSetDirty(true);
+  _vhrRenderAll();
+}
+
+function _vhrWireUI(){
+  const roomList = document.getElementById('vhr-room-list');
+  if(roomList){
+    roomList.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-room-id]');
+      if(!btn) return;
+      _vhrCurrentRoomId = String(btn.dataset.roomId || '');
+      _vhrRenderAll();
+    });
+    roomList.addEventListener('dragstart', (ev) => {
+      const btn = ev.target.closest('button[data-room-id]');
+      if(!btn) return;
+      _vhrRoomDragId = String(btn.dataset.roomId || '');
+      try{ ev.dataTransfer.effectAllowed = 'move'; }catch(e){}
+    });
+    roomList.addEventListener('dragover', (ev) => {
+      if(!_vhrRoomDragId) return;
+      ev.preventDefault();
+    });
+    roomList.addEventListener('drop', (ev) => {
+      const target = ev.target.closest('button[data-room-id]');
+      if(!_vhrRoomDragId || !target) return;
+      ev.preventDefault();
+      const targetId = String(target.dataset.roomId || '');
+      if(!targetId || targetId === _vhrRoomDragId) return;
+      const rooms = Array.isArray(_vhrCfg.rooms) ? _vhrCfg.rooms.slice() : [];
+      const from = rooms.findIndex((r) => String(r.id) === _vhrRoomDragId);
+      const to = rooms.findIndex((r) => String(r.id) === targetId);
+      if(from < 0 || to < 0) return;
+      const moved = rooms.splice(from, 1)[0];
+      rooms.splice(to, 0, moved);
+      _vhrCfg.rooms = rooms;
+      _vhrSetDirty(true);
+      _vhrRenderRooms();
+      _vhrRoomDragId = null;
+    });
+    roomList.addEventListener('dragend', () => { _vhrRoomDragId = null; });
+  }
+
+  const nameEl = document.getElementById('vhr-room-name');
+  if(nameEl){
+    nameEl.addEventListener('input', () => {
+      const room = _vhrCurrentRoom();
+      if(!room) return;
+      room.name = String(nameEl.value || '').trim() || room.name;
+      _vhrSetDirty(true);
+      _vhrRenderRooms();
+    });
+  }
+
+  const stage = document.getElementById('vhr-stage');
+  if(stage){
+    stage.addEventListener('pointerdown', (ev) => {
+      const marker = ev.target.closest('.vhr-marker');
+      if(!marker) return;
+      _vhrDragOutput = parseInt(marker.dataset.output || '', 10);
+      if(!Number.isFinite(_vhrDragOutput) || _vhrDragOutput <= 0){
+        _vhrDragOutput = null;
+        return;
+      }
+      marker.setPointerCapture(ev.pointerId);
+    });
+    stage.addEventListener('pointermove', (ev) => {
+      if(!_vhrDragOutput) return;
+      const rect = stage.getBoundingClientRect();
+      if(rect.width <= 0 || rect.height <= 0) return;
+      const x = ((ev.clientX - rect.left) / rect.width) * 100;
+      const y = ((ev.clientY - rect.top) / rect.height) * 100;
+      const k = String(_vhrDragOutput);
+      if(!_vhrCfg.output_layouts) _vhrCfg.output_layouts = {};
+      const cur = _vhrCfg.output_layouts[k] || {room_id: String(_vhrCurrentRoomId || ''), x: 50, y: 50};
+      _vhrCfg.output_layouts[k] = {
+        room_id: String(cur.room_id || _vhrCurrentRoomId || ''),
+        x: Math.max(0, Math.min(100, x)),
+        y: Math.max(0, Math.min(100, y)),
+      };
+      _vhrSetDirty(true);
+      _vhrRenderRoomEditor();
+    });
+    const endDrag = () => { _vhrDragOutput = null; };
+    stage.addEventListener('pointerup', endDrag);
+    stage.addEventListener('pointercancel', endDrag);
+  }
+
+  const assignHost = document.getElementById('vhr-output-assignments');
+  if(assignHost){
+    assignHost.addEventListener('change', (ev) => {
+      const sel = ev.target.closest('select[data-output-room]');
+      if(!sel) return;
+      const outN = parseInt(sel.getAttribute('data-output-room') || '', 10);
+      if(!Number.isFinite(outN) || outN <= 0) return;
+      const roomId = String(sel.value || '');
+      if(!_vhrCfg.output_layouts) _vhrCfg.output_layouts = {};
+      const cur = _vhrCfg.output_layouts[String(outN)] || {};
+      _vhrCfg.output_layouts[String(outN)] = {
+        room_id: roomId,
+        x: Number.isFinite(parseFloat(cur.x)) ? parseFloat(cur.x) : 50,
+        y: Number.isFinite(parseFloat(cur.y)) ? parseFloat(cur.y) : 50,
+      };
+      _vhrSetDirty(true);
+      _vhrRenderAll();
+    });
+  }
+
+  const filtHost = document.getElementById('vhr-filtered-list');
+  if(filtHost){
+    filtHost.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-filter-act]');
+      if(!btn) return;
+      const act = String(btn.dataset.filterAct || '');
+      const inputNum = parseInt(btn.dataset.input || '', 10);
+      if(!Number.isFinite(inputNum) || inputNum <= 0) return;
+      const arr = Array.isArray(_vhrCfg.filtered_inputs) ? _vhrCfg.filtered_inputs.slice() : [];
+      const idx = arr.findIndex((n) => parseInt(n, 10) === inputNum);
+      if(idx < 0) return;
+      if(act === 'remove'){
+        arr.splice(idx, 1);
+      }else if(act === 'up' && idx > 0){
+        const t = arr[idx - 1]; arr[idx - 1] = arr[idx]; arr[idx] = t;
+      }else if(act === 'down' && idx < (arr.length - 1)){
+        const t = arr[idx + 1]; arr[idx + 1] = arr[idx]; arr[idx] = t;
+      }else{
+        return;
+      }
+      _vhrCfg.filtered_inputs = arr;
+      _vhrSetDirty(true);
+      _vhrRenderFilteredInputs();
+    });
+  }
+
+  const addInputBtn = document.getElementById('vhr-add-input');
+  if(addInputBtn){
+    addInputBtn.addEventListener('click', () => {
+      const sel = document.getElementById('vhr-add-input-select');
+      if(!sel) return;
+      const n = parseInt(sel.value || '', 10);
+      if(!Number.isFinite(n) || n <= 0) return;
+      if(!Array.isArray(_vhrCfg.filtered_inputs)) _vhrCfg.filtered_inputs = [];
+      if(_vhrCfg.filtered_inputs.some((x) => parseInt(x, 10) === n)) return;
+      _vhrCfg.filtered_inputs.push(n);
+      _vhrSetDirty(true);
+      _vhrRenderFilteredInputs();
+    });
+  }
+
+  const newBtn = document.getElementById('vhr-new-room');
+  if(newBtn) newBtn.addEventListener('click', _vhrNewRoom);
+  const delBtn = document.getElementById('vhr-delete-room');
+  if(delBtn) delBtn.addEventListener('click', _vhrDeleteCurrentRoom);
+  const upBtn = document.getElementById('vhr-bg-upload');
+  if(upBtn){
+    upBtn.addEventListener('click', async () => {
+      try{ await _vhrUploadBackground(); }catch(e){ _vhrSetStatus(String(e.message || e), 'error'); }
+    });
+  }
+  const rmBgBtn = document.getElementById('vhr-bg-delete');
+  if(rmBgBtn){
+    rmBgBtn.addEventListener('click', async () => {
+      try{ await _vhrDeleteBackground(); }catch(e){ _vhrSetStatus(String(e.message || e), 'error'); }
+    });
+  }
+  const saveBtn = document.getElementById('vhr-save');
+  if(saveBtn){
+    saveBtn.addEventListener('click', async () => {
+      try{ await _vhrSaveConfig(); }catch(e){ _vhrSetStatus(String(e.message || e), 'error'); }
+    });
+  }
+
+  window.addEventListener('beforeunload', (e) => {
+    if(!_vhrDirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+}
+
+(async () => {
+  try{
+    await _vhrLoadStateAndConfig();
+    _vhrEnsureRoomSelected();
+    _vhrRenderAll();
+    _vhrWireUI();
+  }catch(e){
+    _vhrSetStatus(String(e.message || e), 'error');
+  }
+})();
+</script>
+{% endblock %}
