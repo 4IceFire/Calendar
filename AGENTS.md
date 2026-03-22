@@ -6,7 +6,8 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - `package/`: Python package code. `package/apps/calendar/` contains scheduler, storage, and utilities.
 - Entry points: `webui.py` (Flask Web UI), `cli.py` (CLI), `companion.py`/`propresentor.py` (external integrations).
 - `static/`: front-end JS/CSS assets. `templates/`: HTML templates.
-- Data/config: `config.json`, `events.json`, `timer_presets.json`, `videohub_presets.json`, `auth.db`.
+- Data/config: `config.json`, `events.json`, `timer_presets.json`, `videohub_presets.json`, `videohub_rooms.json`, `auth.db`.
+- VideoHub room images: local uploads live in `videohub_room_images/` and should remain ignored by Git.
 - Logs/runtime files: `calendar.log`, `calendar_triggers.json`, `calendar.pid`.
 
 ## Build, Test, and Development Commands
@@ -40,14 +41,18 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 ## Configuration & Security Tips
 - Keep secrets and environment-specific values out of Git; use `config.json` and local overrides.
 - If you change `webserver_port`, update Docker port mappings (`docker-compose.yml`) accordingly.
+- Keep `videohub_room_images/` out of source control; room backgrounds are local media, not repo assets.
 
 ## Auth Model Notes
 - UI pages are protected by role-based page access in the Web UI (`require_page` checks).
 - API endpoints are intentionally callable without login unless an endpoint is explicitly marked otherwise.
 - For VideoHub preset visibility, enforce role restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
+- VideoHub room metadata is global for all presets and users. Access control applies to who can manage the room layout UI, not to the room data itself.
 
 ## VideoHub Role Controls (Where To Look)
 - Storage: role settings live in `auth.db` table `roles` and are migrated/used in `webui.py`.
+- Preset storage remains in `videohub_presets.json`; global room metadata is stored separately in `videohub_rooms.json`.
+- Room background uploads are served from `/media/videohub_room_images/<filename>` and stored in `videohub_room_images/`.
 - Routing page allow-lists (per role):
   - Columns: `videohub_allowed_outputs`, `videohub_allowed_inputs`
   - Semantics: blank/NULL/"all" => allow all; otherwise JSON list or CSV of 1-based port numbers.
@@ -59,6 +64,23 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
   - Enforcement: only in the VideoHub page UI (the `/api/videohub/presets*` endpoints remain unauthenticated by design).
 - VideoHub preset editing toggle (per role, UI-only):
   - Column: `videohub_can_edit_presets` (INTEGER, default allow when NULL for backward compatibility).
-  - Meaning: when off, VideoHub page allows applying presets but disables create/save/delete/lock and grid/name edits.
+  - Meaning: when off, VideoHub page allows viewing/applying presets but disables create/save/delete/lock and room-based routing edits.
   - UI config: checkbox on Access Levels page; autosave in `static/app.js`.
   - Enforcement: `webui.py` passes `can_edit_presets` into `templates/videohub.html` via `data-can-edit-presets`.
+- VideoHub Rooms management:
+  - The room editor is a separate page at `/videohub/rooms`, but it is not a page-access permission that can be assigned independently in Access Levels.
+  - Access is derived from existing VideoHub access plus `videohub_can_edit_presets`.
+  - Keep this behavior intact: users with VideoHub access but without edit permission can still view/apply presets on `/videohub`, but cannot manage rooms.
+- Current VideoHub UI structure:
+  - `/videohub`: room-based preset editor and viewer.
+  - `/videohub/input-select`: dedicated input grid used when changing a single output route.
+  - `/videohub/rooms`: global room/background/output-position/input-filter management.
+  - `templates/videohub.html`, `templates/videohub_rooms.html`, and `templates/videohub_input_select.html` are the main templates for this flow.
+- Room-layout semantics:
+  - Rooms are global, shared across all presets.
+  - An output can belong to only one room; outputs with no room assignment appear under `Unassigned`.
+  - Room pages control output placement and background image only; they do not save routing.
+  - Preset editing stages routing changes in the UI and only persists them when the user clicks Save Preset.
+- Input filter semantics:
+  - Filtered inputs are global and stored in `videohub_rooms.json`.
+  - Input selection defaults to the filtered list and can toggle to show all inputs.

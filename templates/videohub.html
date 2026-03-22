@@ -1,74 +1,110 @@
 {% extends 'base.html' %}
 
 {% set page_title = 'VideoHub' %}
-{% set page_subtitle = 'Edit a 40-output snapshot and save/apply presets' %}
+{% set page_subtitle = 'Room-based preset editor' %}
 
 {% block page_actions %}
 {% if can_edit_presets %}
 <button id="vh-new" class="btn btn-primary">New Preset</button>
 <button id="vh-save-from-device" class="btn btn-outline-success">Save From Device</button>
 {% endif %}
+<a class="btn btn-outline-secondary" href="/videohub/monitor" target="_blank" rel="noopener noreferrer">Open Monitor</a>
+{% if can_manage_rooms %}
+<a class="btn btn-outline-secondary" href="/videohub/rooms">Manage Rooms</a>
+{% endif %}
 {% endblock %}
 
 {% block content %}
 <style>
-  .vh-grid{
-    display:grid;
-    grid-template-columns: repeat(10, minmax(0, 1fr));
-    gap: .5rem;
+  #vh-page .card{ height: 100%; }
+  #vh-list{ max-height: 70vh; overflow: auto; padding-right: .2rem; }
+  #vh-room-tabs{
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
   }
-  @media (max-width: 1200px){ .vh-grid{ grid-template-columns: repeat(5, minmax(0, 1fr)); } }
-  @media (max-width: 768px){ .vh-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  .vh-tile{ border: 1px solid var(--bs-border-color); border-radius: .5rem; padding: .5rem; }
-  .vh-tile-title{ font-size: .9rem; font-weight: 600; line-height: 1.2; }
-  .vh-tile-sub{ font-size: .75rem; opacity: .75; }
+  #vh-room-tabs .nav-item{ flex: 0 0 auto; }
+  #vh-room-tabs .nav-link{ white-space: nowrap; }
+  .vh-room-stage{
+    position: relative;
+    min-height: 420px;
+    height: min(62vh, 560px);
+    border: 1px solid var(--bs-border-color);
+    border-radius: .5rem;
+    overflow: hidden;
+    background: #f8f9fa;
+    background-size: cover;
+    background-position: center;
+  }
+  .vh-room-empty{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--bs-secondary-color);
+    font-size: .95rem;
+    background: rgba(255,255,255,.65);
+  }
+  .vh-marker{
+    position: absolute;
+    transform: translate(-50%, -50%);
+    border: 1px solid var(--bs-border-color);
+    border-radius: .5rem;
+    background: var(--bs-body-bg);
+    padding: .22rem .35rem;
+    min-width: 92px;
+    text-align: left;
+    box-shadow: 0 2px 4px rgba(0,0,0,.08);
+  }
+  .vh-marker:disabled{ opacity: .7; cursor: default; }
+  .vh-marker-title{ font-weight: 600; font-size: .78rem; line-height: 1.15; display: block; }
+  .vh-marker-sub{ font-size: .68rem; color: var(--bs-secondary-color); line-height: 1.15; display: block; }
+  @media (max-width: 992px){
+    #vh-list{ max-height: 30vh; }
+    .vh-room-stage{ height: 52vh; min-height: 320px; }
+  }
+  @media (max-width: 576px){
+    .vh-room-stage{ height: 48vh; min-height: 280px; }
+    .vh-marker{ min-width: 82px; padding: .2rem .3rem; }
+    .vh-marker-title{ font-size: .72rem; }
+    .vh-marker-sub{ font-size: .64rem; }
+  }
 </style>
 
-<div id="vh-page" data-allowed-presets='{{ allowed_preset_ids|tojson }}' data-can-edit-presets="{{ '1' if can_edit_presets else '0' }}">
+<div id="vh-page"
+     data-allowed-presets='{{ allowed_preset_ids|tojson }}'
+     data-can-edit-presets="{{ '1' if can_edit_presets else '0' }}">
+  <div id="vh-status" class="mb-3"></div>
+  <div id="vh-unsaved" class="alert alert-warning py-2 mb-3 d-none">You have unsaved changes.</div>
 
-<div id="vh-status" class="mb-3"></div>
-
-<div class="row g-3">
-  <div class="col-lg-4">
-    <div class="card">
-      <div class="card-body">
-        <h2 class="h5">Presets</h2>
-        <div class="form-text mb-2">
-          Presets store the full routing snapshot (outputs 1–40).
+  <div class="row g-3">
+    <div class="col-lg-4">
+      <div class="card">
+        <div class="card-body">
+          <h2 class="h5">Presets</h2>
+          <div id="vh-list" class="text-muted">Loading...</div>
         </div>
-        <div id="vh-list" class="text-muted">Loading…</div>
       </div>
     </div>
-  </div>
 
-  <div class="col-lg-8">
-    <div class="card">
-      <div class="card-body">
-        <div class="d-flex align-items-center justify-content-between mb-2">
-          <h2 class="h5 mb-0" id="vh-editor-title">Snapshot</h2>
-        </div>
-
-        <div class="mb-3">
-          <label class="form-label">Name</label>
-          <input id="vh-name" class="form-control" placeholder="e.g. Sunday Service" />
-        </div>
-
-        <div class="mb-2">
-          <div class="form-text">
-            Each tile is an output. Choose an input (type to search: <code>4: Camera</code>). Names are for display only; presets save numbers.
+    <div class="col-lg-8">
+      <div class="card">
+        <div class="card-body">
+          <div class="mb-3">
+            <label class="form-label">Preset Name</label>
+            <input id="vh-name" class="form-control" placeholder="e.g. Sunday Service" />
           </div>
-        </div>
 
-        <div id="vh-grid" class="vh-grid"></div>
+          <ul id="vh-room-tabs" class="nav nav-tabs mb-2"></ul>
+          <div id="vh-room-stage" class="vh-room-stage"></div>
 
-        <div class="mt-3 d-flex gap-2">
-          <button id="vh-save" class="btn btn-success" type="button">Save Preset</button>
-          <button id="vh-apply" class="btn btn-primary" type="button">Apply Preset</button>
-          <button id="vh-delete" class="btn btn-outline-danger ms-auto" type="button">Delete</button>
-        </div>
-
-        <div class="form-text mt-2">
-          Applying a preset sends routing to the configured VideoHub (config keys: <code>videohub_ip</code>, <code>videohub_port</code>).
+          <div class="mt-3 d-flex gap-2 flex-wrap">
+            <button id="vh-save" class="btn btn-success" type="button">Save Preset</button>
+            <button id="vh-apply" class="btn btn-primary" type="button">Apply Preset</button>
+            <button id="vh-delete" class="btn btn-outline-danger ms-md-auto" type="button">Delete</button>
+          </div>
         </div>
       </div>
     </div>
@@ -76,14 +112,18 @@
 </div>
 
 <script>
-let _vhPresets = [];
 let _vhAllowedPresetIds = [];
 let _vhCanEditPresets = true;
+let _vhPresets = [];
+let _vhLabels = {inputs: [], outputs: [], configured: false};
+let _vhRoomsCfg = {rooms: [], output_layouts: {}, filtered_inputs: []};
 let _vhCurrentId = null;
-let _vhLabels = { inputs: [], outputs: [], configured: false };
-let _vhRouting = []; // index 0 => output #1, value => input number (1-based)
+let _vhCurrentName = '';
 let _vhLocked = false;
-
+let _vhRouting = [];
+let _vhRoomId = 'unassigned';
+let _vhDirty = false;
+let _vhDraftToken = null;
 let _vhAutoHideTimeoutId = null;
 
 function _vhMessageTimeoutMs(){
@@ -92,9 +132,7 @@ function _vhMessageTimeoutMs(){
     const n = Number(ms);
     if(!Number.isFinite(n) || n <= 0) return 0;
     return Math.floor(n);
-  }catch(e){
-    return 0;
-  }
+  }catch(e){ return 0; }
 }
 
 function _vhClearAutoHide(){
@@ -109,9 +147,8 @@ function _vhSetStatus(msg, kind){
   if(!el) return;
   if(!msg){ _vhClearAutoHide(); el.className=''; el.textContent=''; return; }
   _vhClearAutoHide();
-  el.className = kind==='error' ? 'alert alert-danger' : (kind==='warn' ? 'alert alert-warning' : 'alert alert-success');
+  el.className = kind === 'error' ? 'alert alert-danger' : (kind === 'warn' ? 'alert alert-warning' : 'alert alert-success');
   el.textContent = msg;
-
   const ms = _vhMessageTimeoutMs();
   if(ms){
     _vhAutoHideTimeoutId = setTimeout(() => {
@@ -123,7 +160,7 @@ function _vhSetStatus(msg, kind){
 }
 
 function _safeHtml(s){
-  return String(s || '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  return String(s || '').replace(/[&<>\"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function _vhParseAllowList(raw){
@@ -132,225 +169,301 @@ function _vhParseAllowList(raw){
   try{
     const parsed = JSON.parse(s);
     if(!Array.isArray(parsed)) return [];
-    return parsed
-      .map((x) => parseInt(x, 10))
-      .filter((n) => Number.isFinite(n) && n > 0);
+    return parsed.map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0);
   }catch(e){
     return [];
   }
 }
 
-function _parseNumberFromSelect(value){
-  const s = String(value || '').trim();
-  if(!s) return null;
-  const m = s.match(/^\s*(\d+)\s*(?::.*)?$/);
-  if(m) return parseInt(m[1], 10);
-  return null;
-}
-
-function _fmtLabel(list, number){
+function _vhFmtLabel(list, number){
   const n = parseInt(number, 10);
-  if(!Number.isFinite(n) || n <= 0) return '';
-  const item = (Array.isArray(list) ? list : []).find(x => parseInt(x.number, 10) === n);
+  if(!Number.isFinite(n) || n <= 0) return String(number || '');
+  const item = (Array.isArray(list) ? list : []).find((x) => parseInt(x.number, 10) === n);
   const label = item && item.label ? String(item.label).trim() : '';
   return label ? `${n}: ${label}` : String(n);
 }
 
-function _ensureInputDatalist(){
-  let dlIn = document.getElementById('vh-inputs-dl');
-  if(!dlIn){
-    dlIn = document.createElement('datalist');
-    dlIn.id = 'vh-inputs-dl';
-    document.body.appendChild(dlIn);
+function _vhNPorts(){
+  const outLen = Array.isArray(_vhLabels.outputs) ? _vhLabels.outputs.length : 0;
+  const inLen = Array.isArray(_vhLabels.inputs) ? _vhLabels.inputs.length : 0;
+  const rLen = Array.isArray(_vhRouting) ? _vhRouting.length : 0;
+  const layoutKeys = Object.keys((_vhRoomsCfg && _vhRoomsCfg.output_layouts) || {});
+  let maxLayout = 0;
+  for(const k of layoutKeys){
+    const n = parseInt(k, 10);
+    if(Number.isFinite(n) && n > maxLayout) maxLayout = n;
   }
-
-  const ins = Array.isArray(_vhLabels.inputs) ? _vhLabels.inputs : [];
-  dlIn.innerHTML = ins.map(i => {
-    const n = parseInt(i.number, 10);
-    const label = String(i.label || '').trim();
-    const v = label ? `${n}: ${label}` : String(n);
-    return `<option value="${_safeHtml(v)}"></option>`;
-  }).join('');
+  return Math.max(40, outLen, inLen, rLen, maxLayout);
 }
 
-function _nPorts(){
-  return Math.max(
-    40,
-    Array.isArray(_vhLabels.outputs) ? _vhLabels.outputs.length : 0,
-    Array.isArray(_vhLabels.inputs) ? _vhLabels.inputs.length : 0,
-    Array.isArray(_vhRouting) ? _vhRouting.length : 0,
-  );
-}
-
-function _renderGrid(){
-  const host = document.getElementById('vh-grid');
-  if(!host) return;
-  const n = _nPorts();
-  const outs = Array.isArray(_vhLabels.outputs) ? _vhLabels.outputs : [];
-
-  // Normalize routing length
+function _vhEnsureRoutingLen(){
+  const n = _vhNPorts();
   if(!Array.isArray(_vhRouting)) _vhRouting = [];
-  while(_vhRouting.length < n) _vhRouting.push(_vhRouting.length + 1);
-
-  host.innerHTML = '';
-  for(let o=1; o<=n; o++){
-    const outLabel = _fmtLabel(outs, o) || String(o);
-    const inputNum = parseInt(_vhRouting[o-1], 10) || 1;
-    const inputLabel = _fmtLabel(_vhLabels.inputs, inputNum) || String(inputNum);
-
-    const tile = document.createElement('div');
-    tile.className = 'vh-tile';
-    tile.innerHTML = `
-      <div class="vh-tile-title">${_safeHtml(outLabel)}</div>
-      <div class="vh-tile-sub mb-1">Output #${o}</div>
-      <input class="form-control form-control-sm vh-in" list="vh-inputs-dl" data-output="${o}" value="${_safeHtml(inputLabel)}" />
-    `;
-    host.appendChild(tile);
-  }
-
-  _applyEditorLockState();
+  while(_vhRouting.length < n){ _vhRouting.push(_vhRouting.length + 1); }
 }
 
-function _applyEditorLockState(){
-  const locked = !!_vhLocked;
-  const canEdit = !!_vhCanEditPresets;
-  const nameEl = document.getElementById('vh-name');
-  const saveEl = document.getElementById('vh-save');
-  const delEl = document.getElementById('vh-delete');
-  if(nameEl) nameEl.disabled = locked || !canEdit;
-  if(saveEl) saveEl.disabled = locked || !canEdit;
-  if(delEl) delEl.disabled = locked || !canEdit || (_vhCurrentId == null);
-
-  const grid = document.getElementById('vh-grid');
-  if(grid){
-    grid.querySelectorAll('input.vh-in').forEach((el) => { el.disabled = locked || !canEdit; });
-  }
-}
-
-function _routesFromRouting(){
-  const n = _nPorts();
+function _vhRoutesFromRouting(){
+  _vhEnsureRoutingLen();
   const routes = [];
-  for(let o=1; o<=n; o++){
-    const inp = parseInt(_vhRouting[o-1], 10);
-    if(!Number.isFinite(inp) || inp <= 0) throw new Error(`Output #${o} must have a valid input number`);
-    routes.push({output:o, input:inp});
+  for(let o = 1; o <= _vhRouting.length; o++){
+    const inp = parseInt(_vhRouting[o - 1], 10);
+    if(Number.isFinite(inp) && inp > 0) routes.push({output: o, input: inp});
   }
   return routes;
 }
 
-function _renderList(){
+function _vhIdentityRouting(n){
+  const out = [];
+  for(let i = 1; i <= n; i++) out.push(i);
+  return out;
+}
+
+function _vhRoutingFromPreset(p){
+  const n = _vhNPorts();
+  const routing = _vhIdentityRouting(n);
+  if(p && Array.isArray(p.routes)){
+    for(const r of p.routes){
+      const o = parseInt(r.output, 10);
+      const inp = parseInt(r.input, 10);
+      if(Number.isFinite(o) && o > 0 && Number.isFinite(inp) && inp > 0 && (o - 1) < routing.length){
+        routing[o - 1] = inp;
+      }
+    }
+  }
+  return routing;
+}
+
+function _vhRoomListWithUnassigned(){
+  const rooms = Array.isArray(_vhRoomsCfg.rooms) ? _vhRoomsCfg.rooms.slice() : [];
+  rooms.push({id: 'unassigned', name: 'Unassigned', background_url: ''});
+  return rooms;
+}
+
+function _vhIsEditable(){
+  return !!_vhCanEditPresets && !_vhLocked;
+}
+
+function _vhSetDirty(v){
+  _vhDirty = !!v;
+  const el = document.getElementById('vh-unsaved');
+  if(el) el.classList.toggle('d-none', !_vhDirty);
+}
+
+function _vhDraftStorageKey(token){
+  return `vh_draft_${String(token || '').trim()}`;
+}
+
+function _vhSaveDraftSession(){
+  if(!_vhDraftToken) _vhDraftToken = `d${Date.now().toString(36)}${Math.random().toString(36).slice(2,8)}`;
+  const payload = {
+    token: _vhDraftToken,
+    id: _vhCurrentId,
+    name: _vhCurrentName,
+    locked: !!_vhLocked,
+    routing: Array.isArray(_vhRouting) ? _vhRouting.slice() : [],
+    room_id: _vhRoomId,
+    dirty: !!_vhDirty,
+    ts: Date.now(),
+  };
+  try{ sessionStorage.setItem(_vhDraftStorageKey(_vhDraftToken), JSON.stringify(payload)); }catch(e){}
+}
+
+function _vhTryLoadDraftFromQuery(){
+  const q = new URLSearchParams(window.location.search || '');
+  const token = String(q.get('draft') || '').trim();
+  if(!token) return false;
+  let raw = null;
+  try{ raw = sessionStorage.getItem(_vhDraftStorageKey(token)); }catch(e){ raw = null; }
+  if(!raw) return false;
+  let data = null;
+  try{ data = JSON.parse(raw); }catch(e){ data = null; }
+  if(!data || !Array.isArray(data.routing)) return false;
+  _vhDraftToken = token;
+  _vhCurrentId = (data.id == null) ? null : parseInt(data.id, 10);
+  _vhCurrentName = String(data.name || '');
+  _vhLocked = !!data.locked;
+  _vhRouting = data.routing.map((x) => parseInt(x, 10) || 1);
+  _vhRoomId = String(data.room_id || 'unassigned');
+  _vhSetDirty(!!data.dirty);
+  return true;
+}
+
+function _vhResetEditorFromPreset(p){
+  _vhCurrentId = p ? p.id : null;
+  _vhCurrentName = p ? String(p.name || '') : '';
+  _vhLocked = !!(p && p.locked);
+  _vhRouting = _vhRoutingFromPreset(p);
+  if(!_vhDraftToken) _vhDraftToken = `d${Date.now().toString(36)}${Math.random().toString(36).slice(2,8)}`;
+  if(_vhRoomId !== 'unassigned'){
+    const hasRoom = (Array.isArray(_vhRoomsCfg.rooms) ? _vhRoomsCfg.rooms : []).some((r) => String(r.id) === String(_vhRoomId));
+    if(!hasRoom) _vhRoomId = 'unassigned';
+  }
+  _vhSetDirty(false);
+  _vhSyncEditorFields();
+}
+
+function _vhSyncEditorFields(){
+  const nameEl = document.getElementById('vh-name');
+  if(nameEl) nameEl.value = _vhCurrentName || '';
+  const saveEl = document.getElementById('vh-save');
+  const delEl = document.getElementById('vh-delete');
+  if(saveEl) saveEl.disabled = !_vhIsEditable();
+  if(delEl) delEl.disabled = !_vhIsEditable() || (_vhCurrentId == null);
+  if(nameEl) nameEl.disabled = !_vhIsEditable();
+}
+
+function _vhPromptDiscardIfDirty(){
+  if(!_vhDirty) return true;
+  return window.confirm('You have unsaved changes. Leave without saving?');
+}
+
+function _vhOutputsForRoom(roomId){
+  _vhEnsureRoutingLen();
+  const out = [];
+  const layouts = (_vhRoomsCfg && _vhRoomsCfg.output_layouts) || {};
+  const validRoomIds = new Set((Array.isArray(_vhRoomsCfg.rooms) ? _vhRoomsCfg.rooms : []).map((r) => String(r.id)));
+  for(let o = 1; o <= _vhRouting.length; o++){
+    const layout = layouts[String(o)] || {};
+    const rid = String(layout.room_id || '');
+    const assigned = rid && validRoomIds.has(rid);
+    if(roomId === 'unassigned'){
+      if(!assigned) out.push(o);
+    }else if(assigned && rid === String(roomId)){
+      out.push(o);
+    }
+  }
+  return out;
+}
+
+function _vhDefaultPosForIndex(idx, total){
+  const cols = Math.max(1, Math.ceil(Math.sqrt(Math.max(total, 1))));
+  const col = idx % cols;
+  const row = Math.floor(idx / cols);
+  const rows = Math.max(1, Math.ceil(total / cols));
+  const x = ((col + 0.5) / cols) * 100;
+  const y = ((row + 0.5) / rows) * 100;
+  return {x, y};
+}
+
+function _vhRenderRooms(){
+  const tabs = document.getElementById('vh-room-tabs');
+  const stage = document.getElementById('vh-room-stage');
+  if(!tabs || !stage) return;
+  const rooms = _vhRoomListWithUnassigned();
+  if(!rooms.length){
+    tabs.innerHTML = '';
+    stage.innerHTML = '<div class="vh-room-empty">No rooms configured.</div>';
+    return;
+  }
+  if(!rooms.some((r) => String(r.id) === String(_vhRoomId))) _vhRoomId = String(rooms[0].id);
+
+  tabs.innerHTML = rooms.map((r) => {
+    const active = String(r.id) === String(_vhRoomId);
+    return `<li class="nav-item"><button class="nav-link ${active ? 'active' : ''}" data-room-id="${_safeHtml(r.id)}" type="button">${_safeHtml(r.name || r.id)}</button></li>`;
+  }).join('');
+
+  const room = rooms.find((r) => String(r.id) === String(_vhRoomId));
+  const bgUrl = room ? String(room.background_url || '') : '';
+  stage.style.backgroundImage = bgUrl ? `url("${_safeHtml(bgUrl)}")` : 'none';
+
+  const outputs = _vhOutputsForRoom(_vhRoomId);
+  if(!outputs.length){
+    stage.innerHTML = '<div class="vh-room-empty">No outputs in this room.</div>';
+    return;
+  }
+
+  const layouts = (_vhRoomsCfg && _vhRoomsCfg.output_layouts) || {};
+  stage.innerHTML = '';
+  outputs.forEach((o, idx) => {
+    const layout = layouts[String(o)] || {};
+    let x = parseFloat(layout.x);
+    let y = parseFloat(layout.y);
+    if(!Number.isFinite(x) || !Number.isFinite(y)){
+      const p = _vhDefaultPosForIndex(idx, outputs.length);
+      x = p.x;
+      y = p.y;
+    }
+    const outLabel = _vhFmtLabel(_vhLabels.outputs, o);
+    const inputNum = parseInt(_vhRouting[o - 1], 10) || 1;
+    const inLabel = _vhFmtLabel(_vhLabels.inputs, inputNum);
+
+    const btn = document.createElement('button');
+    btn.className = 'vh-marker';
+    btn.type = 'button';
+    btn.style.left = `${Math.max(0, Math.min(100, x))}%`;
+    btn.style.top = `${Math.max(0, Math.min(100, y))}%`;
+    btn.dataset.output = String(o);
+    btn.disabled = !_vhIsEditable();
+    btn.innerHTML = `<span class="vh-marker-title">${_safeHtml(inLabel)}</span><span class="vh-marker-sub">${_safeHtml(outLabel)}</span>`;
+    stage.appendChild(btn);
+  });
+}
+
+function _vhRenderList(){
   const el = document.getElementById('vh-list');
   if(!el) return;
-  if(!_vhPresets.length){ el.innerHTML = '<div class="text-muted">No presets yet</div>'; return; }
+  if(!_vhPresets.length){
+    el.innerHTML = '<div class="text-muted">No presets yet.</div>';
+    return;
+  }
   el.innerHTML = '';
   _vhPresets.forEach((p) => {
-    const div = document.createElement('div');
-    div.className = 'd-flex align-items-center mb-2';
-    const count = (p.routes || []).length;
     const active = (_vhCurrentId === p.id);
     const locked = !!p.locked;
-    const lockLabel = locked ? '🔒' : '🔓';
-    const editLabel = locked ? 'View' : (active ? 'Editing' : 'Edit');
+    const div = document.createElement('div');
+    div.className = 'd-flex align-items-center mb-2';
     div.innerHTML = `
       <div class="flex-grow-1">
         <strong>${_safeHtml(p.name || ('Preset ' + p.id))}</strong>
-        <div class="text-muted small">#${p.id} • ${count} output${count===1?'':'s'}${locked ? ' • Locked' : ''}</div>
+        <div class="text-muted small">#${p.id}${locked ? ' • Locked' : ''}${active ? ' • Open' : ''}</div>
       </div>
       <div class="d-flex gap-2">
-        <button class="btn btn-sm btn-outline-secondary" data-act="toggle-lock" data-id="${p.id}" title="${locked ? 'Unlock to allow edits' : 'Lock to prevent edits'}">${lockLabel}</button>
-        <button class="btn btn-sm btn-outline-primary" data-act="select" data-id="${p.id}">${editLabel}</button>
+        ${_vhCanEditPresets ? `<button class="btn btn-sm btn-outline-secondary" data-act="toggle-lock" data-id="${p.id}" title="${locked ? 'Unlock' : 'Lock'}">${locked ? '🔒' : '🔓'}</button>` : ''}
+        <button class="btn btn-sm btn-outline-primary" data-act="select" data-id="${p.id}">${_vhCanEditPresets ? 'Open' : 'View'}</button>
         <button class="btn btn-sm btn-primary" data-act="apply" data-id="${p.id}">Apply</button>
       </div>
     `;
     el.appendChild(div);
   });
-
-  // If a role is allowed to view/apply but not edit, hide edit-only controls.
-  if(!_vhCanEditPresets){
-    el.querySelectorAll('button[data-act="toggle-lock"]').forEach((btn) => btn.remove());
-    el.querySelectorAll('button[data-act="select"]').forEach((btn) => { btn.textContent = 'View'; });
-  }
 }
 
-function _loadEditor(p){
-  _vhCurrentId = p ? p.id : null;
-  _vhLocked = !!(p && p.locked);
-  document.getElementById('vh-editor-title').textContent = p ? `Preset #${p.id}` : 'New Preset (snapshot)';
-  document.getElementById('vh-name').value = p ? (p.name || '') : '';
-  document.getElementById('vh-delete').disabled = !p || _vhLocked;
-
-  const n = _nPorts();
-  const routing = [];
-  for(let i=1;i<=n;i++) routing.push(i); // identity fallback
-  if(p && Array.isArray(p.routes)){
-    for(const r of p.routes){
-      const o = parseInt(r.output, 10);
-      const inp = parseInt(r.input, 10);
-      if(Number.isFinite(o) && o > 0 && Number.isFinite(inp) && inp > 0){
-        if(o-1 >= 0 && o-1 < routing.length) routing[o-1] = inp;
-      }
-    }
-  }
-  _vhRouting = routing;
-  _renderList();
-  _renderGrid();
-  _applyEditorLockState();
-}
-
-async function _loadState(){
+async function _vhLoadState(){
   const res = await fetch('/api/videohub/state?_ts=' + Date.now(), {cache:'no-store'});
-  const data = await res.json().catch(()=>({}));
+  const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load VideoHub state');
-
   _vhLabels = {
     inputs: Array.isArray(data.inputs) ? data.inputs : [],
     outputs: Array.isArray(data.outputs) ? data.outputs : [],
     configured: !!data.configured,
   };
-
-  const routing = Array.isArray(data.routing) ? data.routing : [];
-  _vhRouting = routing.map(x => parseInt(x, 10) || 1);
-
-  _ensureInputDatalist();
-  _renderGrid();
-
-  if(!_vhLabels.configured){
-    _vhSetStatus('VideoHub not configured (set videohub_ip). Showing a numeric 40x40 fallback.', 'warn');
-  } else if(data.error){
-    _vhSetStatus(`Loaded labels; routing may be fallback (${data.error}).`, 'warn');
-  } else {
-    // Successful initial load should be silent to avoid noise.
-    _vhSetStatus('', '');
-  }
 }
 
-async function _loadPresets(){
+async function _vhLoadRoomsConfig(){
+  const res = await fetch('/api/videohub/rooms/config?_ts=' + Date.now(), {cache:'no-store'});
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load room config');
+  _vhRoomsCfg = data.config || {rooms: [], output_layouts: {}, filtered_inputs: []};
+}
+
+async function _vhLoadPresets(){
   const res = await fetch('/api/videohub/presets?_ts=' + Date.now(), {cache:'no-store'});
-  const data = await res.json().catch(()=>({}));
+  const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load presets');
-  const allPresets = Array.isArray(data.presets) ? data.presets : [];
+  const all = Array.isArray(data.presets) ? data.presets : [];
   if(Array.isArray(_vhAllowedPresetIds) && _vhAllowedPresetIds.length){
     const allow = new Set(_vhAllowedPresetIds);
-    _vhPresets = allPresets.filter((p) => allow.has(parseInt(p.id, 10)));
-  } else {
-    _vhPresets = allPresets;
-  }
-  _renderList();
-  if(_vhCurrentId != null){
-    const cur = _vhPresets.find(p => p.id === _vhCurrentId);
-    if(cur) _loadEditor(cur);
+    _vhPresets = all.filter((p) => allow.has(parseInt(p.id, 10)));
+  }else{
+    _vhPresets = all;
   }
 }
 
-async function _savePreset(){
+async function _vhSavePreset(){
   const name = String(document.getElementById('vh-name').value || '').trim();
   if(!name) throw new Error('Preset name is required');
-  const routes = _routesFromRouting();
-  const payload = {name, routes};
-
+  const payload = {name, routes: _vhRoutesFromRouting()};
   let res;
   if(_vhCurrentId != null){
-    payload.id = _vhCurrentId;
     res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(_vhCurrentId))}`, {
       method: 'PUT',
       headers: {'Content-Type':'application/json'},
@@ -363,153 +476,238 @@ async function _savePreset(){
       body: JSON.stringify(payload),
     });
   }
-
-  const data = await res.json().catch(()=>({}));
+  const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Save failed');
+  _vhCurrentId = data.preset && data.preset.id ? parseInt(data.preset.id, 10) : _vhCurrentId;
+  _vhCurrentName = name;
+  _vhSetDirty(false);
   _vhSetStatus('Saved preset.', 'ok');
-  _vhCurrentId = data.preset && data.preset.id ? data.preset.id : _vhCurrentId;
-  await _loadPresets();
+  await _vhLoadPresets();
+  _vhRenderList();
 }
 
-async function _savePresetFromDevice(){
+async function _vhSavePresetFromDevice(){
   const defaultName = `Snapshot ${new Date().toLocaleString()}`;
   const name = String(prompt('Preset name:', defaultName) || '').trim();
   if(!name) return;
-
   const res = await fetch('/api/videohub/presets/from_device', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({name}),
   });
-  const data = await res.json().catch(()=>({}));
+  const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Save from device failed');
-
+  await _vhLoadPresets();
+  const p = _vhPresets.find((x) => parseInt(x.id, 10) === parseInt(data.preset && data.preset.id, 10));
+  _vhResetEditorFromPreset(p || null);
+  _vhRenderList();
+  _vhRenderRooms();
   _vhSetStatus('Saved preset from device.', 'ok');
-  await _loadPresets();
-  if(data.preset && data.preset.id){
-    const p = _vhPresets.find(x => x.id === data.preset.id);
-    if(p) _loadEditor(p);
-  }
 }
 
-async function _applyPreset(id){
+async function _vhApplyPreset(id){
   const res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(id))}/apply`, {method:'POST'});
-  const data = await res.json().catch(()=>({}));
+  const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Apply failed');
   _vhSetStatus(`Applied preset #${id}.`, 'ok');
 }
 
-async function _deleteCurrent(){
+async function _vhDeleteCurrent(){
   if(_vhCurrentId == null) return;
-  if(!confirm('Delete this preset?')) return;
+  if(!window.confirm('Delete this preset?')) return;
   const res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(_vhCurrentId))}`, {method:'DELETE'});
-  const data = await res.json().catch(()=>({}));
+  const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Delete failed');
   _vhSetStatus('Deleted preset.', 'ok');
   _vhCurrentId = null;
-  _loadEditor(null);
-  await _loadPresets();
+  _vhCurrentName = '';
+  _vhLocked = false;
+  _vhRouting = _vhIdentityRouting(_vhNPorts());
+  _vhSetDirty(false);
+  await _vhLoadPresets();
+  _vhRenderList();
+  _vhSyncEditorFields();
+  _vhRenderRooms();
 }
 
-// UI wiring
+async function _vhToggleLock(id, locked){
+  const res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(id))}/lock`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({locked: !!locked}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Lock toggle failed');
+  await _vhLoadPresets();
+  if(_vhCurrentId === id){
+    const cur = _vhPresets.find((p) => p.id === id);
+    _vhLocked = !!(cur && cur.locked);
+    _vhSyncEditorFields();
+    _vhRenderRooms();
+  }
+  _vhRenderList();
+}
 
-{
-  const btn = document.getElementById('vh-new');
-  if(btn){
-    btn.addEventListener('click', () => {
-      _vhSetStatus('', '');
-      _loadEditor(null);
+function _vhGoSelectInput(outputNum){
+  _vhSaveDraftSession();
+  const q = new URLSearchParams();
+  q.set('output', String(outputNum));
+  q.set('room', String(_vhRoomId || 'unassigned'));
+  q.set('draft', String(_vhDraftToken));
+  if(_vhCurrentId != null) q.set('preset', String(_vhCurrentId));
+  window.location.href = `/videohub/input-select?${q.toString()}`;
+}
+
+function _vhWireUI(){
+  const nameEl = document.getElementById('vh-name');
+  if(nameEl){
+    nameEl.addEventListener('input', () => {
+      _vhCurrentName = String(nameEl.value || '');
+      _vhSetDirty(true);
+      _vhSaveDraftSession();
     });
   }
-}
 
-{
-  const btn = document.getElementById('vh-save-from-device');
-  if(btn){
-    btn.addEventListener('click', async () => {
-      try{ _vhSetStatus('', ''); await _savePresetFromDevice(); }
-      catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+  const tabs = document.getElementById('vh-room-tabs');
+  if(tabs){
+    tabs.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-room-id]');
+      if(!btn) return;
+      _vhRoomId = String(btn.dataset.roomId || 'unassigned');
+      _vhSaveDraftSession();
+      _vhRenderRooms();
     });
   }
-}
 
-document.getElementById('vh-save').addEventListener('click', async () => {
-  try{ _vhSetStatus('', ''); await _savePreset(); }
-  catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
-});
+  const stage = document.getElementById('vh-room-stage');
+  if(stage){
+    stage.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button.vh-marker');
+      if(!btn) return;
+      if(!_vhIsEditable()) return;
+      const outNum = parseInt(btn.dataset.output, 10);
+      if(!Number.isFinite(outNum) || outNum <= 0) return;
+      _vhGoSelectInput(outNum);
+    });
+  }
 
-document.getElementById('vh-apply').addEventListener('click', async () => {
-  try{
-    if(_vhCurrentId == null) throw new Error('Select or save a preset first');
-    _vhSetStatus('', '');
-    await _applyPreset(_vhCurrentId);
-  }catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
-});
-
-document.getElementById('vh-delete').addEventListener('click', async () => {
-  try{ await _deleteCurrent(); }
-  catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
-});
-
-document.getElementById('vh-grid').addEventListener('change', (ev) => {
-  const input = ev.target.closest('input.vh-in');
-  if(!input) return;
-  const outNum = parseInt(input.dataset.output, 10);
-  if(!Number.isFinite(outNum) || outNum <= 0) return;
-  const n = _parseNumberFromSelect(input.value);
-  if(!n || n <= 0) return;
-  while(_vhRouting.length < outNum) _vhRouting.push(_vhRouting.length + 1);
-  _vhRouting[outNum-1] = n;
-  input.value = _fmtLabel(_vhLabels.inputs, n) || String(n);
-});
-
-document.getElementById('vh-list').addEventListener('click', async (ev) => {
-  const btn = ev.target.closest('button[data-act]');
-  if(!btn) return;
-  const act = btn.dataset.act;
-  const id = parseInt(btn.dataset.id, 10);
-  const p = _vhPresets.find(x => x.id === id);
-  if(!p) return;
-
-  try{
-    if(act === 'toggle-lock'){
-      const res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(id))}/lock`, {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({locked: !p.locked}),
-      });
-      const data = await res.json().catch(()=>({}));
-      if(!res.ok || !data.ok) throw new Error(data.error || 'Lock toggle failed');
-      await _loadPresets();
-      // If we toggled the currently loaded preset, update lock state immediately.
-      if(_vhCurrentId === id){
-        const cur = _vhPresets.find(x => x.id === id);
-        if(cur) _loadEditor(cur);
+  const list = document.getElementById('vh-list');
+  if(list){
+    list.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-act]');
+      if(!btn) return;
+      const act = String(btn.dataset.act || '');
+      const id = parseInt(btn.dataset.id, 10);
+      const p = _vhPresets.find((x) => x.id === id);
+      if(!p) return;
+      try{
+        if(act === 'select'){
+          if(!_vhPromptDiscardIfDirty()) return;
+          _vhResetEditorFromPreset(p);
+          _vhRenderList();
+          _vhRenderRooms();
+        }else if(act === 'apply'){
+          await _vhApplyPreset(id);
+        }else if(act === 'toggle-lock'){
+          await _vhToggleLock(id, !p.locked);
+        }
+      }catch(e){
+        _vhSetStatus(String(e.message || e), 'error');
       }
-    } else if(act === 'select'){
-      _loadEditor(p);
-    }else if(act === 'apply'){
-      _vhSetStatus('', '');
-      await _applyPreset(id);
-    }
-  }catch(e){
-    _vhSetStatus(String(e.message || e), 'error');
+    });
   }
-});
 
-// init
+  const saveBtn = document.getElementById('vh-save');
+  if(saveBtn){
+    saveBtn.addEventListener('click', async () => {
+      try{ await _vhSavePreset(); _vhSaveDraftSession(); }catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+    });
+  }
+
+  const applyBtn = document.getElementById('vh-apply');
+  if(applyBtn){
+    applyBtn.addEventListener('click', async () => {
+      try{
+        if(_vhCurrentId == null) throw new Error('Select or save a preset first');
+        await _vhApplyPreset(_vhCurrentId);
+      }catch(e){
+        _vhSetStatus(String(e.message || e), 'error');
+      }
+    });
+  }
+
+  const delBtn = document.getElementById('vh-delete');
+  if(delBtn){
+    delBtn.addEventListener('click', async () => {
+      try{ await _vhDeleteCurrent(); }catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+    });
+  }
+
+  const newBtn = document.getElementById('vh-new');
+  if(newBtn){
+    newBtn.addEventListener('click', () => {
+      if(!_vhPromptDiscardIfDirty()) return;
+      _vhResetEditorFromPreset(null);
+      _vhRenderList();
+      _vhRenderRooms();
+    });
+  }
+
+  const fromDevBtn = document.getElementById('vh-save-from-device');
+  if(fromDevBtn){
+    fromDevBtn.addEventListener('click', async () => {
+      try{ await _vhSavePresetFromDevice(); }catch(e){ _vhSetStatus(String(e.message || e), 'error'); }
+    });
+  }
+
+  window.addEventListener('beforeunload', (e) => {
+    if(!_vhDirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href]');
+    if(!a) return;
+    const href = String(a.getAttribute('href') || '').trim();
+    if(!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+    if(!_vhDirty) return;
+    if(!_vhPromptDiscardIfDirty()){
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+}
+
 (async () => {
   try{
     const root = document.getElementById('vh-page');
     _vhAllowedPresetIds = _vhParseAllowList(root ? root.getAttribute('data-allowed-presets') : '');
     _vhCanEditPresets = String(root ? root.getAttribute('data-can-edit-presets') : '1').trim() !== '0';
-    await _loadState();
-    await _loadPresets();
-    _loadEditor(null);
+    await Promise.all([
+      _vhLoadState(),
+      _vhLoadRoomsConfig(),
+      _vhLoadPresets(),
+    ]);
+
+    const loadedDraft = _vhTryLoadDraftFromQuery();
+    if(!loadedDraft){
+      const q = new URLSearchParams(window.location.search || '');
+      const presetQ = parseInt(q.get('preset') || '', 10);
+      const roomQ = String(q.get('room') || '').trim();
+      const picked = Number.isFinite(presetQ) ? _vhPresets.find((p) => p.id === presetQ) : null;
+      _vhResetEditorFromPreset(picked || (_vhPresets[0] || null));
+      if(roomQ) _vhRoomId = roomQ;
+    }
+
+    _vhSyncEditorFields();
+    _vhRenderList();
+    _vhRenderRooms();
+    _vhWireUI();
+    _vhSaveDraftSession();
   }catch(e){
     _vhSetStatus(String(e.message || e), 'error');
   }
 })();
 </script>
-</div>
 {% endblock %}

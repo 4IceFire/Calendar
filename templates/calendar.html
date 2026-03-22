@@ -13,52 +13,154 @@
 {% block content %}
 
 <div class="tdeck-soft rounded-3 p-3">
+  <style>
+    .cal-schedule-table {
+      --bs-table-hover-bg: transparent;
+      --bs-table-hover-color: inherit;
+    }
+    .cal-event-summary-row > td {
+      vertical-align: middle;
+    }
+    .tdeck-table tbody tr.cal-event-summary-row:hover > td,
+    .tdeck-table tbody tr.cal-event-details-row:hover > td {
+      background: transparent !important;
+    }
+    .cal-event-name-cell {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      min-width: 0;
+    }
+    .cal-event-name-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    .cal-event-toggle-btn {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+    .cal-event-details-row > td {
+      background: transparent;
+      padding-top: 0;
+    }
+    .cal-event-details {
+      padding: .25rem 0 .6rem;
+    }
+    .cal-event-details-grid {
+      display: grid;
+      grid-template-columns: 110px 150px 120px 120px minmax(0, 1fr);
+      gap: 0;
+      border-top: 1px solid rgba(255, 255, 255, .08);
+    }
+    .cal-event-detail-cell {
+      padding: .85rem .9rem;
+      background: rgba(255, 255, 255, .04);
+      border-right: 1px solid rgba(255, 255, 255, .06);
+      min-width: 0;
+    }
+    .cal-event-detail-cell:last-child {
+      border-right: 0;
+    }
+    .cal-event-detail-label {
+      display: block;
+      margin-bottom: .25rem;
+      color: #8ea0b3;
+      font-size: .75rem;
+      font-weight: 600;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+    }
+    .cal-event-detail-value {
+      color: #d7dde5;
+      font-size: .95rem;
+    }
+    .cal-event-empty {
+      color: #aeb8c4;
+      font-size: .92rem;
+    }
+    @media (max-width: 900px) {
+      .cal-event-details-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+    @media (max-width: 640px) {
+      .cal-event-details-grid {
+        grid-template-columns: 1fr;
+      }
+      .cal-event-detail-cell {
+        border-right: 0;
+        border-bottom: 1px solid rgba(255, 255, 255, .06);
+      }
+      .cal-event-detail-cell:last-child {
+        border-bottom: 0;
+      }
+    }
+  </style>
+
   <div class="table-responsive tdeck-table-wrap">
-    <table class="table table-sm table-hover align-top tdeck-table mb-0">
+    <table class="table table-sm align-top tdeck-table cal-schedule-table mb-0">
       <thead>
         <tr>
-          <th style="width:70px">ID</th>
           <th style="width:90px">Active</th>
-          <th style="min-width:220px">Name</th>
-          <th style="width:140px">Date</th>
-          <th style="width:110px">Time</th>
-          <th style="width:100px">Repeating</th>
-          <th>Triggers</th>
+          <th style="min-width:260px">Event</th>
           <th class="text-end" style="width:170px"></th>
         </tr>
       </thead>
       <tbody id="events-body">
-        <tr><td colspan="8" class="text-center text-muted">Loading…</td></tr>
+        <tr><td colspan="3" class="text-center text-muted">Loading...</td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
 <script>
+function _eventCollapseKey(id){
+  return `calendar:event:collapsed:${String(id || '').trim()}`;
+}
+
+function _isEventCollapsed(id){
+  try{
+    return localStorage.getItem(_eventCollapseKey(id)) === '1';
+  }catch(e){
+    return false;
+  }
+}
+
+function _setEventCollapsed(id, collapsed){
+  try{
+    localStorage.setItem(_eventCollapseKey(id), collapsed ? '1' : '0');
+  }catch(e){}
+}
+
 async function loadEvents(){
   const tbody = document.getElementById('events-body');
-  tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Loading...</td></tr>';
   try{
-    // fetch events and templates so we can display template labels when available
     const [resp, tplResp] = await Promise.all([
       fetch('/api/ui/events?_ts=' + Date.now(), {cache: 'no-store'}),
       fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'})
     ]);
     const data = await resp.json();
-    const tplData = await tplResp.json().catch(()=>({buttons:[]}));
+    const tplData = await tplResp.json().catch(() => ({buttons: []}));
     const buttons = Array.isArray(tplData.buttons) ? tplData.buttons : [];
-    // build mapping of buttonURL and short-pattern -> label
     const btnMap = {};
     for(const b of buttons){
       const bu = b.buttonURL || (b.pattern ? `location/${b.pattern}/press` : null);
       if(!bu) continue;
       btnMap[bu] = b.label;
-      // also map the short form if possible
       const m = bu.match(/^location\/(\d+\/\d+\/\d+)\/press$/);
       if(m && m[1]) btnMap[m[1]] = b.label;
     }
-    if(!Array.isArray(data) || data.length===0){
-      tbody.innerHTML = '<tr><td colspan="8" class="text-center">No events</td></tr>';
+    if(!Array.isArray(data) || data.length === 0){
+      tbody.innerHTML = '<tr><td colspan="3" class="text-center">No events</td></tr>';
       return;
     }
     tbody.innerHTML = '';
@@ -90,33 +192,27 @@ async function loadEvents(){
       let deltaMin = 0;
       if(rawType === 'BEFORE') deltaMin = -m;
       else if(rawType === 'AFTER') deltaMin = m;
-      else deltaMin = 0;
 
       const due = new Date(baseDt.getTime() + (deltaMin * 60000));
       let label = formatTriggerTime(due);
-
-      // If the trigger falls on a different date, add a small day offset hint.
       try{
         const baseDay = new Date(baseDt.getTime());
-        baseDay.setHours(0,0,0,0);
+        baseDay.setHours(0, 0, 0, 0);
         const dueDay = new Date(due.getTime());
-        dueDay.setHours(0,0,0,0);
+        dueDay.setHours(0, 0, 0, 0);
         const deltaDays = Math.round((dueDay.getTime() - baseDay.getTime()) / 86400000);
         if(deltaDays !== 0){
           label += ` (${deltaDays > 0 ? '+' : ''}${deltaDays}d)`;
         }
       }catch(e){}
-
       return label;
     }
 
     function friendlyTriggerParts(t, baseDt){
       const rawType = String(t.typeOfTrigger || '').toUpperCase();
       const mins = Number(t.minutes) || 0;
-
       const actionType = String(t.actionType || 'companion').toLowerCase();
       const trigName = String((t && t.name) ? t.name : '').trim();
-
       const timeLabel = triggerTimeLabel({baseDt, rawType, mins});
       const offsetHint = (rawType === 'AT')
         ? 'At (0m)'
@@ -135,7 +231,20 @@ async function loadEvents(){
         };
       }
 
-      // normalize short and full button forms
+      if(actionType === 'timer'){
+        const timer = (t && t.timer && typeof t.timer === 'object') ? t.timer : {};
+        const preset = (timer.preset !== undefined && timer.preset !== null) ? `#${timer.preset}` : '#?';
+        const timerTime = String(timer.time || '').trim();
+        const applyNow = (timer.apply !== false);
+        return {
+          rawType,
+          timeLabel,
+          offsetHint,
+          target: trigName || `Timer ${preset}${timerTime ? ` -> ${timerTime}` : ''}${applyNow ? ' (apply)' : ''}`,
+          targetKind: 'timer',
+        };
+      }
+
       const raw = t.buttonURL || '';
       let shortBtn = '';
       try{
@@ -146,11 +255,13 @@ async function loadEvents(){
           if(parts.length >= 3) shortBtn = parts.slice(-3).join('/');
           else shortBtn = raw || '';
         }
-      }catch(e){ shortBtn = raw || ''; }
+      }catch(e){
+        shortBtn = raw || '';
+      }
 
-      const fullBtn = /^location\/.+/.test(raw) ? raw : ( /^\d+\/\d+\/\d+$/.test(shortBtn) ? `location/${shortBtn}/press` : shortBtn );
-
-      // prefer showing a template label when available
+      const fullBtn = /^location\/.+/.test(raw)
+        ? raw
+        : (/^\d+\/\d+\/\d+$/.test(shortBtn) ? `location/${shortBtn}/press` : shortBtn);
       const label = btnMap[fullBtn] || btnMap[shortBtn];
       const target = label ? String(label) : (shortBtn ? String(shortBtn) : '');
       return {
@@ -172,9 +283,9 @@ async function loadEvents(){
     }
 
     for(const e of data){
-      const tr = document.createElement('tr');
       const baseDt = parseEventBaseDt(e);
       const triggers = Array.isArray(e.times) ? e.times : [];
+      const collapsed = _isEventCollapsed(e.id);
       const triggerRows = triggers.map(t => {
         const isEnabled = (t && t.enabled !== false);
         const parts = friendlyTriggerParts(t, baseDt);
@@ -190,52 +301,109 @@ async function loadEvents(){
           </div>
         `;
       }).join('');
-      const triggersHtml = triggerRows ? `<div class="cal-triggers">${triggerRows}</div>` : '';
-      tr.innerHTML = `
-        <td>${escapeHtml(e.id ?? '')}</td>
+      const triggersHtml = triggerRows ? `<div class="cal-triggers">${triggerRows}</div>` : '<div class="cal-event-empty">No triggers</div>';
+
+      const summaryTr = document.createElement('tr');
+      summaryTr.className = 'cal-event-summary-row';
+      summaryTr.setAttribute('data-event-id', String(e.id ?? ''));
+      summaryTr.innerHTML = `
         <td>
           <label class="tdeck-toggle" title="Toggle event active">
             <input type="checkbox" class="event-active-toggle" data-id="${escapeHtml(e.id ?? '')}" ${e.active ? 'checked' : ''}>
             <span class="tdeck-toggle-slider" aria-hidden="true"></span>
           </label>
         </td>
-        <td>${escapeHtml(e.name)}</td>
-        <td>${escapeHtml(e.date)}</td>
-        <td>${escapeHtml(e.time)}</td>
-        <td>${e.repeating ? 'Yes' : 'No'}</td>
-        <td>${triggersHtml}</td>
         <td>
-          <div class="btn-group" role="group">
+          <div class="cal-event-name-cell">
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-secondary cal-event-toggle-btn"
+              data-role="event-collapse-toggle"
+              data-id="${escapeHtml(e.id ?? '')}"
+              aria-expanded="${collapsed ? 'false' : 'true'}"
+              title="Expand/collapse event"
+            >${collapsed ? '+' : '-'}</button>
+            <span class="cal-event-name-text" title="${escapeHtml(e.name || '')}">${escapeHtml(e.name || '(unnamed)')}</span>
+          </div>
+        </td>
+        <td>
+          <div class="btn-group d-flex justify-content-end" role="group">
             <button class="btn btn-sm btn-outline-primary edit-event" data-id="${e.id}">Edit</button>
             <button class="btn btn-sm btn-outline-danger delete-event" data-id="${e.id}">Delete</button>
           </div>
         </td>
       `;
-      tbody.appendChild(tr);
+      tbody.appendChild(summaryTr);
+
+      const detailsTr = document.createElement('tr');
+      detailsTr.className = 'cal-event-details-row';
+      detailsTr.setAttribute('data-event-id', String(e.id ?? ''));
+      if(collapsed) detailsTr.style.display = 'none';
+      detailsTr.innerHTML = `
+        <td colspan="3">
+          <div class="cal-event-details">
+            <div class="cal-event-details-grid">
+              <div class="cal-event-detail-cell">
+                <span class="cal-event-detail-label">ID</span>
+                <div class="cal-event-detail-value">${escapeHtml(e.id ?? '')}</div>
+              </div>
+              <div class="cal-event-detail-cell">
+                <span class="cal-event-detail-label">Date</span>
+                <div class="cal-event-detail-value">${escapeHtml(e.date || '')}</div>
+              </div>
+              <div class="cal-event-detail-cell">
+                <span class="cal-event-detail-label">Time</span>
+                <div class="cal-event-detail-value">${escapeHtml(e.time || '')}</div>
+              </div>
+              <div class="cal-event-detail-cell">
+                <span class="cal-event-detail-label">Repeating</span>
+                <div class="cal-event-detail-value">${e.repeating ? 'Yes' : 'No'}</div>
+              </div>
+              <div class="cal-event-detail-cell">
+                <span class="cal-event-detail-label">Triggers</span>
+                ${triggersHtml}
+              </div>
+            </div>
+          </div>
+        </td>
+      `;
+      tbody.appendChild(detailsTr);
     }
   }catch(err){
-    tbody.innerHTML = `<tr><td colspan="8" class="text-danger">Error loading events</td></tr>`;
+    tbody.innerHTML = '<tr><td colspan="3" class="text-danger">Error loading events</td></tr>';
     console.error(err);
   }
 }
 
 document.getElementById('refresh-events').addEventListener('click', loadEvents);
 
-// Add event button (placeholder: navigate to a create page or open editor)
-document.getElementById('add-event').addEventListener('click', async ()=>{
-  // TODO: replace with a proper create-event flow / modal
+document.getElementById('add-event').addEventListener('click', async () => {
   try{
     window.location.href = '/calendar/new';
-  }catch(e){console.error(e)}
+  }catch(e){
+    console.error(e);
+  }
 });
 
-// Delegate edit/delete button handlers
 document.getElementById('events-body').addEventListener('click', async (ev) => {
+  const toggleBtn = ev.target.closest('[data-role="event-collapse-toggle"]');
+  if(toggleBtn){
+    ev.preventDefault();
+    const id = String(toggleBtn.getAttribute('data-id') || '').trim();
+    if(!id) return;
+    const detailsRow = document.querySelector(`.cal-event-details-row[data-event-id="${CSS.escape(id)}"]`);
+    const willCollapse = !(detailsRow && detailsRow.style.display === 'none');
+    if(detailsRow) detailsRow.style.display = willCollapse ? 'none' : '';
+    toggleBtn.textContent = willCollapse ? '+' : '-';
+    toggleBtn.setAttribute('aria-expanded', willCollapse ? 'false' : 'true');
+    _setEventCollapsed(id, willCollapse);
+    return;
+  }
+
   const btn = ev.target.closest('button');
   if(!btn) return;
   if(btn.classList.contains('edit-event')){
     const id = btn.getAttribute('data-id');
-    // TODO: implement edit UI
     window.location.href = `/calendar/edit/${encodeURIComponent(id)}`;
     return;
   }
@@ -258,7 +426,6 @@ document.getElementById('events-body').addEventListener('click', async (ev) => {
   }
 });
 
-// Toggle active switch handler
 document.getElementById('events-body').addEventListener('change', async (ev) => {
   const input = ev.target;
   if(!input || !input.classList || !input.classList.contains('event-active-toggle')) return;
@@ -287,7 +454,6 @@ document.getElementById('events-body').addEventListener('change', async (ev) => 
   }
 });
 
-// initial load
 loadEvents();
 </script>
 

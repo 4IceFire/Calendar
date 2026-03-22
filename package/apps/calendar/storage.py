@@ -43,6 +43,7 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                 for trig in ev.get("times", []):
                     action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
                     api = trig.get("api") if isinstance(trig, dict) else None
+                    timer = trig.get("timer") if isinstance(trig, dict) else None
                     enabled = True
                     trig_name = str(trig.get("name") or "").strip() if isinstance(trig, dict) else ""
                     trig_uid = str(trig.get("uid") or "").strip() if isinstance(trig, dict) else ""
@@ -58,7 +59,12 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
 
                     # Backward compatible inference: if api exists, treat as API action.
                     if not action_type:
-                        action_type = "api" if isinstance(api, dict) else "companion"
+                        if isinstance(api, dict):
+                            action_type = "api"
+                        elif isinstance(timer, dict):
+                            action_type = "timer"
+                        else:
+                            action_type = "companion"
 
                     if action_type == "api":
                         times.append(
@@ -70,6 +76,21 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                                 uid=trig_uid,
                                 actionType="api",
                                 api=api if isinstance(api, dict) else {},
+                                timer=None,
+                                enabled=enabled,
+                            )
+                        )
+                    elif action_type == "timer":
+                        times.append(
+                            TimeOfTrigger(
+                                trig.get("minutes", 0),
+                                TypeofTime[trig.get("typeOfTrigger", "AT")],
+                                "",
+                                name=trig_name,
+                                uid=trig_uid,
+                                actionType="timer",
+                                api=None,
+                                timer=timer if isinstance(timer, dict) else {},
                                 enabled=enabled,
                             )
                         )
@@ -82,6 +103,7 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                                 name=trig_name,
                                 uid=trig_uid,
                                 actionType="companion",
+                                timer=None,
                                 enabled=enabled,
                             )
                         )
@@ -126,7 +148,12 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
 
                     action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
                     if not action_type:
-                        action_type = "api" if isinstance(trig.get("api"), dict) else "companion"
+                        if isinstance(trig.get("api"), dict):
+                            action_type = "api"
+                        elif isinstance(trig.get("timer"), dict):
+                            action_type = "timer"
+                        else:
+                            action_type = "companion"
                         trig["actionType"] = action_type
                         changed = True
 
@@ -135,6 +162,10 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                             trig["api"] = {}
                             changed = True
                         # keep legacy buttonURL if present; not used by executor
+                    elif action_type == "timer":
+                        if "timer" not in trig or not isinstance(trig.get("timer"), dict):
+                            trig["timer"] = {}
+                            changed = True
                     else:
                         if "buttonURL" not in trig:
                             trig["buttonURL"] = ""

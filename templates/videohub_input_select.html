@@ -1,0 +1,258 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Select Input' %}
+{% set page_subtitle = 'Choose input for the selected output' %}
+
+{% block content %}
+<style>
+  .vhi-grid{
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: .5rem;
+  }
+  @media (max-width: 1200px){ .vhi-grid{ grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 768px){ .vhi-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .vhi-card{
+    border: 1px solid var(--bs-border-color);
+    border-radius: .5rem;
+    padding: .5rem;
+    text-align: left;
+    background: var(--bs-body-bg);
+  }
+  .vhi-card.active{
+    border-color: var(--bs-primary);
+    box-shadow: 0 0 0 .2rem rgba(var(--bs-primary-rgb), .2);
+  }
+  @media (max-width: 576px){
+    .vhi-card{ min-height: 56px; }
+    #vhi-page .btn{ white-space: nowrap; }
+  }
+</style>
+
+<div id="vhi-page" data-can-edit-presets="{{ '1' if can_edit_presets else '0' }}">
+  <div id="vhi-status" class="mb-3"></div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap">
+        <div>
+          <div class="text-muted small">Output</div>
+          <div id="vhi-output-title" class="fw-semibold">-</div>
+          <div id="vhi-current-input" class="small text-muted"></div>
+        </div>
+        <div class="d-flex align-items-center gap-3">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="vhi-show-all">
+            <label class="form-check-label" for="vhi-show-all">Show all inputs</label>
+          </div>
+          <a id="vhi-cancel" class="btn btn-outline-secondary" href="/videohub">Cancel</a>
+          <button id="vhi-confirm" class="btn btn-primary" type="button">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="vhi-grid" class="vhi-grid">
+    <div class="text-muted small">Loading inputs...</div>
+  </div>
+</div>
+
+<script>
+let _vhiOutput = 0;
+let _vhiRoom = 'unassigned';
+let _vhiPreset = '';
+let _vhiDraftToken = '';
+let _vhiCanEdit = true;
+let _vhiLabels = {inputs: [], outputs: []};
+let _vhiRoomsCfg = {filtered_inputs: []};
+let _vhiDraft = null;
+let _vhiSelectedInput = null;
+let _vhiAutoHideTimeoutId = null;
+
+function _vhiMessageTimeoutMs(){
+  try{
+    const ms = window.TDECK_UI && window.TDECK_UI.messageTimeoutMs;
+    const n = Number(ms);
+    if(!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  }catch(e){ return 0; }
+}
+
+function _vhiClearAutoHide(){
+  if(_vhiAutoHideTimeoutId){
+    clearTimeout(_vhiAutoHideTimeoutId);
+    _vhiAutoHideTimeoutId = null;
+  }
+}
+
+function _vhiSetStatus(msg, kind){
+  const el = document.getElementById('vhi-status');
+  if(!el) return;
+  if(!msg){ _vhiClearAutoHide(); el.className=''; el.textContent=''; return; }
+  _vhiClearAutoHide();
+  el.className = kind === 'error' ? 'alert alert-danger' : (kind === 'warn' ? 'alert alert-warning' : 'alert alert-success');
+  el.textContent = msg;
+  const ms = _vhiMessageTimeoutMs();
+  if(ms){
+    _vhiAutoHideTimeoutId = setTimeout(() => {
+      _vhiAutoHideTimeoutId = null;
+      el.className = '';
+      el.textContent = '';
+    }, ms);
+  }
+}
+
+function _safeHtml(s){
+  return String(s || '').replace(/[&<>\"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _vhiFmtLabel(list, number){
+  const n = parseInt(number, 10);
+  if(!Number.isFinite(n) || n <= 0) return String(number || '');
+  const item = (Array.isArray(list) ? list : []).find((x) => parseInt(x.number, 10) === n);
+  const label = item && item.label ? String(item.label).trim() : '';
+  return label ? `${n}: ${label}` : String(n);
+}
+
+function _vhiDraftStorageKey(token){
+  return `vh_draft_${String(token || '').trim()}`;
+}
+
+function _vhiParseQuery(){
+  const q = new URLSearchParams(window.location.search || '');
+  _vhiOutput = parseInt(q.get('output') || '', 10);
+  _vhiRoom = String(q.get('room') || 'unassigned');
+  _vhiPreset = String(q.get('preset') || '');
+  _vhiDraftToken = String(q.get('draft') || '');
+  if(!Number.isFinite(_vhiOutput) || _vhiOutput <= 0){
+    throw new Error('Missing output number');
+  }
+}
+
+async function _vhiLoadStateAndConfig(){
+  const [stateRes, cfgRes] = await Promise.all([
+    fetch('/api/videohub/labels?_ts=' + Date.now(), {cache:'no-store'}),
+    fetch('/api/videohub/rooms/config?_ts=' + Date.now(), {cache:'no-store'}),
+  ]);
+  const st = await stateRes.json().catch(() => ({}));
+  const cfg = await cfgRes.json().catch(() => ({}));
+  if(!stateRes.ok || !st.ok) throw new Error(st.error || 'Failed to load VideoHub state');
+  if(!cfgRes.ok || !cfg.ok) throw new Error(cfg.error || 'Failed to load room config');
+  _vhiLabels.inputs = Array.isArray(st.inputs) ? st.inputs : [];
+  _vhiLabels.outputs = Array.isArray(st.outputs) ? st.outputs : [];
+  _vhiRoomsCfg = cfg.config || {filtered_inputs: []};
+}
+
+function _vhiLoadDraft(){
+  if(!_vhiDraftToken) throw new Error('Missing draft token');
+  let raw = null;
+  try{ raw = sessionStorage.getItem(_vhiDraftStorageKey(_vhiDraftToken)); }catch(e){ raw = null; }
+  if(!raw) throw new Error('Draft not found. Go back and select the output again.');
+  let data = null;
+  try{ data = JSON.parse(raw); }catch(e){ data = null; }
+  if(!data || !Array.isArray(data.routing)) throw new Error('Invalid draft data');
+  _vhiDraft = data;
+  const cur = parseInt(data.routing[_vhiOutput - 1], 10) || 1;
+  _vhiSelectedInput = cur;
+}
+
+function _vhiVisibleInputs(){
+  const showAll = !!(document.getElementById('vhi-show-all') && document.getElementById('vhi-show-all').checked);
+  const maxCount = Math.max(40, _vhiLabels.inputs.length || 0);
+  if(showAll){
+    const out = [];
+    for(let i=1; i<=maxCount; i++) out.push(i);
+    return out;
+  }
+  const filt = Array.isArray(_vhiRoomsCfg.filtered_inputs) ? _vhiRoomsCfg.filtered_inputs : [];
+  const cleaned = filt.map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0);
+  if(cleaned.length) return cleaned;
+  const out = [];
+  for(let i=1; i<=maxCount; i++) out.push(i);
+  return out;
+}
+
+function _vhiRenderHeader(){
+  const outTitle = document.getElementById('vhi-output-title');
+  const curEl = document.getElementById('vhi-current-input');
+  const cancelEl = document.getElementById('vhi-cancel');
+  if(outTitle) outTitle.textContent = _vhiFmtLabel(_vhiLabels.outputs, _vhiOutput);
+  if(curEl) curEl.textContent = `Current: ${_vhiFmtLabel(_vhiLabels.inputs, _vhiSelectedInput)}`;
+  if(cancelEl){
+    const q = new URLSearchParams();
+    q.set('room', _vhiRoom);
+    if(_vhiPreset) q.set('preset', _vhiPreset);
+    if(_vhiDraftToken) q.set('draft', _vhiDraftToken);
+    cancelEl.href = `/videohub?${q.toString()}`;
+  }
+}
+
+function _vhiRenderGrid(){
+  const host = document.getElementById('vhi-grid');
+  if(!host) return;
+  const items = _vhiVisibleInputs();
+  host.innerHTML = items.map((n) => {
+    const active = parseInt(_vhiSelectedInput, 10) === parseInt(n, 10);
+    return `<button class="vhi-card ${active ? 'active' : ''}" type="button" data-input="${n}">${_safeHtml(_vhiFmtLabel(_vhiLabels.inputs, n))}</button>`;
+  }).join('');
+}
+
+function _vhiSaveDraftAndReturn(){
+  if(!_vhiDraft || !_vhiCanEdit) return;
+  while(_vhiDraft.routing.length < _vhiOutput){ _vhiDraft.routing.push(_vhiDraft.routing.length + 1); }
+  _vhiDraft.routing[_vhiOutput - 1] = parseInt(_vhiSelectedInput, 10) || 1;
+  _vhiDraft.dirty = true;
+  _vhiDraft.ts = Date.now();
+  try{
+    sessionStorage.setItem(_vhiDraftStorageKey(_vhiDraftToken), JSON.stringify(_vhiDraft));
+  }catch(e){}
+  const q = new URLSearchParams();
+  q.set('room', _vhiRoom);
+  if(_vhiPreset) q.set('preset', _vhiPreset);
+  q.set('draft', _vhiDraftToken);
+  window.location.href = `/videohub?${q.toString()}`;
+}
+
+function _vhiWireUI(){
+  const grid = document.getElementById('vhi-grid');
+  if(grid){
+    grid.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-input]');
+      if(!btn) return;
+      const n = parseInt(btn.dataset.input || '', 10);
+      if(!Number.isFinite(n) || n <= 0) return;
+      _vhiSelectedInput = n;
+      _vhiRenderHeader();
+      _vhiRenderGrid();
+    });
+  }
+  const toggle = document.getElementById('vhi-show-all');
+  if(toggle){
+    toggle.addEventListener('change', () => _vhiRenderGrid());
+  }
+  const confirmBtn = document.getElementById('vhi-confirm');
+  if(confirmBtn){
+    confirmBtn.disabled = !_vhiCanEdit;
+    confirmBtn.addEventListener('click', () => {
+      if(!_vhiCanEdit) return;
+      _vhiSaveDraftAndReturn();
+    });
+  }
+}
+
+(async () => {
+  try{
+    const root = document.getElementById('vhi-page');
+    _vhiCanEdit = String(root ? root.getAttribute('data-can-edit-presets') : '1').trim() !== '0';
+    _vhiParseQuery();
+    await _vhiLoadStateAndConfig();
+    _vhiLoadDraft();
+    _vhiRenderHeader();
+    _vhiRenderGrid();
+    _vhiWireUI();
+  }catch(e){
+    _vhiSetStatus(String(e.message || e), 'error');
+  }
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,418 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'VideoHub Monitor' %}
+{% set page_subtitle = 'Live room overview of current VideoHub routing' %}
+
+{% block content %}
+<style>
+  .navbar,
+  #page-title,
+  #page-subtitle{
+    display: none !important;
+  }
+  .container.py-4{
+    max-width: none;
+    padding: 0 !important;
+  }
+  .container.py-4 > .d-flex.flex-wrap.align-items-end.justify-content-between.gap-2.mb-3{
+    display: none !important;
+  }
+  body{
+    background: #111315;
+  }
+  #vhm-page{
+    min-height: 100vh;
+    padding: 4.25rem 1rem 1rem;
+  }
+  .vhm-controls{
+    position: fixed;
+    top: .75rem;
+    right: .75rem;
+    z-index: 1100;
+    display: flex;
+    gap: .5rem;
+  }
+  .vhm-control-btn{
+    width: 42px;
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,.35);
+    background: rgba(255,255,255,.94);
+    color: #111315;
+    box-shadow: 0 6px 18px rgba(0,0,0,.18);
+    transition: opacity .18s ease, background-color .18s ease, border-color .18s ease;
+  }
+  .vhm-control-btn svg{
+    width: 18px;
+    height: 18px;
+    display: block;
+  }
+  .vhm-control-btn:hover{
+    background: #ffffff;
+  }
+  .vhm-control-btn.is-dimmed{
+    opacity: .4;
+    background: rgba(120,120,120,.45);
+    border-color: rgba(255,255,255,.18);
+    color: #f1f3f5;
+  }
+  .vhm-control-btn.is-dimmed:hover{
+    opacity: .78;
+    background: rgba(120,120,120,.68);
+  }
+  .vhm-controls .btn{
+    box-shadow: 0 6px 18px rgba(0,0,0,.18);
+  }
+  .vhm-grid{
+    display:grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 1rem;
+  }
+  .vhm-room-card{
+    border: 1px solid var(--bs-border-color);
+    border-radius: .8rem;
+    background: var(--bs-body-bg);
+    box-shadow: 0 6px 18px rgba(0,0,0,.06);
+    overflow: hidden;
+  }
+  .vhm-room-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:.75rem;
+    padding: .85rem 1rem;
+    border-bottom: 1px solid var(--bs-border-color);
+  }
+  .vhm-room-title{
+    font-weight: 700;
+    font-size: 1rem;
+    margin: 0;
+  }
+  .vhm-room-meta{
+    color: var(--bs-secondary-color);
+    font-size: .82rem;
+    white-space: nowrap;
+  }
+  .vhm-stage{
+    position: relative;
+    min-height: 320px;
+    height: min(42vh, 430px);
+    background: linear-gradient(180deg, rgba(248,249,250,1) 0%, rgba(233,236,239,1) 100%);
+    background-size: cover;
+    background-position: center;
+    overflow: hidden;
+  }
+  .vhm-empty{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    color: var(--bs-secondary-color);
+    font-size: .95rem;
+    background: rgba(255,255,255,.56);
+    padding: 1rem;
+  }
+  .vhm-marker{
+    position:absolute;
+    transform: translate(-50%, -50%);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: .55rem;
+    background: rgba(18,18,18,.92);
+    backdrop-filter: blur(3px);
+    padding: .18rem .28rem;
+    min-width: 74px;
+    text-align:left;
+    box-shadow: 0 2px 8px rgba(0,0,0,.18);
+  }
+  .vhm-marker-title{
+    display:block;
+    font-weight: 700;
+    font-size: .7rem;
+    line-height: 1.15;
+    color: #f8f9fa;
+  }
+  @media (max-width: 576px){
+    #vhm-page{ padding: 3.75rem .5rem .5rem; }
+    .vhm-controls{
+      top: .5rem;
+      right: .5rem;
+      justify-content: flex-end;
+    }
+    .vhm-grid{ grid-template-columns: 1fr; }
+    .vhm-stage{ min-height: 260px; height: 40vh; }
+    .vhm-marker{ min-width: 66px; padding: .16rem .24rem; }
+    .vhm-marker-title{ font-size: .64rem; }
+  }
+</style>
+
+<div id="vhm-page">
+  <div class="vhm-controls">
+    <button id="vhm-fullscreen-toggle" class="btn vhm-control-btn" type="button" aria-label="Enter Fullscreen" title="Enter Fullscreen">
+      <span class="vhm-fullscreen-icon-enter" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 3H3v6"></path>
+          <path d="M15 3h6v6"></path>
+          <path d="M21 15v6h-6"></path>
+          <path d="M3 15v6h6"></path>
+          <path d="M8 8 3 3"></path>
+          <path d="M16 8 21 3"></path>
+          <path d="M8 16 3 21"></path>
+          <path d="M16 16 21 21"></path>
+        </svg>
+      </span>
+      <span class="vhm-fullscreen-icon-exit d-none" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 3H3v5"></path>
+          <path d="M16 3h5v5"></path>
+          <path d="M21 16v5h-5"></path>
+          <path d="M3 16v5h5"></path>
+        </svg>
+      </span>
+    </button>
+  </div>
+  <div id="vhm-status" class="mb-3"></div>
+  <div id="vhm-grid" class="vhm-grid">
+    <div class="vhm-room-card">
+      <div class="vhm-room-head">
+        <h2 class="vhm-room-title">Loading rooms...</h2>
+      </div>
+      <div class="vhm-stage">
+        <div class="vhm-empty">Loading current VideoHub routing...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let _vhmLabels = {inputs: [], outputs: [], configured: false};
+let _vhmRoomsCfg = {rooms: [], output_layouts: {}, filtered_inputs: []};
+let _vhmRouting = [];
+let _vhmPollHandle = null;
+let _vhmAutoHideTimeoutId = null;
+
+function _vhmIsFullscreen(){
+  return !!document.fullscreenElement;
+}
+
+function _vhmMessageTimeoutMs(){
+  try{
+    const ms = window.TDECK_UI && window.TDECK_UI.messageTimeoutMs;
+    const n = Number(ms);
+    if(!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  }catch(e){ return 0; }
+}
+
+function _vhmClearAutoHide(){
+  if(_vhmAutoHideTimeoutId){
+    clearTimeout(_vhmAutoHideTimeoutId);
+    _vhmAutoHideTimeoutId = null;
+  }
+}
+
+function _vhmSyncFullscreenButton(){
+  const btn = document.getElementById('vhm-fullscreen-toggle');
+  if(!btn) return;
+  const isFs = _vhmIsFullscreen();
+  btn.classList.toggle('is-dimmed', isFs);
+  btn.setAttribute('aria-label', isFs ? 'Exit Fullscreen' : 'Enter Fullscreen');
+  btn.setAttribute('title', isFs ? 'Exit Fullscreen' : 'Enter Fullscreen');
+  const enterIcon = btn.querySelector('.vhm-fullscreen-icon-enter');
+  const exitIcon = btn.querySelector('.vhm-fullscreen-icon-exit');
+  if(enterIcon) enterIcon.classList.toggle('d-none', isFs);
+  if(exitIcon) exitIcon.classList.toggle('d-none', !isFs);
+}
+
+function _vhmSetStatus(msg, kind){
+  const el = document.getElementById('vhm-status');
+  if(!el) return;
+  if(!msg){
+    _vhmClearAutoHide();
+    el.className = '';
+    el.textContent = '';
+    return;
+  }
+  _vhmClearAutoHide();
+  el.className = kind === 'error' ? 'alert alert-danger' : (kind === 'warn' ? 'alert alert-warning' : 'alert alert-success');
+  el.textContent = msg;
+  const ms = _vhmMessageTimeoutMs();
+  if(ms && kind !== 'warn'){
+    _vhmAutoHideTimeoutId = setTimeout(() => {
+      _vhmAutoHideTimeoutId = null;
+      el.className = '';
+      el.textContent = '';
+    }, ms);
+  }
+}
+
+function _safeHtml(s){
+  return String(s || '').replace(/[&<>\"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _vhmFmtLabel(list, number){
+  const n = parseInt(number, 10);
+  if(!Number.isFinite(n) || n <= 0) return String(number || '');
+  const item = (Array.isArray(list) ? list : []).find((x) => parseInt(x.number, 10) === n);
+  const label = item && item.label ? String(item.label).trim() : '';
+  return label ? `${n}: ${label}` : String(n);
+}
+
+function _vhmNPorts(){
+  const outLen = Array.isArray(_vhmLabels.outputs) ? _vhmLabels.outputs.length : 0;
+  const inLen = Array.isArray(_vhmLabels.inputs) ? _vhmLabels.inputs.length : 0;
+  const rLen = Array.isArray(_vhmRouting) ? _vhmRouting.length : 0;
+  const layoutKeys = Object.keys((_vhmRoomsCfg && _vhmRoomsCfg.output_layouts) || {});
+  let maxLayout = 0;
+  for(const k of layoutKeys){
+    const n = parseInt(k, 10);
+    if(Number.isFinite(n) && n > maxLayout) maxLayout = n;
+  }
+  return Math.max(40, outLen, inLen, rLen, maxLayout);
+}
+
+function _vhmEnsureRoutingLen(){
+  const n = _vhmNPorts();
+  if(!Array.isArray(_vhmRouting)) _vhmRouting = [];
+  while(_vhmRouting.length < n){
+    _vhmRouting.push(_vhmRouting.length + 1);
+  }
+}
+
+function _vhmOutputsForRoom(roomId){
+  _vhmEnsureRoutingLen();
+  const out = [];
+  const layouts = (_vhmRoomsCfg && _vhmRoomsCfg.output_layouts) || {};
+  for(let o = 1; o <= _vhmRouting.length; o++){
+    const layout = layouts[String(o)] || {};
+    if(String(layout.room_id || '') === String(roomId)){
+      out.push(o);
+    }
+  }
+  return out;
+}
+
+function _vhmRender(){
+  const host = document.getElementById('vhm-grid');
+  if(!host) return;
+  const rooms = Array.isArray(_vhmRoomsCfg.rooms) ? _vhmRoomsCfg.rooms : [];
+  if(!rooms.length){
+    host.innerHTML = `
+      <div class="vhm-room-card">
+        <div class="vhm-room-head">
+          <h2 class="vhm-room-title">No rooms configured</h2>
+        </div>
+        <div class="vhm-stage">
+          <div class="vhm-empty">Create rooms in VideoHub Rooms to use the monitor page.</div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const layouts = (_vhmRoomsCfg && _vhmRoomsCfg.output_layouts) || {};
+  host.innerHTML = rooms.map((room) => {
+    const outputs = _vhmOutputsForRoom(room.id);
+    const bgUrl = String(room.background_url || '');
+    const markers = outputs.map((o) => {
+      const layout = layouts[String(o)] || {};
+      const x = Math.max(0, Math.min(100, parseFloat(layout.x) || 50));
+      const y = Math.max(0, Math.min(100, parseFloat(layout.y) || 50));
+      const inputNum = parseInt(_vhmRouting[o - 1], 10) || 1;
+      const inputLabel = _vhmFmtLabel(_vhmLabels.inputs, inputNum);
+      return `
+        <div class="vhm-marker" style="left:${x}%; top:${y}%;">
+          <span class="vhm-marker-title">${_safeHtml(inputLabel)}</span>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <section class="vhm-room-card">
+        <div class="vhm-room-head">
+          <h2 class="vhm-room-title">${_safeHtml(room.name || room.id)}</h2>
+          <div class="vhm-room-meta">${outputs.length} output${outputs.length === 1 ? '' : 's'}</div>
+        </div>
+        <div class="vhm-stage" style="${bgUrl ? `background-image:url('${_safeHtml(bgUrl)}');` : ''}">
+          ${outputs.length ? markers : '<div class="vhm-empty">No outputs assigned to this room.</div>'}
+        </div>
+      </section>
+    `;
+  }).join('');
+}
+
+async function _vhmLoadRooms(){
+  const res = await fetch('/api/videohub/rooms/config?_ts=' + Date.now(), {cache:'no-store'});
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load room config');
+  _vhmRoomsCfg = data.config || {rooms: [], output_layouts: {}, filtered_inputs: []};
+}
+
+async function _vhmLoadState(){
+  const res = await fetch('/api/videohub/state?_ts=' + Date.now(), {cache:'no-store'});
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load VideoHub state');
+  _vhmLabels = {
+    inputs: Array.isArray(data.inputs) ? data.inputs : [],
+    outputs: Array.isArray(data.outputs) ? data.outputs : [],
+    configured: !!data.configured,
+  };
+  _vhmRouting = Array.isArray(data.routing) ? data.routing.map((x) => parseInt(x, 10) || 1) : [];
+  if(!_vhmLabels.configured){
+    _vhmSetStatus('VideoHub is not configured. Showing fallback labels and routing.', 'warn');
+  }else if(data.error){
+    _vhmSetStatus(`Live state may be fallback: ${String(data.error || '')}`, 'warn');
+  }else{
+    _vhmSetStatus('', '');
+  }
+}
+
+async function _vhmPollState(){
+  try{
+    await _vhmLoadState();
+    _vhmRender();
+  }catch(e){
+    _vhmSetStatus(`Monitor refresh failed: ${String(e.message || e)}`, 'warn');
+  }
+}
+
+function _vhmWireControls(){
+  const btn = document.getElementById('vhm-fullscreen-toggle');
+  if(btn){
+    btn.addEventListener('click', async () => {
+      try{
+        if(_vhmIsFullscreen()){
+          await document.exitFullscreen();
+        }else{
+          await document.documentElement.requestFullscreen();
+        }
+      }catch(e){
+        _vhmSetStatus(`Fullscreen failed: ${String(e.message || e)}`, 'warn');
+      }finally{
+        _vhmSyncFullscreenButton();
+      }
+    });
+  }
+  document.addEventListener('fullscreenchange', _vhmSyncFullscreenButton);
+  _vhmSyncFullscreenButton();
+}
+
+(async () => {
+  try{
+    await Promise.all([
+      _vhmLoadRooms(),
+      _vhmLoadState(),
+    ]);
+    _vhmRender();
+    _vhmWireControls();
+    _vhmPollHandle = setInterval(_vhmPollState, 5000);
+  }catch(e){
+    _vhmSetStatus(String(e.message || e), 'error');
+  }
+})();
+</script>
+{% endblock %}

@@ -88,6 +88,20 @@ def _resolve_trigger_display_name(trigger) -> str:
         if isinstance(api, dict):
             return str(api.get("path") or "").strip()
         return "API"
+    if action_type == "timer":
+        timer = getattr(trigger, "timer", None)
+        if isinstance(timer, dict):
+            try:
+                preset = int(timer.get("preset"))
+            except Exception:
+                preset = None
+            time_str = str(timer.get("time") or "").strip()
+            apply_now = bool(timer.get("apply", False))
+            if preset is not None:
+                extra = f" -> {time_str}" if time_str else ""
+                apply_suffix = " (apply)" if apply_now else ""
+                return f"Timer preset #{preset}{extra}{apply_suffix}"
+        return "Timer preset"
 
     url = str(getattr(trigger, "buttonURL", "") or "").strip()
     labels = _get_button_template_labels_by_url()
@@ -280,6 +294,7 @@ class ClockScheduler:
             for job in sorted(self._heap):
                 action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
                 api = getattr(job.trigger, "api", None)
+                timer = getattr(job.trigger, "timer", None)
                 name = _resolve_trigger_display_name(job.trigger)
                 out.append(
                     {
@@ -293,6 +308,7 @@ class ClockScheduler:
                         "actionType": action_type,
                         "url": job.trigger.buttonURL,
                         "api": api if isinstance(api, dict) else None,
+                        "timer": timer if isinstance(timer, dict) else None,
                     }
                 )
 
@@ -309,13 +325,21 @@ class ClockScheduler:
             for i, job in enumerate(upcoming[:20]):
                 action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
                 api = getattr(job.trigger, "api", None) if action_type == "api" else None
+                timer = getattr(job.trigger, "timer", None) if action_type == "timer" else None
                 api_desc = ""
                 if isinstance(api, dict):
                     api_desc = f" | api={str(api.get('method') or '').upper()} {api.get('path') or ''}"
+                timer_desc = ""
+                if isinstance(timer, dict):
+                    timer_desc = (
+                        f" | timer preset={timer.get('preset')} time={timer.get('time')} "
+                        f"apply={bool(timer.get('apply', False))}"
+                    )
                 self._dbg(
                     f"#{i+1:02d} due={job.due.strftime('%Y-%m-%d %H:%M:%S')} | "
                     f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
                     + (api_desc if action_type == "api" else "")
+                    + (timer_desc if action_type == "timer" else "")
                 )
 
     def _execute_internal_api_action(self, api: dict, job: TriggerJob | None = None) -> bool:
@@ -413,6 +437,16 @@ class ClockScheduler:
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
                 f"name='{name}' | offset={job.trigger.timer}min | api={m} {p}"
             )
+        elif action_type == "timer":
+            timer = getattr(job.trigger, "timer", None)
+            preset = (timer or {}).get("preset") if isinstance(timer, dict) else None
+            time_str = (timer or {}).get("time") if isinstance(timer, dict) else None
+            apply_now = bool((timer or {}).get("apply", False)) if isinstance(timer, dict) else False
+            print(
+                f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
+                f"name='{name}' | offset={job.trigger.timer}min | timer preset={preset} time={time_str} "
+                f"apply={apply_now}"
+            )
         else:
             print(
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
@@ -435,6 +469,34 @@ class ClockScheduler:
                     f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
                 )
                 self._dbg("Internal API action -> FAIL")
+            return
+        if action_type == "timer":
+            timer = getattr(job.trigger, "timer", None)
+            if not isinstance(timer, dict):
+                print(f"[ACTION] Timer action invalid at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}; see calendar.log")
+                logger.error(
+                    f"TIMER action invalid payload | event=#{getattr(job.event,'id',None)} "
+                    f"'{job.event.name}' | due={job.due}"
+                )
+                self._dbg("Timer action -> FAIL (invalid payload)")
+                return
+            api_action = {"method": "POST", "path": "/api/timers/preset", "body": dict(timer)}
+            ok = self._execute_internal_api_action(api_action, job)
+            if ok:
+                logger.info(
+                    f"TIMER preset={timer.get('preset')} time={timer.get('time')} "
+                    f"apply={bool(timer.get('apply', False))} OK | "
+                    f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
+                )
+                self._dbg("Timer action -> OK")
+            else:
+                print(f"[ACTION] Timer action failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}; see calendar.log")
+                logger.error(
+                    f"TIMER preset={timer.get('preset')} time={timer.get('time')} "
+                    f"apply={bool(timer.get('apply', False))} FAIL | "
+                    f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
+                )
+                self._dbg("Timer action -> FAIL")
             return
 
         if self.c and getattr(self.c, "connected", False):

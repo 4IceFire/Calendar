@@ -9,6 +9,7 @@ __pycache__/
 calendar.log
 calendar.pid
 calendar_triggers.json
+videohub_room_images/
 
 # Local Config/Event Files
 *.json
