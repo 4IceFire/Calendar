@@ -950,9 +950,16 @@ def _auth_gate():
     if not _auth_enabled():
         return None
 
-    # Always allow static + API + login/logout
+    # Always allow static + API + login/logout + public VideoHub monitor assets/page
     p = request.path or ''
-    if p.startswith('/static/') or p.startswith('/api/') or p == '/login' or p == '/logout':
+    if (
+        p.startswith('/static/')
+        or p.startswith('/api/')
+        or p.startswith('/media/videohub_room_images/')
+        or p == '/login'
+        or p == '/logout'
+        or p == '/videohub/monitor'
+    ):
         return None
 
     # Ensure auth DB + defaults exist when auth is enabled
@@ -2165,6 +2172,7 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
             action_type = str(getattr(trig, 'actionType', 'companion') or 'companion').lower() if trig is not None else 'companion'
             url = str(getattr(trig, 'buttonURL', '') or '').strip() if trig is not None else ''
             api = getattr(trig, 'api', None) if trig is not None else None
+            timer = getattr(trig, 'timer', None) if trig is not None else None
             pattern = _extract_pattern_from_button_url(url) or ''
 
             offset_min = None
@@ -2203,6 +2211,17 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
                         trig_name = str((api or {}).get('path') or '').strip() if isinstance(api, dict) else ''
                     except Exception:
                         trig_name = ''
+                elif action_type == 'timer':
+                    try:
+                        tpreset = int((timer or {}).get('preset')) if isinstance(timer, dict) else None
+                    except Exception:
+                        tpreset = None
+                    ttime = str((timer or {}).get('time') or '').strip() if isinstance(timer, dict) else ''
+                    tapply = bool((timer or {}).get('apply', False)) if isinstance(timer, dict) else False
+                    if tpreset is not None:
+                        trig_name = f"Timer preset #{tpreset}" + (f" -> {ttime}" if ttime else "") + (" (apply)" if tapply else "")
+                    else:
+                        trig_name = "Timer preset"
                 else:
                     trig_name = button_label or url or ''
 
@@ -2216,8 +2235,9 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
                     'offset': offset_label,
                     'name': trig_name,
                     'actionType': action_type,
-                    'buttonURL': url if action_type != 'api' else '',
+                    'buttonURL': url if action_type == 'companion' else '',
                     'api': api if (action_type == 'api' and isinstance(api, dict)) else None,
+                    'timer': timer if (action_type == 'timer' and isinstance(timer, dict)) else None,
                     'button': {
                         'label': button_label,
                         'pattern': button_pattern,
@@ -2344,6 +2364,11 @@ def videohub_input_select_page():
         'videohub_input_select.html',
         can_edit_presets=bool(_can_edit_videohub_presets_current_user()),
     )
+
+
+@app.route('/videohub/monitor')
+def videohub_monitor_page():
+    return render_template('videohub_monitor.html')
 
 
 @app.route('/routing')
@@ -3293,8 +3318,9 @@ def api_ui_events():
                         'name': str(getattr(t, 'name', '') or '').strip(),
                         'enabled': bool(getattr(t, 'enabled', True)),
                         'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
-                        'buttonURL': t.buttonURL,
+                        'buttonURL': t.buttonURL if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'companion' else '',
                         'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
+                        'timer': getattr(t, 'timer', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'timer' else None,
                     }
                     for t in e.times
                 ],
@@ -4309,7 +4335,7 @@ def _validate_time_hhmm(s: str) -> bool:
         return False
 
 
-_RELATIVE_MINUTES_RE = re.compile(r'^\$(?P<sign>[+-])(?P<minutes>\d+)$')
+_RELATIVE_MINUTES_RE = re.compile(r'^\$(?:(?P<zero>0)|(?P<sign>[+-])(?P<minutes>\d+))$')
 
 
 def _parse_iso_datetime(s: str) -> datetime | None:
@@ -4355,7 +4381,7 @@ def _resolve_time_hhmm_input(time_value: object, *, body: dict) -> tuple[str | N
 
     Supports:
       - "HH:MM" (direct)
-      - "$-60" / "$+15" (minutes relative to event_start/base_time)
+      - "$-60" / "$0" / "$+15" (minutes relative to event_start/base_time)
 
     Returns (time_str, error, was_relative).
     """
@@ -4370,14 +4396,18 @@ def _resolve_time_hhmm_input(time_value: object, *, body: dict) -> tuple[str | N
     if s.startswith('$'):
         m = _RELATIVE_MINUTES_RE.match(s)
         if not m:
-            return None, 'relative time must look like "$-60" (minutes) or "$+15"', True
+            return None, 'relative time must look like "$-60", "$0", or "$+15"', True
 
         base_dt, err = _resolve_base_datetime_for_relative_time(body)
         if err:
             return None, err, True
 
-        minutes = int(m.group('minutes'))
-        sign = -1 if m.group('sign') == '-' else 1
+        if m.group('zero') == '0':
+            minutes = 0
+            sign = 1
+        else:
+            minutes = int(m.group('minutes'))
+            sign = -1 if m.group('sign') == '-' else 1
         dt = base_dt + timedelta(minutes=sign * minutes)
         return dt.strftime('%H:%M'), None, True
 
@@ -4476,6 +4506,7 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
     Supported action modes:
       - Companion: {actionType:'companion', buttonURL:'location/1/2/3/press'}
       - API: {actionType:'api', api:{method:'POST', path:'/api/...', body:{...}}}
+      - Timer: {actionType:'timer', timer:{preset:1, time:'08:15'|'$-15'|'$0'|'$+15', apply:true}}
     """
     if not isinstance(raw, dict):
         return None, 'trigger must be an object'
@@ -4530,9 +4561,11 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
             api_obj = None
 
     if not action_type:
-        # infer based on presence of API fields
+        # infer based on payload fields
         if api_obj is not None or raw.get('path') or raw.get('method'):
             action_type = 'api'
+        elif isinstance(raw.get('timer'), dict) or raw.get('preset') is not None:
+            action_type = 'timer'
         else:
             action_type = 'companion'
 
@@ -4558,7 +4591,7 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
 
         path_norm = _normalize_internal_api_path(path)
         if not path_norm or not path_norm.startswith('/api/'):
-            return None, 'api path must be a relative /videohub/... (the /api prefix is added automatically)'
+            return None, 'api path must be a relative path (the /api prefix is added automatically)'
         path = path_norm
 
         if isinstance(body, str) and body.strip():
@@ -4574,6 +4607,34 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
         out['api'] = {'method': method, 'path': path}
         if body is not None:
             out['api']['body'] = body
+        return out, None
+
+    if action_type == 'timer':
+        timer_obj = raw.get('timer') if isinstance(raw.get('timer'), dict) else None
+        preset_raw = (timer_obj or {}).get('preset', raw.get('preset'))
+        time_raw = (timer_obj or {}).get('time', raw.get('time'))
+        apply_raw = (timer_obj or {}).get('apply', raw.get('apply'))
+
+        try:
+            preset = int(preset_raw)
+        except Exception:
+            return None, 'timer preset must be an integer (1-based)'
+        if preset < 1:
+            return None, 'timer preset must be >= 1'
+
+        try:
+            time_str = str(time_raw or '').strip()
+        except Exception:
+            time_str = ''
+        if not (_validate_time_hhmm(time_str) or _RELATIVE_MINUTES_RE.match(time_str)):
+            return None, 'timer time must be HH:MM or relative ($-15, $0, $+15)'
+
+        apply_now = bool(apply_raw) if apply_raw is not None else False
+
+        timer_payload: dict[str, Any] = {'preset': preset, 'time': time_str, 'apply': apply_now}
+
+        out['actionType'] = 'timer'
+        out['timer'] = timer_payload
         return out, None
 
     # Default to companion
@@ -6030,8 +6091,9 @@ def api_get_event_ui(ident: int):
                     'name': str(getattr(t, 'name', '') or '').strip(),
                     'enabled': bool(getattr(t, 'enabled', True)),
                     'actionType': str(getattr(t, 'actionType', 'companion') or 'companion').lower(),
-                    'buttonURL': t.buttonURL,
+                    'buttonURL': t.buttonURL if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'companion' else '',
                     'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
+                    'timer': getattr(t, 'timer', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'timer' else None,
                 }
                 for t in e.times
             ],
@@ -6111,8 +6173,9 @@ def api_update_event_ui(ident: int):
                 if not t3: 
                     continue 
                 action_type = str(t3.get('actionType') or 'companion').lower() 
-                btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else '' 
+                btn_final = str(t3.get('buttonURL') or '') if action_type == 'companion' else '' 
                 api_obj = t3.get('api') if action_type == 'api' else None 
+                timer_obj = t3.get('timer') if action_type == 'timer' else None
                 enabled = bool(t3.get('enabled', True)) 
                 trig_name = str(t3.get('name') or '').strip() 
                 trig_uid = str(t3.get('uid') or '').strip() or _uuid4_str() 
@@ -6126,6 +6189,7 @@ def api_update_event_ui(ident: int):
                         uid=trig_uid, 
                         actionType=action_type, 
                         api=api_obj, 
+                        timer=timer_obj,
                         enabled=enabled, 
                     ) 
                 ) 
@@ -6213,8 +6277,9 @@ def api_create_event_ui():
             if not t3:
                 continue
             action_type = str(t3.get('actionType') or 'companion').lower()
-            btn_final = str(t3.get('buttonURL') or '') if action_type != 'api' else ''
+            btn_final = str(t3.get('buttonURL') or '') if action_type == 'companion' else ''
             api_obj = t3.get('api') if action_type == 'api' else None
+            timer_obj = t3.get('timer') if action_type == 'timer' else None
             enabled = bool(t3.get('enabled', True))
             trig_name = str(t3.get('name') or '').strip()
             trig_uid = str(t3.get('uid') or '').strip() or _uuid4_str()
@@ -6228,6 +6293,7 @@ def api_create_event_ui():
                     uid=trig_uid,
                     actionType=action_type,
                     api=api_obj,
+                    timer=timer_obj,
                     enabled=enabled,
                 )
             )

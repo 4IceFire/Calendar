@@ -31,6 +31,7 @@ class TimeOfTrigger:
         uid: str | None = None,
         actionType: str = "companion",
         api: Optional[Dict[str, Any]] = None,
+        timer: Optional[Dict[str, Any]] = None,
         enabled: bool = True,
     ) -> None:
         self.minutes = minutes
@@ -40,6 +41,7 @@ class TimeOfTrigger:
         self.uid = str(uid).strip() if uid is not None else None
         self.actionType = (actionType or "companion").lower()
         self.api: Optional[Dict[str, Any]] = api if isinstance(api, dict) else None
+        self.timer: Optional[Dict[str, Any]] = timer if isinstance(timer, dict) else None
         self.enabled = bool(enabled)
 
         if typeOfTrigger == TypeofTime.BEFORE:
@@ -66,6 +68,9 @@ class TimeOfTrigger:
         if self.actionType == "api":
             out["actionType"] = "api"
             out["api"] = self.api or {}
+        elif self.actionType == "timer":
+            out["actionType"] = "timer"
+            out["timer"] = self.timer or {}
         else:
             # Backward compatible default
             out["actionType"] = "companion"

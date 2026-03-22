@@ -136,6 +136,19 @@ function displayApiPath(p){
   return s;
 }
 
+function _isTimerTimeExpr(s){
+  const v = String(s || '').trim();
+  return /^\d{1,2}:\d{2}$/.test(v) || /^\$(?:0|[+-]\d+)$/.test(v);
+}
+
+async function loadTimerPresets(){
+  try{
+    const resp = await fetch('/api/timers?_ts=' + Date.now(), {cache: 'no-store'});
+    const data = await resp.json();
+    return Array.isArray(data.timer_presets) ? data.timer_presets : [];
+  }catch(e){ return []; }
+}
+
 // --- Templates page tabs (Buttons / Triggers) ---
 let _templatesActiveTab = 'buttons';
 
@@ -178,9 +191,13 @@ function _readInitialTemplatesTab(){
 
 async function loadTemplates(){
   try{
-    const resp = await fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'});
-    const data = await resp.json();
+    const [templatesResp, timerPresets] = await Promise.all([
+      fetch('/api/templates?_ts=' + Date.now(), {cache: 'no-store'}),
+      loadTimerPresets(),
+    ]);
+    const data = await templatesResp.json();
     window.__buttonTemplates = data.buttons || [];
+    window.__timerPresets = timerPresets || [];
     window.__buttonsTree = data.buttons_tree || {version: 2, folders: [], templates: (data.buttons || [])};
     renderButtonsTree(window.__buttonsTree);
     renderTriggerTemplates(data.triggers || []);
@@ -482,6 +499,9 @@ function _tplReadEditorStateRaw(){
     const apiMethod = row.querySelector('select[name="apiMethod"]')?.value;
     const apiPath = row.querySelector('input[name="apiPath"]')?.value;
     const apiBody = row.querySelector('textarea[name="apiBody"]')?.value;
+    const timerPreset = row.querySelector('select[name="timerPreset"]')?.value;
+    const timerTime = row.querySelector('input[name="timerTime"]')?.value;
+    const timerApply = !!(row.querySelector('input[name="timerApply"]') ? row.querySelector('input[name="timerApply"]').checked : false);
 
     return {
       enabled,
@@ -495,6 +515,9 @@ function _tplReadEditorStateRaw(){
       apiMethod: (apiMethod === undefined) ? null : String(apiMethod),
       apiPath: (apiPath === undefined) ? null : String(apiPath),
       apiBody: (apiBody === undefined) ? null : String(apiBody),
+      timerPreset: (timerPreset === undefined) ? null : String(timerPreset),
+      timerTime: (timerTime === undefined) ? null : String(timerTime),
+      timerApply,
     };
   });
 
@@ -697,6 +720,7 @@ function renderTriggerTemplates(trigs){
 }
 
 function newTriggerRow(templates){
+  const timerPresets = Array.isArray(window.__timerPresets) ? window.__timerPresets : [];
   const uid = _btUuid(); // stable per trigger row (may be overwritten when loading existing specs)
   const div = document.createElement('div');
   div.className = 'trigger-row border rounded p-2 mb-2';
@@ -721,6 +745,7 @@ function newTriggerRow(templates){
         <select name="actionType" class="form-select form-select-sm" style="width:160px">
           <option value="companion">Companion Button</option>
           <option value="api">API Call</option>
+          <option value="timer">Timer Preset</option>
         </select>
         <div class="ms-auto d-flex align-items-center gap-2">
           <button type="button" class="btn btn-sm btn-outline-secondary move-up" title="Move up">↑</button>
@@ -756,6 +781,23 @@ function newTriggerRow(templates){
         </select>
         <input name="apiPath" placeholder="/videohub/presets/1/apply" class="form-control form-control-sm">
         <textarea name="apiBody" placeholder='JSON body (optional)' class="form-control form-control-sm" rows="2" style="max-width:340px"></textarea>
+      </div>
+
+      <div class="mt-2 gap-2 align-items-center timer-fields" style="display:none">
+        <select name="timerPreset" class="form-select form-select-sm" style="min-width:220px">
+          <option value="">(select timer preset)</option>
+          ${timerPresets.map((p,i)=>{
+            const nm = String((p && p.name) ? p.name : '').trim();
+            const tm = String((p && p.time) ? p.time : '').trim();
+            const lbl = nm ? `#${i + 1} - ${nm}${tm ? ` (${tm})` : ''}` : `#${i + 1}${tm ? ` (${tm})` : ''}`;
+            return `<option value="${i + 1}" data-time="${tm.replaceAll('"','&quot;')}">${lbl}</option>`;
+          }).join('')}
+        </select>
+        <input name="timerTime" placeholder="HH:MM or $-15" class="form-control form-control-sm" style="max-width:160px">
+        <div class="form-check mb-0">
+          <input class="form-check-input" type="checkbox" name="timerApply" checked>
+          <label class="form-check-label small">Apply when triggered</label>
+        </div>
       </div>
     </div>
   `;
@@ -816,19 +858,47 @@ function newTriggerRow(templates){
   const actionSel = div.querySelector('select[name="actionType"]');
   const companionFields = div.querySelector('.companion-fields');
   const apiFields = div.querySelector('.api-fields');
+  const timerFields = div.querySelector('.timer-fields');
+  const timerPresetSel = div.querySelector('select[name="timerPreset"]');
+  const timerTimeInp = div.querySelector('input[name="timerTime"]');
+  const timerApplyInp = div.querySelector('input[name="timerApply"]');
+  const syncTimerTimeFromPreset = ()=>{
+    if(!timerPresetSel || !timerTimeInp) return;
+    const opt = timerPresetSel.options[timerPresetSel.selectedIndex];
+    const t = opt ? String(opt.getAttribute('data-time') || '').trim() : '';
+    if(t) timerTimeInp.value = t;
+  };
+  if(timerPresetSel) timerPresetSel.addEventListener('change', syncTimerTimeFromPreset);
   const syncActionFields = ()=>{
     const v = String(actionSel ? actionSel.value : 'companion').toLowerCase();
     if(v === 'api'){
       if(companionFields) companionFields.style.display = 'none';
       if(apiFields) apiFields.style.display = 'flex';
+      if(timerFields) timerFields.style.display = 'none';
       // ensure companion url isn't forced disabled by template selection
       if(inp) inp.disabled = true;
       if(sel) sel.disabled = true;
+      if(timerPresetSel) timerPresetSel.disabled = true;
+      if(timerTimeInp) timerTimeInp.disabled = true;
+      if(timerApplyInp) timerApplyInp.disabled = true;
+    }else if(v === 'timer'){
+      if(companionFields) companionFields.style.display = 'none';
+      if(apiFields) apiFields.style.display = 'none';
+      if(timerFields) timerFields.style.display = 'flex';
+      if(inp) inp.disabled = true;
+      if(sel) sel.disabled = true;
+      if(timerPresetSel) timerPresetSel.disabled = false;
+      if(timerTimeInp) timerTimeInp.disabled = false;
+      if(timerApplyInp) timerApplyInp.disabled = false;
     }else{
       if(companionFields) companionFields.style.display = 'flex';
       if(apiFields) apiFields.style.display = 'none';
+      if(timerFields) timerFields.style.display = 'none';
       if(sel) sel.disabled = false;
       if(inp) inp.disabled = false;
+      if(timerPresetSel) timerPresetSel.disabled = true;
+      if(timerTimeInp) timerTimeInp.disabled = true;
+      if(timerApplyInp) timerApplyInp.disabled = true;
       updateDisabled();
     }
   };
@@ -951,6 +1021,11 @@ function _populateTriggerEditorFromTemplate(idx){
       row.querySelector('select[name="apiMethod"]').value = (s.api && s.api.method) ? String(s.api.method).toUpperCase() : 'POST';
       row.querySelector('input[name="apiPath"]').value = (s.api && s.api.path) ? displayApiPath(String(s.api.path)) : '';
       row.querySelector('textarea[name="apiBody"]').value = (s.api && s.api.body !== undefined) ? JSON.stringify(s.api.body) : '';
+    }else if(String(s.actionType || 'companion').toLowerCase() === 'timer'){
+      const timer = (s && s.timer && typeof s.timer === 'object') ? s.timer : {};
+      row.querySelector('select[name="timerPreset"]').value = String(timer.preset || '');
+      row.querySelector('input[name="timerTime"]').value = String(timer.time || '');
+      row.querySelector('input[name="timerApply"]').checked = (timer.apply !== false);
     }else{
       // try to match a button template
       let matched = false;
@@ -1017,7 +1092,7 @@ function _collectTriggerSpecsFromEditor(){
       const path = String(row.querySelector('input[name="apiPath"]').value || '').trim();
       const bodyRaw = String(row.querySelector('textarea[name="apiBody"]').value || '').trim();
       const normPath = normalizeApiPath(path);
-      if(!normPath || !normPath.startsWith('/api/')) return {ok:false, error:'API path must be like /videohub/... (the /api prefix is added automatically)'};
+      if(!normPath || !normPath.startsWith('/api/')) return {ok:false, error:'API path must be relative (the /api prefix is added automatically)'};
       let body = undefined;
       if(bodyRaw){
         try{ body = JSON.parse(bodyRaw); }
@@ -1026,6 +1101,17 @@ function _collectTriggerSpecsFromEditor(){
       const api = {method, path: normPath};
       if(body !== undefined) api.body = body;
       specs.push({uid, name, minutes: mins, typeOfTrigger: type, enabled, actionType: 'api', api});
+      continue;
+    }
+    if(actionType === 'timer'){
+      const presetRaw = String(row.querySelector('select[name="timerPreset"]')?.value || '').trim();
+      const timeRaw = String(row.querySelector('input[name="timerTime"]')?.value || '').trim();
+      const applyNow = !!row.querySelector('input[name="timerApply"]')?.checked;
+      const preset = parseInt(presetRaw, 10);
+      if(!presetRaw || Number.isNaN(preset) || preset < 1) return {ok:false, error:'Select a valid timer preset'};
+      if(!_isTimerTimeExpr(timeRaw)) return {ok:false, error:'Timer time must be HH:MM or relative ($-15, $0, $+15)'};
+      const timer = {preset, time: timeRaw, apply: applyNow};
+      specs.push({uid, name, minutes: mins, typeOfTrigger: type, enabled, actionType: 'timer', timer});
       continue;
     }
 

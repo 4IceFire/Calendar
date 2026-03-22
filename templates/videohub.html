@@ -8,6 +8,7 @@
 <button id="vh-new" class="btn btn-primary">New Preset</button>
 <button id="vh-save-from-device" class="btn btn-outline-success">Save From Device</button>
 {% endif %}
+<a class="btn btn-outline-secondary" href="/videohub/monitor" target="_blank" rel="noopener noreferrer">Open Monitor</a>
 {% if can_manage_rooms %}
 <a class="btn btn-outline-secondary" href="/videohub/rooms">Manage Rooms</a>
 {% endif %}
@@ -393,7 +394,7 @@ function _vhRenderRooms(){
     btn.style.top = `${Math.max(0, Math.min(100, y))}%`;
     btn.dataset.output = String(o);
     btn.disabled = !_vhIsEditable();
-    btn.innerHTML = `<span class="vh-marker-title">${_safeHtml(outLabel)}</span><span class="vh-marker-sub">${_safeHtml(inLabel)}</span>`;
+    btn.innerHTML = `<span class="vh-marker-title">${_safeHtml(inLabel)}</span><span class="vh-marker-sub">${_safeHtml(outLabel)}</span>`;
     stage.appendChild(btn);
   });
 }

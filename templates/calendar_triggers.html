@@ -79,8 +79,13 @@
         const trigName = String((t && t.name) ? t.name : '').trim();
         const method = (t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST';
         const apiPath = (t.api && t.api.path) ? prettyApiPath(t.api.path) : '';
+        const timerPreset = (t.timer && t.timer.preset !== undefined) ? String(t.timer.preset) : '';
+        const timerTime = (t.timer && t.timer.time) ? String(t.timer.time) : '';
+        const timerApply = !!(t.timer && t.timer.apply);
         const fallback = (actionType === 'api')
           ? (apiPath ? `API: ${method} ${apiPath}` : `API: ${method}`)
+          : (actionType === 'timer')
+          ? (`Timer: #${timerPreset || '?'}${timerTime ? ` -> ${timerTime}` : ''}${timerApply ? ' (apply)' : ''}`)
           : (String((t.button && t.button.label) ? t.button.label : '').trim()
             || String((t.button && t.button.pattern) ? t.button.pattern : '').trim()
             || String(t.buttonURL || '').trim());
