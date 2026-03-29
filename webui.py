@@ -1773,6 +1773,11 @@ def admin_roles_page():
 @require_page('page:admin', 'Admin')
 def api_admin_role_update(role_id: int):
     """Update role settings via JSON (used by Access Levels auto-save UI)."""
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:admin'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
     try:
         data = request.get_json(silent=True) or {}
     except Exception:
@@ -4203,6 +4208,11 @@ def api_console_logs():
       - since: last seen line id (int). Returns only newer lines when possible.
       - limit: max lines to return (int, default 400, max 2000)
     """
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:console'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
     try:
         since = int(request.args.get('since', '0') or '0')
     except Exception:
@@ -4249,6 +4259,11 @@ def api_console_run():
 
     Executed as: <python> cli.py <args...>
     """
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:console'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
     body = request.get_json(silent=True) or {}
     cmd = str(body.get('command', '')).strip()
     if not cmd:
@@ -6018,6 +6033,22 @@ def api_videohub_route():
 
     output_idx = output_n if zero_based else output_n - 1
     input_idx = input_n if zero_based else input_n - 1
+
+    # Enforce per-role allow-lists when a restricted user is logged in.
+    # Admin role is allow-all by design; unauthenticated / auth-disabled callers
+    # (e.g. Companion integration) are not subject to role restrictions.
+    if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
+        role_name = str(getattr(current_user, 'role_name', '') or '')
+        if role_name != 'Admin':
+            role_id = getattr(current_user, 'role_id', None)
+            allowed_outs, allowed_ins = _get_role_videohub_allowlists(role_id)
+            # 1-based comparison to match allow-list storage convention
+            out_1based = output_idx + 1
+            in_1based = input_idx + 1
+            if allowed_outs and out_1based not in allowed_outs:
+                return jsonify({'ok': False, 'error': 'Output not permitted for your role'}), 403
+            if allowed_ins and in_1based not in allowed_ins:
+                return jsonify({'ok': False, 'error': 'Input not permitted for your role'}), 403
 
     try:
         vh.route_video_output(output=output_idx, input_=input_idx, monitoring=monitor)
