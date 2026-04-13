@@ -59,20 +59,25 @@ TDeck runs the transcription engine on the server. A second computer can send mi
 
 Install the sender dependencies on the remote machine:
 
-```powershell
-pip install -r requirements_sender.txt
+```cmd
+python -m pip install -r requirements_sender.txt
 ```
 
-Run the sender:
+Friendly sender setup:
 
-```powershell
-python tools/transcription_sender.py --server http://<tdeck-host>:5000 --token <ingest-token>
-```
+- Windows: double-click `start_transcription_sender.bat`
+- macOS/Linux: run `./start_transcription_sender.sh`
+- The local setup page opens at `http://127.0.0.1:8766`
+- Enter the TDeck server URL, token, and pick the microphone from the dropdown
+- Click `Save Settings`, then `Test Connection`, then `Start Streaming`
 
-List devices first if needed:
+The sender saves its settings locally in `transcription_sender_config.json` so the operator does not need to retype the token or microphone choice every time.
 
-```powershell
-python tools/transcription_sender.py --list-devices
+CLI fallback:
+
+```cmd
+python tools\transcription_sender.py --server http://<tdeck-host>:5000 --token <ingest-token>
+python tools\transcription_sender.py --list-devices
 ```
 
 macOS note: if microphone capture fails, install PortAudio first, for example with `brew install portaudio`.

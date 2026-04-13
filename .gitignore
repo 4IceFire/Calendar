@@ -7,8 +7,10 @@ __pycache__/
 
 # Runtime artifacts
 calendar.log
+realtimestt.log
 calendar.pid
 calendar_triggers.json
+transcription_sender_ui.pid
 videohub_room_images/
 
 # Local Config/Event Files
