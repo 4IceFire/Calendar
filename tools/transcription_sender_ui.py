@@ -181,6 +181,7 @@ HTML = """<!doctype html>
   <script>
     let currentConfig = null;
     let currentDevices = [];
+    let formDirty = false;
 
     function fmtTime(ts){
       if(!ts) return '-';
@@ -207,17 +208,11 @@ HTML = """<!doctype html>
       };
     }
 
-    function applyConfig(cfg, devices){
+    function applyConfig(cfg, devices, {force=false} = {}){
       currentConfig = cfg || {};
       currentDevices = Array.isArray(devices) ? devices : [];
-      document.getElementById('server').value = currentConfig.server || '';
-      document.getElementById('token').value = currentConfig.token || '';
-      document.getElementById('source_name').value = currentConfig.source_name || '';
-      document.getElementById('sample_rate').value = currentConfig.sample_rate || 16000;
-      document.getElementById('chunk_ms').value = currentConfig.chunk_ms || 200;
-      document.getElementById('channels').value = String(currentConfig.channels || 1);
-      document.getElementById('ui_port').value = currentConfig.ui_port || 8766;
       const sel = document.getElementById('device');
+      const prior = sel.value;
       sel.innerHTML = '';
       const blank = document.createElement('option');
       blank.value = '';
@@ -229,7 +224,19 @@ HTML = """<!doctype html>
         opt.textContent = `${dev.name} (${dev.max_input_channels} in)`;
         sel.appendChild(opt);
       });
-      sel.value = String(currentConfig.device || '');
+
+      if(force || !formDirty){
+        document.getElementById('server').value = currentConfig.server || '';
+        document.getElementById('token').value = currentConfig.token || '';
+        document.getElementById('source_name').value = currentConfig.source_name || '';
+        document.getElementById('sample_rate').value = currentConfig.sample_rate || 16000;
+        document.getElementById('chunk_ms').value = currentConfig.chunk_ms || 200;
+        document.getElementById('channels').value = String(currentConfig.channels || 1);
+        document.getElementById('ui_port').value = currentConfig.ui_port || 8766;
+        sel.value = String(currentConfig.device || '');
+      } else {
+        sel.value = prior;
+      }
     }
 
     function applyStatus(st){
@@ -246,10 +253,10 @@ HTML = """<!doctype html>
       document.getElementById('last-error').textContent = st.last_error || '-';
     }
 
-    async function loadState(){
+    async function loadState({refreshForm=false} = {}){
       const res = await fetch('/api/sender/state', {cache:'no-store'});
       const data = await res.json();
-      applyConfig(data.config || {}, data.devices || []);
+      applyConfig(data.config || {}, data.devices || [], {force: refreshForm});
       applyStatus(data.status || {});
     }
 
@@ -269,7 +276,8 @@ HTML = """<!doctype html>
     document.getElementById('sender-form').addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const data = await postJson('/api/sender/config', formData());
-      applyConfig(data.config || {}, data.devices || []);
+      formDirty = false;
+      applyConfig(data.config || {}, data.devices || [], {force:true});
       applyStatus(data.status || {});
     });
 
@@ -282,11 +290,12 @@ HTML = """<!doctype html>
         : (data.error || 'Connection failed');
     });
 
-    document.getElementById('refresh-btn').addEventListener('click', loadState);
+    document.getElementById('refresh-btn').addEventListener('click', () => loadState({refreshForm:true}));
 
     document.getElementById('start-btn').addEventListener('click', async () => {
       const data = await postJson('/api/sender/start', formData());
-      applyConfig(data.config || {}, data.devices || []);
+      formDirty = false;
+      applyConfig(data.config || {}, data.devices || [], {force:true});
       applyStatus(data.status || {});
     });
 
@@ -295,8 +304,13 @@ HTML = """<!doctype html>
       applyStatus(data.status || {});
     });
 
-    loadState();
-    setInterval(loadState, 2000);
+    document.querySelectorAll('#sender-form input, #sender-form select').forEach(el => {
+      el.addEventListener('input', () => { formDirty = true; });
+      el.addEventListener('change', () => { formDirty = true; });
+    });
+
+    loadState({refreshForm:true});
+    setInterval(() => loadState({refreshForm:false}), 2000);
   </script>
 </body>
 </html>"""
