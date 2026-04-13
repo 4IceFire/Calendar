@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response
 import logging
 import threading
 import time
@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 
 from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from package.apps.calendar.transcription_service import TranscriptionService
 
 
 # --- Home overview state (best-effort, in-memory) ---
@@ -229,6 +231,30 @@ except Exception:
 
         # Scheduler/internal API
         "internal_api_timeout_seconds": 10,
+
+        # Realtime transcription
+        "transcription_enabled": False,
+        "transcription_remote_enabled": True,
+        "transcription_bind_host": "0.0.0.0",
+        "transcription_ingest_token": "",
+        "transcription_chunk_ms": 200,
+        "transcription_language": "en",
+        "transcription_model": "small.en",
+        "transcription_realtime_model": "tiny.en",
+        "transcription_device": "cpu",
+        "transcription_enable_realtime": True,
+        "transcription_pause_soft_seconds": 1.0,
+        "transcription_pause_hard_seconds": 2.5,
+        "transcription_keep_history": False,
+        "transcription_history_limit": 10,
+        "transcription_font_scale": 1.0,
+        "transcription_line_spacing": 1.25,
+        "transcription_show_timestamps": True,
+        "transcription_show_live_line": True,
+        "transcription_segment_compact_mode": False,
+        "transcription_color_scheme": "accent",
+        "transcription_sender_input_device": "",
+        "transcription_source_name": "Church Comms",
     }
 
     def _seed_config_if_missing() -> dict:
@@ -1219,6 +1245,36 @@ def _install_console_capture() -> None:
 
 _install_console_capture()
 
+# --- Realtime transcription service ---
+_transcription_service = TranscriptionService(
+    lambda: utils.get_config() if hasattr(utils, 'get_config') else {},
+    console_log=_console_append,
+)
+
+
+def _transcription_public_state(include_history: bool = True) -> dict:
+    return _transcription_service.get_state(include_history=include_history)
+
+
+def _transcription_ingest_token() -> str:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        return str(cfg.get('transcription_ingest_token', '')).strip()
+    except Exception:
+        return ''
+
+
+def _transcription_ingest_authorized() -> bool:
+    token = _transcription_ingest_token()
+    if not token:
+        return False
+    sent = (
+        request.headers.get('X-TDeck-Transcription-Token')
+        or request.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+    )
+    return bool(sent) and str(sent).strip() == token
+
+
 # Optional ProPresenter timer integration (Companion -> this Web UI -> ProPresenter)
 try:
     from propresentor import ProPresentor
@@ -1469,6 +1525,13 @@ def _config_watcher():
             changed = False
         if changed:
             cfg = utils.get_config()
+            try:
+                if bool(cfg.get('transcription_enabled', False)):
+                    _transcription_service.ensure_recorder()
+                else:
+                    _transcription_service.stop_session()
+            except Exception:
+                pass
             new_port = int(cfg.get('webserver_port', cfg.get('server_port', 5000)))
             if new_port != prev_port:
                 try:
@@ -2398,6 +2461,18 @@ def routing_page():
 @require_page('page:timers', 'Timers')
 def timers_page():
     return render_template('timers.html')
+
+
+@app.route('/transcription')
+@require_page('page:transcription', 'Transcription')
+def transcription_page():
+    return render_template('transcription.html')
+
+
+@app.route('/transcription/display')
+@require_page('page:transcription', 'Transcription')
+def transcription_display_page():
+    return render_template('transcription_display.html', page_title='Transcription Display')
 
 
 @app.route('/config')
@@ -3516,6 +3591,13 @@ def api_set_config():
         # persist
         utils.save_config(cfg)
         utils.reload_config(force=True)
+        try:
+            if bool(cfg.get('transcription_enabled', False)):
+                _transcription_service.ensure_recorder()
+            else:
+                _transcription_service.stop_session()
+        except Exception:
+            pass
         # re-apply logging configuration in case `debug` was changed
         try:
             _apply_logging_config()
@@ -3560,6 +3642,128 @@ def api_set_config():
         return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+def _transcription_api_page_guard() -> tuple[dict, int] | None:
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return {'ok': False, 'error': 'unauthorized'}, 401
+        if not can_access('page:transcription'):
+            return {'ok': False, 'error': 'forbidden'}, 403
+    return None
+
+
+@app.route('/api/transcription/state', methods=['GET'])
+def api_transcription_state():
+    guarded = _transcription_api_page_guard()
+    if guarded is not None:
+        body, code = guarded
+        return jsonify(body), code
+    return jsonify(_transcription_public_state(include_history=True))
+
+
+@app.route('/api/transcription/stream', methods=['GET'])
+def api_transcription_stream():
+    guarded = _transcription_api_page_guard()
+    if guarded is not None:
+        body, code = guarded
+        return jsonify(body), code
+    try:
+        last = request.args.get('after')
+        after = int(last) if str(last or '').strip() else None
+    except Exception:
+        after = None
+
+    def _event_stream():
+        current_after = after
+        yield f"data: {json.dumps(_transcription_public_state(include_history=False), ensure_ascii=False)}\n\n"
+        while True:
+            version, state = _transcription_service.stream_wait(after_version=current_after, timeout=15.0)
+            current_after = version
+            payload = json.dumps(state, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+
+    return Response(
+        _event_stream(),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@app.route('/api/transcription/control', methods=['POST'])
+def api_transcription_control():
+    guarded = _transcription_api_page_guard()
+    if guarded is not None:
+        body, code = guarded
+        return jsonify(body), code
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        body = {}
+    ok, err = _transcription_service.control(body.get('action'))
+    if not ok:
+        return jsonify({'ok': False, 'error': err}), 400
+    return jsonify({'ok': True, 'state': _transcription_public_state(include_history=True)})
+
+
+@app.route('/api/transcription/config/test', methods=['GET'])
+def api_transcription_config_test():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    host = request.host_url.rstrip('/')
+    token = _transcription_ingest_token()
+    state = _transcription_public_state(include_history=False)
+    return jsonify({
+        'ok': True,
+        'enabled': bool(cfg.get('transcription_enabled', False)),
+        'remote_enabled': bool(cfg.get('transcription_remote_enabled', True)),
+        'token_configured': bool(token),
+        'ingest_url': f'{host}/api/transcription/audio',
+        'display_url': f'{host}/transcription/display',
+        'status': state.get('status'),
+        'sender': {
+            'source_name': str(cfg.get('transcription_source_name', 'Church Comms') or 'Church Comms'),
+            'input_device': str(cfg.get('transcription_sender_input_device', '') or ''),
+            'chunk_ms': int(cfg.get('transcription_chunk_ms', 200) or 200),
+        },
+    })
+
+
+@app.route('/api/transcription/audio', methods=['POST'])
+def api_transcription_audio():
+    if not _transcription_ingest_authorized():
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+
+    chunk = request.get_data(cache=False, as_text=False) or b''
+    if not chunk:
+        return jsonify({'ok': False, 'error': 'empty body'}), 400
+
+    try:
+        sample_rate = int(request.headers.get('X-Audio-Sample-Rate', '16000'))
+        channels = int(request.headers.get('X-Audio-Channels', '1'))
+        sample_width = int(request.headers.get('X-Audio-Sample-Width', '2'))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid audio headers'}), 400
+
+    source_id = str(request.headers.get('X-Source-Id', '') or '').strip() or str(request.remote_addr or '')
+    source_name = str(request.headers.get('X-Source-Name', '') or '').strip() or 'Remote Sender'
+    ok, err = _transcription_service.ingest_audio(
+        chunk,
+        sample_rate=sample_rate,
+        channels=channels,
+        sample_width=sample_width,
+        source_id=source_id,
+        source_name=source_name,
+        remote_addr=str(request.remote_addr or ''),
+    )
+    if not ok:
+        code = 409 if err == 'Another sender is currently active.' else 400
+        return jsonify({'ok': False, 'error': err}), code
+    return jsonify({'ok': True})
 
 
 # --- VideoHub presets API ---

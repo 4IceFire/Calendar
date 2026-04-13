@@ -61,6 +61,30 @@ _defaults = {
     "videohub_port": 9990,
     "videohub_timeout": 2,
     "videohub_presets_file": "videohub_presets.json",
+
+    # Realtime transcription defaults
+    "transcription_enabled": False,
+    "transcription_remote_enabled": True,
+    "transcription_bind_host": "0.0.0.0",
+    "transcription_ingest_token": "",
+    "transcription_chunk_ms": 200,
+    "transcription_language": "en",
+    "transcription_model": "small.en",
+    "transcription_realtime_model": "tiny.en",
+    "transcription_device": "cpu",
+    "transcription_enable_realtime": True,
+    "transcription_pause_soft_seconds": 1.0,
+    "transcription_pause_hard_seconds": 2.5,
+    "transcription_keep_history": False,
+    "transcription_history_limit": 10,
+    "transcription_font_scale": 1.0,
+    "transcription_line_spacing": 1.25,
+    "transcription_show_timestamps": True,
+    "transcription_show_live_line": True,
+    "transcription_segment_compact_mode": False,
+    "transcription_color_scheme": "accent",
+    "transcription_sender_input_device": "",
+    "transcription_source_name": "Church Comms",
 }
 
 

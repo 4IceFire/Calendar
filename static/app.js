@@ -497,6 +497,97 @@ const CONFIG_META = {
     help: 'JSON file where VideoHub routing presets are stored.',
   },
 
+  transcription_enabled: {
+    label: 'Enable Transcription',
+    help: 'Turns the remote comms transcription feature on for this server.',
+  },
+  transcription_remote_enabled: {
+    label: 'Allow Remote Audio Sender',
+    help: 'Allows a separate computer to stream audio into this TDeck server.',
+  },
+  transcription_bind_host: {
+    label: 'Transcription Bind Host',
+    help: 'Reserved for the transcription service network binding. Keep 0.0.0.0 for normal LAN use.',
+  },
+  transcription_ingest_token: {
+    label: 'Ingest Token',
+    help: 'Shared secret the remote sender must provide when streaming audio.',
+    sensitive: true,
+    inputType: 'password',
+  },
+  transcription_chunk_ms: {
+    label: 'Chunk Size (ms)',
+    help: 'How much audio the sender posts in each request.',
+  },
+  transcription_language: {
+    label: 'Language',
+    help: 'Whisper language code, for example en. Leave as en for English comms.',
+  },
+  transcription_model: {
+    label: 'Final Model',
+    help: 'RealtimeSTT model used for finalized transcript segments.',
+  },
+  transcription_realtime_model: {
+    label: 'Realtime Model',
+    help: 'Faster model used for the live line while people are speaking.',
+  },
+  transcription_device: {
+    label: 'Inference Device',
+    help: 'Usually cpu on the server unless you have a supported GPU setup.',
+  },
+  transcription_enable_realtime: {
+    label: 'Enable Live Line',
+    help: 'Shows rolling live transcription before each speech segment is finalized.',
+  },
+  transcription_pause_soft_seconds: {
+    label: 'Soft Break (seconds)',
+    help: 'Short pauses at or above this length get a subtle break marker.',
+  },
+  transcription_pause_hard_seconds: {
+    label: 'Hard Break (seconds)',
+    help: 'Longer pauses at or above this length get a stronger break marker.',
+  },
+  transcription_keep_history: {
+    label: 'Keep Session History',
+    help: 'Stores recent transcript sessions for review on the operator page.',
+  },
+  transcription_history_limit: {
+    label: 'History Limit',
+    help: 'How many recent sessions to retain when history is enabled.',
+  },
+  transcription_font_scale: {
+    label: 'Font Scale',
+    help: 'Scales the transcription text for the operator and display pages.',
+  },
+  transcription_line_spacing: {
+    label: 'Line Spacing',
+    help: 'Adjusts vertical spacing for live and transcript text.',
+  },
+  transcription_show_timestamps: {
+    label: 'Show Timestamps',
+    help: 'Displays timestamps beside completed transcript segments.',
+  },
+  transcription_show_live_line: {
+    label: 'Show Live Line',
+    help: 'Shows the current in-progress line above the completed transcript.',
+  },
+  transcription_segment_compact_mode: {
+    label: 'Compact Segment Layout',
+    help: 'Uses a denser transcript layout for operators who want more history onscreen.',
+  },
+  transcription_color_scheme: {
+    label: 'Color Scheme',
+    help: 'Visual style for pause markers and transcript accents.',
+  },
+  transcription_sender_input_device: {
+    label: 'Preferred Sender Input Device',
+    help: 'Optional microphone/device label to show in setup instructions for the remote sender.',
+  },
+  transcription_source_name: {
+    label: 'Source Name',
+    help: 'Friendly label shown in the transcription UI for this comms feed.',
+  },
+
   EVENTS_FILE: {
     label: 'Events File',
     help: 'JSON file used to store scheduled events.',
@@ -700,6 +791,33 @@ function _renderConfigGroups(cfg) {
       title: 'VideoHub',
       keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
     },
+    {
+      title: 'Transcription',
+      keys: [
+        'transcription_enabled',
+        'transcription_remote_enabled',
+        'transcription_bind_host',
+        'transcription_ingest_token',
+        'transcription_chunk_ms',
+        'transcription_language',
+        'transcription_model',
+        'transcription_realtime_model',
+        'transcription_device',
+        'transcription_enable_realtime',
+        'transcription_pause_soft_seconds',
+        'transcription_pause_hard_seconds',
+        'transcription_keep_history',
+        'transcription_history_limit',
+        'transcription_font_scale',
+        'transcription_line_spacing',
+        'transcription_show_timestamps',
+        'transcription_show_live_line',
+        'transcription_segment_compact_mode',
+        'transcription_color_scheme',
+        'transcription_sender_input_device',
+        'transcription_source_name',
+      ],
+    },
   ];
 
   const used = new Set();
@@ -759,6 +877,50 @@ function _renderConfigGroups(cfg) {
       title: g.title,
       keys: g.keys,
       postRender: (body) => {
+        if (g.title === 'Transcription') {
+          const box = document.createElement('div');
+          box.className = 'border rounded p-2 mt-2 bg-body-tertiary';
+          const head = document.createElement('div');
+          head.className = 'fw-semibold mb-2';
+          head.textContent = 'Setup Check';
+          const help = document.createElement('div');
+          help.className = 'small text-muted mb-2';
+          help.textContent = 'Checks the current server-side transcription status and shows the URLs needed by the remote sender and iPad display.';
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'btn btn-outline-secondary btn-sm';
+          btn.textContent = 'Check Transcription Setup';
+          const out = document.createElement('div');
+          out.className = 'small mt-2';
+          btn.addEventListener('click', async () => {
+            out.className = 'small mt-2 text-muted';
+            out.textContent = 'Checking...';
+            try {
+              const res = await fetch('/api/transcription/config/test', {cache: 'no-store'});
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok || !data.ok) {
+                throw new Error(data.error || 'Check failed');
+              }
+              out.className = 'small mt-2';
+              out.innerHTML = `
+                <div><strong>Status:</strong> ${String(data.status || 'unknown')}</div>
+                <div><strong>Ingest URL:</strong> <code>${String(data.ingest_url || '')}</code></div>
+                <div><strong>Display URL:</strong> <code>${String(data.display_url || '')}</code></div>
+                <div><strong>Token configured:</strong> ${data.token_configured ? 'Yes' : 'No'}</div>
+              `;
+            } catch (e) {
+              out.className = 'small mt-2 text-danger';
+              out.textContent = String(e.message || e);
+            }
+          });
+          box.appendChild(head);
+          box.appendChild(help);
+          box.appendChild(btn);
+          box.appendChild(out);
+          body.appendChild(box);
+          return;
+        }
+
         if (g.title !== 'Web UI') return;
 
         const presentSchedulingKeys = schedulingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
@@ -2402,3 +2564,270 @@ if (document.getElementById('access-levels-page')) {
     });
   });
 }
+
+// --- Transcription pages ---
+(function() {
+  const opPage = document.getElementById('transcription-page');
+  const displayPage = document.getElementById('transcription-display-page');
+  if (!opPage && !displayPage) return;
+
+  let currentState = null;
+  let es = null;
+
+  function _txFormatTs(ts) {
+    if (!ts) return '-';
+    try {
+      return new Date(Number(ts) * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'});
+    } catch (e) {
+      return '-';
+    }
+  }
+
+  function _txPrettyStatus(status) {
+    const v = String(status || '').trim();
+    if (!v) return 'Idle';
+    return v.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+  }
+
+  function _txBadgeClass(status) {
+    switch (String(status || '')) {
+      case 'receiving': return 'text-bg-success';
+      case 'paused': return 'text-bg-warning';
+      case 'ready': return 'text-bg-primary';
+      case 'disconnected': return 'text-bg-secondary';
+      case 'error':
+      case 'missing_dependency': return 'text-bg-danger';
+      default: return 'text-bg-secondary';
+    }
+  }
+
+  function _txStatusClass(status) {
+    switch (String(status || '')) {
+      case 'receiving': return 'alert alert-success';
+      case 'paused': return 'alert alert-warning';
+      case 'error':
+      case 'missing_dependency': return 'alert alert-danger';
+      default: return 'alert alert-secondary';
+    }
+  }
+
+  function _txApplyDisplaySettings(state) {
+    const display = (state && state.display) || {};
+    const root = displayPage || opPage;
+    if (!root) return;
+    root.style.setProperty('--tx-font-scale', String(display.font_scale || 1));
+    root.style.setProperty('--tx-line-spacing', String(display.line_spacing || 1.25));
+    root.setAttribute('data-color-scheme', String(display.color_scheme || 'accent'));
+    root.setAttribute('data-compact', display.compact_mode ? '1' : '0');
+  }
+
+  function _txRenderSegments(target, state, {displayOnly = false} = {}) {
+    if (!target) return;
+    const display = (state && state.display) || {};
+    const showTimestamps = !!display.show_timestamps;
+    const segments = Array.isArray(state && state.segments) ? state.segments : [];
+    target.innerHTML = '';
+
+    if (!segments.length) {
+      const empty = document.createElement('div');
+      empty.className = 'text-muted small';
+      empty.textContent = 'Completed transcript segments will appear here.';
+      target.appendChild(empty);
+      return;
+    }
+
+    segments.slice().reverse().forEach(seg => {
+      if (seg.type === 'break') {
+        const br = document.createElement('div');
+        br.className = `transcription-break transcription-break-${String(seg.level || 'soft')}`;
+        br.textContent = String(seg.level || 'pause') === 'hard'
+          ? `Long pause · ${Number(seg.gap_seconds || 0).toFixed(1)}s`
+          : `Pause · ${Number(seg.gap_seconds || 0).toFixed(1)}s`;
+        target.appendChild(br);
+        return;
+      }
+
+      const row = document.createElement('div');
+      row.className = 'transcription-segment';
+
+      const meta = document.createElement('div');
+      meta.className = 'transcription-segment-meta';
+      const parts = [];
+      if (showTimestamps) parts.push(_txFormatTs(seg.created_at));
+      if (seg.sender && seg.sender.name) parts.push(String(seg.sender.name));
+      meta.textContent = parts.join(' · ');
+
+      const txt = document.createElement('div');
+      txt.className = displayOnly ? 'transcription-display-segment-text' : 'transcription-segment-text';
+      txt.textContent = String(seg.text || '');
+
+      if (meta.textContent) row.appendChild(meta);
+      row.appendChild(txt);
+      target.appendChild(row);
+    });
+  }
+
+  function _txRenderHistory(state) {
+    if (!opPage) return;
+    const card = document.getElementById('transcription-history-card');
+    const target = document.getElementById('transcription-history');
+    if (!card || !target) return;
+    const history = Array.isArray(state && state.history) ? state.history : [];
+    if (!history.length) {
+      card.classList.add('d-none');
+      target.innerHTML = '';
+      return;
+    }
+    card.classList.remove('d-none');
+    target.innerHTML = '';
+    history.slice().reverse().forEach(sess => {
+      const item = document.createElement('div');
+      item.className = 'border-top pt-2 mt-2';
+      const title = document.createElement('div');
+      title.className = 'fw-semibold';
+      const senderName = sess && sess.sender && sess.sender.name ? String(sess.sender.name) : 'Saved session';
+      title.textContent = `${senderName} · ${_txFormatTs(sess.started_at)}`;
+      const preview = document.createElement('div');
+      preview.className = 'text-muted';
+      const firstSpeech = Array.isArray(sess.segments) ? sess.segments.find(s => s && s.type === 'speech' && s.text) : null;
+      preview.textContent = firstSpeech ? String(firstSpeech.text).slice(0, 160) : 'No transcript text saved.';
+      item.appendChild(title);
+      item.appendChild(preview);
+      target.appendChild(item);
+    });
+  }
+
+  function _txRender(state) {
+    currentState = state || {};
+    _txApplyDisplaySettings(currentState);
+
+    if (opPage) {
+      const status = document.getElementById('transcription-status');
+      const live = document.getElementById('transcription-live');
+      const stabilized = document.getElementById('transcription-stabilized');
+      const segments = document.getElementById('transcription-segments');
+      const source = currentState.source && currentState.source.name ? String(currentState.source.name) : 'None';
+      const statusText = _txPrettyStatus(currentState.status);
+      if (status) {
+        status.className = _txStatusClass(currentState.status);
+        status.textContent = currentState.error ? `${statusText}: ${currentState.error}` : statusText;
+      }
+      const liveText = String(currentState.stabilized_text || currentState.live_text || '').trim();
+      if (live) {
+        live.textContent = liveText || 'Waiting for audio...';
+        live.classList.toggle('d-none', currentState.display && currentState.display.show_live_line === false);
+      }
+      if (stabilized) {
+        stabilized.textContent = String(currentState.live_text || '').trim() && String(currentState.stabilized_text || '').trim() && currentState.live_text !== currentState.stabilized_text
+          ? String(currentState.live_text)
+          : '';
+      }
+      _txRenderSegments(segments, currentState);
+      _txRenderHistory(currentState);
+
+      const map = {
+        'status': statusText,
+        'source': source,
+        'started': _txFormatTs(currentState.session && currentState.session.started_at),
+      };
+      Object.keys(map).forEach(key => {
+        const el = document.querySelector(`[data-transcription-field="${key}"]`);
+        if (el) el.textContent = map[key];
+      });
+    }
+
+    if (displayPage) {
+      const badge = document.getElementById('transcription-display-badge');
+      const live = document.getElementById('transcription-display-live');
+      const stabilized = document.getElementById('transcription-display-stabilized');
+      const segments = document.getElementById('transcription-display-segments');
+      if (badge) {
+        badge.className = `badge ${_txBadgeClass(currentState.status)}`;
+        badge.textContent = _txPrettyStatus(currentState.status);
+      }
+      if (live) {
+        const txt = String(currentState.stabilized_text || currentState.live_text || '').trim();
+        live.textContent = txt || 'Waiting for audio…';
+        live.classList.toggle('d-none', currentState.display && currentState.display.show_live_line === false);
+      }
+      if (stabilized) {
+        stabilized.textContent = String(currentState.live_text || '').trim() && String(currentState.stabilized_text || '').trim() && currentState.live_text !== currentState.stabilized_text
+          ? String(currentState.live_text)
+          : '';
+      }
+      _txRenderSegments(segments, currentState, {displayOnly: true});
+    }
+  }
+
+  async function _txFetchState() {
+    const res = await fetch('/api/transcription/state', {cache: 'no-store'});
+    if (!res.ok) throw new Error('Failed to load transcription state');
+    const data = await res.json();
+    _txRender(data);
+    return data;
+  }
+
+  function _txConnectStream() {
+    if (es) {
+      try { es.close(); } catch (e) {}
+      es = null;
+    }
+    es = new EventSource('/api/transcription/stream');
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(String(ev.data || '{}'));
+        _txRender(data);
+      } catch (e) {
+        // ignore
+      }
+    };
+    es.onerror = () => {
+      try { es.close(); } catch (e) {}
+      es = null;
+      window.setTimeout(_txConnectStream, 2000);
+    };
+  }
+
+  async function _txPostControl(action) {
+    const res = await fetch('/api/transcription/control', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Request failed');
+    }
+    if (data.state) _txRender(data.state);
+  }
+
+  async function _txLoadSetupInfo() {
+    if (!opPage) return;
+    try {
+      const res = await fetch('/api/transcription/config/test', {cache: 'no-store'});
+      if (!res.ok) return;
+      const data = await res.json();
+      const ingest = document.querySelector('[data-transcription-field="ingest-url"]');
+      const pref = document.querySelector('[data-transcription-field="preferred-device"]');
+      const chunk = document.querySelector('[data-transcription-field="chunk-ms"]');
+      if (ingest) ingest.textContent = String(data.ingest_url || '-');
+      if (pref) pref.textContent = String((data.sender && data.sender.input_device) || 'Any device');
+      if (chunk) chunk.textContent = `${Number((data.sender && data.sender.chunk_ms) || 0)} ms`;
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (opPage) {
+    const startBtn = document.getElementById('transcription-start');
+    const stopBtn = document.getElementById('transcription-stop');
+    const clearBtn = document.getElementById('transcription-clear');
+    if (startBtn) startBtn.addEventListener('click', () => _txPostControl('start').catch(err => alert(String(err.message || err))));
+    if (stopBtn) stopBtn.addEventListener('click', () => _txPostControl('stop').catch(err => alert(String(err.message || err))));
+    if (clearBtn) clearBtn.addEventListener('click', () => _txPostControl('clear').catch(err => alert(String(err.message || err))));
+    _txLoadSetupInfo();
+  }
+
+  _txFetchState().catch(() => {});
+  _txConnectStream();
+})();

@@ -8,6 +8,7 @@ It supports:
 - A **scheduler** that watches an events JSON file and executes triggers.
 - A **CLI** (`cli.py`) for starting/stopping the scheduler and managing events.
 - A **Web UI** (`webui.py`) for editing events and templates in a browser.
+- A **RealtimeSTT-based transcription flow** for remote church comms capture and live display.
 
 ## What this app does
 
@@ -47,10 +48,34 @@ python -m pip install --upgrade pip
 2) Install dependencies
 
 ```powershell
-pip install flask werkzeug requests python-dotenv
+pip install -r requirements.txt
 ```
 
 That’s it—there is no separate build step.
+
+### Remote transcription sender
+
+TDeck runs the transcription engine on the server. A second computer can send microphone audio to it over the LAN.
+
+Install the sender dependencies on the remote machine:
+
+```powershell
+pip install -r requirements_sender.txt
+```
+
+Run the sender:
+
+```powershell
+python tools/transcription_sender.py --server http://<tdeck-host>:5000 --token <ingest-token>
+```
+
+List devices first if needed:
+
+```powershell
+python tools/transcription_sender.py --list-devices
+```
+
+macOS note: if microphone capture fails, install PortAudio first, for example with `brew install portaudio`.
 
 ## Configuration
 
@@ -63,6 +88,7 @@ Common keys:
 - `webserver_port`: Web UI port (default: `5000`)
 - `poll_interval`: seconds between file-change checks (default: `1.0`)
 - `debug`: enables more verbose logging/output
+- `transcription_*`: remote comms transcription, pause detection, display tuning, and session history settings
 
 ## Run (Web UI)
 
@@ -178,6 +204,26 @@ Notes:
   - verify `companion_ip` and `companion_port` in `config.json`
   - ensure Companion’s HTTP API is enabled/reachable
   - check `calendar.log` for POST results
+
+## Realtime Transcription
+
+TDeck can accept live microphone audio from another computer, transcribe it with RealtimeSTT on the server, and show the result on:
+
+- `/transcription` for the operator view
+- `/transcription/display` for the iPad-friendly display view
+
+Basic setup:
+
+1. Open **Config** and enable the **Transcription** section.
+2. Set `transcription_ingest_token`.
+3. Save config and open the **Transcription** page.
+4. Start the remote sender on the capture computer.
+
+Notes:
+
+- The current implementation supports one active sender at a time.
+- The remote sender posts 16-bit PCM audio chunks to `/api/transcription/audio`.
+- If `transcription_keep_history` is enabled, recent sessions are saved to `transcription_sessions.json`.
 
 ## ProPresenter timers (optional)
 
