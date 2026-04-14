@@ -121,6 +121,47 @@ html[data-bs-theme="dark"]{
   backdrop-filter: blur(10px);
 }
 
+.tdeck-nav-right{
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tdeck-nav-status{
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1 1 auto;
+  pointer-events: none;
+}
+
+.tdeck-account-dropdown{
+  position: relative;
+  z-index: 1035;
+  flex: 0 0 auto;
+}
+
+.tdeck-account-dropdown .dropdown-menu{
+  z-index: 1040;
+}
+
+@media (max-width: 991.98px){
+  .tdeck-nav-right{
+    width: 100%;
+    margin-top: 0.5rem;
+  }
+
+  .tdeck-nav-status{
+    font-size: 0.85rem;
+  }
+}
+
 /* Softer default cards */
 .card{
   box-shadow: 0 10px 26px rgba(0,0,0,0.06);
@@ -445,6 +486,28 @@ html[data-bs-theme="dark"] .transcription-segment{
   margin: 0;
 }
 
+.transcription-display-flash{
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: rgba(220, 38, 38, 0);
+  opacity: 0;
+  z-index: 2000;
+}
+
+.transcription-display-flash.flash-active{
+  animation: transcription-flash-red-twice 1.4s ease-in-out forwards;
+}
+
+@keyframes transcription-flash-red-twice{
+  0% { opacity: 0; background: rgba(220,38,38,0); }
+  10% { opacity: 0.95; background: rgba(220,38,38,0.88); }
+  24% { opacity: 0; background: rgba(220,38,38,0); }
+  42% { opacity: 0.95; background: rgba(220,38,38,0.88); }
+  58% { opacity: 0; background: rgba(220,38,38,0); }
+  100% { opacity: 0; background: rgba(220,38,38,0); }
+}
+
 .transcription-display-shell{
   --tx-font-scale: 1;
   --tx-line-spacing: 1.35;
@@ -491,6 +554,16 @@ html[data-bs-theme="dark"] .transcription-segment{
   color: var(--tx-live-text);
   border-radius: 1.2rem;
   padding: 1.1rem;
+  box-shadow: 0 -8px 24px rgba(0,0,0,0.22);
+}
+
+.transcription-display-live-label{
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--tx-live-text) 78%, transparent);
+  margin-bottom: 0.45rem;
 }
 
 .transcription-display-live{

@@ -33,22 +33,24 @@
             {% if not auth_enabled or can_access('page:console') %}<li class="nav-item"><a class="nav-link" href="/console">Console</a></li>{% endif %}
           </ul>
         </div>
-        <div class="d-flex align-items-center">
-          <div id="companion-indicator" class="me-2">
-            <span id="companion-dot" class="indicator-dot bg-danger"></span>
-            <span id="companion-label">Checking...</span>
-          </div>
-          <div id="propresenter-indicator" class="me-2">
-            <span id="propresenter-dot" class="indicator-dot bg-danger"></span>
-            <span id="propresenter-label">ProPresenter: Checking...</span>
-          </div>
-          <div id="videohub-indicator" class="me-2">
-            <span id="videohub-dot" class="indicator-dot bg-danger"></span>
-            <span id="videohub-label">VideoHub: Checking...</span>
+        <div class="tdeck-nav-right">
+          <div class="tdeck-nav-status">
+            <div id="companion-indicator" class="me-2">
+              <span id="companion-dot" class="indicator-dot bg-danger"></span>
+              <span id="companion-label">Checking...</span>
+            </div>
+            <div id="propresenter-indicator" class="me-2">
+              <span id="propresenter-dot" class="indicator-dot bg-danger"></span>
+              <span id="propresenter-label">ProPresenter: Checking...</span>
+            </div>
+            <div id="videohub-indicator" class="me-2">
+              <span id="videohub-dot" class="indicator-dot bg-danger"></span>
+              <span id="videohub-label">VideoHub: Checking...</span>
+            </div>
           </div>
 
-          <div class="dropdown">
-            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+          <div class="dropdown tdeck-account-dropdown">
+            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
               {% if auth_enabled %}
                 {% if is_authenticated %}{{ current_user.username }}{% else %}Account{% endif %}
               {% else %}

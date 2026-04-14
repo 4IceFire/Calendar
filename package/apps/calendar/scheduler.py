@@ -303,7 +303,7 @@ class ClockScheduler:
                         "event": job.event.name,
                         "event_id": getattr(job.event, "id", None),
                         "trigger_index": job.trigger_index,
-                        "offset_min": job.trigger.timer,
+                        "offset_min": getattr(job.trigger, "offset_minutes", 0),
                         "name": name,
                         "actionType": action_type,
                         "url": job.trigger.buttonURL,
@@ -337,7 +337,7 @@ class ClockScheduler:
                     )
                 self._dbg(
                     f"#{i+1:02d} due={job.due.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
+                    f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | offset={getattr(job.trigger, 'offset_minutes', 0)}min | url='{job.trigger.buttonURL}'"
                     + (api_desc if action_type == "api" else "")
                     + (timer_desc if action_type == "timer" else "")
                 )
@@ -435,7 +435,7 @@ class ClockScheduler:
             p = str((api or {}).get("path") or "") if isinstance(api, dict) else ""
             print(
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
-                f"name='{name}' | offset={job.trigger.timer}min | api={m} {p}"
+                f"name='{name}' | offset={getattr(job.trigger, 'offset_minutes', 0)}min | api={m} {p}"
             )
         elif action_type == "timer":
             timer = getattr(job.trigger, "timer", None)
@@ -444,13 +444,13 @@ class ClockScheduler:
             apply_now = bool((timer or {}).get("apply", False)) if isinstance(timer, dict) else False
             print(
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
-                f"name='{name}' | offset={job.trigger.timer}min | timer preset={preset} time={time_str} "
+                f"name='{name}' | offset={getattr(job.trigger, 'offset_minutes', 0)}min | timer preset={preset} time={time_str} "
                 f"apply={apply_now}"
             )
         else:
             print(
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
-                f"name='{name}' | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'"
+                f"name='{name}' | offset={getattr(job.trigger, 'offset_minutes', 0)}min | url='{job.trigger.buttonURL}'"
             )
 
         if action_type == "api":
@@ -635,7 +635,7 @@ def next_weekly_occurrence(event: Event, now: datetime) -> Optional[datetime]:
                     continue
             except Exception:
                 pass
-            due = (occurrence + timedelta(minutes=trig.timer)).replace(microsecond=0)
+            due = (occurrence + timedelta(minutes=getattr(trig, "offset_minutes", 0))).replace(microsecond=0)
             if due > now:
                 return True
         return False
@@ -686,7 +686,7 @@ def push_triggers_for_occurrence(
                 continue
         except Exception:
             pass
-        due = (occurrence + timedelta(minutes=trig.timer)).replace(microsecond=0)
+        due = (occurrence + timedelta(minutes=getattr(trig, "offset_minutes", 0))).replace(microsecond=0)
         if due > now:
             heapq.heappush(heap, TriggerJob(due, event, occurrence, idx, trig))
 

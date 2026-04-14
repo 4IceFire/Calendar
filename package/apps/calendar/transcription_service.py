@@ -46,6 +46,120 @@ class TranscriptionService:
         self._session_id: str = self._new_session_id()
         self._recorder_ready = False
         self._receiver_bytes = 0
+        self._action_seq = 0
+        self._recent_action_events: list[dict[str, Any]] = []
+
+    def _keyword_rules_path(self) -> Path:
+        try:
+            data_dir = Path('/data')
+            if data_dir.exists() and data_dir.is_dir():
+                return data_dir / 'transcription_keyword_rules.json'
+        except Exception:
+            pass
+        return Path(__file__).resolve().parents[3] / 'transcription_keyword_rules.json'
+
+    def get_available_actions(self) -> list[dict[str, str]]:
+        return [
+            {
+                'id': 'flash_red_twice',
+                'label': 'Flash Red Twice',
+                'description': 'Flashes the transcription display red twice in a paging-style alert.',
+            },
+        ]
+
+    def _normalize_keyword_rule(self, raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        keyword = str(raw.get('keyword') or '').strip()
+        action_id = str(raw.get('action_id') or raw.get('actionId') or '').strip()
+        if not keyword or not action_id:
+            return None
+        valid_ids = {a['id'] for a in self.get_available_actions()}
+        if action_id not in valid_ids:
+            return None
+        return {
+            'id': str(raw.get('id') or uuid.uuid4().hex).strip() or uuid.uuid4().hex,
+            'enabled': bool(raw.get('enabled', True)),
+            'keyword': keyword,
+            'action_id': action_id,
+            'label': str(raw.get('label') or '').strip(),
+        }
+
+    def load_keyword_rules(self) -> list[dict[str, Any]]:
+        p = self._keyword_rules_path()
+        try:
+            if not p.exists():
+                return []
+            raw = json.loads(p.read_text(encoding='utf-8') or '[]')
+        except Exception:
+            return []
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw:
+            normalized = self._normalize_keyword_rule(item)
+            if not normalized:
+                continue
+            rid = str(normalized['id'])
+            if rid in seen:
+                continue
+            seen.add(rid)
+            out.append(normalized)
+        return out
+
+    def save_keyword_rule(self, raw: dict[str, Any]) -> tuple[bool, dict[str, Any] | None, str | None]:
+        normalized = self._normalize_keyword_rule(raw)
+        if not normalized:
+            return False, None, 'Keyword and action are required.'
+        rules = self.load_keyword_rules()
+        replaced = False
+        for idx, item in enumerate(rules):
+            if str(item.get('id')) == str(normalized['id']):
+                rules[idx] = normalized
+                replaced = True
+                break
+        if not replaced:
+            rules.append(normalized)
+        p = self._keyword_rules_path()
+        try:
+            p.write_text(json.dumps(rules, indent=2), encoding='utf-8')
+        except Exception as e:
+            return False, None, str(e)
+        with self._lock:
+            self._touch_locked()
+        return True, normalized, None
+
+    def delete_keyword_rule(self, rule_id: str) -> tuple[bool, str | None]:
+        rid = str(rule_id or '').strip()
+        if not rid:
+            return False, 'Rule id is required.'
+        rules = [r for r in self.load_keyword_rules() if str(r.get('id')) != rid]
+        p = self._keyword_rules_path()
+        try:
+            p.write_text(json.dumps(rules, indent=2), encoding='utf-8')
+        except Exception as e:
+            return False, str(e)
+        with self._lock:
+            self._touch_locked()
+        return True, None
+
+    def _dispatch_action_locked(self, action_id: str, *, keyword: str, segment_text: str, rule_id: str) -> None:
+        if action_id != 'flash_red_twice':
+            return
+        self._action_seq += 1
+        self._recent_action_events.append({
+            'seq': self._action_seq,
+            'id': uuid.uuid4().hex,
+            'action_id': action_id,
+            'target': 'display',
+            'keyword': keyword,
+            'rule_id': rule_id,
+            'segment_text': segment_text,
+            'created_at': time.time(),
+        })
+        self._recent_action_events = self._recent_action_events[-20:]
+        self._touch_locked()
 
     def _log(self, msg: str) -> None:
         try:
@@ -294,6 +408,20 @@ class TranscriptionService:
             self._last_segment_end_ts = now_ts
             self._live_text = ''
             self._stabilized_text = ''
+            lower_text = clean.casefold()
+            for rule in self.load_keyword_rules():
+                if not bool(rule.get('enabled', True)):
+                    continue
+                keyword = str(rule.get('keyword') or '').strip()
+                if not keyword:
+                    continue
+                if keyword.casefold() in lower_text:
+                    self._dispatch_action_locked(
+                        str(rule.get('action_id') or ''),
+                        keyword=keyword,
+                        segment_text=clean,
+                        rule_id=str(rule.get('id') or ''),
+                    )
             self._touch_locked()
             self._save_history_locked()
 
@@ -503,6 +631,7 @@ class TranscriptionService:
             'live_text': self._live_text,
             'stabilized_text': self._stabilized_text,
             'segments': list(self._segments),
+            'action_events': list(self._recent_action_events),
             'display': {
                 'font_scale': float(cfg.get('transcription_font_scale', 1.0) or 1.0),
                 'line_spacing': float(cfg.get('transcription_line_spacing', 1.25) or 1.25),

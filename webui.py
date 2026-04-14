@@ -2245,7 +2245,7 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
 
             offset_min = None
             try:
-                offset_min = int(getattr(trig, 'timer', 0)) if trig is not None else 0
+                offset_min = int(getattr(trig, 'offset_minutes', 0)) if trig is not None else 0
             except Exception:
                 offset_min = 0
             if offset_min > 0:
@@ -2478,6 +2478,12 @@ def transcription_page():
 @require_page('page:transcription', 'Transcription')
 def transcription_display_page():
     return render_template('transcription_display.html', page_title='Transcription Display')
+
+
+@app.route('/transcription/actions')
+@require_page('page:transcription', 'Transcription')
+def transcription_actions_page():
+    return render_template('transcription_actions.html', page_title='Transcription Actions')
 
 
 @app.route('/config')
@@ -3665,6 +3671,52 @@ def api_transcription_state():
         body, code = guarded
         return jsonify(body), code
     return jsonify(_transcription_public_state(include_history=True))
+
+
+@app.route('/api/transcription/actions', methods=['GET'])
+def api_transcription_actions():
+    guarded = _transcription_api_page_guard()
+    if guarded is not None:
+        body, code = guarded
+        return jsonify(body), code
+    return jsonify({'ok': True, 'actions': _transcription_service.get_available_actions()})
+
+
+@app.route('/api/transcription/keyword-rules', methods=['GET'])
+def api_transcription_keyword_rules_get():
+    guarded = _transcription_api_page_guard()
+    if guarded is not None:
+        body, code = guarded
+        return jsonify(body), code
+    return jsonify({'ok': True, 'rules': _transcription_service.load_keyword_rules()})
+
+
+@app.route('/api/transcription/keyword-rules', methods=['POST'])
+def api_transcription_keyword_rules_post():
+    guarded = _transcription_api_page_guard()
+    if guarded is not None:
+        body, code = guarded
+        return jsonify(body), code
+    try:
+        body = request.get_json() or {}
+    except Exception:
+        body = {}
+    ok, rule, err = _transcription_service.save_keyword_rule(body)
+    if not ok:
+        return jsonify({'ok': False, 'error': err}), 400
+    return jsonify({'ok': True, 'rule': rule, 'rules': _transcription_service.load_keyword_rules()})
+
+
+@app.route('/api/transcription/keyword-rules/<rule_id>', methods=['DELETE'])
+def api_transcription_keyword_rules_delete(rule_id: str):
+    guarded = _transcription_api_page_guard()
+    if guarded is not None:
+        body, code = guarded
+        return jsonify(body), code
+    ok, err = _transcription_service.delete_keyword_rule(rule_id)
+    if not ok:
+        return jsonify({'ok': False, 'error': err}), 400
+    return jsonify({'ok': True, 'rules': _transcription_service.load_keyword_rules()})
 
 
 @app.route('/api/transcription/stream', methods=['GET'])
@@ -5053,6 +5105,14 @@ def api_get_timers():
 def api_set_timers():
     body = request.get_json(silent=True) or {}
 
+    def _coerce_bool(v) -> bool:
+        if isinstance(v, bool):
+            return v
+        if v is None:
+            return False
+        s = str(v).strip().lower()
+        return s in ('1', 'true', 't', 'yes', 'y', 'on')
+
     presets = body.get('timer_presets')
     if presets is None:
         # allow alternate key
@@ -5152,6 +5212,21 @@ def api_set_timers():
         cfg = utils.get_config()
     except Exception:
         cfg = {}
+
+    try:
+        current_presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        current_presets = []
+
+    allow_delete = _coerce_bool(body.get('allow_delete'))
+    if current_presets and len(normalized_presets) < len(current_presets) and not allow_delete:
+        return jsonify({
+            'ok': False,
+            'error': (
+                f'refusing to shrink timer preset list from {len(current_presets)} to {len(normalized_presets)} '
+                'without allow_delete=true'
+            ),
+        }), 409
 
     # presets are stored outside config.json
     try:
@@ -5311,25 +5386,28 @@ def api_update_timer_preset():
     if preset_index < 0 or preset_index >= len(presets):
         return jsonify({'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}), 400
 
-    current = presets[preset_index]
-    if isinstance(current, dict):
-        updated = dict(current)
-    else:
-        # legacy string format support
-        updated = {'time': str(current).strip(), 'name': str(current).strip()}
-
-    updated['time'] = time_str
-
     # Optional name update
     name_raw = _get_ci(body, 'name', 'label')
-    if name_raw is not None:
-        updated['name'] = str(name_raw or '').strip() or updated.get('name', '')
-
-    presets[preset_index] = updated
 
     try:
-        if hasattr(utils, 'save_timer_presets'):
-            utils.save_timer_presets(presets)
+        if hasattr(utils, 'update_timer_preset'):
+            presets, updated = utils.update_timer_preset(
+                preset_number,
+                time_str=time_str,
+                name=name_raw if name_raw is not None else getattr(utils, '_TIMER_NAME_UNSET', object()),
+            )
+        else:
+            current = presets[preset_index]
+            if isinstance(current, dict):
+                updated = dict(current)
+            else:
+                updated = {'time': str(current).strip(), 'name': str(current).strip()}
+            updated['time'] = time_str
+            if name_raw is not None:
+                updated['name'] = str(name_raw or '').strip() or updated.get('name', '')
+            presets[preset_index] = updated
+            if hasattr(utils, 'save_timer_presets'):
+                utils.save_timer_presets(presets)
     except Exception as e:
         return jsonify({'ok': False, 'error': f'failed to save presets: {e}'}), 500
 

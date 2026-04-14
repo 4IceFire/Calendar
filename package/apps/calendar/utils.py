@@ -6,6 +6,7 @@ from typing import Any, Dict, TYPE_CHECKING
 import os
 import re
 import secrets
+import tempfile
 
 from package.apps.calendar.storage import DEFAULT_EVENTS_FILE
 import logging
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
 
 CONFIG_FILE = "config.json"
 TIMER_PRESETS_FILE = "timer_presets.json"
+_timer_presets_lock = threading.RLock()
+_TIMER_NAME_UNSET = object()
 
 _defaults = {
     "EVENTS_FILE": DEFAULT_EVENTS_FILE,
@@ -167,6 +170,31 @@ def _coerce_timer_preset(value: Any) -> Dict[str, Any] | None:
     return out  # type: ignore[return-value]
 
 
+def _normalize_timer_presets_list(presets: list[Any] | None) -> list[Dict[str, Any]]:
+    normalized: list[Dict[str, Any]] = []
+    for v in presets or []:
+        p = _coerce_timer_preset(v)
+        if p is not None:
+            normalized.append(p)
+    return normalized
+
+
+def _atomic_write_json(path: str, data: Any) -> None:
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="timer_presets_", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
 def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, Any]]:
     """Load timer presets from a dedicated JSON file.
 
@@ -174,45 +202,55 @@ def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, Any]]:
     - preferred: JSON array of objects {"time": "HH:MM", "name": "..."}
     - legacy: JSON array of strings "HH:MM"
     """
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, list):
-            return []
-        out: list[Dict[str, Any]] = []
-        for v in data:
-            p = _coerce_timer_preset(v)
-            if p is not None:
-                out.append(p)
-        return out
-    except FileNotFoundError:
-        # create with defaults
-        defaults = [
-            {"time": "08:15", "name": "Timer 1"},
-            {"time": "08:30", "name": "Timer 2"},
-            {"time": "09:10", "name": "Timer 3"},
-            {"time": "09:30", "name": "Timer 4"},
-        ]
+    with _timer_presets_lock:
         try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                return []
+            return _normalize_timer_presets_list(data)
+        except FileNotFoundError:
+            # create with defaults
+            defaults = [
+                {"time": "08:15", "name": "Timer 1"},
+                {"time": "08:30", "name": "Timer 2"},
+                {"time": "09:10", "name": "Timer 3"},
+                {"time": "09:30", "name": "Timer 4"},
+            ]
             save_timer_presets(defaults, path)
+            return defaults
         except Exception:
-            pass
-        return defaults
-    except Exception:
-        return []
+            return []
 
 
 def save_timer_presets(presets: list[Any], path: str = TIMER_PRESETS_FILE) -> None:
-    try:
-        normalized: list[Dict[str, str]] = []
-        for v in presets or []:
-            p = _coerce_timer_preset(v)
-            if p is not None:
-                normalized.append(p)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(normalized, f, indent=2)
-    except Exception:
-        pass
+    with _timer_presets_lock:
+        normalized = _normalize_timer_presets_list(presets)
+        _atomic_write_json(path, normalized)
+
+
+def update_timer_preset(
+    preset_number: int,
+    *,
+    time_str: str,
+    name: Any = _TIMER_NAME_UNSET,
+    path: str = TIMER_PRESETS_FILE,
+) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
+    with _timer_presets_lock:
+        presets = load_timer_presets(path)
+        preset_index = int(preset_number) - 1
+        if preset_index < 0 or preset_index >= len(presets):
+            raise IndexError(f"preset out of range (1..{len(presets)})")
+
+        current = presets[preset_index]
+        updated = dict(current) if isinstance(current, dict) else {"time": str(current).strip(), "name": str(current).strip()}
+        updated["time"] = str(time_str).strip()
+        if name is not _TIMER_NAME_UNSET:
+            updated["name"] = str(name or "").strip() or updated.get("name", "")
+
+        presets[preset_index] = updated
+        save_timer_presets(presets, path)
+        return presets, updated
 
 
 def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:

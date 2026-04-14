@@ -1446,6 +1446,7 @@ let _timersLastSavedJson = '';
 let _timersAutoSaveHandle = null;
 let _timersSaveInFlight = false;
 let _timersSaveQueued = false;
+let _timersAllowDeleteNextSave = false;
 
 function _timersSetStatus(msg, kind) {
   const el = document.getElementById('timers-status');
@@ -1493,13 +1494,16 @@ function _timersSetLastSaved(presets, stagePreset) {
   });
 }
 
-async function _timersSaveInternal({showStatus = true} = {}) {
+async function _timersSaveInternal({showStatus = true, allowDelete = false} = {}) {
   const presets = _timersReadPresetsFromUI();
   const stagePreset = _timersReadStagePresetFromUI();
   const payload = {
     timer_presets: presets,
     stream_start_preset: stagePreset,
   };
+  if (allowDelete) {
+    payload.allow_delete = true;
+  }
   const currentJson = _timersStableStringify(payload);
   if (currentJson && currentJson === _timersLastSavedJson) {
     return {ok: true, changed: false};
@@ -1521,14 +1525,17 @@ async function _timersSaveInternal({showStatus = true} = {}) {
   return {ok: true, changed: true};
 }
 
-async function _timersAutoSaveNow({showStatus = true} = {}) {
+async function _timersAutoSaveNow({showStatus = true, allowDelete = false} = {}) {
   if (_timersSaveInFlight) {
     _timersSaveQueued = true;
+    if (allowDelete) _timersAllowDeleteNextSave = true;
     return {ok: true, queued: true};
   }
   _timersSaveInFlight = true;
   try {
-    const r = await _timersSaveInternal({showStatus});
+    const effectiveAllowDelete = !!(allowDelete || _timersAllowDeleteNextSave);
+    _timersAllowDeleteNextSave = false;
+    const r = await _timersSaveInternal({showStatus, allowDelete: effectiveAllowDelete});
     return r;
     } catch (e) {
       // Per requirements: show error and revert to last-saved data.
@@ -2295,6 +2302,7 @@ if (document.getElementById('timers-page')) {
 
       if (action === 'delete') {
         presets.splice(idx, 1);
+        _timersAllowDeleteNextSave = true;
       } else if (action === 'up' && idx > 0) {
         const tmp = presets[idx - 1];
         presets[idx - 1] = presets[idx];
@@ -2586,10 +2594,12 @@ if (document.getElementById('access-levels-page')) {
 (function() {
   const opPage = document.getElementById('transcription-page');
   const displayPage = document.getElementById('transcription-display-page');
-  if (!opPage && !displayPage) return;
+  const actionsPage = document.getElementById('transcription-actions-page');
+  if (!opPage && !displayPage && !actionsPage) return;
 
   let currentState = null;
   let es = null;
+  const seenActionIds = new Set();
 
   function _txFormatTs(ts) {
     if (!ts) return '-';
@@ -2643,7 +2653,7 @@ if (document.getElementById('access-levels-page')) {
 
   function _txApplyDisplaySettings(state) {
     const display = (state && state.display) || {};
-    const root = displayPage || opPage;
+    const root = displayPage || opPage || actionsPage;
     if (!root) return;
     root.style.setProperty('--tx-font-scale', String(display.font_scale || 1));
     root.style.setProperty('--tx-line-spacing', String(display.line_spacing || 1.25));
@@ -2742,6 +2752,7 @@ if (document.getElementById('access-levels-page')) {
   function _txRender(state) {
     currentState = state || {};
     _txApplyDisplaySettings(currentState);
+    const actionEvents = Array.isArray(currentState.action_events) ? currentState.action_events : [];
 
     if (opPage) {
       const status = document.getElementById('transcription-status');
@@ -2795,17 +2806,41 @@ if (document.getElementById('access-levels-page')) {
         clientBadge.textContent = `Client ${_txPrettyStatus(currentState.client_state || 'waiting')}`;
       }
       if (live) {
-        const txt = String(currentState.stabilized_text || currentState.live_text || '').trim();
+        const liveNow = String(currentState.live_text || '').trim();
+        const stabilizedNow = String(currentState.stabilized_text || '').trim();
+        const txt = liveNow || stabilizedNow;
         live.textContent = txt || 'Waiting for audio…';
-        live.classList.toggle('d-none', currentState.display && currentState.display.show_live_line === false);
       }
       if (stabilized) {
-        stabilized.textContent = String(currentState.live_text || '').trim() && String(currentState.stabilized_text || '').trim() && currentState.live_text !== currentState.stabilized_text
-          ? String(currentState.live_text)
+        const liveNow = String(currentState.live_text || '').trim();
+        const stabilizedNow = String(currentState.stabilized_text || '').trim();
+        stabilized.textContent = liveNow && stabilizedNow && liveNow !== stabilizedNow
+          ? stabilizedNow
           : '';
       }
       _txRenderSegments(segments, currentState, {displayOnly: true});
+      _txHandleDisplayActions(actionEvents);
     }
+  }
+
+  function _txHandleDisplayActions(events) {
+    if (!displayPage || !Array.isArray(events)) return;
+    events.forEach(ev => {
+      const id = String(ev && ev.id || '');
+      if (!id || seenActionIds.has(id)) return;
+      seenActionIds.add(id);
+      if (String(ev.action_id || '') === 'flash_red_twice' && String(ev.target || '') === 'display') {
+        const overlay = document.getElementById('transcription-display-flash');
+        if (!overlay) return;
+        overlay.classList.remove('flash-active');
+        // restart animation reliably
+        void overlay.offsetWidth;
+        overlay.classList.add('flash-active');
+        window.setTimeout(() => {
+          overlay.classList.remove('flash-active');
+        }, 1500);
+      }
+    });
   }
 
   async function _txFetchState() {
@@ -2861,4 +2896,175 @@ if (document.getElementById('access-levels-page')) {
 
   _txFetchState().catch(() => {});
   _txConnectStream();
+})();
+
+// --- Transcription actions page ---
+(function() {
+  const page = document.getElementById('transcription-actions-page');
+  if (!page) return;
+
+  const listEl = document.getElementById('transcription-rules-list');
+  const form = document.getElementById('transcription-actions-form');
+  const statusEl = document.getElementById('transcription-actions-status');
+  const idEl = document.getElementById('transcription-rule-id');
+  const labelEl = document.getElementById('transcription-rule-label');
+  const keywordEl = document.getElementById('transcription-rule-keyword');
+  const actionEl = document.getElementById('transcription-rule-action');
+  const enabledEl = document.getElementById('transcription-rule-enabled');
+  const resetBtn = document.getElementById('transcription-rule-reset');
+
+  let actions = [];
+  let rules = [];
+
+  function setStatus(msg, kind='secondary') {
+    if (!statusEl) return;
+    if (!msg) {
+      statusEl.className = 'mb-3';
+      statusEl.textContent = '';
+      return;
+    }
+    statusEl.className = `alert alert-${kind} mb-3`;
+    statusEl.textContent = String(msg);
+  }
+
+  function resetForm() {
+    idEl.value = '';
+    labelEl.value = '';
+    keywordEl.value = '';
+    enabledEl.checked = true;
+    if (actions.length) actionEl.value = String(actions[0].id || '');
+    setStatus('');
+  }
+
+  function actionLabel(id) {
+    const match = actions.find(a => String(a.id) === String(id));
+    return match ? String(match.label || id) : String(id || '');
+  }
+
+  function renderActions() {
+    actionEl.innerHTML = '';
+    actions.forEach(action => {
+      const opt = document.createElement('option');
+      opt.value = String(action.id || '');
+      opt.textContent = String(action.label || action.id || '');
+      actionEl.appendChild(opt);
+    });
+  }
+
+  function renderRules() {
+    listEl.innerHTML = '';
+    if (!rules.length) {
+      const empty = document.createElement('div');
+      empty.className = 'text-muted small';
+      empty.textContent = 'No keyword rules yet.';
+      listEl.appendChild(empty);
+      return;
+    }
+    rules.forEach(rule => {
+      const card = document.createElement('div');
+      card.className = 'border rounded p-3';
+
+      const head = document.createElement('div');
+      head.className = 'd-flex justify-content-between align-items-start gap-2';
+
+      const left = document.createElement('div');
+      const title = document.createElement('div');
+      title.className = 'fw-semibold';
+      title.textContent = String(rule.label || rule.keyword || 'Rule');
+      const meta = document.createElement('div');
+      meta.className = 'small text-muted';
+      meta.textContent = `"${String(rule.keyword || '')}" → ${actionLabel(rule.action_id)}${rule.enabled ? '' : ' (disabled)'}`;
+      left.appendChild(title);
+      left.appendChild(meta);
+
+      const actionsWrap = document.createElement('div');
+      actionsWrap.className = 'd-flex gap-2 flex-wrap';
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'btn btn-sm btn-outline-secondary';
+      editBtn.textContent = 'Edit';
+      editBtn.addEventListener('click', () => {
+        idEl.value = String(rule.id || '');
+        labelEl.value = String(rule.label || '');
+        keywordEl.value = String(rule.keyword || '');
+        actionEl.value = String(rule.action_id || '');
+        enabledEl.checked = !!rule.enabled;
+        window.scrollTo({top: 0, behavior: 'smooth'});
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn btn-sm btn-outline-danger';
+      delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', async () => {
+        try {
+          const res = await fetch(`/api/transcription/keyword-rules/${encodeURIComponent(String(rule.id || ''))}`, {method: 'DELETE'});
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data.ok) throw new Error(data.error || 'Delete failed');
+          rules = Array.isArray(data.rules) ? data.rules : [];
+          renderRules();
+          setStatus('Rule deleted.', 'secondary');
+          if (String(idEl.value || '') === String(rule.id || '')) resetForm();
+        } catch (e) {
+          setStatus(String(e.message || e), 'danger');
+        }
+      });
+
+      actionsWrap.appendChild(editBtn);
+      actionsWrap.appendChild(delBtn);
+      head.appendChild(left);
+      head.appendChild(actionsWrap);
+      card.appendChild(head);
+      listEl.appendChild(card);
+    });
+  }
+
+  async function loadPageData() {
+    try {
+      const [actionsRes, rulesRes] = await Promise.all([
+        fetch('/api/transcription/actions', {cache: 'no-store'}),
+        fetch('/api/transcription/keyword-rules', {cache: 'no-store'}),
+      ]);
+      const actionsData = await actionsRes.json().catch(() => ({}));
+      const rulesData = await rulesRes.json().catch(() => ({}));
+      if (!actionsRes.ok || !actionsData.ok) throw new Error(actionsData.error || 'Failed to load actions');
+      if (!rulesRes.ok || !rulesData.ok) throw new Error(rulesData.error || 'Failed to load rules');
+      actions = Array.isArray(actionsData.actions) ? actionsData.actions : [];
+      rules = Array.isArray(rulesData.rules) ? rulesData.rules : [];
+      renderActions();
+      renderRules();
+      if (!idEl.value) resetForm();
+    } catch (e) {
+      setStatus(String(e.message || e), 'danger');
+    }
+  }
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    try {
+      const res = await fetch('/api/transcription/keyword-rules', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          id: String(idEl.value || '').trim(),
+          label: String(labelEl.value || '').trim(),
+          keyword: String(keywordEl.value || '').trim(),
+          action_id: String(actionEl.value || '').trim(),
+          enabled: !!enabledEl.checked,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Save failed');
+      rules = Array.isArray(data.rules) ? data.rules : [];
+      renderRules();
+      resetForm();
+      setStatus('Rule saved.', 'success');
+    } catch (e) {
+      setStatus(String(e.message || e), 'danger');
+    }
+  });
+
+  resetBtn.addEventListener('click', resetForm);
+  loadPageData();
 })();

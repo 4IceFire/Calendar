@@ -45,11 +45,11 @@ class TimeOfTrigger:
         self.enabled = bool(enabled)
 
         if typeOfTrigger == TypeofTime.BEFORE:
-            self.timer = -minutes
+            self.offset_minutes = -minutes
         elif typeOfTrigger == TypeofTime.AT:
-            self.timer = 0
+            self.offset_minutes = 0
         elif typeOfTrigger == TypeofTime.AFTER:
-            self.timer = minutes
+            self.offset_minutes = minutes
         else:
             raise ValueError("Impossible Selection")
 
@@ -79,10 +79,10 @@ class TimeOfTrigger:
         return out
 
     def __lt__(self, other: "TimeOfTrigger") -> bool:
-        return self.timer < other.timer
+        return self.offset_minutes < other.offset_minutes
 
     def __str__(self) -> str:
-        return str(self.timer)
+        return str(self.offset_minutes)
 
 
 class Event:
