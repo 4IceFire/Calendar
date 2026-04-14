@@ -124,31 +124,6 @@ HTML = """<!doctype html>
           <label for="device">Microphone</label>
           <select id="device" name="device"></select>
 
-          <div class="row2">
-            <div>
-              <label for="sample_rate">Sample Rate</label>
-              <input id="sample_rate" name="sample_rate" type="number" min="8000" max="96000">
-            </div>
-            <div>
-              <label for="chunk_ms">Chunk Size (ms)</label>
-              <input id="chunk_ms" name="chunk_ms" type="number" min="40" max="4000">
-            </div>
-          </div>
-
-          <div class="row2">
-            <div>
-              <label for="channels">Channels</label>
-              <select id="channels" name="channels">
-                <option value="1">Mono</option>
-                <option value="2">Stereo</option>
-              </select>
-            </div>
-            <div>
-              <label for="ui_port">Local UI Port</label>
-              <input id="ui_port" name="ui_port" type="number" min="1024" max="65535">
-            </div>
-          </div>
-
           <div class="actions">
             <button type="submit" class="primary">Save Settings</button>
             <button type="button" class="secondary" id="test-btn">Test Connection</button>
@@ -161,10 +136,12 @@ HTML = """<!doctype html>
       <div class="card">
         <h2>Live Status</h2>
         <div class="kv" id="live-status">
-          <div>State</div><div id="state">-</div>
+          <div>Sender State</div><div id="sender-state">-</div>
+          <div>Server State</div><div id="server-state">-</div>
           <div>Microphone</div><div id="active-device">-</div>
           <div>Server</div><div id="active-server" class="code">-</div>
           <div>Last Success</div><div id="last-ok">-</div>
+          <div>Server Message</div><div id="server-message">-</div>
           <div>Last Error</div><div id="last-error">-</div>
         </div>
         <hr style="border-color:rgba(148,163,184,.18);margin:18px 0">
@@ -189,10 +166,15 @@ HTML = """<!doctype html>
     }
 
     function statusClass(state){
-      if(state === 'streaming') return 'status good';
-      if(state === 'connecting') return 'status warn';
-      if(state === 'error') return 'status bad';
+      if(state === 'streaming' || state === 'connected') return 'status good';
+      if(state === 'connecting' || state === 'paused') return 'status warn';
+      if(state === 'error' || state === 'disconnected') return 'status bad';
       return 'status';
+    }
+
+    function prettyState(state){
+      const v = String(state || 'idle');
+      return v.replace(/_/g, ' ').replace(/\\b\\w/g, c => c.toUpperCase());
     }
 
     function formData(){
@@ -200,11 +182,7 @@ HTML = """<!doctype html>
         server: document.getElementById('server').value,
         token: document.getElementById('token').value,
         source_name: document.getElementById('source_name').value,
-        device: document.getElementById('device').value,
-        sample_rate: Number(document.getElementById('sample_rate').value || 16000),
-        chunk_ms: Number(document.getElementById('chunk_ms').value || 200),
-        channels: Number(document.getElementById('channels').value || 1),
-        ui_port: Number(document.getElementById('ui_port').value || 8766)
+        device: document.getElementById('device').value
       };
     }
 
@@ -229,10 +207,6 @@ HTML = """<!doctype html>
         document.getElementById('server').value = currentConfig.server || '';
         document.getElementById('token').value = currentConfig.token || '';
         document.getElementById('source_name').value = currentConfig.source_name || '';
-        document.getElementById('sample_rate').value = currentConfig.sample_rate || 16000;
-        document.getElementById('chunk_ms').value = currentConfig.chunk_ms || 200;
-        document.getElementById('channels').value = String(currentConfig.channels || 1);
-        document.getElementById('ui_port').value = currentConfig.ui_port || 8766;
         sel.value = String(currentConfig.device || '');
       } else {
         sel.value = prior;
@@ -240,16 +214,19 @@ HTML = """<!doctype html>
     }
 
     function applyStatus(st){
-      const state = String(st.status || 'idle');
+      const senderState = String(st.sender_state || st.status || 'idle');
+      const serverState = String(st.server_state || 'unknown');
       const box = document.getElementById('sender-status');
-      box.className = statusClass(state);
-      box.textContent = state === 'error'
+      box.className = statusClass(senderState);
+      box.textContent = senderState === 'error'
         ? `Error: ${st.last_error || 'Unknown error'}`
-        : (state.charAt(0).toUpperCase() + state.slice(1));
-      document.getElementById('state').textContent = state;
+        : `Sender ${prettyState(senderState)} · Server ${prettyState(serverState)}`;
+      document.getElementById('sender-state').textContent = prettyState(senderState);
+      document.getElementById('server-state').textContent = prettyState(serverState);
       document.getElementById('active-device').textContent = st.active_device_name || 'Default system microphone';
       document.getElementById('active-server').textContent = (st.config && st.config.server) || '-';
       document.getElementById('last-ok').textContent = fmtTime(st.last_ok_at);
+      document.getElementById('server-message').textContent = st.server_message || '-';
       document.getElementById('last-error').textContent = st.last_error || '-';
     }
 

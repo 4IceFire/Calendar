@@ -465,28 +465,32 @@ class TranscriptionService:
         sender_timeout = self._sender_timeout_seconds(cfg)
         connected = self._last_audio_ts is not None and ((now_ts - self._last_audio_ts) < sender_timeout)
         paused = self._last_audio_ts is not None and ((now_ts - self._last_audio_ts) >= float(cfg.get('transcription_pause_soft_seconds', 1.0) or 1.0))
-
-        status = 'disabled'
+        server_state = 'off'
         if bool(cfg.get('transcription_enabled', False)):
             if AudioToTextRecorder is None:
-                status = 'missing_dependency'
+                server_state = 'missing_dependency'
             elif self._service_error:
-                status = 'error'
-            elif connected and not paused:
-                status = 'receiving'
-            elif connected:
-                status = 'paused'
-            elif self._active_sender:
-                status = 'disconnected'
+                server_state = 'error'
             elif self._recorder_ready:
-                status = 'ready'
+                server_state = 'ready'
             else:
-                status = 'idle'
+                server_state = 'idle'
+
+        client_state = 'off' if not bool(cfg.get('transcription_enabled', False)) else 'waiting'
+        if bool(cfg.get('transcription_enabled', False)):
+            if connected and not paused:
+                client_state = 'streaming'
+            elif connected:
+                client_state = 'paused'
+            elif self._active_sender:
+                client_state = 'disconnected'
 
         state = {
             'ok': True,
             'version': self._version,
-            'status': status,
+            'status': server_state,
+            'server_state': server_state,
+            'client_state': client_state,
             'enabled': bool(cfg.get('transcription_enabled', False)),
             'realtime_supported': AudioToTextRecorder is not None,
             'error': self._service_error,
@@ -505,16 +509,19 @@ class TranscriptionService:
                 'show_timestamps': bool(cfg.get('transcription_show_timestamps', True)),
                 'show_live_line': bool(cfg.get('transcription_show_live_line', True)),
                 'compact_mode': bool(cfg.get('transcription_segment_compact_mode', False)),
-                'color_scheme': str(cfg.get('transcription_color_scheme', 'accent')).strip() or 'accent',
+                'colors': {
+                    'live_bg': str(cfg.get('transcription_color_live_bg', '#121a2c')).strip() or '#121a2c',
+                    'live_text': str(cfg.get('transcription_color_live_text', '#f8fafc')).strip() or '#f8fafc',
+                    'segment_bg': str(cfg.get('transcription_color_segment_bg', '#182235')).strip() or '#182235',
+                    'segment_text': str(cfg.get('transcription_color_segment_text', '#e5e7eb')).strip() or '#e5e7eb',
+                    'break_soft_bg': str(cfg.get('transcription_color_break_soft_bg', '#17354a')).strip() or '#17354a',
+                    'break_soft_text': str(cfg.get('transcription_color_break_soft_text', '#7dd3fc')).strip() or '#7dd3fc',
+                    'break_hard_bg': str(cfg.get('transcription_color_break_hard_bg', '#4f46e5')).strip() or '#4f46e5',
+                    'break_hard_text': str(cfg.get('transcription_color_break_hard_text', '#ffffff')).strip() or '#ffffff',
+                },
             },
             'settings': {
-                'chunk_ms': int(cfg.get('transcription_chunk_ms', 200) or 200),
-                'language': str(cfg.get('transcription_language', 'en')).strip() or 'en',
-                'model': str(cfg.get('transcription_model', 'small.en')).strip() or 'small.en',
-                'realtime_model': str(cfg.get('transcription_realtime_model', 'tiny.en')).strip() or 'tiny.en',
-                'device': str(cfg.get('transcription_device', 'cpu')).strip() or 'cpu',
                 'keep_history': bool(cfg.get('transcription_keep_history', False)),
-                'sender_input_device': str(cfg.get('transcription_sender_input_device', '')).strip(),
                 'source_name': str(cfg.get('transcription_source_name', 'Church Comms')).strip() or 'Church Comms',
             },
             'ts': now_ts,

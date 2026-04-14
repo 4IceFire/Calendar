@@ -145,7 +145,9 @@ class SenderService:
         self._queue: queue.Queue[bytes] | None = None
         self._session = requests.Session()
         self._source_id = str(uuid.uuid4())
-        self._status = 'idle'
+        self._sender_state = 'idle'
+        self._server_state = 'unknown'
+        self._server_message = ''
         self._last_error = ''
         self._last_ok_at: float | None = None
         self._current_config = load_sender_config()
@@ -162,16 +164,24 @@ class SenderService:
             self._current_config = normalized
         return normalized
 
-    def _set_status(self, status: str, error: str = '') -> None:
+    def _set_sender_state(self, status: str, error: str = '') -> None:
         with self._lock:
-            self._status = str(status or 'idle')
+            self._sender_state = str(status or 'idle')
             self._last_error = str(error or '')
             self._status_since = time.time()
+
+    def _set_server_state(self, state: str, message: str = '') -> None:
+        with self._lock:
+            self._server_state = str(state or 'unknown')
+            self._server_message = str(message or '')
 
     def status_snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
-                'status': self._status,
+                'status': self._sender_state,
+                'sender_state': self._sender_state,
+                'server_state': self._server_state,
+                'server_message': self._server_message,
                 'last_error': self._last_error,
                 'last_ok_at': self._last_ok_at,
                 'active_device_name': self._active_device_name,
@@ -194,7 +204,8 @@ class SenderService:
             self._queue = None
             self._active_device_name = ''
         self._stop_event = threading.Event()
-        self._set_status('idle', '')
+        self._set_sender_state('idle', '')
+        self._set_server_state('unknown', '')
 
     def start(self, cfg: dict[str, Any] | None = None) -> tuple[bool, str | None]:
         if cfg is not None:
@@ -211,7 +222,8 @@ class SenderService:
         q: queue.Queue[bytes] = queue.Queue(maxsize=32)
         self._queue = q
         self._stop_event = threading.Event()
-        self._set_status('connecting', '')
+        self._set_sender_state('connecting', '')
+        self._set_server_state('connecting', '')
 
         blocksize = max(1, int((int(config['sample_rate']) * max(40, int(config['chunk_ms']))) / 1000))
 
@@ -227,7 +239,7 @@ class SenderService:
 
             def audio_callback(indata, frames, time_info, status):
                 if status:
-                    self._set_status('error', f'Audio device status: {status}')
+                    self._set_sender_state('error', f'Audio device status: {status}')
                 try:
                     q.put_nowait(bytes(indata))
                 except queue.Full:
@@ -252,7 +264,7 @@ class SenderService:
                     while not self._stop_event.is_set():
                         time.sleep(0.2)
             except Exception as e:
-                self._set_status('error', str(e))
+                self._set_sender_state('error', str(e))
                 self._stop_event.set()
 
         def upload_loop():
@@ -282,12 +294,15 @@ class SenderService:
                     if res.ok:
                         with self._lock:
                             self._last_ok_at = time.time()
-                        self._set_status('streaming', '')
+                        self._set_sender_state('streaming', '')
+                        self._set_server_state('connected', '')
                         backoff = 1.0
                         continue
-                    self._set_status('error', f'HTTP {res.status_code}: {res.text[:200]}')
+                    self._set_sender_state('error', f'HTTP {res.status_code}: {res.text[:200]}')
+                    self._set_server_state('error', f'HTTP {res.status_code}')
                 except Exception as e:
-                    self._set_status('error', str(e))
+                    self._set_sender_state('error', str(e))
+                    self._set_server_state('error', str(e))
 
                 time.sleep(backoff)
                 backoff = min(backoff * 1.8, 8.0)
@@ -306,13 +321,16 @@ class SenderService:
         try:
             res = self._session.get(f'{server}/api/transcription/config/test', timeout=8)
         except Exception as e:
+            self._set_server_state('error', str(e))
             return False, str(e), None
         try:
             data = res.json()
         except Exception:
             data = None
         if not res.ok:
+            self._set_server_state('error', f'HTTP {res.status_code}')
             return False, f'HTTP {res.status_code}', data if isinstance(data, dict) else None
+        self._set_server_state('connected', '')
         if isinstance(data, dict):
             return True, '', data
         return True, '', None

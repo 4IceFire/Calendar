@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 
 {% set page_title = 'Transcription' %}
-{% set page_subtitle = 'Live church comms transcription with remote audio ingest.' %}
+{% set page_subtitle = 'Live church comms transcription.' %}
 
 {% block page_actions %}
   <div class="d-flex gap-2 flex-wrap">
@@ -13,70 +13,68 @@
 {% endblock %}
 
 {% block content %}
-<div id="transcription-page" class="row g-3">
-  <div class="col-12 col-xl-4">
-    <div class="card tdeck-soft h-100">
-      <div class="card-body">
-        <h2 class="h5 mb-3">Session</h2>
-        <div id="transcription-status" class="mb-3"></div>
+<div id="transcription-page" class="transcription-page-shell">
+  <div class="row g-3 mb-3">
+    <div class="col-12 col-lg-4">
+      <div class="card tdeck-soft h-100">
+        <div class="card-body">
+          <h2 class="h5 mb-3">Session</h2>
+          <div id="transcription-status" class="mb-3"></div>
+          <div class="transcription-session-grid small">
+            <div class="text-muted">Server</div>
+            <div data-transcription-field="server-state">Off</div>
+            <div class="text-muted">Client</div>
+            <div data-transcription-field="client-state">Waiting</div>
+            <div class="text-muted">Source</div>
+            <div data-transcription-field="source">None</div>
+            <div class="text-muted">Started</div>
+            <div data-transcription-field="started">-</div>
+            <div class="text-muted">Display</div>
+            <div><a href="/transcription/display" target="_blank" rel="noopener">iPad view</a></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-        <dl class="row mb-0 small">
-          <dt class="col-5 text-muted">State</dt>
-          <dd class="col-7" data-transcription-field="status">Idle</dd>
-
-          <dt class="col-5 text-muted">Source</dt>
-          <dd class="col-7" data-transcription-field="source">None</dd>
-
-          <dt class="col-5 text-muted">Started</dt>
-          <dd class="col-7" data-transcription-field="started">-</dd>
-
-          <dt class="col-5 text-muted">Display</dt>
-          <dd class="col-7"><a href="/transcription/display" target="_blank" rel="noopener">iPad view</a></dd>
-        </dl>
-
-        <hr>
-
-        <h3 class="h6">Sender Setup</h3>
-        <p class="small text-muted mb-2">Use the remote sender on the capture computer and point it at this server.</p>
-        <div class="small">
-          <div><span class="text-muted">Ingest URL:</span> <code data-transcription-field="ingest-url">-</code></div>
-          <div><span class="text-muted">Preferred device:</span> <span data-transcription-field="preferred-device">-</span></div>
-          <div><span class="text-muted">Chunk size:</span> <span data-transcription-field="chunk-ms">-</span></div>
+    <div class="col-12 col-lg-8">
+      <div class="card tdeck-soft h-100">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <div>
+              <h2 class="h5 mb-0">Live Line</h2>
+              <div class="small text-muted">Current speech appears here before it is finalized into the transcript below.</div>
+            </div>
+          </div>
+          <div id="transcription-live-wrap" class="transcription-live-wrap">
+            <div id="transcription-live" class="transcription-live-line">Waiting for audio...</div>
+            <div id="transcription-stabilized" class="transcription-stabilized mt-2"></div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <div class="col-12 col-xl-8">
-    <div class="card tdeck-soft mb-3">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
-          <div>
-            <h2 class="h5 mb-0">Live Line</h2>
-            <div class="small text-muted">Realtime and stabilized text for the active speaker.</div>
+  <div class="row g-3">
+    <div class="col-12 col-xl-8">
+      <div class="card transcription-transcript-card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+            <div>
+              <h2 class="h5 mb-0">Transcript</h2>
+              <div class="small text-muted">Speech segments are shown in reading order with pause markers between them.</div>
+            </div>
           </div>
+          <div id="transcription-segments" class="transcription-segments transcription-segments-operator"></div>
         </div>
-        <div id="transcription-live" class="transcription-live-line">Waiting for audio...</div>
-        <div id="transcription-stabilized" class="transcription-stabilized mt-2"></div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
-          <div>
-            <h2 class="h5 mb-0">Transcript</h2>
-            <div class="small text-muted">Completed speech segments are separated by pause markers.</div>
-          </div>
+    <div class="col-12 col-xl-4">
+      <div id="transcription-history-card" class="card h-100 d-none">
+        <div class="card-body">
+          <h2 class="h5 mb-2">Recent Sessions</h2>
+          <div id="transcription-history" class="small"></div>
         </div>
-        <div id="transcription-segments" class="transcription-segments"></div>
-      </div>
-    </div>
-
-    <div id="transcription-history-card" class="card mt-3 d-none">
-      <div class="card-body">
-        <h2 class="h5 mb-2">Recent Sessions</h2>
-        <div id="transcription-history" class="small"></div>
       </div>
     </div>
   </div>

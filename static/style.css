@@ -332,6 +332,37 @@ details.timer-presses > summary{
 #transcription-page{
   --tx-font-scale: 1;
   --tx-line-spacing: 1.25;
+  --tx-live-bg: #121a2c;
+  --tx-live-text: #f8fafc;
+  --tx-segment-bg: #182235;
+  --tx-segment-text: #e5e7eb;
+  --tx-break-soft-bg: #17354a;
+  --tx-break-soft-text: #7dd3fc;
+  --tx-break-hard-bg: #4f46e5;
+  --tx-break-hard-text: #ffffff;
+}
+
+.transcription-page-shell{
+  min-height: calc(100vh - 11rem);
+}
+
+.transcription-session-grid{
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 0.55rem 0.8rem;
+  align-items: start;
+}
+
+.transcription-live-wrap{
+  background: linear-gradient(180deg, var(--tx-live-bg), color-mix(in srgb, var(--tx-live-bg) 80%, black));
+  color: var(--tx-live-text);
+  border-radius: 1rem;
+  padding: 1.1rem 1.15rem;
+  min-height: 10rem;
+}
+
+.transcription-transcript-card{
+  min-height: 68vh;
 }
 
 .transcription-live-line{
@@ -339,10 +370,11 @@ details.timer-presses > summary{
   line-height: var(--tx-line-spacing);
   font-weight: 700;
   letter-spacing: -0.02em;
+  color: var(--tx-live-text);
 }
 
 .transcription-stabilized{
-  color: var(--bs-secondary-color);
+  color: color-mix(in srgb, var(--tx-live-text) 70%, transparent);
   font-size: calc(0.95rem * var(--tx-font-scale));
 }
 
@@ -350,20 +382,24 @@ details.timer-presses > summary{
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  max-height: 68vh;
   overflow: auto;
+}
+
+.transcription-segments-operator{
+  max-height: 70vh;
 }
 
 .transcription-segment{
   padding: 0.9rem 1rem;
   border: 1px solid rgba(127,127,127,0.20);
   border-radius: 0.9rem;
-  background: rgba(255,255,255,0.45);
+  background: var(--tx-segment-bg);
+  color: var(--tx-segment-text);
   backdrop-filter: blur(8px);
 }
 
 html[data-bs-theme="dark"] .transcription-segment{
-  background: rgba(17,24,39,0.45);
+  background: var(--tx-segment-bg);
 }
 
 .transcription-segment-meta{
@@ -388,23 +424,13 @@ html[data-bs-theme="dark"] .transcription-segment{
 }
 
 .transcription-break-soft{
-  color: var(--tdeck-accent-text);
-  background: rgba(14, 165, 233, 0.10);
+  color: var(--tx-break-soft-text);
+  background: var(--tx-break-soft-bg);
 }
 
 .transcription-break-hard{
-  color: #fff;
-  background: linear-gradient(135deg, var(--tdeck-accent-2), var(--tdeck-accent));
-}
-
-[data-color-scheme="minimal"] .transcription-break-soft{
-  color: var(--bs-secondary-color);
-  background: rgba(127,127,127,0.15);
-}
-
-[data-color-scheme="minimal"] .transcription-break-hard{
-  background: rgba(127,127,127,0.35);
-  color: var(--bs-body-color);
+  color: var(--tx-break-hard-text);
+  background: var(--tx-break-hard-bg);
 }
 
 [data-compact="1"] .transcription-segments{
@@ -422,6 +448,14 @@ html[data-bs-theme="dark"] .transcription-segment{
 .transcription-display-shell{
   --tx-font-scale: 1;
   --tx-line-spacing: 1.35;
+  --tx-live-bg: #121a2c;
+  --tx-live-text: #f8fafc;
+  --tx-segment-bg: #182235;
+  --tx-segment-text: #e5e7eb;
+  --tx-break-soft-bg: #17354a;
+  --tx-break-soft-text: #7dd3fc;
+  --tx-break-hard-bg: #4f46e5;
+  --tx-break-hard-text: #ffffff;
   min-height: 100vh;
   padding: 1.2rem;
   display: flex;
@@ -436,9 +470,25 @@ html[data-bs-theme="dark"] .transcription-segment{
   align-items: center;
 }
 
+.transcription-display-scroll{
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  gap: 0.85rem;
+}
+
+.transcription-display-spacer{
+  flex: 1 0 auto;
+}
+
 .transcription-display-live-wrap{
-  border: 1px solid var(--tdeck-accent-border);
-  background: linear-gradient(135deg, var(--tdeck-accent-soft-bg), rgba(79, 70, 229, 0.08));
+  position: sticky;
+  bottom: 0;
+  border: 1px solid rgba(148,163,184,.18);
+  background: linear-gradient(180deg, var(--tx-live-bg), color-mix(in srgb, var(--tx-live-bg) 82%, black));
+  color: var(--tx-live-text);
   border-radius: 1.2rem;
   padding: 1.1rem;
 }
@@ -448,16 +498,18 @@ html[data-bs-theme="dark"] .transcription-segment{
   line-height: var(--tx-line-spacing);
   font-weight: 800;
   white-space: pre-wrap;
+  color: var(--tx-live-text);
 }
 
 .transcription-display-stabilized{
   margin-top: 0.65rem;
-  color: var(--bs-secondary-color);
+  color: color-mix(in srgb, var(--tx-live-text) 70%, transparent);
   font-size: calc(1rem * var(--tx-font-scale));
 }
 
 .transcription-display-segments{
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.75rem;
 }
 

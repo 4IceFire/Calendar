@@ -235,7 +235,6 @@ except Exception:
         # Realtime transcription
         "transcription_enabled": False,
         "transcription_remote_enabled": True,
-        "transcription_bind_host": "0.0.0.0",
         "transcription_ingest_token": "",
         "transcription_chunk_ms": 200,
         "transcription_language": "en",
@@ -252,8 +251,14 @@ except Exception:
         "transcription_show_timestamps": True,
         "transcription_show_live_line": True,
         "transcription_segment_compact_mode": False,
-        "transcription_color_scheme": "accent",
-        "transcription_sender_input_device": "",
+        "transcription_color_live_bg": "#121a2c",
+        "transcription_color_live_text": "#f8fafc",
+        "transcription_color_segment_bg": "#182235",
+        "transcription_color_segment_text": "#e5e7eb",
+        "transcription_color_break_soft_bg": "#17354a",
+        "transcription_color_break_soft_text": "#7dd3fc",
+        "transcription_color_break_hard_bg": "#4f46e5",
+        "transcription_color_break_hard_text": "#ffffff",
         "transcription_source_name": "Church Comms",
     }
 
@@ -3725,10 +3730,10 @@ def api_transcription_config_test():
         'ingest_url': f'{host}/api/transcription/audio',
         'display_url': f'{host}/transcription/display',
         'status': state.get('status'),
+        'server_state': state.get('server_state'),
+        'client_state': state.get('client_state'),
         'sender': {
             'source_name': str(cfg.get('transcription_source_name', 'Church Comms') or 'Church Comms'),
-            'input_device': str(cfg.get('transcription_sender_input_device', '') or ''),
-            'chunk_ms': int(cfg.get('transcription_chunk_ms', 200) or 200),
         },
     })
 

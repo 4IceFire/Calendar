@@ -15,15 +15,20 @@
           <div class="small text-uppercase text-muted">TDeck Live</div>
           <h1 class="h3 mb-0 tdeck-title">Church Comms</h1>
         </div>
-        <div id="transcription-display-badge" class="badge text-bg-secondary">Idle</div>
+        <div class="d-flex gap-2 flex-wrap align-items-center">
+          <div id="transcription-display-server-badge" class="badge text-bg-secondary">Server Idle</div>
+          <div id="transcription-display-client-badge" class="badge text-bg-secondary">Client Waiting</div>
+        </div>
       </div>
 
-      <section class="transcription-display-live-wrap">
-        <div id="transcription-display-live" class="transcription-display-live">Waiting for audio…</div>
-        <div id="transcription-display-stabilized" class="transcription-display-stabilized"></div>
+      <section id="transcription-display-scroll" class="transcription-display-scroll">
+        <div class="transcription-display-spacer"></div>
+        <div id="transcription-display-segments" class="transcription-display-segments"></div>
+        <section id="transcription-display-live-wrap" class="transcription-display-live-wrap">
+          <div id="transcription-display-live" class="transcription-display-live">Waiting for audio…</div>
+          <div id="transcription-display-stabilized" class="transcription-display-stabilized"></div>
+        </section>
       </section>
-
-      <section id="transcription-display-segments" class="transcription-display-segments"></section>
     </main>
 
     <script src="/static/app.js"></script>

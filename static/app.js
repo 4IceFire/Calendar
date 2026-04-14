@@ -505,35 +505,11 @@ const CONFIG_META = {
     label: 'Allow Remote Audio Sender',
     help: 'Allows a separate computer to stream audio into this TDeck server.',
   },
-  transcription_bind_host: {
-    label: 'Transcription Bind Host',
-    help: 'Reserved for the transcription service network binding. Keep 0.0.0.0 for normal LAN use.',
-  },
   transcription_ingest_token: {
     label: 'Ingest Token',
     help: 'Shared secret the remote sender must provide when streaming audio.',
     sensitive: true,
     inputType: 'password',
-  },
-  transcription_chunk_ms: {
-    label: 'Chunk Size (ms)',
-    help: 'How much audio the sender posts in each request.',
-  },
-  transcription_language: {
-    label: 'Language',
-    help: 'Whisper language code, for example en. Leave as en for English comms.',
-  },
-  transcription_model: {
-    label: 'Final Model',
-    help: 'RealtimeSTT model used for finalized transcript segments.',
-  },
-  transcription_realtime_model: {
-    label: 'Realtime Model',
-    help: 'Faster model used for the live line while people are speaking.',
-  },
-  transcription_device: {
-    label: 'Inference Device',
-    help: 'Usually cpu on the server unless you have a supported GPU setup.',
   },
   transcription_enable_realtime: {
     label: 'Enable Live Line',
@@ -575,13 +551,45 @@ const CONFIG_META = {
     label: 'Compact Segment Layout',
     help: 'Uses a denser transcript layout for operators who want more history onscreen.',
   },
-  transcription_color_scheme: {
-    label: 'Color Scheme',
-    help: 'Visual style for pause markers and transcript accents.',
+  transcription_color_live_bg: {
+    label: 'Live Panel Background',
+    help: 'Background colour for the live speech panel.',
+    inputType: 'color',
   },
-  transcription_sender_input_device: {
-    label: 'Preferred Sender Input Device',
-    help: 'Optional microphone/device label to show in setup instructions for the remote sender.',
+  transcription_color_live_text: {
+    label: 'Live Text',
+    help: 'Text colour for the live speech panel.',
+    inputType: 'color',
+  },
+  transcription_color_segment_bg: {
+    label: 'Transcript Card Background',
+    help: 'Background colour for completed transcript cards.',
+    inputType: 'color',
+  },
+  transcription_color_segment_text: {
+    label: 'Transcript Card Text',
+    help: 'Text colour for completed transcript cards.',
+    inputType: 'color',
+  },
+  transcription_color_break_soft_bg: {
+    label: 'Soft Break Background',
+    help: 'Background colour for short pause markers.',
+    inputType: 'color',
+  },
+  transcription_color_break_soft_text: {
+    label: 'Soft Break Text',
+    help: 'Text colour for short pause markers.',
+    inputType: 'color',
+  },
+  transcription_color_break_hard_bg: {
+    label: 'Hard Break Background',
+    help: 'Background colour for long pause markers.',
+    inputType: 'color',
+  },
+  transcription_color_break_hard_text: {
+    label: 'Hard Break Text',
+    help: 'Text colour for long pause markers.',
+    inputType: 'color',
   },
   transcription_source_name: {
     label: 'Source Name',
@@ -758,7 +766,15 @@ function _renderConfigGroups(cfg) {
   }
 
   // Legacy keys that should not be edited anymore.
-  const hiddenKeys = new Set(['videohub_allowed_outputs', 'videohub_allowed_inputs']);
+  const hiddenKeys = new Set([
+    'videohub_allowed_outputs',
+    'videohub_allowed_inputs',
+    'transcription_chunk_ms',
+    'transcription_language',
+    'transcription_model',
+    'transcription_realtime_model',
+    'transcription_device',
+  ]);
   const schedulingKeys = ['EVENTS_FILE'];
   const authKeys = [
     'auth_enabled',
@@ -796,13 +812,7 @@ function _renderConfigGroups(cfg) {
       keys: [
         'transcription_enabled',
         'transcription_remote_enabled',
-        'transcription_bind_host',
         'transcription_ingest_token',
-        'transcription_chunk_ms',
-        'transcription_language',
-        'transcription_model',
-        'transcription_realtime_model',
-        'transcription_device',
         'transcription_enable_realtime',
         'transcription_pause_soft_seconds',
         'transcription_pause_hard_seconds',
@@ -813,9 +823,15 @@ function _renderConfigGroups(cfg) {
         'transcription_show_timestamps',
         'transcription_show_live_line',
         'transcription_segment_compact_mode',
-        'transcription_color_scheme',
-        'transcription_sender_input_device',
         'transcription_source_name',
+        'transcription_color_live_bg',
+        'transcription_color_live_text',
+        'transcription_color_segment_bg',
+        'transcription_color_segment_text',
+        'transcription_color_break_soft_bg',
+        'transcription_color_break_soft_text',
+        'transcription_color_break_hard_bg',
+        'transcription_color_break_hard_text',
       ],
     },
   ];
@@ -885,7 +901,7 @@ function _renderConfigGroups(cfg) {
           head.textContent = 'Setup Check';
           const help = document.createElement('div');
           help.className = 'small text-muted mb-2';
-          help.textContent = 'Checks the current server-side transcription status and shows the URLs needed by the remote sender and iPad display.';
+          help.textContent = 'Checks server readiness and the current client connection state. The sender itself is now configured from its own local setup page.';
           const btn = document.createElement('button');
           btn.type = 'button';
           btn.className = 'btn btn-outline-secondary btn-sm';
@@ -903,7 +919,8 @@ function _renderConfigGroups(cfg) {
               }
               out.className = 'small mt-2';
               out.innerHTML = `
-                <div><strong>Status:</strong> ${String(data.status || 'unknown')}</div>
+                <div><strong>Server:</strong> ${String(data.server_state || data.status || 'unknown')}</div>
+                <div><strong>Client:</strong> ${String(data.client_state || 'unknown')}</div>
                 <div><strong>Ingest URL:</strong> <code>${String(data.ingest_url || '')}</code></div>
                 <div><strong>Display URL:</strong> <code>${String(data.display_url || '')}</code></div>
                 <div><strong>Token configured:</strong> ${data.token_configured ? 'Yes' : 'No'}</div>
@@ -2589,8 +2606,21 @@ if (document.getElementById('access-levels-page')) {
     return v.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
   }
 
+  function _txApplyColors(root, display) {
+    const colors = (display && display.colors) || {};
+    root.style.setProperty('--tx-live-bg', String(colors.live_bg || '#121a2c'));
+    root.style.setProperty('--tx-live-text', String(colors.live_text || '#f8fafc'));
+    root.style.setProperty('--tx-segment-bg', String(colors.segment_bg || '#182235'));
+    root.style.setProperty('--tx-segment-text', String(colors.segment_text || '#e5e7eb'));
+    root.style.setProperty('--tx-break-soft-bg', String(colors.break_soft_bg || '#17354a'));
+    root.style.setProperty('--tx-break-soft-text', String(colors.break_soft_text || '#7dd3fc'));
+    root.style.setProperty('--tx-break-hard-bg', String(colors.break_hard_bg || '#4f46e5'));
+    root.style.setProperty('--tx-break-hard-text', String(colors.break_hard_text || '#ffffff'));
+  }
+
   function _txBadgeClass(status) {
     switch (String(status || '')) {
+      case 'streaming':
       case 'receiving': return 'text-bg-success';
       case 'paused': return 'text-bg-warning';
       case 'ready': return 'text-bg-primary';
@@ -2617,7 +2647,7 @@ if (document.getElementById('access-levels-page')) {
     if (!root) return;
     root.style.setProperty('--tx-font-scale', String(display.font_scale || 1));
     root.style.setProperty('--tx-line-spacing', String(display.line_spacing || 1.25));
-    root.setAttribute('data-color-scheme', String(display.color_scheme || 'accent'));
+    _txApplyColors(root, display);
     root.setAttribute('data-compact', display.compact_mode ? '1' : '0');
   }
 
@@ -2626,6 +2656,9 @@ if (document.getElementById('access-levels-page')) {
     const display = (state && state.display) || {};
     const showTimestamps = !!display.show_timestamps;
     const segments = Array.isArray(state && state.segments) ? state.segments : [];
+    const shouldStickBottom = displayOnly
+      ? ((target.parentElement.scrollHeight - target.parentElement.scrollTop - target.parentElement.clientHeight) < 40)
+      : false;
     target.innerHTML = '';
 
     if (!segments.length) {
@@ -2636,7 +2669,8 @@ if (document.getElementById('access-levels-page')) {
       return;
     }
 
-    segments.slice().reverse().forEach(seg => {
+    const ordered = displayOnly ? segments.slice() : segments.slice().reverse();
+    ordered.forEach(seg => {
       if (seg.type === 'break') {
         const br = document.createElement('div');
         br.className = `transcription-break transcription-break-${String(seg.level || 'soft')}`;
@@ -2665,6 +2699,14 @@ if (document.getElementById('access-levels-page')) {
       row.appendChild(txt);
       target.appendChild(row);
     });
+
+    if (displayOnly && shouldStickBottom) {
+      try {
+        target.parentElement.scrollTop = target.parentElement.scrollHeight;
+      } catch (e) {
+        // ignore
+      }
+    }
   }
 
   function _txRenderHistory(state) {
@@ -2707,10 +2749,11 @@ if (document.getElementById('access-levels-page')) {
       const stabilized = document.getElementById('transcription-stabilized');
       const segments = document.getElementById('transcription-segments');
       const source = currentState.source && currentState.source.name ? String(currentState.source.name) : 'None';
-      const statusText = _txPrettyStatus(currentState.status);
+      const serverState = _txPrettyStatus(currentState.server_state || currentState.status);
+      const clientState = _txPrettyStatus(currentState.client_state || 'waiting');
       if (status) {
-        status.className = _txStatusClass(currentState.status);
-        status.textContent = currentState.error ? `${statusText}: ${currentState.error}` : statusText;
+        status.className = _txStatusClass(currentState.server_state || currentState.status);
+        status.textContent = currentState.error ? `${serverState}: ${currentState.error}` : `Server ${serverState} · Client ${clientState}`;
       }
       const liveText = String(currentState.stabilized_text || currentState.live_text || '').trim();
       if (live) {
@@ -2726,7 +2769,8 @@ if (document.getElementById('access-levels-page')) {
       _txRenderHistory(currentState);
 
       const map = {
-        'status': statusText,
+        'server-state': serverState,
+        'client-state': clientState,
         'source': source,
         'started': _txFormatTs(currentState.session && currentState.session.started_at),
       };
@@ -2737,13 +2781,18 @@ if (document.getElementById('access-levels-page')) {
     }
 
     if (displayPage) {
-      const badge = document.getElementById('transcription-display-badge');
+      const serverBadge = document.getElementById('transcription-display-server-badge');
+      const clientBadge = document.getElementById('transcription-display-client-badge');
       const live = document.getElementById('transcription-display-live');
       const stabilized = document.getElementById('transcription-display-stabilized');
       const segments = document.getElementById('transcription-display-segments');
-      if (badge) {
-        badge.className = `badge ${_txBadgeClass(currentState.status)}`;
-        badge.textContent = _txPrettyStatus(currentState.status);
+      if (serverBadge) {
+        serverBadge.className = `badge ${_txBadgeClass(currentState.server_state || currentState.status)}`;
+        serverBadge.textContent = `Server ${_txPrettyStatus(currentState.server_state || currentState.status)}`;
+      }
+      if (clientBadge) {
+        clientBadge.className = `badge ${_txBadgeClass(currentState.client_state || 'waiting')}`;
+        clientBadge.textContent = `Client ${_txPrettyStatus(currentState.client_state || 'waiting')}`;
       }
       if (live) {
         const txt = String(currentState.stabilized_text || currentState.live_text || '').trim();
@@ -2801,23 +2850,6 @@ if (document.getElementById('access-levels-page')) {
     if (data.state) _txRender(data.state);
   }
 
-  async function _txLoadSetupInfo() {
-    if (!opPage) return;
-    try {
-      const res = await fetch('/api/transcription/config/test', {cache: 'no-store'});
-      if (!res.ok) return;
-      const data = await res.json();
-      const ingest = document.querySelector('[data-transcription-field="ingest-url"]');
-      const pref = document.querySelector('[data-transcription-field="preferred-device"]');
-      const chunk = document.querySelector('[data-transcription-field="chunk-ms"]');
-      if (ingest) ingest.textContent = String(data.ingest_url || '-');
-      if (pref) pref.textContent = String((data.sender && data.sender.input_device) || 'Any device');
-      if (chunk) chunk.textContent = `${Number((data.sender && data.sender.chunk_ms) || 0)} ms`;
-    } catch (e) {
-      // ignore
-    }
-  }
-
   if (opPage) {
     const startBtn = document.getElementById('transcription-start');
     const stopBtn = document.getElementById('transcription-stop');
@@ -2825,7 +2857,6 @@ if (document.getElementById('access-levels-page')) {
     if (startBtn) startBtn.addEventListener('click', () => _txPostControl('start').catch(err => alert(String(err.message || err))));
     if (stopBtn) stopBtn.addEventListener('click', () => _txPostControl('stop').catch(err => alert(String(err.message || err))));
     if (clearBtn) clearBtn.addEventListener('click', () => _txPostControl('clear').catch(err => alert(String(err.message || err))));
-    _txLoadSetupInfo();
   }
 
   _txFetchState().catch(() => {});
