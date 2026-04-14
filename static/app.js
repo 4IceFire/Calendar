@@ -2486,6 +2486,7 @@ if (document.getElementById('access-levels-page')) {
     const inEl = form.querySelector('input[name="videohub_allowed_inputs_role"]');
     const presetsEl = form.querySelector('input[name="videohub_allowed_presets_role"]');
     const canEditEl = form.querySelector('input[name="videohub_can_edit_presets_role"]');
+    const idleTimeoutEl = form.querySelector('input[name="auth_idle_timeout_minutes_override_role"]');
 
     return {
       page_keys: pageKeys,
@@ -2493,6 +2494,7 @@ if (document.getElementById('access-levels-page')) {
       videohub_allowed_inputs_role: inEl ? String(inEl.value || '') : '',
       videohub_allowed_presets_role: presetsEl ? String(presetsEl.value || '') : '',
       videohub_can_edit_presets_role: canEditEl ? !!canEditEl.checked : true,
+      auth_idle_timeout_minutes_override_role: idleTimeoutEl ? String(idleTimeoutEl.value || '') : '',
     };
   }
 

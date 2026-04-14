@@ -1015,6 +1015,17 @@ def _auth_gate():
         idle_minutes = 2
     idle_minutes = max(1, min(idle_minutes, 24 * 60))
 
+    # Apply per-role idle timeout override (overrides the global config).
+    # None => inherit global; 0 => disable idle logout for this role; N => use N minutes.
+    try:
+        role_override = _role_idle_timeout_override_minutes(getattr(current_user, 'role_id', None))
+        if role_override == 0:
+            idle_enabled = False
+        elif role_override is not None:
+            idle_minutes = role_override
+    except Exception:
+        pass
+
     if idle_enabled:
         now = int(time.time())
         last = int(session.get('_last_activity') or 0)
@@ -1769,10 +1780,20 @@ def admin_roles_page():
                     except Exception:
                         pass
 
+                    # Per-role idle timeout override
+                    try:
+                        idle_raw = request.form.get('auth_idle_timeout_minutes_override_role')
+                        _set_role_idle_timeout_override(rid, idle_raw)
+                        _audit('role_idle_timeout_override_update', f'role_id={rid}')
+                    except Exception:
+                        pass
+
     conn = _db()
     try:
         roles = conn.execute(
-            'SELECT id,name,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets FROM roles ORDER BY lower(name)'
+            'SELECT id,name,videohub_allowed_outputs,videohub_allowed_inputs,'
+            'videohub_allowed_presets,videohub_can_edit_presets,'
+            'auth_idle_timeout_minutes_override FROM roles ORDER BY lower(name)'
         ).fetchall()
         role_pages = conn.execute('SELECT role_id,page_key FROM role_pages').fetchall()
     finally:
@@ -1798,6 +1819,7 @@ def admin_roles_page():
         in_raw = r['videohub_allowed_inputs']
         preset_raw = r['videohub_allowed_presets']
         can_edit_raw = r['videohub_can_edit_presets']
+        idle_timeout_raw = r['auth_idle_timeout_minutes_override']
         try:
             out_s = '' if out_raw is None else str(out_raw).strip()
         except Exception:
@@ -1820,11 +1842,16 @@ def admin_roles_page():
             can_edit = True if can_edit_raw is None else bool(int(can_edit_raw))
         except Exception:
             can_edit = True
+        try:
+            idle_timeout_s = '' if idle_timeout_raw is None else str(idle_timeout_raw)
+        except Exception:
+            idle_timeout_s = ''
         role_to_vh[rid] = {
             'outputs': out_s,
             'inputs': in_s,
             'presets': preset_s,
             'can_edit_presets': bool(can_edit),
+            'idle_timeout_override': idle_timeout_s,
         }
 
     return render_template(
@@ -1899,6 +1926,14 @@ def api_admin_role_update(role_id: int):
                 enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
                 _set_role_videohub_can_edit_presets(rid, bool(enabled))
                 _audit('role_videohub_can_edit_presets_update', f'role_id={rid} enabled={int(bool(enabled))}')
+        except Exception:
+            pass
+
+        # Per-role idle timeout override
+        try:
+            idle_raw = data.get('auth_idle_timeout_minutes_override_role')
+            _set_role_idle_timeout_override(rid, idle_raw)
+            _audit('role_idle_timeout_override_update', f'role_id={rid}')
         except Exception:
             pass
 
