@@ -1252,7 +1252,29 @@ function _timersSetLastSaved(presets, stagePreset) {
   });
 }
 
+function _timersFindIncompletePresetRow() {
+  const body = document.getElementById('timers-presets-body');
+  if (!body) return null;
+  const rows = Array.from(body.querySelectorAll('tr'));
+  for (const r of rows) {
+    const timeInp = r.querySelector('input[data-role="preset-time"]');
+    if (!timeInp) continue;
+    if (!String(timeInp.value || '').trim()) {
+      return r;
+    }
+  }
+  return null;
+}
+
 async function _timersSaveInternal({showStatus = true, allowDelete = false} = {}) {
+  const incompleteRow = _timersFindIncompletePresetRow();
+  if (incompleteRow && !allowDelete) {
+    if (showStatus) {
+      _timersSetStatus('Finish entering the timer time before saving.', 'warn');
+    }
+    return {ok: true, changed: false, skipped: true, reason: 'incomplete-time'};
+  }
+
   const presets = _timersReadPresetsFromUI();
   const stagePreset = _timersReadStagePresetFromUI();
   const payload = {
@@ -1327,7 +1349,7 @@ async function _timersFlushAutoSave() {
     _timersAutoSaveHandle = null;
   }
   const r = await _timersAutoSaveNow({showStatus: true});
-  return !!r.ok;
+  return !!(r.ok && !r.skipped);
 }
 
 async function _timersApplyPreset(presetNumber) {
@@ -2082,6 +2104,10 @@ if (document.getElementById('timers-page')) {
       // NOTE: For custom press URLs, do NOT auto-save while typing.
       // Save happens on blur/change instead.
       if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]'))) {
+        if (el.matches('input[data-role="preset-time"]') && !String(el.value || '').trim()) {
+          _timersSetStatus('Finish entering the timer time before saving.', 'warn');
+          return;
+        }
         _timersScheduleAutoSave({delayMs: 600, showStatus: false});
       }
     });
