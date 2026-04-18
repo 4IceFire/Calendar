@@ -71,34 +71,6 @@ _defaults = {
     "videohub_timeout": 2,
     "videohub_presets_file": "videohub_presets.json",
 
-    # Realtime transcription defaults
-    "transcription_enabled": False,
-    "transcription_remote_enabled": True,
-    "transcription_ingest_token": "",
-    "transcription_chunk_ms": 200,
-    "transcription_language": "en",
-    "transcription_model": "small.en",
-    "transcription_realtime_model": "tiny.en",
-    "transcription_device": "cpu",
-    "transcription_enable_realtime": True,
-    "transcription_pause_soft_seconds": 1.0,
-    "transcription_pause_hard_seconds": 2.5,
-    "transcription_keep_history": False,
-    "transcription_history_limit": 10,
-    "transcription_font_scale": 1.0,
-    "transcription_line_spacing": 1.25,
-    "transcription_show_timestamps": True,
-    "transcription_show_live_line": True,
-    "transcription_segment_compact_mode": False,
-    "transcription_color_live_bg": "#121a2c",
-    "transcription_color_live_text": "#f8fafc",
-    "transcription_color_segment_bg": "#182235",
-    "transcription_color_segment_text": "#e5e7eb",
-    "transcription_color_break_soft_bg": "#17354a",
-    "transcription_color_break_soft_text": "#7dd3fc",
-    "transcription_color_break_hard_bg": "#4f46e5",
-    "transcription_color_break_hard_text": "#ffffff",
-    "transcription_source_name": "Church Comms",
 }
 
 
@@ -328,10 +300,6 @@ def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
     if "companion_preset_is_one_based" in data:
         data.pop("companion_preset_is_one_based", None)
         changed = True
-    for legacy_key in ("transcription_bind_host", "transcription_sender_input_device", "transcription_color_scheme"):
-        if legacy_key in data:
-            data.pop(legacy_key, None)
-            changed = True
     if changed:
         save_config(data, path)
 
