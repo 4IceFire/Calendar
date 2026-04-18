@@ -125,11 +125,23 @@ class Companion:
             self._dbg("-> request error")
             return None
         
-    def GetVariable(self, var) -> str:
+    def get_variable(self, var: str) -> Optional[str]:
         return self.get_command(f"custom-variable/{var}/value")
 
-    def SetVariable(self, var, value):
+    def set_variable(self, var: str, value: Any) -> bool:
         return self.post_command(f"custom-variable/{var}/value", params={"value": value})
+
+    def GetVariable(self, var: str) -> Optional[str]:
+        """Backward-compatible wrapper for older callers.
+
+        The repo does not currently use this method directly, but the legacy
+        name is retained so external integrations keep working while new code
+        can use `get_variable()`.
+        """
+        return self.get_variable(var)
+
+    def SetVariable(self, var: str, value: Any) -> bool:
+        return self.set_variable(var, value)
 
     def close(self) -> None:
         try:

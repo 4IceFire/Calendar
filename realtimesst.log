@@ -1075,3 +1075,287 @@ OSError: [WinError 6] The handle is invalid
 2026-04-14 13:30:11.034 - RealTimeSTT: realtimestt - INFO - Setting listen time
 2026-04-14 13:30:11.034 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
 2026-04-14 13:30:11.034 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:40:27.838 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:40:27.844 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:40:37.556 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:40:37.563 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:40:41.369 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:40:41.369 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:40:41.370 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:40:41.374 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:40:41.375 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:40:41.375 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:40:48.133 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:40:48.139 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:40:53.220 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:40:53.221 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:40:53.221 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:40:53.222 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:40:53.222 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:40:53.223 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:40:53.223 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:40:53.223 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:40:53.225 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:40:53.227 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:40:53.227 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:40:56.134 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:40:56.134 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:40:56.134 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:40:57.842 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:40:57.853 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:40:59.181 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:40:59.182 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:40:59.182 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:00.862 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:41:00.863 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:41:00.864 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:41:00.864 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:41:00.864 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:41:07.841 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:07.842 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:41:07.842 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:41:07.865 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:07.867 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:41:07.867 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:41:07.867 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:41:07.868 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:41:07.870 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:41:07.870 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:41:07.870 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:41:09.896 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:41:09.904 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:41:17.966 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:41:17.966 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:41:17.966 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:19.642 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:41:19.664 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:41:21.189 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:41:21.190 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:41:21.190 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:23.138 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:41:23.140 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:41:23.142 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:41:23.144 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:41:23.144 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:41:29.709 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:29.710 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:41:29.711 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:41:29.711 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:41:29.712 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:41:29.712 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:41:29.712 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:41:29.712 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:41:29.715 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:29.716 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:41:29.716 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:41:32.291 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:41:32.299 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:41:40.481 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:41:40.481 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:41:40.481 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:42.365 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:41:42.393 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:41:45.032 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:41:45.032 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:41:45.033 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:45.840 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:41:45.842 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:41:45.845 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:41:45.846 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:41:45.846 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:41:52.208 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:52.209 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:41:52.210 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:41:52.210 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:41:52.211 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:41:52.212 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:41:52.212 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:41:52.213 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:41:53.862 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:41:53.869 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:41:56.778 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:41:56.780 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:41:56.780 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:42:02.090 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:42:02.091 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:42:02.091 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:03.647 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:42:03.672 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:42:05.207 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:42:05.207 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:42:05.208 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:07.316 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:42:07.319 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:42:07.323 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:42:07.326 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:42:07.326 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:42:13.806 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:13.808 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:42:13.808 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:42:13.898 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:13.901 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:42:13.901 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:42:13.901 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:42:13.903 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:42:13.905 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:42:13.905 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:42:13.906 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:42:16.669 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:42:16.679 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:42:24.859 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:42:24.860 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:42:24.860 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:26.500 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:42:26.512 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:42:27.675 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:42:27.676 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:42:27.676 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:28.819 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:42:28.822 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:42:28.824 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:42:28.824 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:42:28.824 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:42:36.572 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:36.573 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:36.573 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:42:36.574 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:42:36.574 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:42:36.574 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization2026-04-18 14:42:36.574 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:42:36.575 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:42:36.575 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:42:36.576 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:42:37.584 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:42:37.592 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:42:45.607 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:42:45.608 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:42:45.608 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:47.362 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:42:47.375 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:42:49.226 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:42:49.227 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:42:49.228 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:42:49.228 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:42:49.228 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:42:57.843 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:42:57.847 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:42:57.847 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:42:58.233 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:42:58.248 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:42:59.241 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2026-04-18 14:42:59.243 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2026-04-18 14:42:59.247 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:42:59.248 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:42:59.249 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:43:00.063 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:43:00.063 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:43:00.064 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:43:00.070 - RealTimeSTT: realtimestt - DEBUG - Faster_whisper realtime speech to text transcription model initialized successfully
+2026-04-18 14:43:00.071 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 2
+2026-04-18 14:43:00.071 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2026-04-18 14:43:08.908 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:43:08.916 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:43:11.706 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:43:11.707 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:43:11.707 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:43:11.734 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2026-04-18 14:43:11.735 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2026-04-18 14:43:11.735 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2026-04-18 14:43:18.002 - RealTimeSTT: realtimestt - ERROR - Error initializing faster_whisper realtime transcription model: mkl_malloc: failed to allocate memory
+Traceback (most recent call last):
+  File "C:\Users\dedwa\OneDrive\Daniel's Stuff\Church\Companion\Calendar\.venv\Lib\site-packages\RealtimeSTT\audio_recorder.py", line 794, in __init__
+    self.realtime_model_type = faster_whisper.WhisperModel(
+                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        model_size_or_path=self.realtime_model_type,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        download_root=self.download_root,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\dedwa\OneDrive\Daniel's Stuff\Church\Companion\Calendar\.venv\Lib\site-packages\faster_whisper\transcribe.py", line 647, in __init__
+    self.model = ctranslate2.models.Whisper(
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        model_path,
+        ^^^^^^^^^^^
+    ...<6 lines>...
+        **model_kwargs,
+        ^^^^^^^^^^^^^^^
+    )
+    ^
+RuntimeError: mkl_malloc: failed to allocate memory
+2026-04-18 14:43:21.016 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:43:21.016 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2026-04-18 14:43:22.035 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:43:22.035 - RealTimeSTT: realtimestt - INFO - Initializing faster_whisper realtime transcription model tiny.en, default device: cpu, compute type: default, device index: 0, download root: None
+2026-04-18 14:47:48.132 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.135 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.137 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.137 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.137 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.173 - RealTimeSTT: realtimestt - DEBUG - Receive from stdout pipe
+2026-04-18 14:47:48.174 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.177 - RealTimeSTT: realtimestt - INFO - None
+2026-04-18 14:47:48.177 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.179 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.179 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.179 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.178 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.182 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.179 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.184 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.179 - RealTimeSTT: realtimestt - DEBUG - Receive from stdout pipe
+2026-04-18 14:47:48.185 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.186 - RealTimeSTT: realtimestt - INFO - Setting listen time
+g start
+2026-04-18 14:47:48.180 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.188 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.188 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.188 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.188 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.188 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.188 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.188 - RealTimeSTT: realtimestt - DEBUG - Receive from stdout pipe
+2026-04-18 14:47:48.190 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.190 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.190 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.191 - RealTimeSTT: realtimestt - INFO - None
+2026-04-18 14:47:48.192 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.197 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.199 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.199 - RealTimeSTT: realtimestt - INFO - None
+2026-04-18 14:47:48.200 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.201 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.203 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.204 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.205 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.205 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.205 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.205 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.206 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.207 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.208 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.210 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.208 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.210 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.211 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.211 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.211 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.211 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.211 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.211 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.218 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.218 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.219 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.222 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.223 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.223 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.229 - RealTimeSTT: realtimestt - DEBUG - No samples removed, final audio length: 0
+2026-04-18 14:47:48.235 - RealTimeSTT: realtimestt - INFO - State changed from 'listening' to 'inactive'
+2026-04-18 14:47:48.235 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.236 - RealTimeSTT: realtimestt - DEBUG - Receive from stdout pipe
+2026-04-18 14:47:48.236 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.236 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start
+2026-04-18 14:47:48.237 - RealTimeSTT: realtimestt - INFO - None
+2026-04-18 14:47:48.317 - RealTimeSTT: realtimestt - INFO - Setting listen time
+2026-04-18 14:47:48.317 - RealTimeSTT: realtimestt - INFO - State changed from 'inactive' to 'listening'
+2026-04-18 14:47:48.317 - RealTimeSTT: realtimestt - DEBUG - Waiting for recording start

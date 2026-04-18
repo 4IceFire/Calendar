@@ -86,6 +86,25 @@
 
                   <div class="row g-3">
                     <div class="col-12">
+                      <div class="fw-semibold">Idle logout timeout override</div>
+                      <div class="small text-muted">
+                        Leave blank to inherit the global timeout from Config. Use <code>0</code> to disable idle logout for this role.
+                        Any positive value overrides the timeout in minutes.
+                      </div>
+                    </div>
+
+                    <div class="col-12 col-md-4">
+                      <label class="form-label">Override Minutes</label>
+                      <input class="form-control" type="text" name="auth_idle_timeout_minutes_override_role"
+                             value="{{ r.auth_idle_timeout_minutes_override if r.auth_idle_timeout_minutes_override is not none else '' }}"
+                             placeholder="inherit / 0 / 5">
+                    </div>
+                  </div>
+
+                  <hr class="my-3">
+
+                  <div class="row g-3">
+                    <div class="col-12">
                       <div class="fw-semibold">Routing allow-lists (VideoHub)</div>
                       <div class="small text-muted">
                         These restrict what Outputs and Inputs show on the <strong>Routing</strong> page for this role.

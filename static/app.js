@@ -1,119 +1,53 @@
-// Poll companion status endpoint and update indicator
-async function updateCompanion() {
-  try {
-    const res = await fetch('/api/companion_status');
-    if (!res.ok) throw new Error('fetch failed');
-    const data = await res.json();
-    const apply = (dotId, labelId) => {
-      const dot = document.getElementById(dotId);
-      const label = document.getElementById(labelId);
-      if (!dot || !label) return;
-      if (data.connected) {
-        dot.classList.remove('bg-danger');
-        dot.classList.add('bg-success');
-        label.textContent = 'Companion: Online';
-      } else {
-        dot.classList.remove('bg-success');
-        dot.classList.add('bg-danger');
-        label.textContent = 'Companion: Offline';
-      }
-    };
-    apply('companion-dot', 'companion-label');
-    apply('companion-dot-home', 'companion-label-home');
-  } catch (e) {
-    const apply = (dotId, labelId) => {
-      const dot = document.getElementById(dotId);
-      const label = document.getElementById(labelId);
-      if (!dot || !label) return;
-      dot.classList.remove('bg-success');
-      dot.classList.add('bg-danger');
-      label.textContent = 'Companion: Unknown';
-    };
-    apply('companion-dot', 'companion-label');
-    apply('companion-dot-home', 'companion-label-home');
-  }
+function _applyServiceIndicator(serviceKey, label, connected) {
+  const pairs = [
+    [`${serviceKey}-dot`, `${serviceKey}-label`],
+    [`${serviceKey}-dot-home`, `${serviceKey}-label-home`],
+  ];
+  const statusText = connected ? `${label}: Online` : `${label}: Offline`;
+  pairs.forEach(([dotId, labelId]) => {
+    const dot = document.getElementById(dotId);
+    const el = document.getElementById(labelId);
+    if (!dot || !el) return;
+    dot.classList.remove('bg-success', 'bg-danger');
+    dot.classList.add(connected ? 'bg-success' : 'bg-danger');
+    el.textContent = statusText;
+  });
 }
 
-// Poll ProPresenter status endpoint and update indicator
-async function updateProPresenter() {
-  try {
-    const res = await fetch('/api/propresenter_status');
-    if (!res.ok) throw new Error('fetch failed');
-    const data = await res.json();
-    const apply = (dotId, labelId) => {
-      const dot = document.getElementById(dotId);
-      const label = document.getElementById(labelId);
-      if (!dot || !label) return;
-      if (data.connected) {
-        dot.classList.remove('bg-danger');
-        dot.classList.add('bg-success');
-        label.textContent = 'ProPresenter: Online';
-      } else {
-        dot.classList.remove('bg-success');
-        dot.classList.add('bg-danger');
-        label.textContent = 'ProPresenter: Offline';
-      }
-    };
-    apply('propresenter-dot', 'propresenter-label');
-    apply('propresenter-dot-home', 'propresenter-label-home');
-  } catch (e) {
-    const apply = (dotId, labelId) => {
-      const dot = document.getElementById(dotId);
-      const label = document.getElementById(labelId);
-      if (!dot || !label) return;
-      dot.classList.remove('bg-success');
-      dot.classList.add('bg-danger');
-      label.textContent = 'ProPresenter: Unknown';
-    };
-    apply('propresenter-dot', 'propresenter-label');
-    apply('propresenter-dot-home', 'propresenter-label-home');
-  }
+function _applyServiceIndicatorUnknown(serviceKey, label) {
+  const pairs = [
+    [`${serviceKey}-dot`, `${serviceKey}-label`],
+    [`${serviceKey}-dot-home`, `${serviceKey}-label-home`],
+  ];
+  pairs.forEach(([dotId, labelId]) => {
+    const dot = document.getElementById(dotId);
+    const el = document.getElementById(labelId);
+    if (!dot || !el) return;
+    dot.classList.remove('bg-success');
+    dot.classList.add('bg-danger');
+    el.textContent = `${label}: Unknown`;
+  });
 }
 
-// Poll VideoHub status endpoint and update indicator
-async function updateVideoHub() {
+async function updateStatusIndicators() {
   try {
-    const res = await fetch('/api/videohub_status');
+    const res = await fetch('/api/status/summary', {cache: 'no-store'});
     if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    const apply = (dotId, labelId) => {
-      const dot = document.getElementById(dotId);
-      const label = document.getElementById(labelId);
-      if (!dot || !label) return;
-      if (data.connected) {
-        dot.classList.remove('bg-danger');
-        dot.classList.add('bg-success');
-        label.textContent = 'VideoHub: Online';
-      } else {
-        dot.classList.remove('bg-success');
-        dot.classList.add('bg-danger');
-        label.textContent = 'VideoHub: Offline';
-      }
-    };
-    apply('videohub-dot', 'videohub-label');
-    apply('videohub-dot-home', 'videohub-label-home');
+    _applyServiceIndicator('companion', 'Companion', !!(data && data.companion && data.companion.connected));
+    _applyServiceIndicator('propresenter', 'ProPresenter', !!(data && data.propresenter && data.propresenter.connected));
+    _applyServiceIndicator('videohub', 'VideoHub', !!(data && data.videohub && data.videohub.connected));
   } catch (e) {
-    const apply = (dotId, labelId) => {
-      const dot = document.getElementById(dotId);
-      const label = document.getElementById(labelId);
-      if (!dot || !label) return;
-      dot.classList.remove('bg-success');
-      dot.classList.add('bg-danger');
-      label.textContent = 'VideoHub: Unknown';
-    };
-    apply('videohub-dot', 'videohub-label');
-    apply('videohub-dot-home', 'videohub-label-home');
+    _applyServiceIndicatorUnknown('companion', 'Companion');
+    _applyServiceIndicatorUnknown('propresenter', 'ProPresenter');
+    _applyServiceIndicatorUnknown('videohub', 'VideoHub');
   }
 }
 
 // initial check
-updateCompanion();
-updateProPresenter();
-updateVideoHub();
-// refresh every 10s for more responsive UI
-setInterval(updateCompanion, 10000);
-setInterval(updateProPresenter, 10000);
-setInterval(updateVideoHub, 10000);
+updateStatusIndicators();
+// refresh every 15s while the server keeps the backend snapshot warm in the background
+setInterval(updateStatusIndicators, 15000);
 
 function _uiMessageTimeoutMs() {
   try {
@@ -2490,6 +2424,7 @@ if (document.getElementById('access-levels-page')) {
     if (!roleId) return null;
 
     const pageKeys = Array.from(form.querySelectorAll('input[type="checkbox"][name="page_keys"]:checked')).map(cb => String(cb.value));
+    const idleTimeoutEl = form.querySelector('input[name="auth_idle_timeout_minutes_override_role"]');
     const outEl = form.querySelector('input[name="videohub_allowed_outputs_role"]');
     const inEl = form.querySelector('input[name="videohub_allowed_inputs_role"]');
     const presetsEl = form.querySelector('input[name="videohub_allowed_presets_role"]');
@@ -2497,6 +2432,7 @@ if (document.getElementById('access-levels-page')) {
 
     return {
       page_keys: pageKeys,
+      auth_idle_timeout_minutes_override_role: idleTimeoutEl ? String(idleTimeoutEl.value || '') : '',
       videohub_allowed_outputs_role: outEl ? String(outEl.value || '') : '',
       videohub_allowed_inputs_role: inEl ? String(inEl.value || '') : '',
       videohub_allowed_presets_role: presetsEl ? String(presetsEl.value || '') : '',

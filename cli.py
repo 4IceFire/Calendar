@@ -68,6 +68,174 @@ def _save_cfg(cfg: dict) -> None:
             pass
 
 
+def _normalize_trigger_type(value: str):
+    from package.apps.calendar.models import TypeofTime
+
+    key = str(value or "AT").strip().upper()
+    if not key:
+        key = "AT"
+    return TypeofTime[key]
+
+
+def _trigger_from_spec(spec: str):
+    from package.apps.calendar.models import TimeOfTrigger
+
+    raw = str(spec or "").strip()
+    if not raw:
+        raise ValueError("empty trigger spec")
+
+    if raw[:1] in "{[":
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("JSON trigger spec must be an object")
+
+        minutes = int(payload.get("minutes", 0))
+        trig_type = _normalize_trigger_type(payload.get("typeOfTrigger") or payload.get("type") or "AT")
+        action_type = str(payload.get("actionType") or payload.get("action_type") or "").strip().lower()
+        if not action_type:
+            if isinstance(payload.get("api"), dict):
+                action_type = "api"
+            elif isinstance(payload.get("timer"), dict):
+                action_type = "timer"
+            else:
+                action_type = "companion"
+
+        common_kwargs = {
+            "name": payload.get("name", ""),
+            "uid": payload.get("uid"),
+            "actionType": action_type,
+            "enabled": bool(payload.get("enabled", payload.get("active", True))),
+        }
+
+        if action_type == "api":
+            api = payload.get("api")
+            if not isinstance(api, dict):
+                raise ValueError("api triggers require an 'api' object")
+            return TimeOfTrigger(minutes, trig_type, "", api=api, timer=None, **common_kwargs)
+        if action_type == "timer":
+            timer = payload.get("timer")
+            if not isinstance(timer, dict):
+                raise ValueError("timer triggers require a 'timer' object")
+            return TimeOfTrigger(minutes, trig_type, "", api=None, timer=timer, **common_kwargs)
+
+        button_url = str(payload.get("buttonURL") or payload.get("button_url") or payload.get("url") or "").strip()
+        return TimeOfTrigger(minutes, trig_type, button_url, api=None, timer=None, **common_kwargs)
+
+    parts = raw.split(",", 2)
+    if len(parts) < 2:
+        raise ValueError("Trigger spec must be minutes,TYPE,buttonURL or a JSON object")
+
+    minutes = int(parts[0])
+    trig_type = _normalize_trigger_type(parts[1])
+    url = parts[2] if len(parts) > 2 else ""
+    return TimeOfTrigger(minutes, trig_type, url)
+
+
+def _trigger_display_dict(trigger) -> dict:
+    if hasattr(trigger, "to_dict"):
+        return trigger.to_dict()
+
+    action_type = str(getattr(trigger, "actionType", "") or "").strip().lower() or "companion"
+    out = {
+        "minutes": int(getattr(trigger, "minutes", 0)),
+        "typeOfTrigger": getattr(getattr(trigger, "typeOfTrigger", None), "name", "AT"),
+        "enabled": bool(getattr(trigger, "enabled", True)),
+        "actionType": action_type,
+    }
+    name = str(getattr(trigger, "name", "") or "").strip()
+    uid = str(getattr(trigger, "uid", "") or "").strip()
+    if name:
+        out["name"] = name
+    if uid:
+        out["uid"] = uid
+    if action_type == "api":
+        out["api"] = getattr(trigger, "api", None) or {}
+    elif action_type == "timer":
+        out["timer"] = getattr(trigger, "timer", None) or {}
+    else:
+        out["buttonURL"] = str(getattr(trigger, "buttonURL", "") or "")
+    return out
+
+
+def _resolve_trigger_action_type(trigger) -> str:
+    action_type = str(getattr(trigger, "actionType", "") or "").strip().lower()
+    if action_type:
+        return action_type
+    if isinstance(getattr(trigger, "api", None), dict):
+        return "api"
+    if isinstance(getattr(trigger, "timer", None), dict):
+        return "timer"
+    return "companion"
+
+
+def _local_api_request(method: str, path: str, body=None, timeout: float = 3.0):
+    cfg = utils.get_config()
+    port = int(cfg.get("webserver_port", cfg.get("server_port", 5000)))
+    path = str(path or "").strip()
+    if not path or "://" in path:
+        return False, "invalid local API path"
+
+    if path.startswith("/api/"):
+        path_norm = path
+    elif path.startswith("/"):
+        path_norm = "/api" + path
+    else:
+        path_norm = "/api/" + path.lstrip("/")
+
+    url = f"http://127.0.0.1:{port}{path_norm}"
+    req_data = None
+    req_headers = {}
+    if str(method or "POST").upper() != "GET":
+        req_data = json.dumps(body if body is not None else {}).encode("utf-8")
+        req_headers["Content-Type"] = "application/json"
+
+    try:
+        req = urllib.request.Request(url, data=req_data, headers=req_headers, method=str(method or "POST").upper())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = resp.read().decode("utf-8", errors="replace")
+            return True, payload
+    except urllib.error.HTTPError as e:
+        try:
+            payload = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            payload = str(e)
+        return False, f"HTTP {e.code} calling {url}: {payload}"
+    except Exception as e:
+        return False, f"Failed to call {url}: {e}"
+
+
+def _manual_trigger_action(trigger):
+    action_type = _resolve_trigger_action_type(trigger)
+
+    if action_type == "api":
+        api = getattr(trigger, "api", None)
+        if not isinstance(api, dict):
+            return False, "invalid api trigger payload"
+        method = str(api.get("method") or "POST").upper()
+        path = str(api.get("path") or "").strip()
+        body = api.get("body")
+        ok, detail = _local_api_request(method, path, body)
+        return ok, f"{method} {path}".strip() if ok else detail
+
+    if action_type == "timer":
+        timer = getattr(trigger, "timer", None)
+        if not isinstance(timer, dict):
+            return False, "invalid timer trigger payload"
+        ok, detail = _local_api_request("POST", "/api/timers/preset", dict(timer))
+        if ok:
+            preset = timer.get("preset")
+            time_str = timer.get("time")
+            return True, f"timer preset={preset} time={time_str}"
+        return False, detail
+
+    companion = utils.get_companion()
+    button_url = str(getattr(trigger, "buttonURL", "") or "").strip()
+    if companion and getattr(companion, "connected", False):
+        ok = companion.post_command(button_url)
+        return ok, f"POST {button_url}" if ok else f"POST {button_url} failed"
+    return False, f"Companion not connected; would POST {button_url}"
+
+
 def cmd_timers_list(args) -> int:
     cfg = utils.get_config()
     presets = _get_timer_presets(cfg)
@@ -395,7 +563,7 @@ def cmd_show(args):
     if not ev:
         print("Event not found")
         return
-    print({
+    print(json.dumps({
         "id": getattr(ev, "id", None),
         "name": ev.name,
         "day": ev.day.name,
@@ -403,11 +571,8 @@ def cmd_show(args):
         "time": ev.time.strftime("%H:%M:%S"),
         "repeating": ev.repeating,
         "active": getattr(ev, "active", True),
-        "times": [
-            {"minutes": t.minutes, "type": t.typeOfTrigger.name, "buttonURL": t.buttonURL}
-            for t in ev.times
-        ],
-    })
+        "times": [_trigger_display_dict(t) for t in ev.times],
+    }, indent=2, sort_keys=True))
 
 
 def _persist_and_touch(events):
@@ -452,18 +617,26 @@ def cmd_trigger(args):
         return
 
     trig = ev.times[which]
-    c = utils.get_companion()
-    if c and getattr(c, "connected", False):
-        ok = c.post_command(trig.buttonURL)
-        if ok:
-            logger.info(f"Manual trigger POST {trig.buttonURL} OK | event='{ev.name}'")
-            print(f"Triggered '{ev.name}' -> {trig.buttonURL} -> OK")
+    action_type = _resolve_trigger_action_type(trig)
+    ok, detail = _manual_trigger_action(trig)
+    if ok:
+        if action_type == "api":
+            logger.info(f"Manual trigger API {detail} OK | event='{ev.name}'")
+        elif action_type == "timer":
+            logger.info(f"Manual trigger TIMER {detail} OK | event='{ev.name}'")
         else:
-            logger.error(f"Manual trigger POST {trig.buttonURL} FAIL | event='{ev.name}'")
-            print(f"Triggered '{ev.name}' -> {trig.buttonURL} -> FAIL")
+            logger.info(f"Manual trigger POST {detail} OK | event='{ev.name}'")
+        print(f"Triggered '{ev.name}' -> {detail} -> OK")
     else:
-        logger.warning(f"Companion not connected; manual trigger would POST {trig.buttonURL} | event='{ev.name}'")
-        print(f"Companion not connected; would POST {trig.buttonURL}")
+        if action_type == "api":
+            logger.error(f"Manual trigger API FAIL | event='{ev.name}' | {detail}")
+        elif action_type == "timer":
+            logger.error(f"Manual trigger TIMER FAIL | event='{ev.name}' | {detail}")
+        elif detail.startswith("Companion not connected"):
+            logger.warning(f"Companion not connected; manual trigger would POST {getattr(trig, 'buttonURL', '')} | event='{ev.name}'")
+        else:
+            logger.error(f"Manual trigger POST FAIL | event='{ev.name}' | {detail}")
+        print(f"Triggered '{ev.name}' -> {detail} -> FAIL")
 
 
 def main(argv=None):
@@ -504,7 +677,7 @@ def main(argv=None):
     add_p.add_argument("--time", required=True, help="Time HH:MM:SS")
     add_p.add_argument("--repeating", action="store_true", help="Make event repeating")
     add_p.add_argument("--active", action="store_true", help="Set event active (default true)")
-    add_p.add_argument("--trigger", action="append", help="Trigger spec minutes,TYPE,buttonURL (repeatable)")
+    add_p.add_argument("--trigger", action="append", help="Trigger spec minutes,TYPE,buttonURL or JSON object (repeatable)")
 
     remove_p = sub.add_parser("remove", help="Remove an event")
     remove_p.add_argument("ident", help="Event id or name substring")
@@ -517,7 +690,7 @@ def main(argv=None):
     edit_p.add_argument("--time", help="Time HH:MM:SS")
     edit_p.add_argument("--repeating", type=bool, help="Repeating: true/false")
     edit_p.add_argument("--active", type=bool, help="Active: true/false")
-    edit_p.add_argument("--trigger", action="append", help="Trigger spec minutes,TYPE,buttonURL (replaces triggers)")
+    edit_p.add_argument("--trigger", action="append", help="Trigger spec minutes,TYPE,buttonURL or JSON object (replaces triggers)")
 
     debug_p = sub.add_parser("debug", help="Show or set debug mode")
     debug_p.add_argument("action", choices=["show", "on", "off"], help="Action: show, on, off")
@@ -634,13 +807,23 @@ def main(argv=None):
                 due = job.due.strftime("%Y-%m-%d %H:%M:%S")
                 now = datetime.now()
                 secs = int((job.due - now).total_seconds())
-                print(f"{i:3d}: due={due} (+{secs}s) | event=#{getattr(job.event,'id',0)} '{job.event.name}' | trigger={job.trigger_index+1}/{len(job.event.times)} | offset={job.trigger.timer}min | url='{job.trigger.buttonURL}'")
+                action_type = _resolve_trigger_action_type(job.trigger)
+                if action_type == "api":
+                    api = getattr(job.trigger, "api", None) or {}
+                    action_desc = f"api {str(api.get('method') or 'POST').upper()} {str(api.get('path') or '').strip()}".strip()
+                elif action_type == "timer":
+                    timer = getattr(job.trigger, "timer", None) or {}
+                    action_desc = f"timer preset={timer.get('preset')} time={timer.get('time')} apply={bool(timer.get('apply', False))}"
+                else:
+                    action_desc = f"url='{job.trigger.buttonURL}'"
+                print(f"{i:3d}: due={due} (+{secs}s) | event=#{getattr(job.event,'id',0)} '{job.event.name}' | trigger={job.trigger_index+1}/{len(job.event.times)} | offset={job.trigger.timer}min | {action_desc}")
             return 0
 
         # Fall back to reading the persistent snapshot written by the
         # background scheduler process (if available).
         try:
             import json
+
             from pathlib import Path
 
             path = Path.cwd() / "calendar_triggers.json"
@@ -657,7 +840,16 @@ def main(argv=None):
                 # snapshot format may include event_id as 'event_id' or include id in event string
                 event_id = j.get("event_id") or j.get("id") or None
                 eid = f"#{event_id} " if event_id is not None else ""
-                print(f"{i:3d}: due={j['due']} (+{j['seconds_until']}s) | event={eid}'{j['event']}' | trigger_index={j['trigger_index']+1} | offset={j['offset_min']}min | url='{j['url']}'")
+                action_type = str(j.get("actionType") or "companion").lower()
+                if action_type == "api":
+                    api = j.get("api") or {}
+                    action_desc = f"api {str(api.get('method') or 'POST').upper()} {str(api.get('path') or '').strip()}".strip()
+                elif action_type == "timer":
+                    timer = j.get("timer") or {}
+                    action_desc = f"timer preset={timer.get('preset')} time={timer.get('time')} apply={bool(timer.get('apply', False))}"
+                else:
+                    action_desc = f"url='{j.get('url', '')}'"
+                print(f"{i:3d}: due={j['due']} (+{j['seconds_until']}s) | event={eid}'{j['event']}' | trigger_index={j['trigger_index']+1} | offset={j['offset_min']}min | {action_desc}")
             return 0
         except Exception:
             print("Scheduler is not running. No scheduled triggers available.")
@@ -667,16 +859,12 @@ def main(argv=None):
         cfg = utils.get_config()
         events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
         events = storage.load_events(events_file)
-        from package.apps.calendar.models import TimeOfTrigger, TypeofTime, WeekDay
+        from package.apps.calendar.models import WeekDay
         try:
             times = []
             if args.trigger:
                 for spec in args.trigger:
-                    parts = spec.split(",", 2)
-                    minutes = int(parts[0])
-                    typ = TypeofTime[parts[1]]
-                    url = parts[2] if len(parts) > 2 else ""
-                    times.append(TimeOfTrigger(minutes, typ, url))
+                    times.append(_trigger_from_spec(spec))
             from datetime import datetime
             # determine new unique id
             max_id = 0
@@ -733,7 +921,7 @@ def main(argv=None):
         if not ev:
             print("Event not found")
             return 1
-        from package.apps.calendar.models import TimeOfTrigger, TypeofTime, WeekDay
+        from package.apps.calendar.models import WeekDay
         from datetime import datetime
         try:
             if args.name:
@@ -751,11 +939,7 @@ def main(argv=None):
             if args.trigger is not None:
                 times = []
                 for spec in args.trigger:
-                    parts = spec.split(",", 2)
-                    minutes = int(parts[0])
-                    typ = TypeofTime[parts[1]]
-                    url = parts[2] if len(parts) > 2 else ""
-                    times.append(TimeOfTrigger(minutes, typ, url))
+                    times.append(_trigger_from_spec(spec))
                 ev.times = times
             storage.save_events(events, events_file)
             print(f"Updated '{ev.name}'")

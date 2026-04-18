@@ -4,7 +4,6 @@ import time as t
 from datetime import datetime, timedelta
 from typing import List, Optional
 import json
-from pathlib import Path
 import requests
 
 from package.apps.calendar.models import Event, TriggerJob
@@ -16,7 +15,7 @@ _button_templates_cache: dict = {"mtime": None, "labels_by_url": {}}
 
 def _read_button_templates_any() -> list[dict]:
     """Read button_templates.json in either legacy list or tree format."""
-    path = Path.cwd() / "button_templates.json"
+    path = utils.get_project_path("button_templates.json")
     try:
         raw = json.loads(path.read_text(encoding="utf-8") or "[]")
     except Exception:
@@ -43,7 +42,7 @@ def _button_template_effective_url(tpl: dict) -> str:
 
 
 def _get_button_template_labels_by_url() -> dict[str, str]:
-    path = Path.cwd() / "button_templates.json"
+    path = utils.get_project_path("button_templates.json")
     try:
         mtime = path.stat().st_mtime
     except Exception:
@@ -312,7 +311,7 @@ class ClockScheduler:
                     }
                 )
 
-            path = Path.cwd() / "calendar_triggers.json"
+            path = utils.get_project_path("calendar_triggers.json")
             tmp = path.with_suffix(".tmp")
             with tmp.open("w", encoding="utf-8") as f:
                 json.dump(out, f, indent=2)

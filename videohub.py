@@ -398,7 +398,3 @@ class VideohubClient:
         cmd = f"{header}:\n" + "\n".join(lines) + "\n\n"
         self._send(cmd, read_response=False)
 
-    # Minor convenience for future expansion (labels/state parsing)
-    def send_raw(self, payload: str, *, read_response: bool = False) -> Optional[str]:
-        """Send a raw protocol block. Caller must include final blank line."""
-        return self._send(payload, read_response=read_response)

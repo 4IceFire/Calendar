@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import threading
 from typing import Any, Dict, TYPE_CHECKING
-import os
 import re
 import secrets
-import tempfile
+from pathlib import Path
 
+from package.json_cache import read_json, remember_json, write_json
 from package.apps.calendar.storage import DEFAULT_EVENTS_FILE
 import logging
 from logging.handlers import RotatingFileHandler
@@ -19,6 +19,12 @@ CONFIG_FILE = "config.json"
 TIMER_PRESETS_FILE = "timer_presets.json"
 _timer_presets_lock = threading.RLock()
 _TIMER_NAME_UNSET = object()
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def get_project_path(*parts: str) -> Path:
+    """Return an absolute path anchored at the repository root."""
+    return _PROJECT_ROOT.joinpath(*parts)
 
 _defaults = {
     "EVENTS_FILE": DEFAULT_EVENTS_FILE,
@@ -180,19 +186,7 @@ def _normalize_timer_presets_list(presets: list[Any] | None) -> list[Dict[str, A
 
 
 def _atomic_write_json(path: str, data: Any) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix="timer_presets_", suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-        raise
+    write_json(path, data)
 
 
 def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, Any]]:
@@ -203,30 +197,46 @@ def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, Any]]:
     - legacy: JSON array of strings "HH:MM"
     """
     with _timer_presets_lock:
+        defaults = [
+            {"time": "08:15", "name": "Timer 1"},
+            {"time": "08:30", "name": "Timer 2"},
+            {"time": "09:10", "name": "Timer 3"},
+            {"time": "09:30", "name": "Timer 4"},
+        ]
+
+        def _transform(raw: Any) -> tuple[list[Dict[str, Any]], bool]:
+            if not isinstance(raw, list):
+                return [], True
+            normalized = _normalize_timer_presets_list(raw)
+            return normalized, normalized != raw
+
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, list):
-                return []
-            return _normalize_timer_presets_list(data)
-        except FileNotFoundError:
-            # create with defaults
-            defaults = [
-                {"time": "08:15", "name": "Timer 1"},
-                {"time": "08:30", "name": "Timer 2"},
-                {"time": "09:10", "name": "Timer 3"},
-                {"time": "09:30", "name": "Timer 4"},
-            ]
-            save_timer_presets(defaults, path)
-            return defaults
+            presets, changed = read_json(
+                path,
+                default_factory=lambda: list(defaults),
+                create_if_missing=True,
+                transform=_transform,
+            )
         except Exception:
-            return []
+            presets = []
+            changed = False
+
+        if changed:
+            try:
+                write_json(path, presets)
+            except Exception:
+                pass
+        return list(presets)
 
 
 def save_timer_presets(presets: list[Any], path: str = TIMER_PRESETS_FILE) -> None:
     with _timer_presets_lock:
         normalized = _normalize_timer_presets_list(presets)
         _atomic_write_json(path, normalized)
+        try:
+            remember_json(path, normalized)
+        except Exception:
+            pass
 
 
 def update_timer_preset(

@@ -1,4 +1,5 @@
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response
+import copy
 import logging
 import threading
 import time
@@ -17,6 +18,8 @@ import json
 import re
 from datetime import datetime, timedelta
 
+from package.json_cache import read_json, write_json
+
 from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -25,9 +28,11 @@ from package.apps.calendar.transcription_service import TranscriptionService
 
 # --- Home overview state (best-effort, in-memory) ---
 _home_overview_lock = threading.Lock()
+_home_overview_cache_lock = threading.Lock()
 _home_last_timer_preset: dict = {'preset': None, 'name': None, 'time': None, 'ts': None}
 _home_last_videohub_preset: dict = {'id': None, 'ts': None}
 _home_last_videohub_route: dict = {'output': None, 'input': None, 'monitor': None, 'ts': None}
+_home_overview_cache: dict = {'stamp': None, 'payload': None}
 
 
 def _home_state_path() -> Path:
@@ -51,11 +56,8 @@ def _home_state_path() -> Path:
 def _home_state_load() -> dict:
     p = _home_state_path()
     try:
-        if not p.exists():
-            return {}
-        raw = p.read_text(encoding='utf-8')
-        obj = json.loads(raw or '{}')
-        return obj if isinstance(obj, dict) else {}
+        data, _ = read_json(p, default_factory=dict, create_if_missing=False)
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -68,9 +70,7 @@ def _home_state_save(payload: dict) -> None:
         pass
 
     try:
-        tmp = p.with_suffix('.tmp')
-        tmp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-        tmp.replace(p)
+        write_json(p, payload)
     except Exception:
         try:
             p.write_text(json.dumps(payload, indent=2), encoding='utf-8')
@@ -904,6 +904,29 @@ def _set_role_idle_timeout_override(role_id: int, raw: str | None) -> None:
         conn.close()
 
 
+def _effective_idle_timeout_minutes_for_current_user() -> int | None:
+    """Return the current user's idle timeout, or None when idle logout is off."""
+    cfg = _auth_cfg()
+    try:
+        idle_enabled = _cfg_bool(cfg, 'auth_idle_timeout_enabled', True)
+    except Exception:
+        idle_enabled = True
+    if not idle_enabled:
+        return None
+
+    try:
+        global_minutes = _cfg_int(cfg, 'auth_idle_timeout_minutes', 2, min_value=1, max_value=24 * 60)
+    except Exception:
+        global_minutes = 2
+
+    role_minutes = _role_idle_timeout_override_minutes(getattr(current_user, 'role_id', None))
+    if role_minutes is None:
+        return global_minutes
+    if role_minutes <= 0:
+        return None
+    return max(1, min(int(role_minutes), 24 * 60))
+
+
 class _User(UserMixin):
     def __init__(self, row: sqlite3.Row):
         self.id = int(row['id'])
@@ -1004,19 +1027,9 @@ def _auth_gate():
         return redirect(url_for('login_page', next=nxt))
 
     # Idle timeout
-    cfg = _auth_cfg()
-    try:
-        idle_enabled = bool(cfg.get('auth_idle_timeout_enabled', True))
-    except Exception:
-        idle_enabled = True
-    try:
-        idle_minutes = int(cfg.get('auth_idle_timeout_minutes', 2))
-    except Exception:
-        idle_minutes = 2
-    idle_minutes = max(1, min(idle_minutes, 24 * 60))
-
-    if idle_enabled:
-        now = int(time.time())
+    now = int(time.time())
+    idle_minutes = _effective_idle_timeout_minutes_for_current_user()
+    if idle_minutes is not None:
         last = int(session.get('_last_activity') or 0)
         if last and (now - last) > (idle_minutes * 60):
             try:
@@ -1027,9 +1040,9 @@ def _auth_gate():
             session.clear()
             return redirect(url_for('login_page', timeout=1))
 
-        # Don't let background heartbeat requests keep the session alive.
-        if p != '/auth/ping':
-            session['_last_activity'] = now
+    # Don't let background heartbeat requests keep the session alive.
+    if p != '/auth/ping':
+        session['_last_activity'] = now
 
     # Auth heartbeat endpoints: allow without page-key authorization.
     # - /auth/ping: detects timeout and redirects via the idle check above
@@ -1397,10 +1410,14 @@ _server_lock = threading.Lock()
 _companion_status_cache = {'ts': 0.0, 'connected': False}
 _propresenter_status_cache = {'ts': 0.0, 'connected': False}
 _videohub_status_cache = {'ts': 0.0, 'connected': False}
+_status_snapshot_cache = {'ts': 0.0, 'payload': None}
 _videohub_labels_cache = {'ts': 0.0, 'payload': None}
 _videohub_state_cache = {'ts': 0.0, 'payload': None}
 _status_cache_lock = threading.Lock()
+_status_refresher_lock = threading.Lock()
+_status_refresher_started = False
 _STATUS_CACHE_TTL_SECONDS = 2.0
+_STATUS_REFRESH_INTERVAL_SECONDS = 5.0
 _VIDEOHUB_LABELS_CACHE_TTL_SECONDS = 10.0
 _VIDEOHUB_STATE_CACHE_TTL_SECONDS = 5.0
 
@@ -1452,6 +1469,157 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
     except Exception:
         pass
 
+
+def _probe_companion_status(cfg: dict) -> dict:
+    connected = False
+    detail = ''
+    try:
+        c = utils.get_companion()
+        if c is None:
+            connected = False
+        else:
+            try:
+                if hasattr(c, 'check_connection'):
+                    connected = bool(c.check_connection())
+                else:
+                    connected = bool(getattr(c, 'connected', False))
+            except Exception:
+                connected = bool(getattr(c, 'connected', False))
+    except Exception:
+        connected = False
+
+    try:
+        ip = str(cfg.get('companion_ip', '')).strip()
+        port = int(cfg.get('companion_port', 0))
+        detail = f"{ip}:{port}" if ip and port else (ip or '')
+    except Exception:
+        detail = ''
+
+    return {
+        'connected': bool(connected),
+        'detail': detail,
+        'checked_at': time.time(),
+    }
+
+
+def _probe_propresenter_status(cfg: dict) -> dict:
+    connected = False
+    detail = ''
+    try:
+        if ProPresentor is None:
+            connected = False
+        else:
+            ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+            try:
+                port = int(cfg.get('propresenter_port', 1025))
+            except Exception:
+                port = 1025
+            pp = ProPresentor(ip, port, timeout=1.0, verify_on_init=False, debug=False)
+            connected = bool(pp.check_connection())
+            detail = f"{ip}:{port}" if ip and port else ''
+    except Exception:
+        connected = False
+        detail = ''
+
+    return {
+        'connected': bool(connected),
+        'detail': detail,
+        'checked_at': time.time(),
+    }
+
+
+def _probe_videohub_status(cfg: dict) -> dict:
+    connected = False
+    detail = ''
+    try:
+        vh = _get_videohub_client_from_config()
+        if vh is None:
+            connected = False
+        else:
+            connected = bool(vh.ping())
+    except Exception:
+        connected = False
+
+    try:
+        ip = str(cfg.get('videohub_ip', '')).strip()
+        port = int(cfg.get('videohub_port', 0))
+        detail = f"{ip}:{port}" if ip and port else (ip or '')
+    except Exception:
+        detail = ''
+
+    return {
+        'connected': bool(connected),
+        'detail': detail,
+        'checked_at': time.time(),
+    }
+
+
+def _refresh_status_snapshot() -> dict:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    companion = _probe_companion_status(cfg)
+    propresenter = _probe_propresenter_status(cfg)
+    videohub = _probe_videohub_status(cfg)
+    now = time.time()
+
+    payload = {
+        'ok': True,
+        'ts': now,
+        'companion': companion,
+        'propresenter': propresenter,
+        'videohub': videohub,
+    }
+
+    with _status_cache_lock:
+        _status_snapshot_cache['ts'] = now
+        _status_snapshot_cache['payload'] = payload
+        _companion_status_cache['ts'] = companion.get('checked_at', now)
+        _companion_status_cache['connected'] = bool(companion.get('connected', False))
+        _propresenter_status_cache['ts'] = propresenter.get('checked_at', now)
+        _propresenter_status_cache['connected'] = bool(propresenter.get('connected', False))
+        _videohub_status_cache['ts'] = videohub.get('checked_at', now)
+        _videohub_status_cache['connected'] = bool(videohub.get('connected', False))
+
+    _log_connectivity_change('companion', bool(companion.get('connected', False)), detail=str(companion.get('detail') or ''))
+    _log_connectivity_change('propresenter', bool(propresenter.get('connected', False)), detail=str(propresenter.get('detail') or ''))
+    _log_connectivity_change('videohub', bool(videohub.get('connected', False)), detail=str(videohub.get('detail') or ''))
+
+    return payload
+
+
+def _get_status_snapshot() -> dict:
+    now = time.time()
+    with _status_cache_lock:
+        payload = _status_snapshot_cache.get('payload')
+        ts = float(_status_snapshot_cache.get('ts', 0.0) or 0.0)
+
+    if isinstance(payload, dict):
+        if (now - ts) <= (_STATUS_REFRESH_INTERVAL_SECONDS * 2.0):
+            return payload
+
+    return _refresh_status_snapshot()
+
+
+def _status_refresher_loop() -> None:
+    while True:
+        time.sleep(_STATUS_REFRESH_INTERVAL_SECONDS)
+        try:
+            _refresh_status_snapshot()
+        except Exception:
+            pass
+
+
+def _ensure_status_refresher_started() -> None:
+    global _status_refresher_started
+    with _status_refresher_lock:
+        if _status_refresher_started:
+            return
+        _status_refresher_started = True
+        threading.Thread(target=_status_refresher_loop, daemon=True).start()
+
 # Upcoming trigger cache (to avoid recomputing schedule for each client refresh)
 _upcoming_triggers_cache = {'ts': 0.0, 'events_file': '', 'limit': None, 'payload': None}
 _UPCOMING_TRIGGERS_TTL_SECONDS = 1.0
@@ -1473,6 +1641,14 @@ def start_http_server(host: str, port: int) -> None:
         # start apps after the server is up
         try:
             _start_all_apps()
+        except Exception:
+            pass
+        try:
+            _refresh_status_snapshot()
+        except Exception:
+            pass
+        try:
+            _ensure_status_refresher_started()
         except Exception:
             pass
 
@@ -1734,6 +1910,13 @@ def admin_roles_page():
                     role_name = ''
 
                 if role_name != 'Admin':
+                    if 'auth_idle_timeout_minutes_override_role' in request.form:
+                        try:
+                            _set_role_idle_timeout_override(rid, request.form.get('auth_idle_timeout_minutes_override_role'))
+                            _audit('role_idle_timeout_override_update', f'role_id={rid}')
+                        except Exception:
+                            pass
+
                     keys = request.form.getlist('page_keys')
                     try:
                         _set_role_pages(rid, [str(k) for k in keys])
@@ -1772,7 +1955,7 @@ def admin_roles_page():
     conn = _db()
     try:
         roles = conn.execute(
-            'SELECT id,name,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets FROM roles ORDER BY lower(name)'
+            'SELECT id,name,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets FROM roles ORDER BY lower(name)'
         ).fetchall()
         role_pages = conn.execute('SELECT role_id,page_key FROM role_pages').fetchall()
     finally:
@@ -1858,8 +2041,15 @@ def api_admin_role_update(role_id: int):
     except Exception:
         role_name = ''
 
-    # Admin role is allow-all and not editable for page keys/allow-lists.
+    # Admin role is allow-all and not editable here.
     if role_name != 'Admin':
+        if 'auth_idle_timeout_minutes_override_role' in data:
+            try:
+                _set_role_idle_timeout_override(rid, data.get('auth_idle_timeout_minutes_override_role'))
+                _audit('role_idle_timeout_override_update', f'role_id={rid}')
+            except Exception:
+                pass
+
         try:
             keys = data.get('page_keys')
             if not isinstance(keys, list):
@@ -2173,13 +2363,7 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
     # Map buttonURL -> template info (for nicer display)
     tpl_by_url: dict[str, dict] = {}
     try:
-        tree, btn_changed = _load_button_templates_tree()
-        if btn_changed:
-            try:
-                _save_button_templates_tree(tree)
-            except Exception:
-                pass
-        arr = _flatten_button_templates_tree(tree)
+        tree, arr, _ = _load_button_templates_bundle()
         for tpl in arr or []:
             if not isinstance(tpl, dict):
                 continue
@@ -2513,24 +2697,34 @@ def calendar_edit_page(ident: int):
 
 def _read_json_file(p: Path):
     try:
-        if not p.exists():
-            return []
-        return json.loads(p.read_text(encoding='utf-8') or '[]')
+        data, _ = read_json(p, default_factory=list)
+        return data
     except Exception:
         return []
 
 
 def _write_json_file(p: Path, data):
-    try:
-        p.write_text(json.dumps(data, indent=2), encoding='utf-8')
-        return True
-    except Exception:
-        return False
+    return bool(write_json(p, data))
 
 
 _videohub_rooms_lock = threading.Lock()
+_templates_cache_lock = threading.RLock()
 _VIDEOHUB_ROOM_ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
 _VIDEOHUB_ROOM_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+_button_templates_cache = {'snapshot': None, 'tree': None, 'buttons': None}
+_trigger_templates_cache = {'snapshot': None, 'triggers': None}
+_videohub_rooms_cache = {'snapshot': None, 'config': None}
+
+
+def _path_snapshot(p: Path) -> tuple[int, int] | None:
+    try:
+        st = p.stat()
+    except Exception:
+        return None
+    try:
+        return (int(st.st_mtime_ns), int(st.st_size))
+    except Exception:
+        return None
 
 
 def _videohub_rooms_config_path() -> Path:
@@ -2644,25 +2838,48 @@ def _normalize_videohub_rooms_config(raw) -> dict:
 def _load_videohub_rooms_config() -> dict:
     p = _videohub_rooms_config_path()
     with _videohub_rooms_lock:
+        sig = _path_snapshot(p)
+        with _templates_cache_lock:
+            if sig is not None and _videohub_rooms_cache.get('snapshot') == sig:
+                cached = _videohub_rooms_cache.get('config')
+                if isinstance(cached, dict):
+                    return copy.deepcopy(cached)
+
+        def _transform(raw):
+            normalized = _normalize_videohub_rooms_config(raw)
+            return normalized, normalized != raw
+
         try:
-            if not p.exists():
-                d = _default_videohub_rooms_config()
-                p.write_text(json.dumps(d, indent=2), encoding='utf-8')
-                return d
-            raw = json.loads(p.read_text(encoding='utf-8') or '{}')
+            cfg, changed = read_json(
+                p,
+                default_factory=_default_videohub_rooms_config,
+                create_if_missing=True,
+                transform=_transform,
+            )
         except Exception:
             return _default_videohub_rooms_config()
-    return _normalize_videohub_rooms_config(raw)
+
+        if changed:
+            try:
+                _save_videohub_rooms_config(cfg)
+            except Exception:
+                pass
+        else:
+            with _templates_cache_lock:
+                _videohub_rooms_cache['snapshot'] = _path_snapshot(p)
+                _videohub_rooms_cache['config'] = copy.deepcopy(cfg)
+        return cfg
 
 
 def _save_videohub_rooms_config(data: dict) -> dict:
     p = _videohub_rooms_config_path()
     normalized = _normalize_videohub_rooms_config(data)
     with _videohub_rooms_lock:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + '.tmp')
-        tmp.write_text(json.dumps(normalized, indent=2), encoding='utf-8')
-        tmp.replace(p)
+        if not write_json(p, normalized):
+            return normalized
+        with _templates_cache_lock:
+            _videohub_rooms_cache['snapshot'] = _path_snapshot(p)
+            _videohub_rooms_cache['config'] = copy.deepcopy(normalized)
     return normalized
 
 
@@ -2805,14 +3022,8 @@ def _uuid4_str() -> str:
         return str(int(time.time() * 1000))
 
 
-def _load_button_templates_tree() -> tuple[dict, bool]:
-    """Load button templates as a folder tree (with backward compatible migration).
-
-    File formats supported:
-    - Legacy: list[template]
-    - Current: {version, folders, templates}
-    """
-    raw = _read_json_file(BUTTON_TEMPLATES)
+def _normalize_button_templates_tree(raw) -> tuple[dict, bool]:
+    """Normalize button templates into the current tree structure."""
     changed = False
 
     if isinstance(raw, dict):
@@ -2827,7 +3038,6 @@ def _load_button_templates_tree() -> tuple[dict, bool]:
         templates = []
         changed = True
 
-    # Normalize folders
     norm_folders: list[dict] = []
     folder_ids: set[str] = set()
     for i, f in enumerate(folders):
@@ -2849,7 +3059,6 @@ def _load_button_templates_tree() -> tuple[dict, bool]:
             changed = True
         norm_folders.append({'id': fid, 'name': name, 'parentId': parent_id, 'order': order})
 
-    # Normalize templates
     norm_templates: list[dict] = []
     for i, t in enumerate(templates):
         if not isinstance(t, dict):
@@ -2869,18 +3078,8 @@ def _load_button_templates_tree() -> tuple[dict, bool]:
         except Exception:
             order = i
             changed = True
-        norm_templates.append(
-            {
-                'id': tid,
-                'label': label,
-                'pattern': pattern,
-                'buttonURL': url,
-                'folderId': folder_id,
-                'order': order,
-            }
-        )
+        norm_templates.append({'id': tid, 'label': label, 'pattern': pattern, 'buttonURL': url, 'folderId': folder_id, 'order': order})
 
-    # Ensure folder references are valid (drop to root if missing)
     folder_ids = {f['id'] for f in norm_folders}
     for t in norm_templates:
         if t.get('folderId') and t['folderId'] not in folder_ids:
@@ -2892,7 +3091,39 @@ def _load_button_templates_tree() -> tuple[dict, bool]:
             f['parentId'] = None
             changed = True
 
-    tree = {'version': 2, 'folders': norm_folders, 'templates': norm_templates}
+    return {'version': 2, 'folders': norm_folders, 'templates': norm_templates}, changed
+
+
+def _load_button_templates_bundle() -> tuple[dict, list[dict], bool]:
+    sig = _path_snapshot(BUTTON_TEMPLATES)
+    with _templates_cache_lock:
+        if sig is not None and _button_templates_cache.get('snapshot') == sig:
+            cached_tree = _button_templates_cache.get('tree')
+            cached_buttons = _button_templates_cache.get('buttons')
+            if isinstance(cached_tree, dict) and isinstance(cached_buttons, list):
+                return copy.deepcopy(cached_tree), copy.deepcopy(cached_buttons), False
+
+    tree, changed = read_json(
+        BUTTON_TEMPLATES,
+        default_factory=lambda: {'version': 2, 'folders': [], 'templates': []},
+        create_if_missing=True,
+        transform=_normalize_button_templates_tree,
+    )
+    saved = True
+    if changed:
+        saved = _write_json_file(BUTTON_TEMPLATES, tree)
+
+    buttons = _flatten_button_templates_tree(tree)
+    if saved:
+        with _templates_cache_lock:
+            _button_templates_cache['snapshot'] = _path_snapshot(BUTTON_TEMPLATES)
+            _button_templates_cache['tree'] = copy.deepcopy(tree)
+            _button_templates_cache['buttons'] = copy.deepcopy(buttons)
+    return tree, buttons, changed
+
+
+def _load_button_templates_tree() -> tuple[dict, bool]:
+    tree, _, changed = _load_button_templates_bundle()
     return tree, changed
 
 
@@ -2904,7 +3135,14 @@ def _save_button_templates_tree(tree: dict) -> bool:
         'folders': tree.get('folders') if isinstance(tree.get('folders'), list) else [],
         'templates': tree.get('templates') if isinstance(tree.get('templates'), list) else [],
     }
-    return _write_json_file(BUTTON_TEMPLATES, out)
+    ok = _write_json_file(BUTTON_TEMPLATES, out)
+    if ok:
+        buttons = _flatten_button_templates_tree(out)
+        with _templates_cache_lock:
+            _button_templates_cache['snapshot'] = _path_snapshot(BUTTON_TEMPLATES)
+            _button_templates_cache['tree'] = copy.deepcopy(out)
+            _button_templates_cache['buttons'] = copy.deepcopy(buttons)
+    return ok
 
 
 def _flatten_button_templates_tree(tree: dict) -> list[dict]:
@@ -2946,6 +3184,84 @@ def _flatten_button_templates_tree(tree: dict) -> list[dict]:
     return out
 
 
+def _normalize_trigger_templates_list(raw) -> tuple[list[dict], bool]:
+    if not isinstance(raw, list):
+        raw = []
+    normalized: list[dict] = []
+    changed = False
+    for t in raw:
+        if not isinstance(t, dict):
+            normalized.append(t)
+            continue
+        if not str(t.get('id') or '').strip():
+            t = dict(t)
+            t['id'] = _uuid4_str()
+            changed = True
+        if 'times' not in t and 'spec' in t:
+            val = t.get('spec')
+            if isinstance(val, str):
+                try:
+                    val_parsed = json.loads(val)
+                except Exception:
+                    val_parsed = val
+            else:
+                val_parsed = val
+            t['times'] = val_parsed
+            t.pop('spec', None)
+            changed = True
+
+        times = _coerce_trigger_times_list(t.get('times'))
+        norm_times = []
+        for spec in times:
+            if not isinstance(spec, dict):
+                norm_times.append(spec)
+                continue
+            if not str(spec.get('uid') or '').strip():
+                spec = dict(spec)
+                spec['uid'] = _uuid4_str()
+                changed = True
+            norm_times.append(spec)
+        if t.get('times') != norm_times:
+            t = dict(t)
+            t['times'] = norm_times
+            changed = True
+        normalized.append(t)
+    return normalized, changed
+
+
+def _load_trigger_templates_list() -> tuple[list[dict], bool]:
+    sig = _path_snapshot(TRIGGER_TEMPLATES)
+    with _templates_cache_lock:
+        if sig is not None and _trigger_templates_cache.get('snapshot') == sig:
+            cached = _trigger_templates_cache.get('triggers')
+            if isinstance(cached, list):
+                return copy.deepcopy(cached), False
+
+    trigs, changed = read_json(
+        TRIGGER_TEMPLATES,
+        default_factory=list,
+        create_if_missing=True,
+        transform=_normalize_trigger_templates_list,
+    )
+    saved = True
+    if changed:
+        saved = _save_trigger_templates_list(trigs)
+    if saved:
+        with _templates_cache_lock:
+            _trigger_templates_cache['snapshot'] = _path_snapshot(TRIGGER_TEMPLATES)
+            _trigger_templates_cache['triggers'] = copy.deepcopy(trigs)
+    return trigs, changed
+
+
+def _save_trigger_templates_list(trigs: list[dict]) -> bool:
+    ok = _write_json_file(TRIGGER_TEMPLATES, trigs)
+    if ok:
+        with _templates_cache_lock:
+            _trigger_templates_cache['snapshot'] = _path_snapshot(TRIGGER_TEMPLATES)
+            _trigger_templates_cache['triggers'] = copy.deepcopy(trigs)
+    return ok
+
+
 def _replace_button_url_everywhere(old_url: str, new_url: str) -> dict:
     """Best-effort replacement across stored data files."""
     out = {
@@ -2960,7 +3276,7 @@ def _replace_button_url_everywhere(old_url: str, new_url: str) -> dict:
     old_pattern = _extract_pattern_from_button_url(old_url)
     # 1) trigger_templates.json
     try:
-        trigs = _read_json_file(TRIGGER_TEMPLATES)
+        trigs, _ = _load_trigger_templates_list()
         changed = False
         replaced = 0
         normalized = []
@@ -2984,7 +3300,7 @@ def _replace_button_url_everywhere(old_url: str, new_url: str) -> dict:
             t2.pop('spec', None)
             normalized.append(t2)
         if changed:
-            _write_json_file(TRIGGER_TEMPLATES, normalized)
+            _save_trigger_templates_list(normalized)
         out['trigger_templates_updated'] = replaced
     except Exception:
         pass
@@ -3061,61 +3377,8 @@ def _replace_button_url_everywhere(old_url: str, new_url: str) -> dict:
 
 @app.route('/api/templates')
 def api_get_templates():
-    tree, btn_changed = _load_button_templates_tree()
-    if btn_changed:
-        try:
-            _save_button_templates_tree(tree)
-        except Exception:
-            pass
-    btns = _flatten_button_templates_tree(tree)
-
-    trigs = _read_json_file(TRIGGER_TEMPLATES)
-    # normalize older 'spec' entries to 'times'
-    normalized = []
-    changed = False
-    for t in trigs:
-        if not isinstance(t, dict):
-            normalized.append(t); continue
-        if not str(t.get('id') or '').strip():
-            t = dict(t)
-            t['id'] = _uuid4_str()
-            changed = True
-        if 'times' not in t and 'spec' in t:
-            val = t.get('spec')
-            if isinstance(val, str):
-                try:
-                    val_parsed = json.loads(val)
-                except Exception:
-                    val_parsed = val
-            else:
-                val_parsed = val
-            t['times'] = val_parsed
-            t.pop('spec', None)
-            changed = True
-
-        times = _coerce_trigger_times_list(t.get('times'))
-        norm_times = []
-        for spec in times:
-            if not isinstance(spec, dict):
-                norm_times.append(spec)
-                continue
-            if not str(spec.get('uid') or '').strip():
-                spec = dict(spec)
-                spec['uid'] = _uuid4_str()
-                changed = True
-            norm_times.append(spec)
-        if t.get('times') != norm_times:
-            t = dict(t)
-            t['times'] = norm_times
-            changed = True
-        normalized.append(t)
-    trigs = normalized
-    # if we normalized old entries, persist the normalized form back to file
-    if changed:
-        try:
-            _write_json_file(TRIGGER_TEMPLATES, trigs)
-        except Exception:
-            pass
+    tree, btns, _ = _load_button_templates_bundle()
+    trigs, _ = _load_trigger_templates_list()
     return jsonify({'buttons': btns, 'buttons_tree': tree, 'triggers': trigs})
 
 
@@ -3131,7 +3394,7 @@ def api_add_button_template():
     if not re.match(r'^\d+\/\d+\/\d+$', pattern):
         return jsonify({'ok': False, 'error': 'pattern must be like "1/0/1" (three integers separated by "/")'}), 400
 
-    tree, changed = _load_button_templates_tree()
+    tree, _ = _load_button_templates_tree()
     arr = tree.get('templates') if isinstance(tree.get('templates'), list) else []
     button_url = f"location/{pattern}/press"
     dup = _find_duplicate_button_template(arr, url=button_url, pattern=pattern)
@@ -3160,7 +3423,7 @@ def api_add_button_template():
 @app.route('/api/templates/button/<tpl_id>', methods=['DELETE'])
 def api_delete_button_template(tpl_id: str):
     tpl_id = str(tpl_id or '').strip()
-    tree, changed = _load_button_templates_tree()
+    tree, _ = _load_button_templates_tree()
     arr = tree.get('templates') if isinstance(tree.get('templates'), list) else []
     idx = None
     for i, t in enumerate(arr):
@@ -3199,7 +3462,7 @@ def api_update_button_template(tpl_id: str):
     new_url = f'location/{pattern}/press'
 
     tpl_id = str(tpl_id or '').strip()
-    tree, changed = _load_button_templates_tree()
+    tree, _ = _load_button_templates_tree()
     arr = tree.get('templates') if isinstance(tree.get('templates'), list) else []
     idx = None
     for i, t in enumerate(arr):
@@ -3243,12 +3506,7 @@ def api_update_button_template(tpl_id: str):
 
 @app.route('/api/templates/buttons_tree', methods=['GET'])
 def api_get_buttons_tree():
-    tree, changed = _load_button_templates_tree()
-    if changed:
-        try:
-            _save_button_templates_tree(tree)
-        except Exception:
-            pass
+    tree, _ = _load_button_templates_tree()
     return jsonify({'ok': True, 'tree': tree})
 
 
@@ -3306,9 +3564,9 @@ def api_add_trigger_template():
                 t3 = dict(t3)
                 t3['uid'] = _uuid4_str()
             normalized_times.append(t3)
-    arr = _read_json_file(TRIGGER_TEMPLATES)
+    arr, _ = _load_trigger_templates_list()
     arr.append({'id': _uuid4_str(), 'label': label, 'times': normalized_times})
-    ok = _write_json_file(TRIGGER_TEMPLATES, arr)
+    ok = _save_trigger_templates_list(arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
     return jsonify({'ok': True, 'template': arr[-1]})
@@ -3316,11 +3574,11 @@ def api_add_trigger_template():
 
 @app.route('/api/templates/trigger/<int:idx>', methods=['DELETE'])
 def api_delete_trigger_template(idx: int):
-    arr = _read_json_file(TRIGGER_TEMPLATES)
+    arr, _ = _load_trigger_templates_list()
     if idx < 0 or idx >= len(arr):
         return jsonify({'ok': False, 'error': 'index out of range'}), 404
     removed = arr.pop(idx)
-    ok = _write_json_file(TRIGGER_TEMPLATES, arr)
+    ok = _save_trigger_templates_list(arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
     return jsonify({'ok': True, 'removed': removed})
@@ -3363,13 +3621,13 @@ def api_update_trigger_template(idx: int):
                 t3 = dict(t3)
                 t3['uid'] = _uuid4_str()
             normalized_times.append(t3)
-    arr = _read_json_file(TRIGGER_TEMPLATES)
+    arr, _ = _load_trigger_templates_list()
     if idx < 0 or idx >= len(arr):
         return jsonify({'ok': False, 'error': 'index out of range'}), 404
     prev = arr[idx] if isinstance(arr[idx], dict) else {}
     tpl_id = str(prev.get('id') or '').strip() or _uuid4_str()
     arr[idx] = {'id': tpl_id, 'label': label, 'times': normalized_times}
-    ok = _write_json_file(TRIGGER_TEMPLATES, arr)
+    ok = _save_trigger_templates_list(arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
     return jsonify({'ok': True, 'template': arr[idx]})
@@ -3422,133 +3680,31 @@ def api_ui_events():
 
 @app.route('/api/companion_status')
 def companion_status():
-    # Cache to prevent N clients polling every 10s from causing N blocking
-    # network probes at the same moment.
-    now = time.time()
-    with _status_cache_lock:
-        if (now - float(_companion_status_cache.get('ts', 0.0))) < _STATUS_CACHE_TTL_SECONDS:
-            return jsonify({'connected': bool(_companion_status_cache.get('connected', False))})
-
-    c = utils.get_companion()
-    status = False
-    try:
-        if c is None:
-            status = False
-        else:
-            # actively check connectivity if possible to return an up-to-date result
-            try:
-                if hasattr(c, 'check_connection'):
-                    status = bool(c.check_connection())
-                else:
-                    status = bool(getattr(c, 'connected', False))
-            except Exception:
-                # fall back to stored flag
-                status = bool(getattr(c, 'connected', False))
-    except Exception:
-        status = False
-
-    with _status_cache_lock:
-        _companion_status_cache['ts'] = now
-        _companion_status_cache['connected'] = bool(status)
-
-    # Log only on ONLINE/OFFLINE transitions.
-    try:
-        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
-    except Exception:
-        cfg = {}
-    try:
-        ip = str(cfg.get('companion_ip', '')).strip()
-        port = int(cfg.get('companion_port', 0))
-        detail = f"{ip}:{port}" if ip and port else (ip or '')
-    except Exception:
-        detail = ''
-    _log_connectivity_change('companion', bool(status), detail=detail)
-
-    return jsonify({'connected': status})
+    snapshot = _get_status_snapshot()
+    companion = snapshot.get('companion') if isinstance(snapshot, dict) else {}
+    return jsonify({'connected': bool(companion.get('connected', False))})
 
 
 @app.route('/api/propresenter_status')
 def propresenter_status():
-    """Lightweight ProPresenter connectivity check for the UI indicator.
-    """
-    now = time.time()
-    with _status_cache_lock:
-        if (now - float(_propresenter_status_cache.get('ts', 0.0))) < _STATUS_CACHE_TTL_SECONDS:
-            return jsonify({'connected': bool(_propresenter_status_cache.get('connected', False))})
-
-    status = False
-    try:
-        if ProPresentor is None:
-            status = False
-        else:
-            try:
-                cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
-            except Exception:
-                cfg = {}
-
-            ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
-            try:
-                port = int(cfg.get('propresenter_port', 1025))
-            except Exception:
-                port = 1025
-
-            # Keep this fast; it's polled periodically.
-            pp = ProPresentor(ip, port, timeout=1.0, verify_on_init=False, debug=False)
-            status = bool(pp.check_connection())
-    except Exception:
-        status = False
-
-    with _status_cache_lock:
-        _propresenter_status_cache['ts'] = now
-        _propresenter_status_cache['connected'] = bool(status)
-
-    try:
-        detail = f"{ip}:{port}" if ip and port else ''
-    except Exception:
-        detail = ''
-    _log_connectivity_change('propresenter', bool(status), detail=detail)
-
-    return jsonify({'connected': status})
+    """Lightweight ProPresenter connectivity check for the UI indicator."""
+    snapshot = _get_status_snapshot()
+    propresenter = snapshot.get('propresenter') if isinstance(snapshot, dict) else {}
+    return jsonify({'connected': bool(propresenter.get('connected', False))})
 
 
 @app.route('/api/videohub_status')
 def videohub_status():
-    """Lightweight VideoHub connectivity check for the UI indicator.
+    """Lightweight VideoHub connectivity check for the UI indicator."""
+    snapshot = _get_status_snapshot()
+    videohub = snapshot.get('videohub') if isinstance(snapshot, dict) else {}
+    return jsonify({'connected': bool(videohub.get('connected', False))})
 
-    Uses the same caching strategy as the other status endpoints.
-    """
-    now = time.time()
-    with _status_cache_lock:
-        if (now - float(_videohub_status_cache.get('ts', 0.0))) < _STATUS_CACHE_TTL_SECONDS:
-            return jsonify({'connected': bool(_videohub_status_cache.get('connected', False))})
 
-    status = False
-    try:
-        vh = _get_videohub_client_from_config()
-        if vh is None:
-            status = False
-        else:
-            status = bool(vh.ping())
-    except Exception:
-        status = False
-
-    with _status_cache_lock:
-        _videohub_status_cache['ts'] = now
-        _videohub_status_cache['connected'] = bool(status)
-
-    try:
-        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
-    except Exception:
-        cfg = {}
-    try:
-        ip = str(cfg.get('videohub_ip', '')).strip()
-        port = int(cfg.get('videohub_port', 0))
-        detail = f"{ip}:{port}" if ip and port else (ip or '')
-    except Exception:
-        detail = ''
-    _log_connectivity_change('videohub', bool(status), detail=detail)
-
-    return jsonify({'connected': bool(status)})
+@app.route('/api/status/summary')
+def api_status_summary():
+    """Return a consolidated connectivity snapshot for the top navbar."""
+    return jsonify(_get_status_snapshot())
 
 
 @app.route('/api/config', methods=['GET'])
@@ -4347,12 +4503,6 @@ def api_home_overview():
     Best-effort and intentionally minimal.
     """
 
-    # Timers
-    try:
-        timer_presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
-    except Exception:
-        timer_presets = []
-
     # Sync from disk first so multi-process deployments stay consistent.
     try:
         _home_state_sync_from_disk()
@@ -4363,6 +4513,50 @@ def api_home_overview():
         last_timer = dict(_home_last_timer_preset)
         last_vh = dict(_home_last_videohub_preset)
         last_vh_route = dict(_home_last_videohub_route)
+
+    try:
+        timer_presets_path = Path(str(getattr(utils, 'TIMER_PRESETS_FILE', 'timer_presets.json')))
+    except Exception:
+        timer_presets_path = Path('timer_presets.json')
+
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+
+    try:
+        videohub_presets_path = Path(str(cfg.get('videohub_presets_file', 'videohub_presets.json')))
+    except Exception:
+        videohub_presets_path = Path('videohub_presets.json')
+
+    cache_stamp = (
+        _path_snapshot(timer_presets_path),
+        _path_snapshot(_home_state_path()),
+        _path_snapshot(videohub_presets_path),
+        last_timer.get('preset'),
+        last_timer.get('name'),
+        last_timer.get('time'),
+        last_timer.get('ts'),
+        last_vh.get('id'),
+        last_vh.get('ts'),
+        last_vh_route.get('output'),
+        last_vh_route.get('input'),
+        last_vh_route.get('monitor'),
+        last_vh_route.get('ts'),
+    )
+
+    with _home_overview_cache_lock:
+        cached = _home_overview_cache.get('payload')
+        if _home_overview_cache.get('stamp') == cache_stamp and isinstance(cached, dict):
+            payload = dict(cached)
+            payload['ts'] = time.time()
+            return jsonify(payload)
+
+    # Timers
+    try:
+        timer_presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        timer_presets = []
 
     def _timer_info(n: int):
         try:
@@ -4453,7 +4647,11 @@ def api_home_overview():
     except Exception:
         pass
 
-    return jsonify({'ok': True, 'timers': timers_payload, 'videohub': videohub_payload, 'ts': time.time()})
+    payload = {'ok': True, 'timers': timers_payload, 'videohub': videohub_payload, 'ts': time.time()}
+    with _home_overview_cache_lock:
+        _home_overview_cache['stamp'] = cache_stamp
+        _home_overview_cache['payload'] = payload
+    return jsonify(payload)
 
 
 @app.route('/api/console/logs', methods=['GET'])
@@ -5502,16 +5700,28 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
     except Exception:
         presses = []
 
-    # We don't yet know the ProPresenter timer id here; use a placeholder.
-    # If ProPresenter is available, we'll re-fire using the real timer id
-    # after computing pp_timer_id to keep cancellation semantics consistent.
-    press_info = _fire_timer_button_presses_now(
-        pp_timer_id=-1,
-        preset_number=int(preset_number),
-        preset_name=preset_name,
-        time_str=time_str,
-        button_presses=presses,
-    )
+    try:
+        pp_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
+    except Exception:
+        pp_timer_index = 1
+
+    # ProPresenter's HTTP API timer IDs are 0-based indices. Keep the config
+    # value human-friendly (1-based), but convert for API calls.
+    # Backward compatibility: if someone configured 0 explicitly, keep it.
+    pp_timer_id = pp_timer_index - 1 if pp_timer_index > 0 else 0
+
+    # Fire configured Companion presses immediately, using the real timer id so
+    # any prior scheduled action for this timer is cancelled consistently.
+    try:
+        press_info = _fire_timer_button_presses_now(
+            pp_timer_id=pp_timer_id,
+            preset_number=int(preset_number),
+            preset_name=preset_name,
+            time_str=time_str,
+            button_presses=presses,
+        )
+    except Exception:
+        press_info = {'fired': False, 'count': 0}
 
     # Keep original time validation for timer control, but don't prevent button presses.
     if not _validate_time_hhmm(time_str):
@@ -5533,28 +5743,6 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
             },
             200,
         )
-
-    try:
-        pp_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
-    except Exception:
-        pp_timer_index = 1
-
-    # ProPresenter's HTTP API timer IDs are 0-based indices. Keep the config
-    # value human-friendly (1-based), but convert for API calls.
-    # Backward compatibility: if someone configured 0 explicitly, keep it.
-    pp_timer_id = pp_timer_index - 1 if pp_timer_index > 0 else 0
-
-    # Re-fire using the real timer id so subsequent presses replace the prior job.
-    try:
-        press_info = _fire_timer_button_presses_now(
-            pp_timer_id=pp_timer_id,
-            preset_number=int(preset_number),
-            preset_name=preset_name,
-            time_str=time_str,
-            button_presses=presses,
-        )
-    except Exception:
-        pass
 
     ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
     try:
