@@ -1205,6 +1205,8 @@ let _timersAutoSaveHandle = null;
 let _timersSaveInFlight = false;
 let _timersSaveQueued = false;
 let _timersAllowDeleteNextSave = false;
+const _timersIncompleteTimeRestoreDelayMs = 4000;
+const _timersIncompleteTimeRestoreHandles = new WeakMap();
 
 function _timersSetStatus(msg, kind) {
   const el = document.getElementById('timers-status');
@@ -1252,26 +1254,90 @@ function _timersSetLastSaved(presets, stagePreset) {
   });
 }
 
-function _timersFindIncompletePresetRow() {
+function _timersClearIncompleteTimeRestore(input) {
+  if (!input) return;
+  const handle = _timersIncompleteTimeRestoreHandles.get(input);
+  if (handle) {
+    clearTimeout(handle);
+    _timersIncompleteTimeRestoreHandles.delete(input);
+  }
+}
+
+function _timersResolvePreviousCompleteTime(input) {
+  const explicit = String((input && input.dataset && input.dataset.lastCompleteTime) || '').trim();
+  if (explicit) return explicit;
+  const tr = input ? input.closest('tr') : null;
+  const idx = tr ? Number(tr.dataset.index) : NaN;
+  if (Number.isFinite(idx) && _timersLastSavedPresets && _timersLastSavedPresets[idx]) {
+    const saved = String(_timersLastSavedPresets[idx].time || '').trim();
+    if (saved) return saved;
+  }
+  return '00:00';
+}
+
+function _timersRememberCompleteTime(input) {
+  if (!input) return;
+  const value = String(input.value || '').trim();
+  if (!value) return;
+  input.dataset.lastCompleteTime = value;
+  _timersClearIncompleteTimeRestore(input);
+}
+
+function _timersScheduleIncompleteTimeRestore(input) {
+  if (!input) return;
+  _timersClearIncompleteTimeRestore(input);
+  const handle = setTimeout(() => {
+    _timersIncompleteTimeRestoreHandles.delete(input);
+    if (_timersRestoreIncompletePresetTimeNow(input)) {
+      _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+    }
+  }, _timersIncompleteTimeRestoreDelayMs);
+  _timersIncompleteTimeRestoreHandles.set(input, handle);
+}
+
+function _timersRestoreIncompletePresetTimeNow(input) {
+  if (!input) return false;
+  _timersClearIncompleteTimeRestore(input);
+  if (!document.body || !document.body.contains(input)) return false;
+  if (String(input.value || '').trim()) return false;
+  input.value = _timersResolvePreviousCompleteTime(input);
+  _timersRememberCompleteTime(input);
+  return true;
+}
+
+function _timersEnsureCompletePresetTimes() {
+  let restored = false;
+  while (true) {
+    const input = _timersFindIncompletePresetTimeInput();
+    if (!input) break;
+    if (!_timersRestoreIncompletePresetTimeNow(input)) break;
+    restored = true;
+  }
+  if (restored) {
+    _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+  }
+  return restored;
+}
+
+function _timersFindIncompletePresetTimeInput() {
   const body = document.getElementById('timers-presets-body');
   if (!body) return null;
-  const rows = Array.from(body.querySelectorAll('tr'));
-  for (const r of rows) {
-    const timeInp = r.querySelector('input[data-role="preset-time"]');
-    if (!timeInp) continue;
-    if (!String(timeInp.value || '').trim()) {
-      return r;
+  const inputs = Array.from(body.querySelectorAll('input[data-role="preset-time"]'));
+  for (const input of inputs) {
+    if (!String(input.value || '').trim()) {
+      return input;
     }
   }
   return null;
 }
 
+function _timersHasIncompletePresetTime() {
+  return !!_timersFindIncompletePresetTimeInput();
+}
+
 async function _timersSaveInternal({showStatus = true, allowDelete = false} = {}) {
-  const incompleteRow = _timersFindIncompletePresetRow();
-  if (incompleteRow && !allowDelete) {
-    if (showStatus) {
-      _timersSetStatus('Finish entering the timer time before saving.', 'warn');
-    }
+  const incompleteInput = _timersFindIncompletePresetTimeInput();
+  if (incompleteInput && !allowDelete) {
     return {ok: true, changed: false, skipped: true, reason: 'incomplete-time'};
   }
 
@@ -1317,12 +1383,12 @@ async function _timersAutoSaveNow({showStatus = true, allowDelete = false} = {})
     _timersAllowDeleteNextSave = false;
     const r = await _timersSaveInternal({showStatus, allowDelete: effectiveAllowDelete});
     return r;
-    } catch (e) {
-      // Per requirements: show error and revert to last-saved data.
-      _timersSetStatus(String(e.message || e), 'error');
-      _timersRestoreLastSaved();
-      return {ok: false, error: String(e.message || e)};
-    } finally {
+  } catch (e) {
+    // Per requirements: show error and revert to last-saved data.
+    _timersSetStatus(String(e.message || e), 'error');
+    _timersRestoreLastSaved();
+    return {ok: false, error: String(e.message || e)};
+  } finally {
     _timersSaveInFlight = false;
     if (_timersSaveQueued) {
       _timersSaveQueued = false;
@@ -1775,6 +1841,7 @@ function _timersRenderPresets(presets) {
     input.step = '60';
     input.className = 'form-control form-control-sm';
     input.value = String(presetObj.time || '').trim() || '00:00';
+    input.dataset.lastCompleteTime = input.value;
     input.dataset.role = 'preset-time';
     timeTd.appendChild(input);
 
@@ -1931,6 +1998,9 @@ if (document.getElementById('timers-page')) {
   const addBtn = document.getElementById('timers-add');
   if (addBtn) {
     addBtn.addEventListener('click', () => {
+      if (_timersHasIncompletePresetTime()) {
+        _timersEnsureCompletePresetTimes();
+      }
       const presets = _timersReadPresetsFromUI();
       presets.push({time: '00:00', name: ''});
       _timersRenderPresets(presets);
@@ -2078,6 +2148,10 @@ if (document.getElementById('timers-page')) {
         return;
       }
 
+      if (_timersHasIncompletePresetTime()) {
+        _timersEnsureCompletePresetTimes();
+      }
+
       const presets = _timersReadPresetsFromUI();
 
       if (action === 'delete') {
@@ -2104,16 +2178,35 @@ if (document.getElementById('timers-page')) {
       // NOTE: For custom press URLs, do NOT auto-save while typing.
       // Save happens on blur/change instead.
       if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]'))) {
-        if (el.matches('input[data-role="preset-time"]') && !String(el.value || '').trim()) {
-          _timersSetStatus('Finish entering the timer time before saving.', 'warn');
-          return;
+        if (el.matches('input[data-role="preset-time"]')) {
+          if (!String(el.value || '').trim()) {
+            _timersScheduleIncompleteTimeRestore(el);
+            return;
+          }
+          _timersRememberCompleteTime(el);
         }
         _timersScheduleAutoSave({delayMs: 600, showStatus: false});
       }
     });
+    body.addEventListener('blur', (ev) => {
+      const el = ev.target;
+      if (!el || !el.matches || !el.matches('input[data-role="preset-time"]')) return;
+      if (!String(el.value || '').trim()) {
+        _timersScheduleIncompleteTimeRestore(el);
+        return;
+      }
+      _timersRememberCompleteTime(el);
+    }, true);
     body.addEventListener('change', (ev) => {
       const el = ev.target;
       if (!el) return;
+      if (el.matches && el.matches('input[data-role="preset-time"]')) {
+        if (!String(el.value || '').trim()) {
+          _timersScheduleIncompleteTimeRestore(el);
+          return;
+        }
+        _timersRememberCompleteTime(el);
+      }
       if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]') || el.matches('select[data-role="press-template"]') || el.matches('input[data-role="press-url"]'))) {
         _timersScheduleAutoSave({delayMs: 0, showStatus: false});
       }
