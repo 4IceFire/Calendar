@@ -4526,11 +4526,21 @@ def api_console_run():
 
 
 def _validate_time_hhmm(s: str) -> bool:
+    return _normalize_time_hhmm(s) is not None
+
+
+def _normalize_time_hhmm(value) -> str | None:
     try:
-        datetime.strptime(s, '%H:%M')
-        return True
+        if hasattr(utils, 'normalize_time_hhmm'):
+            return utils.normalize_time_hhmm(value)
     except Exception:
-        return False
+        pass
+    try:
+        s = str(value or '').strip()
+        dt = datetime.strptime(s, '%H:%M')
+        return dt.strftime('%H:%M')
+    except Exception:
+        return None
 
 
 _RELATIVE_MINUTES_RE = re.compile(r'^\$(?:(?P<zero>0)|(?P<sign>[+-])(?P<minutes>\d+))$')
@@ -4609,10 +4619,11 @@ def _resolve_time_hhmm_input(time_value: object, *, body: dict) -> tuple[str | N
         dt = base_dt + timedelta(minutes=sign * minutes)
         return dt.strftime('%H:%M'), None, True
 
-    if not _validate_time_hhmm(s):
+    normalized = _normalize_time_hhmm(s)
+    if not normalized:
         return None, 'time must be HH:MM', False
 
-    return s, None, False
+    return normalized, None, False
 
 
 def _format_time_hhmm_ampm(time_str: str) -> str:
@@ -4849,6 +4860,9 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
 # --- Timer preset actions (Companion button presses) ---
 _timer_action_lock = threading.Lock()
 _timer_action_jobs: dict[int, threading.Timer] = {}
+_timer_mutation_lock = threading.RLock()
+_timer_companion_sync_lock = threading.Lock()
+_timer_companion_sync_generation = 0
 
 
 def _cancel_timer_action_job(pp_timer_id: int) -> None:
@@ -5007,6 +5021,471 @@ def _sync_companion_timer_variable_for_preset(*, cfg: dict, preset_number: int, 
     return ok, None if ok else 'failed to set variable'
 
 
+def _queue_companion_timer_variable_sync(*, cfg: dict, presets: list[dict]) -> None:
+    """Best-effort Companion variable sync that never blocks timer saves."""
+    global _timer_companion_sync_generation
+
+    try:
+        cfg_copy = copy.deepcopy(cfg or {})
+    except Exception:
+        cfg_copy = dict(cfg or {})
+    try:
+        presets_copy = copy.deepcopy(presets or [])
+    except Exception:
+        presets_copy = list(presets or [])
+
+    with _timer_companion_sync_lock:
+        _timer_companion_sync_generation += 1
+        generation = _timer_companion_sync_generation
+
+    def _worker() -> None:
+        try:
+            # Coalesce bursts of edits into one latest-state sync.
+            time.sleep(0.25)
+            with _timer_companion_sync_lock:
+                if generation != _timer_companion_sync_generation:
+                    return
+
+            ok_count = 0
+            fail_count = 0
+            for i, preset in enumerate(presets_copy, start=1):
+                ok, _err = _sync_companion_timer_variable_for_preset(
+                    cfg=cfg_copy,
+                    preset_number=i,
+                    preset=preset if isinstance(preset, dict) else {},
+                )
+                if ok:
+                    ok_count += 1
+                else:
+                    fail_count += 1
+
+            if _is_debug_enabled():
+                try:
+                    _console_append(
+                        f"[TIMERS] Companion variable sync finished: ok={ok_count} fail={fail_count}\n"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            if _is_debug_enabled():
+                try:
+                    _console_append(f"[TIMERS] Companion variable sync error: {e}\n")
+                except Exception:
+                    pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _timer_get_ci(d: dict, *keys: str):
+    try:
+        for k in keys:
+            if k in d:
+                return d.get(k)
+        lower = {str(k).lower(): v for k, v in d.items()}
+        for k in keys:
+            lk = str(k).lower()
+            if lk in lower:
+                return lower.get(lk)
+    except Exception:
+        return None
+    return None
+
+
+def _timer_has_ci(d: dict, *keys: str) -> bool:
+    try:
+        lower = {str(k).lower() for k in d.keys()}
+        return any((k in d) or (str(k).lower() in lower) for k in keys)
+    except Exception:
+        return False
+
+
+def _timer_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ('1', 'true', 't', 'yes', 'y', 'on')
+
+
+def _timer_normalize_button_presses(raw) -> tuple[list[dict[str, str]] | None, str | None]:
+    if raw is None:
+        return [], None
+    raw_list = [raw] if isinstance(raw, (dict, str)) else raw
+    if not isinstance(raw_list, list):
+        return None, 'button_presses must be an array of button press entries'
+    if len(raw_list) > 50:
+        return None, 'too many button presses (max 50 per timer)'
+
+    out: list[dict[str, str]] = []
+    for item in raw_list:
+        if isinstance(item, str):
+            u = _normalize_companion_button_url(item)
+        elif isinstance(item, dict):
+            u = _normalize_companion_button_url(str(item.get('buttonURL') or item.get('url') or item.get('button_url') or ''))
+        else:
+            u = None
+        if not u:
+            return None, "Invalid buttonURL in button_presses. Use '1/2/3' or 'location/1/2/3/press'"
+        out.append({'buttonURL': u})
+    return out, None
+
+
+def _timer_normalize_preset_for_save(value) -> tuple[dict | None, str | None]:
+    if isinstance(value, dict):
+        time_str = str(value.get('time', '')).strip()
+        name_str = str(value.get('name', '')).strip()
+        raw_presses = value.get('button_presses')
+        if raw_presses is None and 'buttonPresses' in value:
+            raw_presses = value.get('buttonPresses')
+        if raw_presses is None and 'actions' in value:
+            raw_presses = value.get('actions')
+    else:
+        time_str = str(value or '').strip()
+        name_str = ''
+        raw_presses = None
+
+    if not time_str:
+        return None, None
+    normalized_time = _normalize_time_hhmm(time_str)
+    if not normalized_time:
+        return None, f'invalid time: {time_str}. Use HH:MM'
+    time_str = normalized_time
+
+    presses, err = _timer_normalize_button_presses(raw_presses)
+    if err:
+        return None, err
+
+    obj = {'time': time_str, 'name': name_str or time_str}
+    if presses:
+        obj['button_presses'] = presses
+    return obj, None
+
+
+def _timer_normalize_preset_list(values) -> tuple[list[dict] | None, str | None]:
+    if not isinstance(values, list):
+        return None, 'timer_presets must be an array of presets'
+    out: list[dict] = []
+    for value in values:
+        obj, err = _timer_normalize_preset_for_save(value)
+        if err:
+            return None, err
+        if obj is not None:
+            out.append(obj)
+    if len(out) < 1:
+        return None, 'timer_presets must contain at least 1 entry'
+    if len(out) > 100:
+        return None, 'timer_presets too large (max 100)'
+    return out, None
+
+
+def _timer_state_payload(*, cfg: dict, presets: list, **extra) -> dict:
+    try:
+        propresenter_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
+    except Exception:
+        propresenter_timer_index = 1
+    try:
+        stream_start_preset = int(cfg.get('stream_start_preset', 0))
+    except Exception:
+        stream_start_preset = 0
+    if stream_start_preset < 1:
+        stream_start_preset = 0
+
+    payload = {
+        'ok': True,
+        'propresenter_timer_index': propresenter_timer_index,
+        'stream_start_preset': stream_start_preset,
+        'timer_presets': presets,
+        'preset_count': len(presets),
+    }
+    payload.update(extra)
+    return payload
+
+
+def _save_timer_config_changes(cfg: dict, changes: dict) -> tuple[dict, bool]:
+    changed = False
+    for key, value in (changes or {}).items():
+        if cfg.get(key) != value:
+            cfg[key] = value
+            changed = True
+    if not changed:
+        return cfg, False
+
+    utils.save_config(cfg)
+    utils.reload_config(force=True)
+    try:
+        return utils.get_config(), True
+    except Exception:
+        return cfg, True
+
+
+def _mutate_timers(body: dict) -> tuple[dict, int]:
+    if not isinstance(body, dict):
+        body = {}
+
+    action = str(body.get('action') or '').strip().lower()
+    if not action:
+        action = 'update_preset' if _timer_has_ci(body, 'preset', 'preset_index', 'index', 'number') else 'replace_all'
+
+    apply_after: tuple[int, dict, list, dict, object, bool] | None = None
+
+    with _timer_mutation_lock:
+        try:
+            cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        except Exception:
+            cfg = {}
+        try:
+            presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
+        except Exception:
+            presets = []
+
+        config_changes: dict = {}
+        presets_changed = False
+        extra: dict = {'action': action}
+
+        try:
+            if action in ('replace_all', 'set_all'):
+                raw_presets = body.get('timer_presets')
+                if raw_presets is None:
+                    raw_presets = body.get('presets')
+                normalized, err = _timer_normalize_preset_list(raw_presets)
+                if err:
+                    return {'ok': False, 'error': err}, 400
+
+                allow_delete = _timer_bool(body.get('allow_delete'))
+                if presets and len(normalized or []) < len(presets) and not allow_delete:
+                    return {
+                        'ok': False,
+                        'error': (
+                            f'refusing to shrink timer preset list from {len(presets)} to {len(normalized or [])} '
+                            'without allow_delete=true'
+                        ),
+                    }, 409
+
+                presets = normalized or []
+                presets_changed = True
+
+                stream_start_raw = body.get('stream_start_preset')
+                if stream_start_raw is None:
+                    stream_start_raw = body.get('streamStartPreset')
+                if stream_start_raw is not None:
+                    try:
+                        stream_start = 0 if str(stream_start_raw).strip() == '' else int(stream_start_raw)
+                    except Exception:
+                        return {'ok': False, 'error': 'stream_start_preset must be an integer (1-based)'}, 400
+                    if stream_start != 0 and not (1 <= stream_start <= len(presets)):
+                        return {'ok': False, 'error': f'stream_start_preset out of range (1..{len(presets)})'}, 400
+                    config_changes['stream_start_preset'] = stream_start
+
+                if _timer_has_ci(body, 'propresenter_timer_index', 'timer_index'):
+                    try:
+                        config_changes['propresenter_timer_index'] = int(_timer_get_ci(body, 'propresenter_timer_index', 'timer_index'))
+                    except Exception:
+                        return {'ok': False, 'error': 'propresenter_timer_index must be an integer'}, 400
+                    cfg.pop('timer_index', None)
+
+            elif action == 'update_preset':
+                if not presets:
+                    return {'ok': False, 'error': 'no presets configured (timer_presets.json is empty)', 'preset_count': 0}, 400
+                preset_raw = _timer_get_ci(body, 'preset', 'preset_index', 'index', 'number')
+                try:
+                    preset_number = int(preset_raw)
+                except Exception:
+                    return {'ok': False, 'error': 'preset must be an integer (1-based)'}, 400
+
+                preset_index = preset_number - 1
+                if preset_index < 0 or preset_index >= len(presets):
+                    return {'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}, 400
+
+                patch = body.get('patch') if isinstance(body.get('patch'), dict) else body
+                current = dict(presets[preset_index]) if isinstance(presets[preset_index], dict) else {
+                    'time': str(presets[preset_index]).strip(),
+                    'name': str(presets[preset_index]).strip(),
+                }
+                updated = dict(current)
+                time_was_relative = False
+                time_raw = None
+
+                if _timer_has_ci(patch, 'time', 'hhmm', 'value'):
+                    time_raw = _timer_get_ci(patch, 'time', 'hhmm', 'value')
+                    time_str, time_err, time_was_relative = _resolve_time_hhmm_input(time_raw, body=body)
+                    if time_err:
+                        return {'ok': False, 'error': time_err}, 400
+                    updated['time'] = time_str
+
+                if _timer_has_ci(patch, 'name', 'label'):
+                    name_raw = _timer_get_ci(patch, 'name', 'label')
+                    updated['name'] = str(name_raw or '').strip()
+
+                if _timer_has_ci(patch, 'button_presses', 'buttonPresses', 'actions'):
+                    raw_presses = _timer_get_ci(patch, 'button_presses', 'buttonPresses', 'actions')
+                    presses, err = _timer_normalize_button_presses(raw_presses)
+                    if err:
+                        return {'ok': False, 'error': err}, 400
+                    if presses:
+                        updated['button_presses'] = presses
+                    else:
+                        updated.pop('button_presses', None)
+
+                normalized_updated_time = _normalize_time_hhmm(str(updated.get('time', '')).strip())
+                if not normalized_updated_time:
+                    return {'ok': False, 'error': 'time must be HH:MM'}, 400
+                updated['time'] = normalized_updated_time
+                if not str(updated.get('name', '')).strip():
+                    updated['name'] = str(updated.get('time', '')).strip()
+
+                if updated != current:
+                    presets[preset_index] = updated
+                    presets_changed = True
+
+                extra.update({
+                    'preset': preset_number,
+                    'timer_preset': updated,
+                    'updated': presets_changed,
+                    'time_input': str(time_raw) if time_was_relative else None,
+                })
+
+                if _timer_bool(_timer_get_ci(body, 'apply', 'apply_now', 'applypreset')):
+                    apply_after = (
+                        preset_number,
+                        copy.deepcopy(cfg),
+                        copy.deepcopy(presets),
+                        copy.deepcopy(updated),
+                        time_raw,
+                        time_was_relative,
+                    )
+
+            elif action == 'create_preset':
+                time_raw = body.get('time', '00:00')
+                time_str, time_err, _time_was_relative = _resolve_time_hhmm_input(time_raw, body=body)
+                if time_err:
+                    return {'ok': False, 'error': time_err}, 400
+                name = str(body.get('name') or '').strip() or time_str
+                presses, err = _timer_normalize_button_presses(body.get('button_presses'))
+                if err:
+                    return {'ok': False, 'error': err}, 400
+                item = {'time': time_str, 'name': name}
+                if presses:
+                    item['button_presses'] = presses
+                presets.append(item)
+                presets_changed = True
+                extra.update({'preset': len(presets), 'timer_preset': item})
+
+            elif action == 'delete_preset':
+                preset_raw = _timer_get_ci(body, 'preset', 'preset_index', 'index', 'number')
+                try:
+                    preset_number = int(preset_raw)
+                except Exception:
+                    return {'ok': False, 'error': 'preset must be an integer (1-based)'}, 400
+                if len(presets) <= 1:
+                    return {'ok': False, 'error': 'at least one timer preset is required'}, 400
+                preset_index = preset_number - 1
+                if preset_index < 0 or preset_index >= len(presets):
+                    return {'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}, 400
+                removed = presets.pop(preset_index)
+                presets_changed = True
+                stream = _cfg_int(cfg, 'stream_start_preset', 0, min_value=0)
+                if stream == preset_number:
+                    config_changes['stream_start_preset'] = 0
+                elif stream > preset_number:
+                    config_changes['stream_start_preset'] = stream - 1
+                extra.update({'preset': preset_number, 'removed': removed})
+
+            elif action == 'move_preset':
+                try:
+                    src = int(_timer_get_ci(body, 'preset', 'from', 'source'))
+                except Exception:
+                    return {'ok': False, 'error': 'preset must be an integer (1-based)'}, 400
+                direction = str(body.get('direction') or '').strip().lower()
+                if _timer_has_ci(body, 'to', 'target'):
+                    try:
+                        dst = int(_timer_get_ci(body, 'to', 'target'))
+                    except Exception:
+                        return {'ok': False, 'error': 'to must be an integer (1-based)'}, 400
+                elif direction == 'up':
+                    dst = src - 1
+                elif direction == 'down':
+                    dst = src + 1
+                else:
+                    return {'ok': False, 'error': 'move_preset requires direction or to'}, 400
+
+                if src < 1 or src > len(presets) or dst < 1 or dst > len(presets):
+                    return {'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}, 400
+                if src != dst:
+                    item = presets.pop(src - 1)
+                    presets.insert(dst - 1, item)
+                    presets_changed = True
+                    stream = _cfg_int(cfg, 'stream_start_preset', 0, min_value=0)
+                    if stream == src:
+                        config_changes['stream_start_preset'] = dst
+                    elif src < stream <= dst:
+                        config_changes['stream_start_preset'] = stream - 1
+                    elif dst <= stream < src:
+                        config_changes['stream_start_preset'] = stream + 1
+                extra.update({'preset': src, 'to': dst})
+
+            elif action == 'set_stream_start_preset':
+                try:
+                    value = int(body.get('stream_start_preset', body.get('preset', 0)) or 0)
+                except Exception:
+                    return {'ok': False, 'error': 'stream_start_preset must be an integer (1-based)'}, 400
+                if value != 0 and not (1 <= value <= len(presets)):
+                    return {'ok': False, 'error': f'stream_start_preset out of range (1..{len(presets)})'}, 400
+                config_changes['stream_start_preset'] = value
+                extra.update({'stream_start_preset': value})
+
+            else:
+                return {'ok': False, 'error': f'unknown timer action: {action}'}, 400
+
+            if presets_changed:
+                if not hasattr(utils, 'save_timer_presets'):
+                    return {'ok': False, 'error': 'timer preset storage is not available'}, 500
+                utils.save_timer_presets(presets)
+
+            if config_changes:
+                cfg, config_changed = _save_timer_config_changes(cfg, config_changes)
+            else:
+                config_changed = False
+
+            if presets_changed:
+                _queue_companion_timer_variable_sync(cfg=cfg, presets=presets)
+
+            extra.update({
+                'presets_changed': presets_changed,
+                'config_changed': config_changed,
+            })
+            payload = _timer_state_payload(cfg=cfg, presets=presets, **extra)
+
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}, 500
+
+    if apply_after is not None:
+        preset_number, apply_cfg, apply_presets, updated, time_raw, time_was_relative = apply_after
+        try:
+            _console_append(
+                f"[TIMERS] /api/timers/mutate apply=true from {request.remote_addr} "
+                f"preset={preset_number} time={updated.get('time')}\n"
+            )
+        except Exception:
+            pass
+        apply_payload, status = _apply_timer_preset_number(
+            preset_number=preset_number,
+            cfg=apply_cfg,
+            presets=apply_presets,
+        )
+        if isinstance(apply_payload, dict):
+            apply_payload.update({
+                'timer_preset': updated,
+                'timer_presets': apply_presets,
+                'preset_count': len(apply_presets),
+                'updated_then_applied': True,
+                'time_input': str(time_raw) if time_was_relative else None,
+            })
+        return apply_payload, status
+
+    return payload, 200
+
+
 @app.route('/api/timers', methods=['GET'])
 def api_get_timers():
     try:
@@ -5041,209 +5520,16 @@ def api_get_timers():
 @app.route('/api/timers', methods=['POST'])
 def api_set_timers():
     body = request.get_json(silent=True) or {}
-
-    def _coerce_bool(v) -> bool:
-        if isinstance(v, bool):
-            return v
-        if v is None:
-            return False
-        s = str(v).strip().lower()
-        return s in ('1', 'true', 't', 'yes', 'y', 'on')
-
-    presets = body.get('timer_presets')
-    if presets is None:
-        # allow alternate key
-        presets = body.get('presets')
-
-    if not isinstance(presets, list):
-        return jsonify({'ok': False, 'error': 'timer_presets must be an array of presets'}), 400
-
-    normalized_presets: list[dict] = []
-    for v in presets:
-        if isinstance(v, dict):
-            time_str = str(v.get('time', '')).strip()
-            name_str = str(v.get('name', '')).strip()
-            raw_presses = v.get('button_presses')
-            if raw_presses is None and 'buttonPresses' in v:
-                raw_presses = v.get('buttonPresses')
-            if raw_presses is None and 'actions' in v:
-                raw_presses = v.get('actions')
-        else:
-            time_str = str(v).strip()
-            name_str = ''
-            raw_presses = None
-
-        if not time_str:
-            continue
-        if not _validate_time_hhmm(time_str):
-            return jsonify({'ok': False, 'error': f'invalid time: {time_str}. Use HH:MM'}), 400
-
-        # Always ensure each timer has a name; default to its time.
-        if not name_str:
-            name_str = time_str
-
-        # Normalize button presses
-        presses_out: list[dict[str, str]] = []
-        if raw_presses is not None:
-            if isinstance(raw_presses, dict) or isinstance(raw_presses, str):
-                raw_list = [raw_presses]
-            else:
-                raw_list = raw_presses
-
-            if not isinstance(raw_list, list):
-                return jsonify({'ok': False, 'error': 'button_presses must be an array of button press entries'}), 400
-
-            if len(raw_list) > 50:
-                return jsonify({'ok': False, 'error': 'too many button presses (max 50 per timer)'}), 400
-
-            for item in raw_list:
-                if isinstance(item, str):
-                    u = _normalize_companion_button_url(item)
-                elif isinstance(item, dict):
-                    u = _normalize_companion_button_url(str(item.get('buttonURL') or item.get('url') or item.get('button_url') or ''))
-                else:
-                    u = None
-
-                if not u:
-                    return jsonify({'ok': False, 'error': "Invalid buttonURL in button_presses. Use '1/2/3' or 'location/1/2/3/press'"}), 400
-                presses_out.append({'buttonURL': u})
-
-        obj = {'time': time_str, 'name': name_str}
-        if presses_out:
-            obj['button_presses'] = presses_out
-
-        normalized_presets.append(obj)
-
-    if len(normalized_presets) < 1:
-        return jsonify({'ok': False, 'error': 'timer_presets must contain at least 1 entry'}), 400
-    if len(normalized_presets) > 100:
-        return jsonify({'ok': False, 'error': 'timer_presets too large (max 100)'}), 400
-
-    try:
-        propresenter_timer_index = int(body.get('propresenter_timer_index', body.get('timer_index', None)))
-    except Exception:
-        propresenter_timer_index = None
-
-    stream_start_raw = body.get('stream_start_preset')
-    if stream_start_raw is None:
-        stream_start_raw = body.get('streamStartPreset')
-
-    stream_start_preset: int | None = None
-    if stream_start_raw is not None:
-        try:
-            if str(stream_start_raw).strip() == '':
-                stream_start_preset = 0
-            else:
-                stream_start_preset = int(stream_start_raw)
-        except Exception:
-            return jsonify({'ok': False, 'error': 'stream_start_preset must be an integer (1-based)'}), 400
-
-        if stream_start_preset != 0 and not (1 <= stream_start_preset <= len(normalized_presets)):
-            return jsonify({
-                'ok': False,
-                'error': f'stream_start_preset out of range (1..{len(normalized_presets)})'
-            }), 400
+    body['action'] = 'replace_all'
+    payload, status = _mutate_timers(body)
+    return jsonify(payload), status
 
 
-    try:
-        cfg = utils.get_config()
-    except Exception:
-        cfg = {}
-
-    try:
-        current_presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
-    except Exception:
-        current_presets = []
-
-    allow_delete = _coerce_bool(body.get('allow_delete'))
-    if current_presets and len(normalized_presets) < len(current_presets) and not allow_delete:
-        return jsonify({
-            'ok': False,
-            'error': (
-                f'refusing to shrink timer preset list from {len(current_presets)} to {len(normalized_presets)} '
-                'without allow_delete=true'
-            ),
-        }), 409
-
-    # presets are stored outside config.json
-    try:
-        if hasattr(utils, 'save_timer_presets'):
-            utils.save_timer_presets(normalized_presets)
-    except Exception:
-        pass
-    if propresenter_timer_index is not None:
-        cfg['propresenter_timer_index'] = propresenter_timer_index
-        # remove legacy key if present
-        cfg.pop('timer_index', None)
-    if stream_start_preset is not None:
-        cfg['stream_start_preset'] = stream_start_preset
-
-    try:
-        utils.save_config(cfg)
-        utils.reload_config(force=True)
-
-        # Debug-only: log when presets/config are successfully saved.
-        if _is_debug_enabled():
-            try:
-                _console_append(
-                    f"[TIMERS] Saved {len(normalized_presets)} preset(s); "
-                    f"propresenter_timer_index={cfg.get('propresenter_timer_index', 1)}\n"
-                )
-            except Exception:
-                pass
-
-        # Push names to Companion custom variables, e.g. timer_name_1, timer_name_2, ...
-        companion_updated = False
-        companion_failed = 0
-        try:
-            prefix = str(cfg.get('companion_timer_name', '')).strip()
-        except Exception:
-            prefix = ''
-        try:
-            comp = utils.get_companion() if hasattr(utils, 'get_companion') else None
-            if prefix and comp is not None:
-                companion_updated = True
-                for i, p in enumerate(normalized_presets, start=1):
-                    var_name = f"{prefix}{i}"
-
-                    # Format: "timer_name_{index}: HH:MMam" (12-hour with am/pm)
-                    try:
-                        t = str(p.get('time', '')).strip()
-                    except Exception:
-                        t = ''
-                    try:
-                        dt = datetime.strptime(t, '%H:%M')
-                        pretty_time = dt.strftime('%I:%M%p').lower()
-                    except Exception:
-                        pretty_time = t
-
-                    # Use the saved preset name as the label; fall back to the variable name.
-                    try:
-                        label = str(p.get('name', '')).strip()
-                    except Exception:
-                        label = ''
-
-                    # If the label is missing (or just equals the raw HH:MM), use the variable name as label.
-                    if (not label) or (label == t):
-                        label = var_name
-
-                    value = f"{label}\n{pretty_time}"
-
-                    if not comp.SetVariable(var_name, value):
-                        companion_failed += 1
-        except Exception:
-            companion_updated = False
-
-        return jsonify({
-            'ok': True,
-            'timer_presets': normalized_presets,
-            'propresenter_timer_index': cfg.get('propresenter_timer_index', 1),
-            'stream_start_preset': cfg.get('stream_start_preset', 0),
-            'companion_names_updated': companion_updated,
-            'companion_names_failed': companion_failed,
-        })
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+@app.route('/api/timers/mutate', methods=['POST', 'PATCH'])
+def api_mutate_timers():
+    body = request.get_json(silent=True) or {}
+    payload, status = _mutate_timers(body)
+    return jsonify(payload), status
 
 
 @app.route('/api/timers/preset', methods=['POST', 'PATCH'])
@@ -5256,143 +5542,17 @@ def api_update_timer_preset():
     """
 
     body = request.get_json(silent=True) or {}
-
-    def _get_ci(d: dict, *keys: str):
-        try:
-            for k in keys:
-                if k in d:
-                    return d.get(k)
-            lower = {str(k).lower(): v for k, v in d.items()}
-            for k in keys:
-                lk = str(k).lower()
-                if lk in lower:
-                    return lower.get(lk)
-        except Exception:
-            return None
-        return None
-
-    preset_raw = _get_ci(body, 'preset', 'preset_index', 'index', 'number')
-    if preset_raw is None:
-        preset_raw = request.args.get('preset') or request.args.get('index')
-
-    time_raw = _get_ci(body, 'time', 'hhmm', 'value')
-    if time_raw is None:
-        time_raw = request.args.get('time')
-
-    apply_raw = _get_ci(body, 'apply', 'apply_now', 'applypreset')
-    if apply_raw is None:
-        apply_raw = request.args.get('apply')
-
-    def _coerce_bool(v) -> bool:
-        if isinstance(v, bool):
-            return v
-        if v is None:
-            return False
-        s = str(v).strip().lower()
-        if s in ('1', 'true', 't', 'yes', 'y', 'on'):
-            return True
-        if s in ('0', 'false', 'f', 'no', 'n', 'off'):
-            return False
-        return False
-
-    apply_now = _coerce_bool(apply_raw)
-
-    try:
-        preset_number = int(preset_raw)
-    except Exception:
-        return jsonify({'ok': False, 'error': 'preset must be an integer (1-based)'}), 400
-
-    time_str, time_err, time_was_relative = _resolve_time_hhmm_input(time_raw, body=body)
-    if time_err:
-        return jsonify({'ok': False, 'error': time_err}), 400
-
-    try:
-        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
-    except Exception:
-        cfg = {}
-
-    try:
-        presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
-    except Exception:
-        presets = []
-
-    if not presets:
-        return jsonify({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)', 'preset_count': 0}), 400
-
-    preset_index = preset_number - 1
-    if preset_index < 0 or preset_index >= len(presets):
-        return jsonify({'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}), 400
-
-    # Optional name update
-    name_raw = _get_ci(body, 'name', 'label')
-
-    try:
-        if hasattr(utils, 'update_timer_preset'):
-            presets, updated = utils.update_timer_preset(
-                preset_number,
-                time_str=time_str,
-                name=name_raw if name_raw is not None else getattr(utils, '_TIMER_NAME_UNSET', object()),
-            )
-        else:
-            current = presets[preset_index]
-            if isinstance(current, dict):
-                updated = dict(current)
-            else:
-                updated = {'time': str(current).strip(), 'name': str(current).strip()}
-            updated['time'] = time_str
-            if name_raw is not None:
-                updated['name'] = str(name_raw or '').strip() or updated.get('name', '')
-            presets[preset_index] = updated
-            if hasattr(utils, 'save_timer_presets'):
-                utils.save_timer_presets(presets)
-    except Exception as e:
-        return jsonify({'ok': False, 'error': f'failed to save presets: {e}'}), 500
-
-    # Keep Companion custom vars in sync for this one preset (best-effort)
-    companion_updated = False
-    companion_error = None
-    try:
-        companion_updated, companion_error = _sync_companion_timer_variable_for_preset(
-            cfg=cfg,
-            preset_number=preset_number,
-            preset=updated,
-        )
-    except Exception:
-        companion_updated = False
-
-    if apply_now:
-        try:
-            _console_append(
-                f"[TIMERS] /api/timers/preset apply=true from {request.remote_addr} "
-                f"preset={preset_number} time={time_str}\n"
-            )
-        except Exception:
-            pass
-
-        payload, status = _apply_timer_preset_number(preset_number=preset_number, cfg=cfg, presets=presets)
-        # Include update info for visibility
-        try:
-            if isinstance(payload, dict):
-                payload['timer_preset'] = updated
-                payload['companion_updated'] = companion_updated
-                payload['companion_error'] = companion_error
-                payload['updated_then_applied'] = True
-                if time_was_relative:
-                    payload['time_input'] = str(time_raw)
-        except Exception:
-            pass
-        return jsonify(payload), status
-
-    return jsonify({
-        'ok': True,
-        'preset': preset_number,
-        'preset_count': len(presets),
-        'timer_preset': updated,
-        'companion_updated': companion_updated,
-        'companion_error': companion_error,
-        'updated_then_applied': False,
-        'time_input': str(time_raw) if time_was_relative else None,
-    })
+    if 'preset' not in body and 'index' not in body:
+        preset_arg = request.args.get('preset') or request.args.get('index')
+        if preset_arg is not None:
+            body['preset'] = preset_arg
+    if not _timer_has_ci(body, 'time', 'hhmm', 'value') and request.args.get('time') is not None:
+        body['time'] = request.args.get('time')
+    if not _timer_has_ci(body, 'apply', 'apply_now', 'applypreset') and request.args.get('apply') is not None:
+        body['apply'] = request.args.get('apply')
+    body['action'] = 'update_preset'
+    payload, status = _mutate_timers(body)
+    return jsonify(payload), status
 
 
 def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) -> tuple[dict, int]:

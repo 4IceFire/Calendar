@@ -479,7 +479,9 @@ class ClockScheduler:
                 )
                 self._dbg("Timer action -> FAIL (invalid payload)")
                 return
-            api_action = {"method": "POST", "path": "/api/timers/preset", "body": dict(timer)}
+            body = dict(timer)
+            body["action"] = "update_preset"
+            api_action = {"method": "POST", "path": "/api/timers/mutate", "body": body}
             ok = self._execute_internal_api_action(api_action, job)
             if ok:
                 logger.info(

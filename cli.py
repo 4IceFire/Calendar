@@ -221,7 +221,9 @@ def _manual_trigger_action(trigger):
         timer = getattr(trigger, "timer", None)
         if not isinstance(timer, dict):
             return False, "invalid timer trigger payload"
-        ok, detail = _local_api_request("POST", "/api/timers/preset", dict(timer))
+        body = dict(timer)
+        body["action"] = "update_preset"
+        ok, detail = _local_api_request("POST", "/api/timers/mutate", body)
         if ok:
             preset = timer.get("preset")
             time_str = timer.get("time")

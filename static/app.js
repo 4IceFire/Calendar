@@ -1200,11 +1200,9 @@ if (document.getElementById('console-page')) {
 let _timersButtonTemplates = [];
 let _timersLastSavedPresets = null;
 let _timersLastSavedStagePreset = 0;
-let _timersLastSavedJson = '';
-let _timersAutoSaveHandle = null;
-let _timersSaveInFlight = false;
-let _timersSaveQueued = false;
-let _timersAllowDeleteNextSave = false;
+let _timersMutationQueue = [];
+let _timersDrainPromise = null;
+let _timersEditVersion = 0;
 const _timersIncompleteTimeRestoreDelayMs = 4000;
 const _timersIncompleteTimeRestoreHandles = new WeakMap();
 
@@ -1231,14 +1229,6 @@ function _timersClearStatus() {
   el.textContent = '';
 }
 
-function _timersStableStringify(v) {
-  try {
-    return JSON.stringify(v || {});
-  } catch (e) {
-    return '';
-  }
-}
-
 function _timersSetLastSaved(presets, stagePreset) {
   // Deep-copy to keep it immutable.
   try {
@@ -1248,10 +1238,6 @@ function _timersSetLastSaved(presets, stagePreset) {
   }
   const n = Number(stagePreset);
   _timersLastSavedStagePreset = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-  _timersLastSavedJson = _timersStableStringify({
-    timer_presets: _timersLastSavedPresets,
-    stream_start_preset: _timersLastSavedStagePreset,
-  });
 }
 
 function _timersClearIncompleteTimeRestore(input) {
@@ -1264,12 +1250,12 @@ function _timersClearIncompleteTimeRestore(input) {
 }
 
 function _timersResolvePreviousCompleteTime(input) {
-  const explicit = String((input && input.dataset && input.dataset.lastCompleteTime) || '').trim();
+  const explicit = _timersNormalizeTimeForInput(input && input.dataset && input.dataset.lastCompleteTime);
   if (explicit) return explicit;
   const tr = input ? input.closest('tr') : null;
   const idx = tr ? Number(tr.dataset.index) : NaN;
   if (Number.isFinite(idx) && _timersLastSavedPresets && _timersLastSavedPresets[idx]) {
-    const saved = String(_timersLastSavedPresets[idx].time || '').trim();
+    const saved = _timersNormalizeTimeForInput(_timersLastSavedPresets[idx].time);
     if (saved) return saved;
   }
   return '00:00';
@@ -1300,7 +1286,11 @@ function _timersRestoreIncompletePresetTimeNow(input) {
   _timersClearIncompleteTimeRestore(input);
   if (!document.body || !document.body.contains(input)) return false;
   if (String(input.value || '').trim()) return false;
-  input.value = _timersResolvePreviousCompleteTime(input);
+  const restored = _timersResolvePreviousCompleteTime(input);
+  input.value = restored;
+  if (input.value !== restored) {
+    input.value = '00:00';
+  }
   _timersRememberCompleteTime(input);
   return true;
 }
@@ -1335,87 +1325,186 @@ function _timersHasIncompletePresetTime() {
   return !!_timersFindIncompletePresetTimeInput();
 }
 
-async function _timersSaveInternal({showStatus = true, allowDelete = false} = {}) {
-  const incompleteInput = _timersFindIncompletePresetTimeInput();
-  if (incompleteInput && !allowDelete) {
-    return {ok: true, changed: false, skipped: true, reason: 'incomplete-time'};
+function _timersNormalizeTimeForInput(value) {
+  const s = String(value || '').trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (!m) return '';
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) {
+    return '';
   }
-
-  const presets = _timersReadPresetsFromUI();
-  const stagePreset = _timersReadStagePresetFromUI();
-  const payload = {
-    timer_presets: presets,
-    stream_start_preset: stagePreset,
-  };
-  if (allowDelete) {
-    payload.allow_delete = true;
-  }
-  const currentJson = _timersStableStringify(payload);
-  if (currentJson && currentJson === _timersLastSavedJson) {
-    return {ok: true, changed: false};
-  }
-
-  const res = await fetch('/api/timers', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) {
-    throw new Error(data.error || 'Save failed');
-  }
-
-  _timersSetLastSaved(data.timer_presets || presets, data.stream_start_preset ?? stagePreset);
-  _timersApplyStagePresetId(data.stream_start_preset ?? stagePreset);
-  if (showStatus) _timersSetStatus('', 'ok');
-  return {ok: true, changed: true};
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 }
 
-async function _timersAutoSaveNow({showStatus = true, allowDelete = false} = {}) {
-  if (_timersSaveInFlight) {
-    _timersSaveQueued = true;
-    if (allowDelete) _timersAllowDeleteNextSave = true;
-    return {ok: true, queued: true};
+function _timersApplyMutationResponse(data, {render = false} = {}) {
+  const presets = Array.isArray(data && data.timer_presets) ? data.timer_presets : _timersReadPresetsFromUI();
+  const stagePreset = Number((data && data.stream_start_preset) ?? _timersReadStagePresetFromUI() ?? 0);
+  _timersSetLastSaved(presets, stagePreset);
+  if (render) {
+    _timersRenderPresets(presets);
+    _timersApplyStagePresetId(stagePreset);
+    return;
   }
-  _timersSaveInFlight = true;
-  try {
-    const effectiveAllowDelete = !!(allowDelete || _timersAllowDeleteNextSave);
-    _timersAllowDeleteNextSave = false;
-    const r = await _timersSaveInternal({showStatus, allowDelete: effectiveAllowDelete});
-    return r;
-  } catch (e) {
-    // Per requirements: show error and revert to last-saved data.
-    _timersSetStatus(String(e.message || e), 'error');
-    _timersRestoreLastSaved();
-    return {ok: false, error: String(e.message || e)};
-  } finally {
-    _timersSaveInFlight = false;
-    if (_timersSaveQueued) {
-      _timersSaveQueued = false;
-      // Run once more, but don't spam status.
-      _timersAutoSaveNow({showStatus: false});
+  _timersStageRenderOptions(presets);
+  _timersStageSetPreview(_timersReadStagePresetFromUI(), presets);
+  _timersStageSetButtonsEnabled(_timersReadStagePresetFromUI() > 0 && _timersReadStagePresetFromUI() <= presets.length);
+}
+
+function _timersQueueMutation(payload, {render = false, row = null, version = null} = {}) {
+  const item = {payload, render, row, version};
+  if (payload && payload.action === 'update_preset' && !payload.apply) {
+    for (let i = _timersMutationQueue.length - 1; i >= 0; i -= 1) {
+      const queued = _timersMutationQueue[i];
+      if (
+        queued &&
+        queued.payload &&
+        queued.payload.action === 'update_preset' &&
+        queued.payload.preset === payload.preset &&
+        !queued.payload.apply
+      ) {
+        queued.payload.patch = Object.assign({}, queued.payload.patch || {}, payload.patch || {});
+        queued.row = row || queued.row;
+        queued.version = version || queued.version;
+        queued.render = queued.render || render;
+        return _timersDrainMutationQueue();
+      }
     }
   }
+  _timersMutationQueue.push(item);
+  return _timersDrainMutationQueue();
 }
 
-function _timersScheduleAutoSave({delayMs = 600, showStatus = false} = {}) {
-  if (_timersAutoSaveHandle) {
-    clearTimeout(_timersAutoSaveHandle);
-    _timersAutoSaveHandle = null;
+function _timersClearRowSaveTimer(tr) {
+  if (tr && tr.__timerSaveHandle) {
+    clearTimeout(tr.__timerSaveHandle);
+    tr.__timerSaveHandle = null;
   }
-  _timersAutoSaveHandle = setTimeout(() => {
-    _timersAutoSaveHandle = null;
-    _timersAutoSaveNow({showStatus});
+}
+
+function _timersReadPresetFromRow(tr) {
+  if (!tr) return null;
+  const timeInp = tr.querySelector('input[data-role="preset-time"]');
+  const nameInp = tr.querySelector('input[data-role="preset-name"]');
+  const time = String((timeInp && timeInp.value) || '').trim();
+  if (!time) return null;
+  const name = String((nameInp && nameInp.value) || '').trim();
+  const obj = {time, name};
+
+  const list = tr.querySelector('[data-role="presses-list"]');
+  const pressesOut = [];
+  if (list) {
+    const pressRows = Array.from(list.querySelectorAll('[data-role="press-row"]'));
+    for (const pr of pressRows) {
+      const sel = pr.querySelector('select[data-role="press-template"]');
+      const inp = pr.querySelector('input[data-role="press-url"]');
+      let url = '';
+      if (sel && String(sel.value || '') !== '') {
+        url = _timersTemplateToURL(sel.value);
+      } else {
+        url = String((inp && inp.value) || '').trim();
+      }
+      const norm = _timersNormalizeButtonURL(url);
+      if (!norm) continue;
+      if (norm === '__INVALID__') {
+        throw new Error(`Invalid button URL: ${url}. Use '1/2/3' or 'location/1/2/3/press'.`);
+      }
+      pressesOut.push({buttonURL: norm});
+    }
+  }
+  obj.button_presses = pressesOut;
+  return obj;
+}
+
+function _timersQueueRowUpdate(tr) {
+  if (!tr) return Promise.resolve({ok: true, skipped: true});
+  _timersClearRowSaveTimer(tr);
+  const preset = Number(tr.dataset.index) + 1;
+  if (!Number.isFinite(preset) || preset < 1) return Promise.resolve({ok: true, skipped: true});
+  let patch = null;
+  try {
+    patch = _timersReadPresetFromRow(tr);
+  } catch (e) {
+    _timersSetStatus(String(e.message || e), 'error');
+    return Promise.resolve({ok: false, error: String(e.message || e)});
+  }
+  if (!patch) {
+    return Promise.resolve({ok: true, skipped: true, reason: 'incomplete-time'});
+  }
+  const version = String((tr.dataset && tr.dataset.dirtyVersion) || '');
+  return _timersQueueMutation(
+    {action: 'update_preset', preset, patch},
+    {row: tr, version}
+  );
+}
+
+function _timersMarkRowDirty(tr, {delayMs = 700} = {}) {
+  if (!tr) return;
+  tr.dataset.dirty = '1';
+  tr.dataset.dirtyVersion = String(++_timersEditVersion);
+  _timersClearRowSaveTimer(tr);
+  tr.__timerSaveHandle = setTimeout(() => {
+    tr.__timerSaveHandle = null;
+    _timersQueueRowUpdate(tr);
   }, Math.max(0, Number(delayMs) || 0));
 }
 
-async function _timersFlushAutoSave() {
-  if (_timersAutoSaveHandle) {
-    clearTimeout(_timersAutoSaveHandle);
-    _timersAutoSaveHandle = null;
+function _timersScheduleAutoSave({delayMs = 700, showStatus = false} = {}) {
+  const body = document.getElementById('timers-presets-body');
+  if (!body) return;
+  const rows = Array.from(body.querySelectorAll('tr[data-dirty="1"]'));
+  rows.forEach((tr) => _timersMarkRowDirty(tr, {delayMs}));
+  if (showStatus) _timersClearStatus();
+}
+
+function _timersDrainMutationQueue() {
+  if (_timersDrainPromise) return _timersDrainPromise;
+  _timersDrainPromise = (async () => {
+    while (_timersMutationQueue.length) {
+      const item = _timersMutationQueue.shift();
+      try {
+        const res = await fetch('/api/timers/mutate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(item.payload || {}),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'Save failed');
+        }
+        if (item.row && item.version && item.row.dataset.dirtyVersion === String(item.version)) {
+          delete item.row.dataset.dirty;
+        }
+        _timersApplyMutationResponse(data, {render: !!item.render});
+        _timersClearStatus();
+      } catch (e) {
+        if (item.row) item.row.dataset.dirty = '1';
+        _timersSetStatus(String(e.message || e), 'error');
+        return {ok: false, error: String(e.message || e)};
+      }
+    }
+    return {ok: true};
+  })().finally(() => {
+    _timersDrainPromise = null;
+  });
+  return _timersDrainPromise;
+}
+
+async function _timersFlushAutoSave({showStatus = true} = {}) {
+  const body = document.getElementById('timers-presets-body');
+  if (body) {
+    const rows = Array.from(body.querySelectorAll('tr[data-dirty="1"]'));
+    for (const tr of rows) {
+      _timersClearRowSaveTimer(tr);
+      const r = await _timersQueueRowUpdate(tr);
+      if (r && r.ok === false) return false;
+    }
   }
-  const r = await _timersAutoSaveNow({showStatus: true});
-  return !!(r.ok && !r.skipped);
+  const r = await _timersDrainMutationQueue();
+  if (showStatus && r && r.ok === false) {
+    _timersSetStatus(r.error || 'Save failed', 'error');
+  }
+  return !!(!r || r.ok !== false);
 }
 
 async function _timersApplyPreset(presetNumber) {
@@ -1765,11 +1854,13 @@ function _timersApplyStagePresetId(presetId) {
   _timersStageSetButtonsEnabled(value > 0 && value <= presets.length);
 }
 
-function _timersRestoreLastSaved() {
-  if (_timersLastSavedPresets) {
-    _timersRenderPresets(_timersLastSavedPresets);
-  }
-  _timersApplyStagePresetId(_timersLastSavedStagePreset);
+function _timersSaveStagePresetId(presetId) {
+  const id = Number(presetId);
+  const value = Number.isFinite(id) && id > 0 ? Math.floor(id) : 0;
+  return _timersQueueMutation({
+    action: 'set_stream_start_preset',
+    stream_start_preset: value,
+  });
 }
 
 async function _timersSendStreamStartMessage() {
@@ -1840,7 +1931,8 @@ function _timersRenderPresets(presets) {
     input.type = 'time';
     input.step = '60';
     input.className = 'form-control form-control-sm';
-    input.value = String(presetObj.time || '').trim() || '00:00';
+    const normalizedTime = _timersNormalizeTimeForInput(presetObj.time) || '00:00';
+    input.value = normalizedTime;
     input.dataset.lastCompleteTime = input.value;
     input.dataset.role = 'preset-time';
     timeTd.appendChild(input);
@@ -1979,7 +2071,7 @@ async function _timersLoad() {
     _timersButtonTemplates = [];
   }
 
-  const res = await fetch('/api/timers');
+  const res = await fetch('/api/timers?_ts=' + Date.now(), {cache: 'no-store'});
   if (!res.ok) throw new Error('Failed to load timers');
   const data = await res.json();
 
@@ -2001,10 +2093,14 @@ if (document.getElementById('timers-page')) {
       if (_timersHasIncompletePresetTime()) {
         _timersEnsureCompletePresetTimes();
       }
-      const presets = _timersReadPresetsFromUI();
-      presets.push({time: '00:00', name: ''});
-      _timersRenderPresets(presets);
-      _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+      (async () => {
+        const ok = await _timersFlushAutoSave({showStatus: false});
+        if (!ok) return;
+        await _timersQueueMutation(
+          {action: 'create_preset', time: '00:00', name: ''},
+          {render: true}
+        );
+      })();
     });
   }
 
@@ -2037,13 +2133,13 @@ if (document.getElementById('timers-page')) {
       const raw = String(stageInput.value || '').trim();
       if (!raw) {
         _timersApplyStagePresetId(0);
-        _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+        _timersSaveStagePresetId(0);
         return;
       }
       const id = _timersStageResolvePresetId(raw, presets);
       if (id) {
         _timersApplyStagePresetId(id);
-        _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+        _timersSaveStagePresetId(id);
       } else {
         _timersStageSetHint('No matching preset found.', 'error');
         _timersApplyStagePresetId(_timersReadStagePresetFromUI());
@@ -2123,6 +2219,7 @@ if (document.getElementById('timers-page')) {
         }
 
         _timersUpdatePressSummary(tr);
+        _timersMarkRowDirty(tr, {delayMs: 0});
         return;
       }
 
@@ -2152,23 +2249,26 @@ if (document.getElementById('timers-page')) {
         _timersEnsureCompletePresetTimes();
       }
 
-      const presets = _timersReadPresetsFromUI();
-
-      if (action === 'delete') {
-        presets.splice(idx, 1);
-        _timersAllowDeleteNextSave = true;
-      } else if (action === 'up' && idx > 0) {
-        const tmp = presets[idx - 1];
-        presets[idx - 1] = presets[idx];
-        presets[idx] = tmp;
-      } else if (action === 'down' && idx < presets.length - 1) {
-        const tmp = presets[idx + 1];
-        presets[idx + 1] = presets[idx];
-        presets[idx] = tmp;
-      }
-
-      _timersRenderPresets(presets);
-      _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+      (async () => {
+        const ok = await _timersFlushAutoSave({showStatus: false});
+        if (!ok) return;
+        if (action === 'delete') {
+          await _timersQueueMutation(
+            {action: 'delete_preset', preset: idx + 1},
+            {render: true}
+          );
+        } else if (action === 'up' && idx > 0) {
+          await _timersQueueMutation(
+            {action: 'move_preset', preset: idx + 1, direction: 'up'},
+            {render: true}
+          );
+        } else if (action === 'down' && idx < body.querySelectorAll('tr').length - 1) {
+          await _timersQueueMutation(
+            {action: 'move_preset', preset: idx + 1, direction: 'down'},
+            {render: true}
+          );
+        }
+      })();
     });
 
     // Auto-save on edits
@@ -2185,7 +2285,7 @@ if (document.getElementById('timers-page')) {
           }
           _timersRememberCompleteTime(el);
         }
-        _timersScheduleAutoSave({delayMs: 600, showStatus: false});
+        _timersMarkRowDirty(el.closest('tr'), {delayMs: 700});
       }
     });
     body.addEventListener('blur', (ev) => {
@@ -2208,7 +2308,7 @@ if (document.getElementById('timers-page')) {
         _timersRememberCompleteTime(el);
       }
       if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]') || el.matches('select[data-role="press-template"]') || el.matches('input[data-role="press-url"]'))) {
-        _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+        _timersMarkRowDirty(el.closest('tr'), {delayMs: 0});
       }
     });
 
@@ -2233,7 +2333,7 @@ if (document.getElementById('timers-page')) {
         inp.disabled = false;
       }
 
-      _timersScheduleAutoSave({delayMs: 0, showStatus: false});
+      _timersMarkRowDirty(sel.closest('tr'), {delayMs: 0});
     });
   }
 }

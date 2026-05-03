@@ -20,11 +20,31 @@ TIMER_PRESETS_FILE = "timer_presets.json"
 _timer_presets_lock = threading.RLock()
 _TIMER_NAME_UNSET = object()
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_HHMM_RE = re.compile(r'^(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::\d{2})?$')
 
 
 def get_project_path(*parts: str) -> Path:
     """Return an absolute path anchored at the repository root."""
     return _PROJECT_ROOT.joinpath(*parts)
+
+
+def normalize_time_hhmm(value: Any) -> str | None:
+    """Normalize browser/user time values to zero-padded HH:MM."""
+    try:
+        s = str(value or '').strip()
+    except Exception:
+        return None
+    m = _HHMM_RE.match(s)
+    if not m:
+        return None
+    try:
+        hour = int(m.group('hour'))
+        minute = int(m.group('minute'))
+    except Exception:
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}"
 
 _defaults = {
     "EVENTS_FILE": DEFAULT_EVENTS_FILE,
@@ -139,6 +159,10 @@ def _coerce_timer_preset(value: Any) -> Dict[str, Any] | None:
 
     if not t:
         return None
+    normalized_time = normalize_time_hhmm(t)
+    if not normalized_time:
+        return None
+    t = normalized_time
     if not n:
         n = t
 
@@ -158,7 +182,8 @@ def _normalize_timer_presets_list(presets: list[Any] | None) -> list[Dict[str, A
 
 
 def _atomic_write_json(path: str, data: Any) -> None:
-    write_json(path, data)
+    if not write_json(path, data):
+        raise OSError(f"failed to write JSON file: {path}")
 
 
 def load_timer_presets(path: str = TIMER_PRESETS_FILE) -> list[Dict[str, Any]]:
