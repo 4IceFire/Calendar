@@ -1337,6 +1337,77 @@ function _timersNormalizeTimeForInput(value) {
   return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 }
 
+function _timersParseDurationMinutes(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/,/g, ' ');
+  if (!raw) return {ok: false, error: 'Enter an amount of time first.'};
+  const compact = raw.replace(/\s+/g, '');
+
+  let minutes = null;
+  if (/^\d+$/.test(compact)) {
+    minutes = parseInt(compact, 10);
+  } else {
+    const hm = compact.match(/^(\d+):(\d{1,2})$/);
+    if (hm) {
+      const hours = parseInt(hm[1], 10);
+      const mins = parseInt(hm[2], 10);
+      if (mins > 59) return {ok: false, error: 'For H:MM, minutes must be 0-59.'};
+      minutes = (hours * 60) + mins;
+    } else {
+      const tokenRe = /(\d+)(hours|hour|hrs|hr|h|minutes|minute|mins|min|m)/g;
+      let pos = 0;
+      let hours = 0;
+      let mins = 0;
+      let match = null;
+      let sawToken = false;
+      while ((match = tokenRe.exec(compact)) !== null) {
+        if (match.index !== pos) {
+          return {ok: false, error: 'Use minutes, 15m, 1h 30m, or 1:30.'};
+        }
+        const amount = parseInt(match[1], 10);
+        if (String(match[2] || '').startsWith('h')) hours += amount;
+        else mins += amount;
+        sawToken = true;
+        pos = tokenRe.lastIndex;
+      }
+      if (!sawToken || pos !== compact.length) {
+        return {ok: false, error: 'Use minutes, 15m, 1h 30m, or 1:30.'};
+      }
+      minutes = (hours * 60) + mins;
+    }
+  }
+
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return {ok: false, error: 'Amount must be greater than 0 minutes.'};
+  }
+  if (minutes > 24 * 60) {
+    return {ok: false, error: 'Amount must be 24 hours or less.'};
+  }
+  return {ok: true, minutes};
+}
+
+async function _timersAdjustAllPresets(sign) {
+  const input = document.getElementById('timers-bulk-adjust-amount');
+  const parsed = _timersParseDurationMinutes(input ? input.value : '');
+  if (!parsed.ok) {
+    _timersSetStatus(parsed.error || 'Invalid duration.', 'error');
+    if (input) input.focus();
+    return false;
+  }
+
+  if (_timersHasIncompletePresetTime()) {
+    _timersEnsureCompletePresetTimes();
+  }
+  const ok = await _timersFlushAutoSave({showStatus: false});
+  if (!ok) return false;
+
+  const delta = (sign < 0 ? -1 : 1) * parsed.minutes;
+  const result = await _timersQueueMutation(
+    {action: 'adjust_all_presets', delta_minutes: delta},
+    {render: true}
+  );
+  return !!(!result || result.ok !== false);
+}
+
 function _timersApplyMutationResponse(data, {render = false} = {}) {
   const presets = Array.isArray(data && data.timer_presets) ? data.timer_presets : _timersReadPresetsFromUI();
   const stagePreset = Number((data && data.stream_start_preset) ?? _timersReadStagePresetFromUI() ?? 0);
@@ -1877,6 +1948,22 @@ async function _timersSendStreamStartMessage() {
   return data;
 }
 
+async function _timersSendCustomStageMessage(message) {
+  const res = await fetch('/api/propresenter/stage/message', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Custom stage message failed');
+  }
+  if (!data.sent) {
+    throw new Error(data.detail || 'Custom stage message failed to send');
+  }
+  return data;
+}
+
 async function _timersClearStageMessage() {
   const res = await fetch('/api/propresenter/stage/clear', {
     method: 'POST',
@@ -2104,6 +2191,44 @@ if (document.getElementById('timers-page')) {
     });
   }
 
+  const bulkAdjustInput = document.getElementById('timers-bulk-adjust-amount');
+  const bulkAddBtn = document.getElementById('timers-bulk-add');
+  const bulkSubtractBtn = document.getElementById('timers-bulk-subtract');
+  const runBulkAdjust = (sign) => {
+    (async () => {
+      _timersClearStatus();
+      try {
+        if (bulkAddBtn) bulkAddBtn.disabled = true;
+        if (bulkSubtractBtn) bulkSubtractBtn.disabled = true;
+        await _timersAdjustAllPresets(sign);
+      } catch (e) {
+        _timersSetStatus(String(e.message || e), 'error');
+      } finally {
+        if (bulkAddBtn) bulkAddBtn.disabled = false;
+        if (bulkSubtractBtn) bulkSubtractBtn.disabled = false;
+      }
+    })();
+  };
+  if (bulkAddBtn) {
+    bulkAddBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      runBulkAdjust(1);
+    });
+  }
+  if (bulkSubtractBtn) {
+    bulkSubtractBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      runBulkAdjust(-1);
+    });
+  }
+  if (bulkAdjustInput) {
+    bulkAdjustInput.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      runBulkAdjust(ev.shiftKey ? -1 : 1);
+    });
+  }
+
   // Stage message preset selection
   const stageInput = document.getElementById('timers-stage-preset');
   if (stageInput) {
@@ -2168,6 +2293,55 @@ if (document.getElementById('timers-page')) {
           _timersSetStatus(String(e.message || e), 'error');
         }
       })();
+    });
+  }
+
+  const customStageInput = document.getElementById('timers-stage-custom-message');
+  const customStageHint = document.getElementById('timers-stage-custom-hint');
+  const customStageSendBtn = document.getElementById('timers-stage-custom-send');
+  const setCustomStageHint = (msg, kind) => {
+    if (!customStageHint) return;
+    customStageHint.textContent = String(msg || '');
+    if (kind === 'error') customStageHint.className = 'form-text text-danger';
+    else if (kind === 'ok') customStageHint.className = 'form-text text-success';
+    else customStageHint.className = 'form-text text-muted';
+  };
+  const sendCustomStageMessage = () => {
+    (async () => {
+      _timersClearStatus();
+      try {
+        const message = String((customStageInput && customStageInput.value) || '').trim();
+        if (!message) {
+          setCustomStageHint('Type a message first.', 'error');
+          if (customStageInput) customStageInput.focus();
+          return;
+        }
+        if (customStageSendBtn) customStageSendBtn.disabled = true;
+        await _timersSendCustomStageMessage(message);
+        setCustomStageHint('Custom stage message sent.', 'ok');
+      } catch (e) {
+        setCustomStageHint(String(e.message || e), 'error');
+        _timersSetStatus(String(e.message || e), 'error');
+      } finally {
+        if (customStageSendBtn) customStageSendBtn.disabled = false;
+      }
+    })();
+  };
+  if (customStageSendBtn) {
+    customStageSendBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      sendCustomStageMessage();
+    });
+  }
+  if (customStageInput) {
+    customStageInput.addEventListener('input', () => {
+      setCustomStageHint('Press Send Custom Message, or Ctrl+Enter from the text box.', '');
+    });
+    customStageInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault();
+        sendCustomStageMessage();
+      }
     });
   }
 

@@ -8,13 +8,25 @@
 
 {% block content %}
 <div id="timers-page">
-	<div class="tdeck-soft rounded-3 p-3">
-		<div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-			<div>
+	<div class="tdeck-soft rounded-3 p-3 timer-presets-panel">
+		<div class="timer-presets-header mb-3">
+			<div class="timer-presets-title">
 				<h2 class="h5 mb-0">Preset Times</h2>
 				<div class="small text-muted">Edits auto-save as you type.</div>
 			</div>
-			<button id="timers-add" class="btn btn-outline-secondary btn-sm">Add Time</button>
+			<div class="timer-presets-tools">
+				<div class="timer-adjust-tool">
+					<label for="timers-bulk-adjust-amount" class="timer-tool-label">Adjust all</label>
+					<div class="timer-adjust-control">
+						<input id="timers-bulk-adjust-amount" class="form-control form-control-sm" placeholder="15m, 1h, 1:30">
+						<div class="btn-group" role="group" aria-label="Adjust all timer presets">
+							<button id="timers-bulk-subtract" class="btn btn-outline-secondary btn-sm" title="Subtract from every timer">-</button>
+							<button id="timers-bulk-add" class="btn btn-outline-secondary btn-sm" title="Add to every timer">+</button>
+						</div>
+					</div>
+				</div>
+				<button id="timers-add" class="btn btn-primary btn-sm timer-add-preset-btn">Add Preset</button>
+			</div>
 		</div>
 
 		<div class="table-responsive tdeck-table-wrap">
@@ -22,7 +34,7 @@
 				<thead>
 					<tr>
 						<th style="width: 70px;"></th>
-						<th style="width: 90px;">Order</th>
+						<th style="width: 90px;">Preset</th>
 						<th style="width: 260px;">Name</th>
 						<th>Time (HH:MM)</th>
 						<th style="width: 420px;">Button Presses</th>
@@ -34,29 +46,51 @@
 		</div>
 	</div>
 
-	<div id="timers-stage-message" class="tdeck-soft rounded-3 p-3 mt-3">
-		<div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+	<div id="timers-stage-message" class="tdeck-soft rounded-3 p-3 mt-3 timer-stage-panel">
+		<div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-3">
 			<div>
 				<h2 class="h5 mb-0">Stage Message</h2>
-				<div class="small text-muted">Send the stream start stage message from a timer preset.</div>
+				<div class="small text-muted">Send a preset stream-start message, or type a one-off message for stage display.</div>
 			</div>
 			<div class="d-flex flex-wrap gap-2">
-				<button id="timers-stage-send" class="btn btn-primary btn-sm">Send Stage Message</button>
 				<button id="timers-stage-clear" class="btn btn-outline-secondary btn-sm">Clear Stage Message</button>
 			</div>
 		</div>
 
-		<div class="row g-2 align-items-end">
-			<div class="col-lg-7">
-				<label for="timers-stage-preset" class="form-label mb-1">Stream Start Preset</label>
-				<input id="timers-stage-preset" class="form-control form-control-sm" list="timers-stage-preset-list" placeholder="Type preset ID or name">
-				<datalist id="timers-stage-preset-list"></datalist>
-				<input type="hidden" id="timers-stage-preset-id">
-				<div id="timers-stage-hint" class="form-text text-muted">Type a preset ID or name, then select it from the list.</div>
+		<div class="row g-3">
+			<div class="col-lg-6">
+				<div class="timer-stage-card h-100">
+					<div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
+						<div>
+							<div class="timer-stage-eyebrow">Preset Message</div>
+							<h3 class="h6 mb-0">Stream Start</h3>
+						</div>
+						<button id="timers-stage-send" class="btn btn-primary btn-sm">Send Stream Start</button>
+					</div>
+					<label for="timers-stage-preset" class="form-label mb-1">Timer preset</label>
+					<input id="timers-stage-preset" class="form-control form-control-sm" list="timers-stage-preset-list" placeholder="Type preset ID or name">
+					<datalist id="timers-stage-preset-list"></datalist>
+					<input type="hidden" id="timers-stage-preset-id">
+					<div id="timers-stage-hint" class="form-text text-muted">Type a preset ID or name, then select it from the list.</div>
+					<div class="timer-stage-output mt-3">
+						<div class="small text-muted">Preview</div>
+						<div id="timers-stage-preview" class="timer-stage-preview mt-1"></div>
+					</div>
+				</div>
 			</div>
-			<div class="col-lg-5">
-				<div class="small text-muted">Output:</div>
-				<div id="timers-stage-preview" class="text-muted small mt-1"></div>
+			<div class="col-lg-6">
+				<div class="timer-stage-card h-100">
+					<div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
+						<div>
+							<div class="timer-stage-eyebrow">One-Off Message</div>
+							<h3 class="h6 mb-0">Custom Message</h3>
+						</div>
+						<button id="timers-stage-custom-send" class="btn btn-outline-primary btn-sm">Send Custom</button>
+					</div>
+					<label for="timers-stage-custom-message" class="form-label mb-1">Message text</label>
+					<textarea id="timers-stage-custom-message" class="form-control form-control-sm timer-stage-textarea" rows="4" placeholder="Type any stage message"></textarea>
+					<div id="timers-stage-custom-hint" class="form-text text-muted">Press Send Custom, or Ctrl+Enter from the text box.</div>
+				</div>
 			</div>
 		</div>
 	</div>

@@ -4639,6 +4639,75 @@ def _format_time_hhmm_ampm(time_str: str) -> str:
     return f"{hour}:{dt.minute:02d}{suffix}"
 
 
+def _parse_timer_duration_minutes(value: object) -> tuple[int | None, str | None]:
+    """Parse a human-entered duration into minutes.
+
+    Accepts plain minutes ("15"), hours/minutes ("1h 30m"), and H:MM ("1:30").
+    """
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        raw = ''
+    if not raw:
+        return None, 'duration is required'
+
+    raw = raw.replace(',', ' ')
+    compact = re.sub(r'\s+', '', raw)
+
+    if re.fullmatch(r'\d+', compact):
+        minutes = int(compact)
+    else:
+        hm = re.fullmatch(r'(\d+):(\d{1,2})', compact)
+        if hm:
+            hours = int(hm.group(1))
+            mins = int(hm.group(2))
+            if mins > 59:
+                return None, 'duration minutes must be 0..59 when using H:MM'
+            minutes = (hours * 60) + mins
+        else:
+            token_re = re.compile(r'(\d+)(hours|hour|hrs|hr|h|minutes|minute|mins|min|m)')
+            pos = 0
+            hours = 0
+            mins = 0
+            saw_token = False
+            for m in token_re.finditer(compact):
+                if m.start() != pos:
+                    return None, 'duration must look like 15m, 1h 30m, or 1:30'
+                amount = int(m.group(1))
+                unit = m.group(2)
+                if unit.startswith('h'):
+                    hours += amount
+                else:
+                    mins += amount
+                saw_token = True
+                pos = m.end()
+            if not saw_token or pos != len(compact):
+                return None, 'duration must look like 15m, 1h 30m, or 1:30'
+            minutes = (hours * 60) + mins
+
+    if minutes <= 0:
+        return None, 'duration must be greater than 0 minutes'
+    if minutes > 24 * 60:
+        return None, 'duration must be 24 hours or less'
+    return minutes, None
+
+
+def _time_hhmm_to_minutes(time_str: str) -> int | None:
+    normalized = _normalize_time_hhmm(time_str)
+    if not normalized:
+        return None
+    try:
+        h, m = normalized.split(':', 1)
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+
+def _minutes_to_time_hhmm(minutes: int) -> str:
+    total = int(minutes) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
 def _resolve_stream_start_preset(cfg: dict, presets: list[dict]) -> tuple[int, dict] | None:
     """Return (1-based preset number, preset dict) for stream-start message."""
     try:
@@ -5423,6 +5492,57 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                     elif dst <= stream < src:
                         config_changes['stream_start_preset'] = stream + 1
                 extra.update({'preset': src, 'to': dst})
+
+            elif action == 'adjust_all_presets':
+                raw_delta = _timer_get_ci(body, 'delta_minutes', 'delta', 'minutes')
+                if raw_delta is None:
+                    raw_duration = _timer_get_ci(body, 'duration', 'amount')
+                    parsed_duration, duration_err = _parse_timer_duration_minutes(raw_duration)
+                    if duration_err:
+                        return {'ok': False, 'error': duration_err}, 400
+                    sign_raw = str(_timer_get_ci(body, 'sign', 'direction') or '+').strip().lower()
+                    sign = -1 if sign_raw in ('-', 'minus', 'subtract', 'remove', 'down') else 1
+                    delta_minutes = sign * int(parsed_duration or 0)
+                else:
+                    try:
+                        delta_minutes = int(raw_delta)
+                    except Exception:
+                        return {'ok': False, 'error': 'delta_minutes must be an integer'}, 400
+                if delta_minutes == 0:
+                    return {'ok': False, 'error': 'delta_minutes must not be 0'}, 400
+                if abs(delta_minutes) > 24 * 60:
+                    return {'ok': False, 'error': 'delta_minutes must be between -1440 and 1440'}, 400
+
+                adjusted = 0
+                skipped: list[int] = []
+                updated_presets: list = []
+                for idx, preset in enumerate(presets, start=1):
+                    current = dict(preset) if isinstance(preset, dict) else {
+                        'time': str(preset or '').strip(),
+                        'name': str(preset or '').strip(),
+                    }
+                    current_minutes = _time_hhmm_to_minutes(str(current.get('time', '')).strip())
+                    if current_minutes is None:
+                        skipped.append(idx)
+                        updated_presets.append(preset)
+                        continue
+                    current['time'] = _minutes_to_time_hhmm(current_minutes + delta_minutes)
+                    if not str(current.get('name', '')).strip():
+                        current['name'] = current['time']
+                    updated_presets.append(current)
+                    adjusted += 1
+
+                if adjusted < 1:
+                    return {'ok': False, 'error': 'no valid timer presets were available to adjust'}, 400
+
+                if updated_presets != presets:
+                    presets = updated_presets
+                    presets_changed = True
+                extra.update({
+                    'delta_minutes': delta_minutes,
+                    'adjusted_count': adjusted,
+                    'skipped_presets': skipped,
+                })
 
             elif action == 'set_stream_start_preset':
                 try:
