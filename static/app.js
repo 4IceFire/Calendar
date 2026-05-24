@@ -1095,105 +1095,48 @@ if (document.getElementById('config-page')) {
 function _consoleSetStatus(msg, kind) {
   const el = document.getElementById('console-status');
   if (!el) return;
-  if (!msg) {
-    _uiClearAutoHide(el);
-    el.className = '';
-    el.textContent = '';
-    return;
-  }
-  const cls = kind === 'error' ? 'alert alert-danger' : 'alert alert-success';
-  el.className = cls;
+  if (!msg) { el.className=''; el.textContent=''; return; }
+  el.className = kind === 'error' ? 'alert alert-danger' : 'alert alert-success';
   el.textContent = msg;
-  _uiScheduleAutoHide(el, () => {
-    el.className = '';
-    el.textContent = '';
-  });
 }
 
 if (document.getElementById('console-page')) {
   const logEl = document.getElementById('console-log');
-  const cmdEl = document.getElementById('console-command');
-  const runBtn = document.getElementById('console-run');
-  let since = 0;
-  let polling = false;
+  const severityEl = document.getElementById('console-severity');
+  const moduleEl = document.getElementById('console-module');
+  const refreshBtn = document.getElementById('console-refresh');
 
-  function _appendToLog(text) {
-    if (!logEl || text == null) return;
-    logEl.textContent += String(text);
+  function renderLines(lines) {
+    if (!logEl) return;
+    const text = (lines || []).map((ln) => {
+      const actor = ln.username ? ln.username : (ln.ip ? `ip:${ln.ip}` : 'system');
+      return `[${ln.ts}] [${ln.severity}] [${ln.module}] [${actor}] ${ln.message}`;
+    }).join('\n');
+    logEl.textContent = text + (text ? '\n' : '');
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  async function pollConsole() {
-    if (polling) return;
-    polling = true;
+  async function loadLogs() {
     try {
-      const res = await fetch(`/api/console/logs?since=${encodeURIComponent(String(since))}`);
-      if (!res.ok) throw new Error('Failed to load console logs');
+      const qs = new URLSearchParams();
+      if (severityEl && severityEl.value) qs.set('severity', severityEl.value);
+      if (moduleEl && moduleEl.value) qs.set('module', moduleEl.value);
+      qs.set('limit', '800');
+      const res = await fetch(`/api/console/logs?${qs.toString()}`);
       const data = await res.json();
-      if (!data || !data.ok) throw new Error(data && data.error ? data.error : 'Failed to load console logs');
-      const lines = data.lines || [];
-      if (lines.length) {
-        const rendered = lines.map((ln) => {
-          // Backward-compatible with older string-only API.
-          if (typeof ln === 'string') return ln;
-          const ts = String(ln.ts || '').trim();
-          const text = String(ln.text || '');
-          // Prefix every captured line with date/time.
-          return ts ? `${ts} ${text}` : text;
-        }).join('');
-        _appendToLog(rendered);
-      }
-      since = Number(data.next || since) || since;
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to load logs');
+      renderLines(data.lines || []);
     } catch (e) {
-      // Don't spam the UI; just show the latest error.
       _consoleSetStatus(String(e.message || e), 'error');
-    } finally {
-      polling = false;
     }
   }
 
-  async function runCommand() {
-    const cmd = String((cmdEl && cmdEl.value) || '').trim();
-    if (!cmd) return;
-    _consoleSetStatus('', 'ok');
-    if (runBtn) runBtn.disabled = true;
-    try {
-      const res = await fetch('/api/console/run', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command: cmd}),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'Command failed');
-      }
-      // The server also appends output to the live log buffer; polling will show it.
-      _consoleSetStatus(`Exit code: ${data.exit_code}`, 'ok');
-      if (cmdEl) cmdEl.value = '';
-      // Immediately poll once so output appears quickly.
-      await pollConsole();
-    } catch (e) {
-      _consoleSetStatus(String(e.message || e), 'error');
-    } finally {
-      if (runBtn) runBtn.disabled = false;
-    }
-  }
+  if (refreshBtn) refreshBtn.addEventListener('click', loadLogs);
+  if (severityEl) severityEl.addEventListener('change', loadLogs);
+  if (moduleEl) moduleEl.addEventListener('change', loadLogs);
 
-  // initial load + poll
-  pollConsole();
-  setInterval(pollConsole, 1000);
-
-  if (runBtn) {
-    runBtn.addEventListener('click', runCommand);
-  }
-  if (cmdEl) {
-    cmdEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        runCommand();
-      }
-    });
-  }
+  loadLogs();
+  setInterval(loadLogs, 3000);
 }
 
 // --- Timers page ---
@@ -2742,4 +2685,3 @@ if (document.getElementById('access-levels-page')) {
     });
   });
 }
-

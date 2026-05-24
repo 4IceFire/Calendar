@@ -6,18 +6,41 @@
 <div id="console-page">
   <div id="console-status" class="mb-3"></div>
 
-  <div class="mb-3">
-    <div class="input-group">
-      <span class="input-group-text">cli</span>
-      <input id="console-command" type="text" class="form-control" placeholder="list" autocomplete="off" />
-      <button id="console-run" class="btn btn-primary" type="button">Run</button>
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label">Severity</label>
+          <select id="console-severity" class="form-select">
+            <option value="">All</option>
+            <option value="DEBUG">DEBUG</option>
+            <option value="INFO">INFO</option>
+            <option value="WARNING">WARNING</option>
+            <option value="ERROR">ERROR</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Area / Module</label>
+          <select id="console-module" class="form-select">
+            <option value="">All</option>
+            <option value="api">API</option>
+            <option value="scheduler">Scheduler</option>
+            <option value="timers">Timers</option>
+            <option value="videohub">VideoHub</option>
+            <option value="auth">Auth</option>
+            <option value="automation">Automation</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <button id="console-refresh" class="btn btn-primary w-100" type="button">Refresh</button>
+        </div>
+      </div>
     </div>
-    <div class="form-text">Runs the app CLI as <code>cli &lt;command&gt;</code> (example: <code>cli list</code>). Do not type <code>python cli.py</code>.</div>
   </div>
 
   <div class="card mb-3">
     <div class="card-body">
-      <h2 class="h6">Live Output</h2>
+      <h2 class="h6">Persistent Logs</h2>
       <pre id="console-log" class="border rounded p-2 mb-0" style="height: 55vh; overflow: auto; white-space: pre-wrap;"></pre>
     </div>
   </div>
