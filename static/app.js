@@ -1102,8 +1102,6 @@ function _consoleSetStatus(msg, kind) {
 
 if (document.getElementById('console-page')) {
   const logEl = document.getElementById('console-log');
-  const severityEl = document.getElementById('console-severity');
-  const moduleEl = document.getElementById('console-module');
   const refreshBtn = document.getElementById('console-refresh');
 
   function renderLines(lines) {
@@ -1118,6 +1116,8 @@ if (document.getElementById('console-page')) {
 
   async function loadLogs() {
     try {
+      const severityEl = document.getElementById('console-severity');
+      const moduleEl = document.getElementById('console-module');
       const qs = new URLSearchParams();
       if (severityEl && severityEl.value) qs.set('severity', severityEl.value);
       if (moduleEl && moduleEl.value) qs.set('module', moduleEl.value);
@@ -1132,8 +1132,10 @@ if (document.getElementById('console-page')) {
   }
 
   if (refreshBtn) refreshBtn.addEventListener('click', loadLogs);
-  if (severityEl) severityEl.addEventListener('change', loadLogs);
-  if (moduleEl) moduleEl.addEventListener('change', loadLogs);
+  const severityFilterEl = document.getElementById('console-severity');
+  const moduleFilterEl = document.getElementById('console-module');
+  if (severityFilterEl) severityFilterEl.addEventListener('change', loadLogs);
+  if (moduleFilterEl) moduleFilterEl.addEventListener('change', loadLogs);
 
   loadLogs();
   setInterval(loadLogs, 3000);
