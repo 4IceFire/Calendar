@@ -427,6 +427,19 @@ def _init_auth_db() -> None:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT NOT NULL,
+              severity TEXT NOT NULL,
+              module TEXT NOT NULL,
+              message TEXT NOT NULL,
+              username TEXT,
+              ip TEXT
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -633,6 +646,36 @@ def _can_manage_videohub_rooms_for_current_user() -> bool:
         return False
 
 
+def _app_log(severity: str, module: str, message: str, username: str | None = None, ip: str | None = None) -> None:
+    try:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        ts = ''
+    if username is None:
+        try:
+            if getattr(current_user, 'is_authenticated', False):
+                username = str(getattr(current_user, 'username', '') or '')
+        except Exception:
+            username = ''
+    if ip is None:
+        try:
+            ip = str(request.remote_addr or '')
+        except Exception:
+            ip = ''
+    try:
+        conn = _db()
+        try:
+            conn.execute(
+                'INSERT INTO app_logs(ts,severity,module,message,username,ip) VALUES (?,?,?,?,?,?)',
+                (ts, str(severity or 'INFO').upper(), str(module or 'system'), str(message or ''), username or None, ip or None),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 def _audit(action: str, detail: str | None = None) -> None:
     try:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -650,6 +693,7 @@ def _audit(action: str, detail: str | None = None) -> None:
         ip = str(request.remote_addr or '')
     except Exception:
         ip = ''
+    _app_log('INFO', 'auth', f'audit:{action} detail={detail or ""}', username=uname, ip=ip)
     try:
         conn = _db()
         try:
@@ -1055,6 +1099,25 @@ def auth_ping():
 def auth_touch():
     # Handled by _auth_gate (refreshes last-activity and returns 204)
     return ('', 204)
+
+
+@app.after_request
+def _api_request_logger(resp):
+    try:
+        p = str(request.path or '')
+        if p.startswith('/api/') and p != '/api/console/logs':
+            actor = None
+            ip = None
+            if getattr(current_user, 'is_authenticated', False):
+                actor = str(getattr(current_user, 'username', '') or '')
+            else:
+                ip = str(request.remote_addr or '')
+            code = int(getattr(resp, 'status_code', 500) or 500)
+            sev = 'INFO' if code < 400 else 'ERROR'
+            _app_log(sev, 'api', f'{request.method} {p} -> {code}', username=actor, ip=ip)
+    except Exception:
+        pass
+    return resp
 
 
 @app.context_processor
@@ -4395,40 +4458,36 @@ def api_home_overview():
 
 @app.route('/api/console/logs', methods=['GET'])
 def api_console_logs():
-    """Return captured stdout/stderr/logging lines.
-
-    Query:
-      - since: last seen line id (int). Returns only newer lines when possible.
-      - limit: max lines to return (int, default 400, max 2000)
-    """
-    try:
-        since = int(request.args.get('since', '0') or '0')
-    except Exception:
-        since = 0
-
+    severity = str(request.args.get('severity', '') or '').strip().upper()
+    module = str(request.args.get('module', '') or '').strip().lower()
     try:
         limit = int(request.args.get('limit', '400') or '400')
     except Exception:
         limit = 400
-    if limit < 1:
-        limit = 1
-    if limit > _CONSOLE_MAX_LINES:
-        limit = _CONSOLE_MAX_LINES
+    limit = max(1, min(limit, 2000))
 
-    with _console_lock:
-        lines = list(_console_lines)
-        next_id = _console_seq
+    where = []
+    vals = []
+    if severity:
+        where.append('severity=?')
+        vals.append(severity)
+    if module:
+        where.append('module=?')
+        vals.append(module)
 
-    if since > 0:
-        lines = [(i, ts, t) for (i, ts, t) in lines if i > since]
-    if len(lines) > limit:
-        lines = lines[-limit:]
+    sql = 'SELECT ts,severity,module,message,username,ip FROM app_logs'
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    sql += ' ORDER BY id DESC LIMIT ?'
+    vals.append(limit)
 
-    return jsonify({
-        'ok': True,
-        'next': next_id,
-        'lines': [{'ts': ts, 'text': t} for (_, ts, t) in lines],
-    })
+    conn = _db()
+    try:
+        rows = conn.execute(sql, tuple(vals)).fetchall()
+    finally:
+        conn.close()
+
+    return jsonify({'ok': True, 'lines': [dict(r) for r in reversed(rows)]})
 
 
 def _project_root() -> str:
@@ -6548,6 +6607,7 @@ def api_delete_event_ui(ident: int):
         ev = matching[0]
         events.remove(ev)
         storage.save_events(events, events_file)
+        _app_log('INFO', 'scheduler', f'event_deleted id={ident} name={ev.name}')
         return jsonify({'removed': True, 'id': ident, 'name': ev.name})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -6698,6 +6758,7 @@ def api_update_event_ui(ident: int):
         ev.times = times
 
         storage.save_events(events, events_file)
+        _app_log('INFO', 'scheduler', f'event_updated id={ident} name={ev.name}')
         return jsonify({'ok': True, 'id': ident})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -6795,6 +6856,7 @@ def api_create_event_ui():
         ev = Event(name, new_id, WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday, date_obj, time_obj, repeating, times, active)
         events.append(ev)
         storage.save_events(events, events_file)
+        _app_log('INFO', 'scheduler', f'event_created id={new_id} name={name}')
         return jsonify({'ok': True, 'id': new_id})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
