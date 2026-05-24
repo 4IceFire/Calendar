@@ -1101,10 +1101,10 @@ function _consoleSetStatus(msg, kind) {
 }
 
 if (document.getElementById('console-page')) {
-  const logEl = document.getElementById('console-log');
   const refreshBtn = document.getElementById('console-refresh');
 
-  function renderLines(lines) {
+  const renderLines = (lines) => {
+    const logEl = document.getElementById('console-log');
     if (!logEl) return;
     const text = (lines || []).map((ln) => {
       const actor = ln.username ? ln.username : (ln.ip ? `ip:${ln.ip}` : 'system');
@@ -1112,9 +1112,9 @@ if (document.getElementById('console-page')) {
     }).join('\n');
     logEl.textContent = text + (text ? '\n' : '');
     logEl.scrollTop = logEl.scrollHeight;
-  }
+  };
 
-  async function loadLogs() {
+  const loadLogs = async () => {
     try {
       const severityEl = document.getElementById('console-severity');
       const moduleEl = document.getElementById('console-module');
@@ -1129,7 +1129,7 @@ if (document.getElementById('console-page')) {
     } catch (e) {
       _consoleSetStatus(String(e.message || e), 'error');
     }
-  }
+  };
 
   if (refreshBtn) refreshBtn.addEventListener('click', loadLogs);
   const severityFilterEl = document.getElementById('console-severity');
