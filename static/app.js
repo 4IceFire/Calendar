@@ -84,6 +84,17 @@ function _uiScheduleAutoHide(el, clearFn) {
   }, ms);
 }
 
+document.querySelectorAll('form[data-confirm]').forEach(form => {
+  if (form.getAttribute('data-confirm-bound') === '1') return;
+  form.setAttribute('data-confirm-bound', '1');
+  form.addEventListener('submit', (e) => {
+    const msg = String(form.getAttribute('data-confirm') || 'Are you sure?');
+    if (!window.confirm(msg)) {
+      e.preventDefault();
+    }
+  });
+});
+
 // --- Routing page (quick VideoHub route) ---
 function _routingSetStatus(msg, kind) {
   const el = document.getElementById('routing-status');
@@ -381,6 +392,10 @@ const CONFIG_META = {
     label: 'Minimum Password Length',
     help: 'Minimum length required for new passwords.',
   },
+  auth_lockout_failed_attempts: {
+    label: 'Failed Login Lockout Attempts',
+    help: 'How many failed password attempts lock an account until an admin unlocks it.',
+  },
   flask_secret_key: {
     label: 'Flask Secret Key',
     help: 'Used to sign session cookies. Changing this will log out all users and invalidate existing sessions.',
@@ -611,6 +626,7 @@ function _renderConfigGroups(cfg) {
     'auth_idle_timeout_enabled',
     'auth_idle_timeout_minutes',
     'auth_min_password_length',
+    'auth_lockout_failed_attempts',
     'flask_secret_key',
   ];
   const proPresenterTimingKeys = [
@@ -2514,16 +2530,112 @@ if (document.getElementById('timers-page')) {
 
 // --- Permissions page (users + groups) ---
 if (document.getElementById('permissions-page')) {
+  const permissionsRoot = document.getElementById('permissions-page');
   const userList = document.getElementById('permissions-user-list');
   const userSearch = document.getElementById('permissions-user-search');
   const createUserCard = document.getElementById('permissions-create-user-card');
   const usersCard = document.getElementById('permissions-users-card');
-  const userItems = Array.from(document.querySelectorAll('[data-user-select][data-user-id]'));
+  const userItems = Array.from(document.querySelectorAll('[data-user-link][data-user-id]'));
   const userPanels = Array.from(document.querySelectorAll('[data-user-panel][data-user-id]'));
   const USER_STORAGE_KEY = 'tdeck_permissions_selectedUserId';
   const userSaveTimers = new Map();
   const userSaveInFlight = new Map();
   const userSaveQueued = new Map();
+  const minPasswordLength = Math.max(4, Math.min(Number(permissionsRoot.getAttribute('data-min-password-length')) || 6, 128));
+
+  function _permissionsExistingUsernames() {
+    return new Set(userItems.map(item => String(item.getAttribute('data-user-username') || '').trim().toLowerCase()).filter(Boolean));
+  }
+
+  function _permissionsExistingUserEmails() {
+    return new Set(userItems.map(item => String(item.getAttribute('data-user-email') || '').trim().toLowerCase()).filter(Boolean));
+  }
+
+  function _permissionsExistingGroupNames() {
+    const names = Array.from(document.querySelectorAll('[data-group-option][data-group-name]')).map(el => String(el.getAttribute('data-group-name') || '').trim().toLowerCase()).filter(Boolean);
+    return new Set(names);
+  }
+
+  function _permissionsShowFieldError(field, msg) {
+    if (!field) return false;
+    field.setCustomValidity(String(msg || 'Invalid value'));
+    field.reportValidity();
+    const clear = () => field.setCustomValidity('');
+    field.addEventListener('input', clear, { once: true });
+    field.addEventListener('change', clear, { once: true });
+    return false;
+  }
+
+  try {
+    const feedbackError = String(permissionsRoot.getAttribute('data-feedback-error') || '').trim();
+    if (feedbackError) {
+      const activePane = permissionsRoot.querySelector('.tab-pane.active') || permissionsRoot;
+      const field = activePane.querySelector('input:not([type="hidden"]), button');
+      _permissionsShowFieldError(field, feedbackError);
+    }
+  } catch (e) {}
+
+  document.querySelectorAll('form[data-confirm]').forEach(form => {
+    if (form.getAttribute('data-confirm-bound') === '1') return;
+    form.setAttribute('data-confirm-bound', '1');
+    form.addEventListener('submit', (e) => {
+      const msg = String(form.getAttribute('data-confirm') || 'Are you sure?');
+      if (!window.confirm(msg)) {
+        e.preventDefault();
+      }
+    });
+  });
+
+  document.querySelectorAll('form').forEach(form => {
+    const actionEl = form.querySelector('input[name="action"]');
+    const action = actionEl ? String(actionEl.value || '') : '';
+    if (!['create_user', 'create_group', 'reset_password'].includes(action)) return;
+    form.addEventListener('submit', (e) => {
+      if (action === 'create_user') {
+        const usernameEl = form.querySelector('input[name="username"]');
+        const fullNameEl = form.querySelector('input[name="full_name"]');
+        const emailEl = form.querySelector('input[name="email"]');
+        const passwordEl = form.querySelector('input[name="password"]');
+        const username = String((usernameEl || {}).value || '').trim();
+        const fullName = String((fullNameEl || {}).value || '').trim();
+        const email = String((emailEl || {}).value || '').trim();
+        const password = String((passwordEl || {}).value || '');
+        if (username && _permissionsExistingUsernames().has(username.toLowerCase())) {
+          e.preventDefault();
+          return _permissionsShowFieldError(usernameEl, `The user "${username}" already exists. Use a different username.`);
+        }
+        if (!fullName) {
+          e.preventDefault();
+          return _permissionsShowFieldError(fullNameEl, 'Please fill out this field.');
+        }
+        if (email && _permissionsExistingUserEmails().has(email.toLowerCase())) {
+          e.preventDefault();
+          return _permissionsShowFieldError(emailEl, `The email "${email}" is already being used. Use a different email address.`);
+        }
+        if (password && password.length < minPasswordLength) {
+          e.preventDefault();
+          return _permissionsShowFieldError(passwordEl, `Password must be at least ${minPasswordLength} characters.`);
+        }
+      }
+      if (action === 'create_group') {
+        const groupEl = form.querySelector('input[name="group_name"]');
+        const groupName = String((groupEl || {}).value || '').trim();
+        if (groupName && _permissionsExistingGroupNames().has(groupName.toLowerCase())) {
+          e.preventDefault();
+          return _permissionsShowFieldError(groupEl, `The group "${groupName}" already exists. Use a different group name.`);
+        }
+      }
+      if (action === 'reset_password') {
+        const passwordEl = form.querySelector('input[name="new_password"]');
+        const password = String((passwordEl || {}).value || '');
+        if (password && password.length < minPasswordLength) {
+          e.preventDefault();
+          return _permissionsShowFieldError(passwordEl, `Password must be at least ${minPasswordLength} characters.`);
+        }
+      }
+      return true;
+    });
+  });
 
   function _syncUsersListHeight() {
     if (!createUserCard || !usersCard || !userList) return;
@@ -2567,7 +2679,39 @@ if (document.getElementById('permissions-page')) {
     }
   }
 
+  function _permissionsTabNameFromButton(btn) {
+    const target = btn ? String(btn.getAttribute('data-bs-target') || '') : '';
+    return target === '#permissions-groups' ? 'groups' : 'users';
+  }
+
+  function _setPermissionsUrlTab(name) {
+    const tabName = name === 'groups' ? 'groups' : 'users';
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', tabName);
+      const desiredHash = tabName === 'groups' ? '#groups' : '#users';
+      if (!url.hash || url.hash === '#groups' || url.hash === '#users' || url.hash.startsWith('#role-') || url.hash.startsWith('#user-')) {
+        url.hash = desiredHash;
+      }
+      window.history.replaceState(null, '', url.toString());
+    } catch (e) {}
+  }
+
   function _syncPermissionsHash() {
+    let tabParam = '';
+    try {
+      tabParam = String(new URLSearchParams(window.location.search || '').get('tab') || '').toLowerCase();
+    } catch (e) {
+      tabParam = '';
+    }
+    if (tabParam === 'groups') {
+      _showPermissionsTab('groups');
+      return;
+    }
+    if (tabParam === 'users') {
+      _showPermissionsTab('users');
+      return;
+    }
     const h = String(window.location.hash || '').replace(/^#/, '');
     if (h === 'groups' || h.startsWith('role-')) _showPermissionsTab('groups');
     if (h === 'users' || h.startsWith('user-')) _showPermissionsTab('users');
@@ -2576,8 +2720,14 @@ if (document.getElementById('permissions-page')) {
   _syncPermissionsHash();
   window.addEventListener('hashchange', _syncPermissionsHash);
   document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tabBtn => {
-    tabBtn.addEventListener('shown.bs.tab', _scheduleUsersListHeightSync);
-    tabBtn.addEventListener('click', _scheduleUsersListHeightSync);
+    tabBtn.addEventListener('shown.bs.tab', (e) => {
+      _setPermissionsUrlTab(_permissionsTabNameFromButton(e.target));
+      _scheduleUsersListHeightSync();
+    });
+    tabBtn.addEventListener('click', () => {
+      _setPermissionsUrlTab(_permissionsTabNameFromButton(tabBtn));
+      _scheduleUsersListHeightSync();
+    });
   });
 
   function _userPanelById(userId) {
@@ -2627,7 +2777,7 @@ if (document.getElementById('permissions-page')) {
   }
 
   const initialUserId = _readSelectedUserId();
-  if (initialUserId) _selectUser(initialUserId, { persist: true, updateHash: false });
+  if (initialUserId && userPanels.length) _selectUser(initialUserId, { persist: true, updateHash: false });
 
   if (userList) {
     userList.addEventListener('click', (e) => {
@@ -2718,6 +2868,125 @@ if (document.getElementById('permissions-page')) {
     const userId = String(form.getAttribute('data-user-id') || '').trim();
     form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.addEventListener('change', () => _userScheduleSave(userId, { delayMs: 0 }));
+    });
+  });
+}
+
+// --- Admin user detail page ---
+if (document.getElementById('admin-user-detail-page')) {
+  const root = document.getElementById('admin-user-detail-page');
+  const userId = String(root.getAttribute('data-user-id') || '').trim();
+  const minPasswordLength = Math.max(4, Math.min(Number(root.getAttribute('data-min-password-length')) || 6, 128));
+  const accessForm = root.querySelector('[data-user-detail-access-form]');
+  const accessError = root.querySelector('[data-user-detail-access-error]');
+  const accessSaved = root.querySelector('[data-user-detail-access-saved]');
+  let accessSaveTimer = null;
+  let accessSaveInFlight = false;
+  let accessSaveQueued = false;
+
+  function _detailShowFieldError(field, msg) {
+    if (!field) return false;
+    field.setCustomValidity(String(msg || 'Invalid value'));
+    field.reportValidity();
+    const clear = () => field.setCustomValidity('');
+    field.addEventListener('input', clear, { once: true });
+    field.addEventListener('change', clear, { once: true });
+    return false;
+  }
+
+  document.querySelectorAll('[data-group-search]').forEach(search => {
+    search.addEventListener('input', () => {
+      const q = String(search.value || '').trim().toLowerCase();
+      const scope = search.closest('.card-body') || document;
+      scope.querySelectorAll('[data-group-option][data-group-name]').forEach(option => {
+        const name = String(option.getAttribute('data-group-name') || '').toLowerCase();
+        option.classList.toggle('d-none', !!q && !name.includes(q));
+      });
+    });
+  });
+
+  function _detailSetAccessMessage(kind, msg) {
+    const el = kind === 'error' ? accessError : accessSaved;
+    if (!el) return;
+    if (!msg) {
+      _uiClearAutoHide(el);
+      el.classList.add('d-none');
+      if (kind !== 'error') el.textContent = 'Saved';
+      return;
+    }
+    el.textContent = String(msg);
+    el.classList.remove('d-none');
+    _uiScheduleAutoHide(el, () => el.classList.add('d-none'));
+  }
+
+  function _detailReadAccessPayload() {
+    if (!accessForm) return null;
+    return {
+      is_active: !!(accessForm.querySelector('input[name="is_active"]') || {}).checked,
+      group_ids: Array.from(accessForm.querySelectorAll('input[name="group_ids"]:checked')).map(cb => String(cb.value)),
+    };
+  }
+
+  async function _detailSaveAccessNow() {
+    const payload = _detailReadAccessPayload();
+    if (!userId || !payload) return false;
+    if (accessSaveInFlight) {
+      accessSaveQueued = true;
+      return true;
+    }
+    accessSaveInFlight = true;
+    _detailSetAccessMessage('error', '');
+    _detailSetAccessMessage('saved', '');
+    try {
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data || !data.ok) throw new Error((data && data.error) ? data.error : 'Save failed');
+      _detailSetAccessMessage('saved', 'Saved');
+      return true;
+    } catch (e) {
+      _detailSetAccessMessage('error', String(e.message || e));
+      return false;
+    } finally {
+      accessSaveInFlight = false;
+      if (accessSaveQueued) {
+        accessSaveQueued = false;
+        _detailScheduleAccessSave(250);
+      }
+    }
+  }
+
+  function _detailScheduleAccessSave(delayMs) {
+    if (accessSaveTimer) clearTimeout(accessSaveTimer);
+    accessSaveTimer = setTimeout(() => {
+      accessSaveTimer = null;
+      _detailSaveAccessNow();
+    }, Math.max(0, Number(delayMs) || 0));
+  }
+
+  if (accessForm) {
+    accessForm.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => _detailScheduleAccessSave(0));
+    });
+  }
+
+  document.querySelectorAll('form').forEach(form => {
+    const actionEl = form.querySelector('input[name="action"]');
+    const action = actionEl ? String(actionEl.value || '') : '';
+    if (action !== 'reset_password') return;
+    form.addEventListener('submit', (e) => {
+      const generated = e.submitter && String(e.submitter.getAttribute('name') || '') === 'generate_password';
+      if (generated) return true;
+      const passwordEl = form.querySelector('input[name="new_password"]');
+      const password = String((passwordEl || {}).value || '');
+      if (password.length < minPasswordLength) {
+        e.preventDefault();
+        return _detailShowFieldError(passwordEl, `Password must be at least ${minPasswordLength} characters.`);
+      }
+      return true;
     });
   });
 }

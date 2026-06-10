@@ -1,0 +1,233 @@
+{% extends 'base.html' %}
+
+{% set page_title = page_title|default('User') %}
+
+{% block content %}
+  <div id="admin-user-detail-page" data-min-password-length="{{ min_len }}" data-user-id="{{ user_row.id }}">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+      <div>
+        <h1 class="h3 mb-1">{{ user_row.username }}</h1>
+        <div class="text-muted small">User ID: {{ user_row.id }}</div>
+      </div>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_permissions_page', tab='users') }}#users">Back to users</a>
+    </div>
+
+    {% if error %}
+      <div class="alert alert-danger py-2">{{ error }}</div>
+    {% endif %}
+    {% if message %}
+      <div class="alert alert-success py-2">{{ message }}</div>
+    {% endif %}
+    {% if generated_password %}
+      <div class="alert alert-warning py-2">
+        Temporary password: <code>{{ generated_password }}</code>
+      </div>
+    {% endif %}
+
+    <div class="row g-4">
+      <div class="col-lg-6">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Profile</h2>
+            <form method="post" data-user-detail-form="profile">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="update_profile">
+              <div class="mb-3">
+                <label class="form-label">Username</label>
+                <input class="form-control" name="username" value="{{ user_row.username }}" required>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Full name</label>
+                <input class="form-control" name="full_name" value="{{ user_row.full_name or '' }}" required>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Email</label>
+                <input class="form-control" type="email" name="email" value="{{ user_row.email or '' }}" required>
+              </div>
+              <div class="row small text-muted g-2 mb-3">
+                <div class="col-sm-6">Created: {{ user_row.created_at or 'Unknown' }}</div>
+                <div class="col-sm-6">Created by: {{ user_row.created_by_name or 'Unknown' }}</div>
+                <div class="col-sm-6">Updated: {{ user_row.updated_at or 'Unknown' }}</div>
+                <div class="col-sm-6">Updated by: {{ user_row.updated_by_name or 'Unknown' }}</div>
+                <div class="col-sm-6">Last login: {{ user_row.last_login_at or 'Never' }}</div>
+                <div class="col-sm-6">Admin email list: {{ admin_email_rows|length }} address{% if admin_email_rows|length != 1 %}es{% endif %}</div>
+              </div>
+              <button class="btn btn-primary" type="submit">Save profile</button>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Access</h2>
+            <div class="alert alert-danger d-none py-2" data-user-detail-access-error></div>
+            <div class="alert alert-success d-none py-2" data-user-detail-access-saved>Saved</div>
+            <form method="post" data-user-detail-access-form="1">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="update_access">
+              <div class="d-flex flex-wrap gap-3 mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" name="is_active" id="user-active" {% if user_row.is_active %}checked{% endif %}>
+                  <label class="form-check-label" for="user-active">Account active</label>
+                </div>
+                {% if user_row.is_locked %}
+                  <span class="badge text-bg-danger align-self-center">Locked</span>
+                {% else %}
+                  <span class="badge text-bg-success align-self-center">Unlocked</span>
+                {% endif %}
+              </div>
+
+              {% if user_row.is_locked %}
+                <div class="small text-muted mb-3">Locked at {{ user_row.locked_at or 'Unknown' }}{% if user_row.locked_reason %}: {{ user_row.locked_reason }}{% endif %}</div>
+              {% endif %}
+              <div class="small text-muted mb-2">Failed login count: {{ user_row.failed_login_count or 0 }} of {{ lockout_attempts }}</div>
+
+              <label class="form-label">Groups</label>
+              <input class="form-control form-control-sm mb-2" data-group-search="detail" placeholder="Search groups">
+              <div class="border rounded p-2 mb-3 overflow-auto" style="max-height: 260px">
+                {% for g in groups %}
+                  <div class="form-check" data-group-option="1" data-group-name="{{ g.name|lower }}">
+                    <input class="form-check-input" type="checkbox" name="group_ids" value="{{ g.id }}" id="detail-group-{{ g.id }}" {% if g.id in assigned_group_ids %}checked{% endif %}>
+                    <label class="form-check-label" for="detail-group-{{ g.id }}">{{ g.name }}{% if g.is_admin %} <span class="text-muted">(full access)</span>{% endif %}</label>
+                  </div>
+                {% endfor %}
+              </div>
+
+              <button class="btn btn-primary" type="submit">Save access</button>
+            </form>
+
+            <div class="d-flex flex-wrap gap-2 mt-3">
+              {% if user_row.is_locked %}
+                <form method="post">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="unlock_user">
+                  <button class="btn btn-outline-success btn-sm" type="submit">Unlock account</button>
+                </form>
+              {% else %}
+                <form method="post" data-confirm="Lock user {{ user_row.username }}? They will be signed out and unable to log in.">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="lock_user">
+                  <button class="btn btn-outline-warning btn-sm" type="submit">Lock account</button>
+                </form>
+              {% endif %}
+              <form method="post" data-confirm="Delete user {{ user_row.username }}? This cannot be undone.">
+                <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="delete_user">
+                <button class="btn btn-outline-danger btn-sm" type="submit">Delete user</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Security</h2>
+            <form method="post">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="reset_password">
+              <div class="mb-3">
+                <label class="form-label">New password</label>
+                <input class="form-control" type="password" name="new_password" autocomplete="new-password">
+                <div class="small text-muted mt-1">Minimum length: {{ min_len }}</div>
+              </div>
+              <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" name="force_password_change" id="force-password-change" checked>
+                <label class="form-check-label" for="force-password-change">Force password change on next login</label>
+              </div>
+              <div class="small text-muted mb-3">Password changed: {{ user_row.password_changed_at or 'Unknown' }}</div>
+              <div class="d-flex flex-wrap gap-2">
+                <button class="btn btn-primary" type="submit">Reset password</button>
+                <button class="btn btn-outline-secondary" type="submit" name="generate_password" value="1">Generate temporary password</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+              <h2 class="h5 mb-0">Sessions</h2>
+              <form method="post" data-confirm="Sign out {{ user_row.username }} everywhere?">
+                <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="sign_out_everywhere">
+                <button class="btn btn-sm btn-outline-warning" type="submit">Sign out everywhere</button>
+              </form>
+            </div>
+            <div class="list-group">
+              {% for s in sessions %}
+                <div class="list-group-item">
+                  <div class="d-flex justify-content-between gap-2">
+                    <span class="fw-semibold">{{ s.ip or 'Unknown IP' }}</span>
+                    {% if s.revoked_at %}
+                      <span class="badge text-bg-secondary">Revoked</span>
+                    {% else %}
+                      <span class="badge text-bg-success">Active</span>
+                    {% endif %}
+                  </div>
+                  <div class="small text-muted">Last seen: {{ s.last_seen_at }} | Created: {{ s.created_at }}</div>
+                  {% if s.user_agent %}<div class="small text-muted text-truncate">{{ s.user_agent }}</div>{% endif %}
+                </div>
+              {% else %}
+                <div class="text-muted small">No sessions recorded.</div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Effective Permissions</h2>
+            <div class="row g-2">
+              {% for p in effective_permissions %}
+                <div class="col-md-6">
+                  <div class="border rounded p-2 h-100">
+                    <div class="d-flex justify-content-between gap-2">
+                      <span>{{ p.name }}</span>
+                      {% if p.granted_by %}
+                        <span class="badge text-bg-success">Allowed</span>
+                      {% else %}
+                        <span class="badge text-bg-secondary">Denied</span>
+                      {% endif %}
+                    </div>
+                    <div class="small text-muted">
+                      {% if p.granted_by %}{{ p.granted_by|join(', ') }}{% else %}No group grants this{% endif %}
+                    </div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
+        <div class="card tdeck-soft h-100">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Activity</h2>
+            <div class="list-group">
+              {% for a in audit_rows %}
+                <div class="list-group-item">
+                  <div class="d-flex justify-content-between gap-2">
+                    <span class="fw-semibold">{{ a.action }}</span>
+                    <span class="small text-muted">{{ a.ts }}</span>
+                  </div>
+                  {% if a.detail %}<div class="small text-muted">{{ a.detail }}</div>{% endif %}
+                </div>
+              {% else %}
+                <div class="text-muted small">No activity recorded.</div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

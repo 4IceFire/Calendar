@@ -81,6 +81,7 @@ _defaults = {
     "auth_idle_timeout_enabled": True,
     "auth_idle_timeout_minutes": 2,
     "auth_min_password_length": 6,
+    "auth_lockout_failed_attempts": 5,
 
     # Scheduler/internal API
     "internal_api_timeout_seconds": 10,

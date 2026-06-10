@@ -226,6 +226,7 @@ except Exception:
         "auth_idle_timeout_enabled": True,
         "auth_idle_timeout_minutes": 2,
         "auth_min_password_length": 6,
+        "auth_lockout_failed_attempts": 5,
 
         # Scheduler/internal API
         "internal_api_timeout_seconds": 10,
@@ -404,6 +405,44 @@ def _init_auth_db() -> None:
             )
             """
         )
+        try:
+            user_cols = [str(r['name']) for r in conn.execute('PRAGMA table_info(users)').fetchall()]
+        except Exception:
+            user_cols = []
+        for col_name, col_type in (
+            ('email', 'TEXT'),
+            ('full_name', 'TEXT'),
+            ('is_locked', 'INTEGER NOT NULL DEFAULT 0'),
+            ('locked_at', 'TEXT'),
+            ('locked_reason', 'TEXT'),
+            ('failed_login_count', 'INTEGER NOT NULL DEFAULT 0'),
+            ('last_failed_login_at', 'TEXT'),
+            ('force_password_change', 'INTEGER NOT NULL DEFAULT 0'),
+            ('password_changed_at', 'TEXT'),
+            ('last_login_at', 'TEXT'),
+            ('created_by', 'INTEGER'),
+            ('updated_by', 'INTEGER'),
+            ('session_version', 'INTEGER NOT NULL DEFAULT 0'),
+        ):
+            if col_name not in user_cols:
+                try:
+                    conn.execute(f'ALTER TABLE users ADD COLUMN {col_name} {col_type}')
+                except Exception:
+                    pass
+        try:
+            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users(lower(username))')
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower_nonblank
+                ON users(lower(email))
+                WHERE email IS NOT NULL AND trim(email) != ''
+                """
+            )
+        except Exception:
+            pass
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS groups (
@@ -486,6 +525,21 @@ def _init_auth_db() -> None:
             CREATE TABLE IF NOT EXISTS auth_meta (
               key TEXT PRIMARY KEY,
               value TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_sessions (
+              id TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              revoked_at TEXT,
+              ip TEXT,
+              user_agent TEXT,
+              session_version INTEGER NOT NULL DEFAULT 0,
+              FOREIGN KEY(user_id) REFERENCES users(id)
             )
             """
         )
@@ -832,13 +886,13 @@ def _admin_update_user(conn: sqlite3.Connection, uid: int, group_ids: list[int],
     row = conn.execute('SELECT is_active FROM users WHERE id=?', (int(uid),)).fetchone()
     if not row:
         return False
-    was_active = bool(int(row['is_active'] or 0))
-    was_admin = _admin_user_has_admin_group(conn, uid)
-    will_admin = _admin_group_ids_include_admin(conn, group_ids)
-    if was_active and was_admin and ((not is_active) or (not will_admin)) and _admin_active_admin_count(conn) <= 1:
+    if _would_remove_last_active_admin(conn, int(uid), is_active=bool(is_active), group_ids=group_ids):
         return False
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conn.execute('UPDATE users SET is_active=?, updated_at=? WHERE id=?', (1 if is_active else 0, now, int(uid)))
+    conn.execute(
+        'UPDATE users SET is_active=?, updated_at=?, updated_by=? WHERE id=?',
+        (1 if is_active else 0, now, _current_admin_user_id(), int(uid)),
+    )
     _admin_replace_user_groups(conn, uid, group_ids)
     return True
 
@@ -1187,6 +1241,289 @@ def _user_by_username(username: str) -> sqlite3.Row | None:
         conn.close()
 
 
+def _auth_min_password_length() -> int:
+    cfg = _auth_cfg()
+    try:
+        min_len = int(cfg.get('auth_min_password_length', 6))
+    except Exception:
+        min_len = 6
+    return max(4, min(min_len, 128))
+
+
+def _auth_lockout_failed_attempts() -> int:
+    cfg = _auth_cfg()
+    try:
+        attempts = int(cfg.get('auth_lockout_failed_attempts', 5))
+    except Exception:
+        attempts = 5
+    return max(1, min(attempts, 100))
+
+
+def _now_str() -> str:
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _current_admin_user_id() -> int | None:
+    try:
+        if getattr(current_user, 'is_authenticated', False):
+            return int(current_user.get_id())
+    except Exception:
+        pass
+    return None
+
+
+def _user_duplicate(conn: sqlite3.Connection, field: str, value: str, user_id: int | None = None) -> bool:
+    value = str(value or '').strip()
+    if not value:
+        return False
+    uid = int(user_id) if user_id else 0
+    if field == 'email':
+        row = conn.execute(
+            "SELECT 1 FROM users WHERE trim(email)!='' AND lower(email)=lower(?) AND id<>? LIMIT 1",
+            (value, uid),
+        ).fetchone()
+        return bool(row)
+    row = conn.execute(
+        'SELECT 1 FROM users WHERE lower(username)=lower(?) AND id<>? LIMIT 1',
+        (value, uid),
+    ).fetchone()
+    return bool(row)
+
+
+def _admin_active_admin_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT count(DISTINCT u.id) AS c
+        FROM users u
+        JOIN user_groups ug ON ug.user_id=u.id
+        JOIN groups g ON g.id=ug.group_id
+        WHERE u.is_active=1 AND COALESCE(u.is_locked,0)=0 AND g.is_admin=1
+        """
+    ).fetchone()
+    return int(row['c'] or 0) if row else 0
+
+
+def _admin_user_has_admin_group(conn: sqlite3.Connection, uid: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM user_groups ug
+        JOIN groups g ON g.id=ug.group_id
+        WHERE ug.user_id=? AND g.is_admin=1
+        LIMIT 1
+        """,
+        (int(uid),),
+    ).fetchone()
+    return bool(row)
+
+
+def _admin_group_ids_include_admin(conn: sqlite3.Connection, group_ids: list[int]) -> bool:
+    if not group_ids:
+        return False
+    placeholders = ','.join(['?'] * len(group_ids))
+    row = conn.execute(
+        f'SELECT 1 FROM groups WHERE is_admin=1 AND id IN ({placeholders}) LIMIT 1',
+        tuple(group_ids),
+    ).fetchone()
+    return bool(row)
+
+
+def _would_remove_last_active_admin(
+    conn: sqlite3.Connection,
+    uid: int,
+    *,
+    is_active: bool | None = None,
+    is_locked: bool | None = None,
+    group_ids: list[int] | None = None,
+) -> bool:
+    row = conn.execute('SELECT is_active,is_locked FROM users WHERE id=?', (int(uid),)).fetchone()
+    if not row:
+        return False
+    was_active = bool(int(row['is_active'] or 0))
+    was_locked = bool(int(row['is_locked'] or 0))
+    was_admin = _admin_user_has_admin_group(conn, uid)
+    will_active = was_active if is_active is None else bool(is_active)
+    will_locked = was_locked if is_locked is None else bool(is_locked)
+    will_admin = was_admin if group_ids is None else _admin_group_ids_include_admin(conn, group_ids)
+    if was_active and (not was_locked) and was_admin and ((not will_active) or will_locked or (not will_admin)):
+        return _admin_active_admin_count(conn) <= 1
+    return False
+
+
+def _revoke_user_sessions(conn: sqlite3.Connection, user_id: int) -> None:
+    now = _now_str()
+    conn.execute('UPDATE user_sessions SET revoked_at=COALESCE(revoked_at, ?) WHERE user_id=?', (now, int(user_id)))
+    conn.execute(
+        'UPDATE users SET session_version=COALESCE(session_version,0)+1, updated_at=? WHERE id=?',
+        (now, int(user_id)),
+    )
+
+
+def _create_user_session(row: sqlite3.Row) -> None:
+    sid = uuid.uuid4().hex
+    now = _now_str()
+    try:
+        version = int(row['session_version'] or 0)
+    except Exception:
+        version = 0
+    conn = _db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO user_sessions(id,user_id,created_at,last_seen_at,ip,user_agent,session_version)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            (
+                sid,
+                int(row['id']),
+                now,
+                now,
+                str(request.remote_addr or ''),
+                str((request.user_agent.string if request.user_agent else '') or '')[:500],
+                version,
+            ),
+        )
+        conn.commit()
+        session['_auth_session_id'] = sid
+    finally:
+        conn.close()
+
+
+def _touch_current_user_session() -> bool:
+    sid = str(session.get('_auth_session_id') or '').strip()
+    uid = _current_admin_user_id()
+    if uid is None:
+        return False
+    if not sid:
+        row = _user_record(uid)
+        if not row:
+            return False
+        if not bool(int(row['is_active'] or 0)) or bool(int(row['is_locked'] or 0)):
+            return False
+        _create_user_session(row)
+        return True
+    now = _now_str()
+    conn = _db()
+    try:
+        row = conn.execute(
+            """
+            SELECT s.revoked_at,s.session_version AS session_row_version,
+                   u.session_version AS user_session_version,u.is_active,u.is_locked
+            FROM user_sessions s
+            JOIN users u ON u.id=s.user_id
+            WHERE s.id=? AND s.user_id=?
+            """,
+            (sid, uid),
+        ).fetchone()
+        if not row:
+            return False
+        if row['revoked_at'] or not bool(int(row['is_active'] or 0)) or bool(int(row['is_locked'] or 0)):
+            return False
+        if int(row['session_row_version'] or 0) != int(row['user_session_version'] or 0):
+            return False
+        conn.execute('UPDATE user_sessions SET last_seen_at=? WHERE id=?', (now, sid))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _record_login_failure(row: sqlite3.Row | None, username: str) -> None:
+    if not row:
+        _audit('login_fail', f'username={username}')
+        return
+    threshold = _auth_lockout_failed_attempts()
+    now = _now_str()
+    locked_now = False
+    conn = _db()
+    try:
+        latest = conn.execute('SELECT failed_login_count,is_locked FROM users WHERE id=?', (int(row['id']),)).fetchone()
+        count = int((latest['failed_login_count'] if latest else row['failed_login_count']) or 0) + 1
+        lock_now = count >= threshold and not bool(int((latest['is_locked'] if latest else row['is_locked']) or 0))
+        if lock_now:
+            conn.execute(
+                """
+                UPDATE users
+                SET failed_login_count=?, last_failed_login_at=?, is_locked=1, locked_at=?, locked_reason=?, updated_at=?
+                WHERE id=?
+                """,
+                (count, now, now, f'Too many failed login attempts ({threshold})', now, int(row['id'])),
+            )
+            _revoke_user_sessions(conn, int(row['id']))
+            locked_now = True
+        else:
+            conn.execute(
+                'UPDATE users SET failed_login_count=?, last_failed_login_at=?, updated_at=? WHERE id=?',
+                (count, now, now, int(row['id'])),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    if locked_now:
+        _audit('user_lockout', f'id={int(row["id"])} username={username}')
+    _audit('login_fail', f'username={username}')
+
+
+def _record_login_success(user_id: int) -> sqlite3.Row | None:
+    now = _now_str()
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE users SET failed_login_count=0,last_failed_login_at=NULL,last_login_at=?,updated_at=? WHERE id=?',
+            (now, now, int(user_id)),
+        )
+        conn.commit()
+        return conn.execute('SELECT * FROM users WHERE id=?', (int(user_id),)).fetchone()
+    finally:
+        conn.close()
+
+
+def _effective_permissions_for_user(user_id: int) -> list[dict[str, Any]]:
+    groups = _get_user_groups(user_id)
+    admin_names = [str(g['name'] or '') for g in groups if bool(int(g['is_admin'] or 0))]
+    conn = _db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT gp.page_key,g.name
+            FROM group_pages gp
+            JOIN groups g ON g.id=gp.group_id
+            JOIN user_groups ug ON ug.group_id=g.id
+            WHERE ug.user_id=?
+            ORDER BY lower(g.name)
+            """,
+            (int(user_id),),
+        ).fetchall()
+    finally:
+        conn.close()
+    grantors: dict[str, list[str]] = {}
+    for r in rows or []:
+        grantors.setdefault(str(r['page_key']), []).append(str(r['name'] or ''))
+    out = []
+    for key, meta in sorted(_PAGE_REGISTRY.items(), key=lambda item: str(item[1].get('name') or item[0]).lower()):
+        names = list(admin_names) if admin_names else grantors.get(key, [])
+        out.append({'key': key, 'name': meta.get('name') or key, 'granted_by': names})
+    return out
+
+
+def _admin_email_rows() -> list[sqlite3.Row]:
+    conn = _db()
+    try:
+        return conn.execute(
+            """
+            SELECT DISTINCT u.id,u.username,u.full_name,u.email
+            FROM users u
+            JOIN user_groups ug ON ug.user_id=u.id
+            JOIN groups g ON g.id=ug.group_id
+            WHERE u.is_active=1 AND COALESCE(u.is_locked,0)=0 AND g.is_admin=1
+              AND u.email IS NOT NULL AND trim(u.email)!=''
+            ORDER BY lower(u.username)
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+
 def _effective_idle_timeout_override_minutes_for_user(user_id: int | None) -> int | None:
     """Return merged group idle override.
 
@@ -1281,6 +1618,8 @@ class _User(UserMixin):
         self.id = int(row['id'])
         self.username = str(row['username'])
         self._active = bool(int(row['is_active'] or 0))
+        self.is_locked = bool(int(row['is_locked'] or 0)) if 'is_locked' in row.keys() else False
+        self.force_password_change = bool(int(row['force_password_change'] or 0)) if 'force_password_change' in row.keys() else False
         try:
             groups = _get_user_groups(self.id)
         except Exception:
@@ -1290,7 +1629,7 @@ class _User(UserMixin):
         self.is_admin_group = any(bool(int(g['is_admin'] or 0)) for g in groups)
 
     def is_active(self) -> bool:
-        return bool(self._active)
+        return bool(self._active) and not bool(self.is_locked)
 
 
 login_manager = LoginManager()
@@ -1380,6 +1719,17 @@ def _auth_gate():
         nxt = request.full_path if request.query_string else request.path
         return redirect(url_for('login_page', next=nxt))
 
+    try:
+        if not _touch_current_user_session():
+            _audit('logout_session_revoked', f'path={p}')
+            logout_user()
+            session.clear()
+            return redirect(url_for('login_page', next=p))
+    except Exception:
+        logout_user()
+        session.clear()
+        return redirect(url_for('login_page', next=p))
+
     # Idle timeout
     now = int(time.time())
     idle_minutes = _effective_idle_timeout_minutes_for_current_user()
@@ -1410,6 +1760,13 @@ def _auth_gate():
             pass
         return ('', 204)
 
+    try:
+        row = _user_record(int(current_user.get_id()))
+        if row and bool(int(row['force_password_change'] or 0)) and p != '/account/password':
+            return redirect(url_for('account_password_page', force=1))
+    except Exception:
+        pass
+
     # CSRF protect non-API mutating requests
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
         if not _validate_csrf():
@@ -1419,6 +1776,8 @@ def _auth_gate():
     # Authorization for pages
     view_fn = app.view_functions.get(request.endpoint)
     page_key = getattr(view_fn, '_required_page_key', None) if view_fn else None
+    if p == '/account/password':
+        return None
     if not page_key:
         _audit('deny_missing_page_key', f'endpoint={request.endpoint} path={p}')
         return abort(403)
@@ -2077,12 +2436,16 @@ def login_page():
 
         row = _user_by_username(username)
         if not row:
-            _audit('login_fail', f'username={username}')
+            _record_login_failure(None, username)
             return render_template('login.html', page_title='Login', error='Invalid username or password', next=next_url), 401
 
         if not bool(int(row['is_active'] or 0)):
             _audit('login_fail_inactive', f'username={username}')
             return render_template('login.html', page_title='Login', error='Account is disabled', next=next_url), 403
+
+        if bool(int(row['is_locked'] or 0)):
+            _audit('login_fail_locked', f'username={username}')
+            return render_template('login.html', page_title='Login', error='Account is locked. Ask an admin to unlock it.', next=next_url), 403
 
         try:
             ok = check_password_hash(str(row['password_hash'] or ''), password)
@@ -2090,13 +2453,18 @@ def login_page():
             ok = False
 
         if not ok:
-            _audit('login_fail', f'username={username}')
+            _record_login_failure(row, username)
             return render_template('login.html', page_title='Login', error='Invalid username or password', next=next_url), 401
 
-        user = _User(row)
+        refreshed = _record_login_success(int(row['id'])) or row
+        user = _User(refreshed)
         login_user(user)
         session['_last_activity'] = int(time.time())
+        _create_user_session(refreshed)
         _audit('login_ok', f'username={username}')
+
+        if bool(int(refreshed['force_password_change'] or 0)):
+            return redirect(url_for('account_password_page', force=1))
 
         return redirect(next_url or '/')
 
@@ -2109,6 +2477,17 @@ def login_page():
 def logout_page():
     if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
         _audit('logout')
+        try:
+            sid = str(session.get('_auth_session_id') or '').strip()
+            if sid:
+                conn = _db()
+                try:
+                    conn.execute('UPDATE user_sessions SET revoked_at=COALESCE(revoked_at, ?) WHERE id=?', (_now_str(), sid))
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            pass
     try:
         logout_user()
     except Exception:
@@ -2128,12 +2507,7 @@ def account_password_page():
         new_pw = str(request.form.get('new_password') or '')
         confirm_pw = str(request.form.get('confirm_password') or '')
 
-        cfg = _auth_cfg()
-        try:
-            min_len = int(cfg.get('auth_min_password_length', 6))
-        except Exception:
-            min_len = 6
-        min_len = max(4, min(min_len, 128))
+        min_len = _auth_min_password_length()
 
         if new_pw != confirm_pw:
             return render_template('account_password.html', page_title='Change Password', error='Passwords do not match')
@@ -2150,8 +2524,8 @@ def account_password_page():
         try:
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             conn.execute(
-                'UPDATE users SET password_hash=?, updated_at=? WHERE id=?',
-                (generate_password_hash(new_pw), now, int(current_user.get_id())),
+                'UPDATE users SET password_hash=?, force_password_change=0, password_changed_at=?, updated_at=? WHERE id=?',
+                (generate_password_hash(new_pw), now, now, int(current_user.get_id())),
             )
             conn.commit()
         finally:
@@ -2160,7 +2534,8 @@ def account_password_page():
         _audit('password_change_ok')
         return redirect('/')
 
-    return render_template('account_password.html', page_title='Change Password')
+    force = bool(str(request.args.get('force') or '').strip())
+    return render_template('account_password.html', page_title='Change Password', force_change=force)
 
 
 @app.route('/admin/permissions', methods=['GET', 'POST'])
@@ -2179,6 +2554,13 @@ def admin_permissions_page():
     if request.method == 'POST':
         action = str(request.form.get('action') or '').strip()
 
+        def _permissions_redirect(tab: str, error: str | None = None):
+            tab_name = 'groups' if tab == 'groups' else 'users'
+            kwargs = {'tab': tab_name}
+            if error:
+                kwargs['error'] = str(error)
+            return redirect(url_for('admin_permissions_page', **kwargs) + f'#{tab_name}')
+
         def _form_group_ids() -> list[int]:
             out: list[int] = []
             for raw in request.form.getlist('group_ids'):
@@ -2192,12 +2574,20 @@ def admin_permissions_page():
 
         if action == 'create_group':
             name = str(request.form.get('group_name') or '').strip()
-            if name:
-                try:
-                    _ensure_group(name)
-                    _audit('group_create', name)
-                except Exception:
-                    pass
+            if not name:
+                return _permissions_redirect('groups', 'Enter a group name.')
+            conn = _db()
+            try:
+                existing = conn.execute('SELECT 1 FROM groups WHERE lower(name)=lower(?) LIMIT 1', (name,)).fetchone()
+            finally:
+                conn.close()
+            if existing:
+                return _permissions_redirect('groups', f'The group "{name}" already exists. Use a different group name.')
+            try:
+                _ensure_group(name)
+                _audit('group_create', name)
+            except Exception:
+                return _permissions_redirect('groups', 'Could not create group. Use a different group name.')
 
         if action == 'delete_group':
             group_id = request.form.get('group_id')
@@ -2280,54 +2670,75 @@ def admin_permissions_page():
                         pass
 
         if action == 'create_user':
-            cfg = _auth_cfg()
-            try:
-                min_len = int(cfg.get('auth_min_password_length', 6))
-            except Exception:
-                min_len = 6
-            min_len = max(4, min(min_len, 128))
+            min_len = _auth_min_password_length()
             username = str(request.form.get('username') or '').strip()
+            full_name = str(request.form.get('full_name') or '').strip()
+            email = str(request.form.get('email') or '').strip()
             password = str(request.form.get('password') or '')
             group_ids = _form_group_ids()
 
-            if username and len(password) >= min_len:
-                conn = _db()
-                try:
-                    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    cur = conn.execute(
-                        'INSERT INTO users(username,password_hash,role_id,is_active,created_at,updated_at) VALUES (?,?,?,?,?,?)',
-                        (username, generate_password_hash(password), None, 1, now, now),
-                    )
-                    _admin_replace_user_groups(conn, int(cur.lastrowid), group_ids)
-                    conn.commit()
-                    _audit('user_create', username)
-                except Exception:
-                    pass
-                finally:
-                    conn.close()
+            if not username:
+                return _permissions_redirect('users', 'Enter a username.')
+            if not full_name:
+                return _permissions_redirect('users', 'Enter a full name.')
+            if not email:
+                return _permissions_redirect('users', 'Enter an email address.')
+            if len(password) < min_len:
+                return _permissions_redirect('users', f'Password must be at least {min_len} characters.')
+            conn = _db()
+            try:
+                existing = _user_duplicate(conn, 'username', username)
+                existing_email = _user_duplicate(conn, 'email', email)
+            finally:
+                conn.close()
+            if existing:
+                return _permissions_redirect('users', f'The user "{username}" already exists. Use a different username.')
+            if existing_email:
+                return _permissions_redirect('users', f'The email "{email}" is already being used. Use a different email address.')
+            conn = _db()
+            try:
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                actor = _current_admin_user_id()
+                cur = conn.execute(
+                    """
+                    INSERT INTO users(
+                      username,full_name,email,password_hash,role_id,is_active,
+                      created_at,updated_at,created_by,updated_by,password_changed_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (username, full_name, email, generate_password_hash(password), None, 1, now, now, actor, actor, now),
+                )
+                _admin_replace_user_groups(conn, int(cur.lastrowid), group_ids)
+                conn.commit()
+                _audit('user_create', username)
+            except Exception:
+                return _permissions_redirect('users', 'Could not create user. Use a different username.')
+            finally:
+                conn.close()
 
         if action == 'reset_password':
-            cfg = _auth_cfg()
-            try:
-                min_len = int(cfg.get('auth_min_password_length', 6))
-            except Exception:
-                min_len = 6
-            min_len = max(4, min(min_len, 128))
+            min_len = _auth_min_password_length()
             user_id = request.form.get('user_id')
             new_pw = str(request.form.get('new_password') or '')
             try:
                 uid = int(user_id)
             except Exception:
                 uid = None
-            if uid and len(new_pw) >= min_len:
-                conn = _db()
-                try:
-                    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    conn.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', (generate_password_hash(new_pw), now, uid))
-                    conn.commit()
-                    _audit('user_password_reset', f'id={uid}')
-                finally:
-                    conn.close()
+            if not uid:
+                return _permissions_redirect('users', 'Select a user before resetting a password.')
+            if len(new_pw) < min_len:
+                return _permissions_redirect('users', f'Password must be at least {min_len} characters.')
+            conn = _db()
+            try:
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                conn.execute(
+                    'UPDATE users SET password_hash=?, password_changed_at=?, updated_at=?, updated_by=? WHERE id=?',
+                    (generate_password_hash(new_pw), now, now, _current_admin_user_id(), uid),
+                )
+                conn.commit()
+                _audit('user_password_reset', f'id={uid}')
+            finally:
+                conn.close()
 
         if action == 'delete_user':
             user_id = request.form.get('user_id')
@@ -2351,6 +2762,7 @@ def admin_permissions_page():
                             pass
                         else:
                             conn.execute('DELETE FROM user_groups WHERE user_id=?', (uid,))
+                            conn.execute('UPDATE user_sessions SET revoked_at=COALESCE(revoked_at, ?) WHERE user_id=?', (_now_str(), uid))
                             conn.execute('DELETE FROM users WHERE id=?', (uid,))
                             conn.commit()
                             _audit('user_delete', f'id={uid}')
@@ -2358,9 +2770,9 @@ def admin_permissions_page():
                     conn.close()
 
         if action in ('create_group', 'delete_group', 'save_group'):
-            return redirect(url_for('admin_permissions_page', tab='groups'))
+            return _permissions_redirect('groups')
         if action in ('create_user', 'reset_password', 'delete_user'):
-            return redirect(url_for('admin_permissions_page', tab='users'))
+            return _permissions_redirect('users')
 
     conn = _db()
     try:
@@ -2377,7 +2789,11 @@ def admin_permissions_page():
             """
         ).fetchall()
         users = conn.execute(
-            'SELECT u.id,u.username,u.is_active FROM users u ORDER BY lower(u.username)'
+            """
+            SELECT u.id,u.username,u.full_name,u.email,u.is_active,u.is_locked
+            FROM users u
+            ORDER BY lower(u.username)
+            """
         ).fetchall()
         memberships = conn.execute(
             """
@@ -2457,17 +2873,13 @@ def admin_permissions_page():
         user_to_groups.setdefault(uid, []).append(m)
         user_to_group_ids.setdefault(uid, set()).add(gid)
 
-    cfg = _auth_cfg()
-    try:
-        min_len = int(cfg.get('auth_min_password_length', 6))
-    except Exception:
-        min_len = 6
-    min_len = max(4, min(min_len, 128))
+    min_len = _auth_min_password_length()
 
     return render_template(
         'admin_permissions.html',
         page_title='Permissions',
         active_tab='groups' if str(request.args.get('tab') or '').lower() == 'groups' else 'users',
+        feedback_error=str(request.args.get('error') or ''),
         groups=groups,
         pages=pages,
         group_to_pages=group_to_pages,
@@ -2483,7 +2895,7 @@ def admin_permissions_page():
 @app.route('/admin/groups')
 @require_page('page:admin', 'Admin')
 def admin_groups_page():
-    return redirect(url_for('admin_permissions_page', tab='groups'))
+    return redirect(url_for('admin_permissions_page', tab='groups') + '#groups')
 
 
 @app.route('/api/admin/groups/<int:group_id>', methods=['POST'])
@@ -2595,10 +3007,219 @@ def api_admin_user_update(user_id: int):
     return jsonify({'ok': True})
 
 
+def _generated_password() -> str:
+    return secrets.token_urlsafe(12).replace('-', 'A').replace('_', '9')[:16]
+
+
+def _admin_user_detail_context(user_id: int, error: str | None = None, message: str | None = None) -> dict[str, Any]:
+    conn = _db()
+    try:
+        user = conn.execute(
+            """
+            SELECT u.*,
+                   cu.username AS created_by_name,
+                   uu.username AS updated_by_name
+            FROM users u
+            LEFT JOIN users cu ON cu.id=u.created_by
+            LEFT JOIN users uu ON uu.id=u.updated_by
+            WHERE u.id=?
+            """,
+            (int(user_id),),
+        ).fetchone()
+        if not user:
+            abort(404)
+        groups = conn.execute(
+            'SELECT id,name,is_admin,is_system FROM groups ORDER BY is_system DESC, lower(name)'
+        ).fetchall()
+        assigned = conn.execute('SELECT group_id FROM user_groups WHERE user_id=?', (int(user_id),)).fetchall()
+        sessions_rows = conn.execute(
+            """
+            SELECT id,created_at,last_seen_at,revoked_at,ip,user_agent
+            FROM user_sessions
+            WHERE user_id=?
+            ORDER BY revoked_at IS NOT NULL, last_seen_at DESC
+            LIMIT 20
+            """,
+            (int(user_id),),
+        ).fetchall()
+        audit_rows = conn.execute(
+            """
+            SELECT ts,username,action,detail,ip
+            FROM audit
+            WHERE user_id=? OR detail LIKE ?
+            ORDER BY id DESC
+            LIMIT 30
+            """,
+            (int(user_id), f'%id={int(user_id)}%'),
+        ).fetchall()
+    finally:
+        conn.close()
+    generated_password = session.pop('_admin_generated_password', None)
+    return {
+        'page_title': f'User: {user["username"]}',
+        'user_row': user,
+        'groups': groups,
+        'assigned_group_ids': {int(r['group_id']) for r in assigned or []},
+        'effective_permissions': _effective_permissions_for_user(int(user_id)),
+        'sessions': sessions_rows,
+        'audit_rows': audit_rows,
+        'min_len': _auth_min_password_length(),
+        'lockout_attempts': _auth_lockout_failed_attempts(),
+        'admin_email_rows': _admin_email_rows(),
+        'generated_password': generated_password,
+        'error': error,
+        'message': message,
+    }
+
+
+@app.route('/admin/users/<int:user_id>', methods=['GET', 'POST'])
+@require_page('page:admin', 'Admin')
+def admin_user_detail_page(user_id: int):
+    try:
+        _bootstrap_default_users_roles()
+    except Exception:
+        pass
+
+    def _form_group_ids() -> list[int]:
+        out: list[int] = []
+        for raw in request.form.getlist('group_ids'):
+            try:
+                gid = int(raw)
+            except Exception:
+                continue
+            if gid > 0 and gid not in out:
+                out.append(gid)
+        return out
+
+    if request.method == 'POST':
+        action = str(request.form.get('action') or '').strip()
+        actor = _current_admin_user_id()
+        conn = _db()
+        try:
+            user = conn.execute('SELECT * FROM users WHERE id=?', (int(user_id),)).fetchone()
+            if not user:
+                abort(404)
+            now = _now_str()
+
+            if action == 'update_profile':
+                username = str(request.form.get('username') or '').strip()
+                full_name = str(request.form.get('full_name') or '').strip()
+                email = str(request.form.get('email') or '').strip()
+                if not username:
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Enter a username.'))
+                if not full_name:
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Enter a full name.'))
+                if not email:
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Enter an email address.'))
+                if _user_duplicate(conn, 'username', username, user_id):
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='That username is already in use.'))
+                if _user_duplicate(conn, 'email', email, user_id):
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='That email address is already in use.'))
+                conn.execute(
+                    'UPDATE users SET username=?,full_name=?,email=?,updated_at=?,updated_by=? WHERE id=?',
+                    (username, full_name, email, now, actor, int(user_id)),
+                )
+                conn.commit()
+                _audit('user_profile_update', f'id={int(user_id)}')
+                return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='profile'))
+
+            if action == 'update_access':
+                is_active = request.form.get('is_active') == 'on'
+                group_ids = _form_group_ids()
+                if _would_remove_last_active_admin(conn, int(user_id), is_active=is_active, group_ids=group_ids):
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Cannot remove or disable the last active admin user.'))
+                conn.execute(
+                    'UPDATE users SET is_active=?,updated_at=?,updated_by=? WHERE id=?',
+                    (1 if is_active else 0, now, actor, int(user_id)),
+                )
+                _admin_replace_user_groups(conn, int(user_id), group_ids)
+                conn.commit()
+                _audit('user_access_update', f'id={int(user_id)} groups={len(group_ids)} active={int(is_active)}')
+                return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='access'))
+
+            if action == 'lock_user':
+                if actor == int(user_id):
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='You cannot lock your own account.'))
+                if _would_remove_last_active_admin(conn, int(user_id), is_locked=True):
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Cannot lock the last active admin user.'))
+                conn.execute(
+                    'UPDATE users SET is_locked=1,locked_at=?,locked_reason=?,updated_at=?,updated_by=? WHERE id=?',
+                    (now, 'Locked by admin', now, actor, int(user_id)),
+                )
+                _revoke_user_sessions(conn, int(user_id))
+                conn.commit()
+                _audit('user_lock', f'id={int(user_id)}')
+                return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='locked'))
+
+            if action == 'unlock_user':
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET is_locked=0,locked_at=NULL,locked_reason=NULL,failed_login_count=0,last_failed_login_at=NULL,updated_at=?,updated_by=?
+                    WHERE id=?
+                    """,
+                    (now, actor, int(user_id)),
+                )
+                conn.commit()
+                _audit('user_unlock', f'id={int(user_id)}')
+                return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='unlocked'))
+
+            if action == 'reset_password':
+                min_len = _auth_min_password_length()
+                force_change = request.form.get('force_password_change') == 'on'
+                generate_temp = request.form.get('generate_password') == '1'
+                new_pw = _generated_password() if generate_temp else str(request.form.get('new_password') or '')
+                if len(new_pw) < min_len:
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error=f'Password must be at least {min_len} characters.'))
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET password_hash=?,password_changed_at=?,force_password_change=?,failed_login_count=0,last_failed_login_at=NULL,
+                        updated_at=?,updated_by=?
+                    WHERE id=?
+                    """,
+                    (generate_password_hash(new_pw), now, 1 if force_change else 0, now, actor, int(user_id)),
+                )
+                if force_change:
+                    _revoke_user_sessions(conn, int(user_id))
+                conn.commit()
+                if generate_temp:
+                    session['_admin_generated_password'] = new_pw
+                _audit('user_password_reset', f'id={int(user_id)} force_change={int(force_change)} generated={int(generate_temp)}')
+                return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='password'))
+
+            if action == 'sign_out_everywhere':
+                _revoke_user_sessions(conn, int(user_id))
+                conn.commit()
+                _audit('user_sessions_revoke', f'id={int(user_id)}')
+                return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='sessions'))
+
+            if action == 'delete_user':
+                if actor == int(user_id):
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='You cannot delete your own account.'))
+                if _would_remove_last_active_admin(conn, int(user_id), is_active=False):
+                    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Cannot delete the last active admin user.'))
+                username = str(user['username'] or '')
+                conn.execute('DELETE FROM user_groups WHERE user_id=?', (int(user_id),))
+                conn.execute('UPDATE user_sessions SET revoked_at=COALESCE(revoked_at, ?) WHERE user_id=?', (now, int(user_id)))
+                conn.execute('DELETE FROM users WHERE id=?', (int(user_id),))
+                conn.commit()
+                _audit('user_delete', f'id={int(user_id)} username={username}')
+                return redirect(url_for('admin_permissions_page', tab='users') + '#users')
+        finally:
+            conn.close()
+
+    saved = str(request.args.get('saved') or '').strip()
+    message = None
+    if saved:
+        message = 'Changes saved.'
+    return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, message=message))
+
+
 @app.route('/admin/users', methods=['GET', 'POST'])
 @require_page('page:admin', 'Admin')
 def admin_users_page():
-    return redirect(url_for('admin_permissions_page', tab='users'))
+    return redirect(url_for('admin_permissions_page', tab='users') + '#users')
 
 
 @app.get('/admin/backup/authdb')

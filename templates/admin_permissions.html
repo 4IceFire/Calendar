@@ -3,7 +3,7 @@
 {% set page_title = 'Permissions' %}
 
 {% block content %}
-  <div id="permissions-page">
+  <div id="permissions-page" data-feedback-error="{{ feedback_error|default('')|e }}" data-min-password-length="{{ min_len }}">
     <ul class="nav nav-tabs mb-3" role="tablist">
       <li class="nav-item" role="presentation">
         <button class="nav-link {% if active_tab != 'groups' %}active{% endif %}" id="users-tab" data-bs-toggle="tab" data-bs-target="#permissions-users" type="button" role="tab">Users</button>
@@ -26,6 +26,14 @@
                   <div class="mb-3">
                     <label class="form-label">Username</label>
                     <input class="form-control" name="username" required>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">Full name</label>
+                    <input class="form-control" name="full_name" required>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">Email</label>
+                    <input class="form-control" type="email" name="email" required>
                   </div>
                   <div class="mb-3">
                     <label class="form-label">Password</label>
@@ -61,10 +69,15 @@
                 <div class="list-group flex-grow-1 overflow-auto" id="permissions-user-list" style="min-height:0">
                   {% for u in users %}
                     {% set assigned = user_to_groups.get(u.id, []) %}
-                    <button type="button" class="list-group-item list-group-item-action" data-user-select="1" data-user-id="{{ u.id }}" data-user-name="{{ u.username|lower }}">
+                    <a href="{{ url_for('admin_user_detail_page', user_id=u.id) }}" class="list-group-item list-group-item-action" data-user-link="1" data-user-id="{{ u.id }}" data-user-name="{{ (u.username ~ ' ' ~ (u.full_name or '') ~ ' ' ~ (u.email or ''))|lower }}" data-user-username="{{ u.username|lower }}" data-user-email="{{ (u.email or '')|lower }}">
                       <div class="d-flex justify-content-between gap-2">
-                        <span class="fw-semibold">{{ u.username }}</span>
-                        {% if u.is_active %}
+                        <span>
+                          <span class="fw-semibold">{{ u.username }}</span>
+                          {% if u.full_name %}<span class="text-muted ms-1">{{ u.full_name }}</span>{% endif %}
+                        </span>
+                        {% if u.is_locked %}
+                          <span class="badge text-bg-danger">Locked</span>
+                        {% elif u.is_active %}
                           <span class="badge text-bg-success">Active</span>
                         {% else %}
                           <span class="badge text-bg-secondary">Inactive</span>
@@ -77,81 +90,9 @@
                           No groups
                         {% endif %}
                       </div>
-                    </button>
+                    </a>
                   {% endfor %}
                 </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="col-12">
-            <div class="card tdeck-soft">
-              <div class="card-body">
-                <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
-                  <div>
-                    <h2 class="h5 mb-1">Edit User</h2>
-                    <div class="small text-muted">Select a user. Account status and group changes auto-save.</div>
-                  </div>
-                </div>
-
-                {% for u in users %}
-                  {% set assigned = user_to_groups.get(u.id, []) %}
-                  {% set assigned_ids = user_to_group_ids.get(u.id, []) %}
-                  <div class="border rounded-3 p-3 mb-3 d-none" data-user-panel="1" data-user-id="{{ u.id }}">
-                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
-                      <div>
-                        <div class="fw-semibold">{{ u.username }}</div>
-                        <div class="small text-muted">User ID: {{ u.id }}</div>
-                      </div>
-                      <form method="post">
-                        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-                        <input type="hidden" name="action" value="delete_user">
-                        <input type="hidden" name="user_id" value="{{ u.id }}">
-                        <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
-                      </form>
-                    </div>
-
-                    <div class="alert alert-danger d-none" data-user-error="1"></div>
-                    <div class="alert alert-success d-none" data-user-saved="1">Saved</div>
-
-                    <form method="post" data-user-form="1" data-user-id="{{ u.id }}">
-                      <div class="form-check form-switch mb-3">
-                        <input class="form-check-input" type="checkbox" role="switch" name="is_active" id="active-{{ u.id }}" {% if u.is_active %}checked{% endif %}>
-                        <label class="form-check-label" for="active-{{ u.id }}">Account active</label>
-                      </div>
-
-                      <label class="form-label">Groups</label>
-                      <input class="form-control form-control-sm mb-2" data-group-search="user" placeholder="Search groups">
-                      <div class="row g-2">
-                        {% for g in groups %}
-                          <div class="col-sm-6" data-group-option="1" data-group-name="{{ g.name|lower }}">
-                            <div class="form-check">
-                              <input class="form-check-input" type="checkbox" name="group_ids" value="{{ g.id }}"
-                                     id="user-{{ u.id }}-group-{{ g.id }}"
-                                     {% if g.id in assigned_ids %}checked{% endif %}>
-                              <label class="form-check-label" for="user-{{ u.id }}-group-{{ g.id }}">
-                                {{ g.name }}{% if g.is_admin %} <span class="text-muted">(full access)</span>{% endif %}
-                              </label>
-                            </div>
-                          </div>
-                        {% endfor %}
-                      </div>
-                    </form>
-
-                    <form method="post" class="row g-2 align-items-end mt-4">
-                      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-                      <input type="hidden" name="action" value="reset_password">
-                      <input type="hidden" name="user_id" value="{{ u.id }}">
-                      <div class="col-12 col-md-8">
-                        <label class="form-label">Reset password</label>
-                        <input class="form-control form-control-sm" type="password" name="new_password" placeholder="New password">
-                      </div>
-                      <div class="col-12 col-md-4">
-                        <button class="btn btn-sm btn-outline-secondary" type="submit">Reset password</button>
-                      </div>
-                    </form>
-                  </div>
-                {% endfor %}
               </div>
             </div>
           </div>
@@ -187,7 +128,7 @@
                         <div class="small text-muted">{{ group_to_users.get(g.id, [])|length }} user{% if group_to_users.get(g.id, [])|length != 1 %}s{% endif %}{% if g.is_admin %} | Full access{% endif %}</div>
                       </button>
                       {% if not g.is_admin %}
-                        <form method="post" class="ms-2">
+                        <form method="post" class="ms-2" data-confirm="Delete group {{ g.name }}? This will remove it from all users.">
                           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
                           <input type="hidden" name="action" value="delete_group">
                           <input type="hidden" name="group_id" value="{{ g.id }}">
