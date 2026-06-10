@@ -358,13 +358,12 @@ def _init_auth_db() -> None:
             )
             """
         )
-        # Per-role VideoHub allow-lists (stored as JSON string or NULL for inherit)
+        # Legacy per-role VideoHub allow-lists, kept so older auth.db files can migrate.
         try:
             cols = [str(r['name']) for r in conn.execute('PRAGMA table_info(roles)').fetchall()]
         except Exception:
             cols = []
-        # Per-role idle logout timeout override (minutes). NULL => inherit from config.
-        # 0 => disable idle logout for that role.
+        # Legacy per-role idle timeout override. NULL => inherit; 0 => disable.
         if 'auth_idle_timeout_minutes_override' not in cols:
             try:
                 conn.execute('ALTER TABLE roles ADD COLUMN auth_idle_timeout_minutes_override INTEGER')
@@ -406,6 +405,60 @@ def _init_auth_db() -> None:
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS groups (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE,
+              is_system INTEGER NOT NULL DEFAULT 0,
+              is_admin INTEGER NOT NULL DEFAULT 0,
+              auth_idle_timeout_minutes_override INTEGER,
+              videohub_allowed_outputs TEXT,
+              videohub_allowed_inputs TEXT,
+              videohub_allowed_presets TEXT,
+              videohub_can_edit_presets INTEGER
+            )
+            """
+        )
+        try:
+            group_cols = [str(r['name']) for r in conn.execute('PRAGMA table_info(groups)').fetchall()]
+        except Exception:
+            group_cols = []
+        for col_name, col_type in (
+            ('is_system', 'INTEGER NOT NULL DEFAULT 0'),
+            ('is_admin', 'INTEGER NOT NULL DEFAULT 0'),
+            ('auth_idle_timeout_minutes_override', 'INTEGER'),
+            ('videohub_allowed_outputs', 'TEXT'),
+            ('videohub_allowed_inputs', 'TEXT'),
+            ('videohub_allowed_presets', 'TEXT'),
+            ('videohub_can_edit_presets', 'INTEGER'),
+        ):
+            if col_name not in group_cols:
+                try:
+                    conn.execute(f'ALTER TABLE groups ADD COLUMN {col_name} {col_type}')
+                except Exception:
+                    pass
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_pages (
+              group_id INTEGER NOT NULL,
+              page_key TEXT NOT NULL,
+              UNIQUE(group_id, page_key),
+              FOREIGN KEY(group_id) REFERENCES groups(id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_groups (
+              user_id INTEGER NOT NULL,
+              group_id INTEGER NOT NULL,
+              UNIQUE(user_id, group_id),
+              FOREIGN KEY(user_id) REFERENCES users(id),
+              FOREIGN KEY(group_id) REFERENCES groups(id)
+            )
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS role_pages (
               role_id INTEGER NOT NULL,
               page_key TEXT NOT NULL,
@@ -426,6 +479,35 @@ def _init_auth_db() -> None:
               ip TEXT
             )
             """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _auth_meta_get(key: str) -> str | None:
+    conn = _db()
+    try:
+        row = conn.execute('SELECT value FROM auth_meta WHERE key=?', (str(key),)).fetchone()
+        return str(row['value']) if row and row['value'] is not None else None
+    finally:
+        conn.close()
+
+
+def _auth_meta_set(key: str, value: str) -> None:
+    conn = _db()
+    try:
+        conn.execute(
+            'INSERT INTO auth_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+            (str(key), str(value)),
         )
         conn.commit()
     finally:
@@ -457,6 +539,8 @@ def _coerce_allow_list(v):
                 if n > 0:
                     nums.append(n)
             return sorted(set(nums))
+    if isinstance(v, int):
+        return [v] if v > 0 else []
     if not isinstance(v, list):
         return []
     out = []
@@ -470,8 +554,8 @@ def _coerce_allow_list(v):
     return sorted(set(out))
 
 
-def _parse_role_allowlist_field(raw: str | None) -> list[int]:
-    """Parse a role allow-list input.
+def _parse_group_allowlist_field(raw: str | None) -> list[int]:
+    """Parse a group allow-list input.
 
     Semantics:
       - Blank/NULL => allow all
@@ -489,35 +573,17 @@ def _parse_role_allowlist_field(raw: str | None) -> list[int]:
     return _coerce_allow_list(s)
 
 
-def _get_role_videohub_allowlists(role_id: int | None) -> tuple[list[int], list[int]]:
-    if role_id is None:
-        return ([], [])
-    conn = _db()
-    try:
-        row = conn.execute(
-            'SELECT videohub_allowed_outputs, videohub_allowed_inputs FROM roles WHERE id=?',
-            (int(role_id),),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return ([], [])
-    outs = _parse_role_allowlist_field(row['videohub_allowed_outputs'])
-    ins = _parse_role_allowlist_field(row['videohub_allowed_inputs'])
-    return (outs, ins)
-
-
-def _set_role_videohub_allowlists(role_id: int, outputs_raw: str | None, inputs_raw: str | None) -> None:
-    outs = _parse_role_allowlist_field(outputs_raw)
-    ins = _parse_role_allowlist_field(inputs_raw)
+def _set_group_videohub_allowlists(group_id: int, outputs_raw: str | None, inputs_raw: str | None) -> None:
+    outs = _parse_group_allowlist_field(outputs_raw)
+    ins = _parse_group_allowlist_field(inputs_raw)
     conn = _db()
     try:
         conn.execute(
-            'UPDATE roles SET videohub_allowed_outputs=?, videohub_allowed_inputs=? WHERE id=?',
+            'UPDATE groups SET videohub_allowed_outputs=?, videohub_allowed_inputs=? WHERE id=?',
             (
                 json.dumps(outs),
                 json.dumps(ins),
-                int(role_id),
+                int(group_id),
             ),
         )
         conn.commit()
@@ -525,31 +591,15 @@ def _set_role_videohub_allowlists(role_id: int, outputs_raw: str | None, inputs_
         conn.close()
 
 
-def _get_role_videohub_allowed_preset_ids(role_id: int | None) -> list[int]:
-    if role_id is None:
-        return []
-    conn = _db()
-    try:
-        row = conn.execute(
-            'SELECT videohub_allowed_presets FROM roles WHERE id=?',
-            (int(role_id),),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return []
-    return _parse_role_allowlist_field(row['videohub_allowed_presets'])
-
-
-def _set_role_videohub_allowed_preset_ids(role_id: int, presets_raw: str | None) -> None:
-    preset_ids = _parse_role_allowlist_field(presets_raw)
+def _set_group_videohub_allowed_preset_ids(group_id: int, presets_raw: str | None) -> None:
+    preset_ids = _parse_group_allowlist_field(presets_raw)
     conn = _db()
     try:
         conn.execute(
-            'UPDATE roles SET videohub_allowed_presets=? WHERE id=?',
+            'UPDATE groups SET videohub_allowed_presets=? WHERE id=?',
             (
                 json.dumps(preset_ids),
-                int(role_id),
+                int(group_id),
             ),
         )
         conn.commit()
@@ -557,48 +607,239 @@ def _set_role_videohub_allowed_preset_ids(role_id: int, presets_raw: str | None)
         conn.close()
 
 
-def _get_role_videohub_can_edit_presets(role_id: int | None) -> bool:
-    """Return whether this role can create/edit/delete VideoHub presets in the Web UI.
+def _set_group_videohub_can_edit_presets(group_id: int, enabled: bool) -> None:
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET videohub_can_edit_presets=? WHERE id=?',
+            (
+                1 if bool(enabled) else 0,
+                int(group_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-    Semantics:
-      - NULL/blank/missing => allow (backward compatible)
-      - 0 => disallow
-      - 1 => allow
-    """
-    if role_id is None:
+
+def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
+    group_id = int(group_id)
+    keys = [k for k in (page_keys or []) if str(k or '').strip()]
+    conn = _db()
+    try:
+        conn.execute('DELETE FROM group_pages WHERE group_id=?', (group_id,))
+        for k in keys:
+            conn.execute('INSERT OR IGNORE INTO group_pages(group_id,page_key) VALUES (?,?)', (group_id, str(k)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_user_groups(user_id: int | None) -> list[sqlite3.Row]:
+    if user_id is None:
+        return []
+    conn = _db()
+    try:
+        return conn.execute(
+            """
+            SELECT g.*
+            FROM groups g
+            JOIN user_groups ug ON ug.group_id = g.id
+            WHERE ug.user_id=?
+            ORDER BY lower(g.name)
+            """,
+            (int(user_id),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _get_user_groups_for_page(user_id: int | None, page_key: str) -> list[sqlite3.Row]:
+    if user_id is None or not page_key:
+        return []
+    conn = _db()
+    try:
+        return conn.execute(
+            """
+            SELECT DISTINCT g.*
+            FROM groups g
+            JOIN user_groups ug ON ug.group_id = g.id
+            JOIN group_pages gp ON gp.group_id = g.id
+            WHERE ug.user_id=? AND gp.page_key=?
+            ORDER BY lower(g.name)
+            """,
+            (int(user_id), str(page_key)),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _user_is_admin(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    conn = _db()
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM user_groups ug
+            JOIN groups g ON g.id = ug.group_id
+            WHERE ug.user_id=? AND g.is_admin=1
+            LIMIT 1
+            """,
+            (int(user_id),),
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _user_allows_page(user_id: int | None, page_key: str) -> bool:
+    if not page_key or user_id is None:
+        return False
+    if _user_is_admin(user_id):
         return True
     conn = _db()
     try:
         row = conn.execute(
-            'SELECT videohub_can_edit_presets FROM roles WHERE id=?',
-            (int(role_id),),
+            """
+            SELECT 1
+            FROM user_groups ug
+            JOIN group_pages gp ON gp.group_id = ug.group_id
+            WHERE ug.user_id=? AND gp.page_key=?
+            LIMIT 1
+            """,
+            (int(user_id), str(page_key)),
         ).fetchone()
+        return bool(row)
     finally:
         conn.close()
+
+
+def _effective_group_allowlist(rows: list[sqlite3.Row], column: str) -> list[int]:
+    """Merge group allow-lists.
+
+    Blank/NULL means allow all. If any assigned group allows all, the effective
+    allow-list is blank/all. Otherwise return the union of all IDs.
+    """
+    if not rows:
+        return []
+    merged: set[int] = set()
+    saw_restricted = False
+    for row in rows:
+        raw = row[column]
+        try:
+            raw_s = '' if raw is None else str(raw).strip()
+        except Exception:
+            raw_s = ''
+        if not raw_s or raw_s.lower() in ('all', '*', 'inherit', 'default', 'global') or raw_s == '[]':
+            return []
+        nums = _parse_group_allowlist_field(raw_s)
+        saw_restricted = True
+        merged.update(nums)
+    if not saw_restricted:
+        return []
+    return sorted(merged)
+
+
+def _effective_videohub_allowlists_for_user(user_id: int | None) -> tuple[list[int], list[int]]:
+    if user_id is None or _user_is_admin(user_id):
+        return ([], [])
+    groups = _get_user_groups_for_page(user_id, 'page:routing')
+    return (
+        _effective_group_allowlist(groups, 'videohub_allowed_outputs'),
+        _effective_group_allowlist(groups, 'videohub_allowed_inputs'),
+    )
+
+
+def _effective_videohub_preset_ids_for_user(user_id: int | None) -> list[int]:
+    if user_id is None or _user_is_admin(user_id):
+        return []
+    return _effective_group_allowlist(_get_user_groups_for_page(user_id, 'page:videohub'), 'videohub_allowed_presets')
+
+
+def _effective_videohub_can_edit_presets_for_user(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    if _user_is_admin(user_id):
+        return True
+    groups = _get_user_groups_for_page(user_id, 'page:videohub')
+    if not groups:
+        return False
+    for row in groups:
+        v = row['videohub_can_edit_presets']
+        if v is None:
+            continue
+        try:
+            if bool(int(v)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _admin_active_admin_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT count(DISTINCT u.id) AS c
+        FROM users u
+        JOIN user_groups ug ON ug.user_id=u.id
+        JOIN groups g ON g.id=ug.group_id
+        WHERE u.is_active=1 AND g.is_admin=1
+        """
+    ).fetchone()
+    return int(row['c'] or 0) if row else 0
+
+
+def _admin_user_has_admin_group(conn: sqlite3.Connection, uid: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM user_groups ug
+        JOIN groups g ON g.id=ug.group_id
+        WHERE ug.user_id=? AND g.is_admin=1
+        LIMIT 1
+        """,
+        (int(uid),),
+    ).fetchone()
+    return bool(row)
+
+
+def _admin_group_ids_include_admin(conn: sqlite3.Connection, group_ids: list[int]) -> bool:
+    if not group_ids:
+        return False
+    placeholders = ','.join(['?'] * len(group_ids))
+    row = conn.execute(
+        f'SELECT 1 FROM groups WHERE is_admin=1 AND id IN ({placeholders}) LIMIT 1',
+        tuple(group_ids),
+    ).fetchone()
+    return bool(row)
+
+
+def _admin_replace_user_groups(conn: sqlite3.Connection, uid: int, group_ids: list[int]) -> None:
+    conn.execute('DELETE FROM user_groups WHERE user_id=?', (int(uid),))
+    for gid in group_ids:
+        exists = conn.execute('SELECT 1 FROM groups WHERE id=?', (int(gid),)).fetchone()
+        if exists:
+            conn.execute(
+                'INSERT OR IGNORE INTO user_groups(user_id,group_id) VALUES (?,?)',
+                (int(uid), int(gid)),
+            )
+
+
+def _admin_update_user(conn: sqlite3.Connection, uid: int, group_ids: list[int], is_active: int) -> bool:
+    row = conn.execute('SELECT is_active FROM users WHERE id=?', (int(uid),)).fetchone()
     if not row:
-        return True
-    v = row['videohub_can_edit_presets']
-    if v is None:
-        return True
-    try:
-        return bool(int(v))
-    except Exception:
-        return True
-
-
-def _set_role_videohub_can_edit_presets(role_id: int, enabled: bool) -> None:
-    conn = _db()
-    try:
-        conn.execute(
-            'UPDATE roles SET videohub_can_edit_presets=? WHERE id=?',
-            (
-                1 if bool(enabled) else 0,
-                int(role_id),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        return False
+    was_active = bool(int(row['is_active'] or 0))
+    was_admin = _admin_user_has_admin_group(conn, uid)
+    will_admin = _admin_group_ids_include_admin(conn, group_ids)
+    if was_active and was_admin and ((not is_active) or (not will_admin)) and _admin_active_admin_count(conn) <= 1:
+        return False
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn.execute('UPDATE users SET is_active=?, updated_at=? WHERE id=?', (1 if is_active else 0, now, int(uid)))
+    _admin_replace_user_groups(conn, uid, group_ids)
+    return True
 
 
 def _can_manage_videohub_rooms_for_current_user() -> bool:
@@ -616,19 +857,14 @@ def _can_manage_videohub_rooms_for_current_user() -> bool:
         return False
 
     try:
-        if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
-            return True
-    except Exception:
-        pass
-
-    try:
         if not can_access('page:videohub'):
             return False
     except Exception:
         return False
 
     try:
-        return bool(_get_role_videohub_can_edit_presets(getattr(current_user, 'role_id', None)))
+        uid = int(current_user.get_id())
+        return bool(_effective_videohub_can_edit_presets_for_user(uid))
     except Exception:
         return False
 
@@ -691,73 +927,215 @@ def require_page(page_key: str, friendly_name: str):
     return _decorator
 
 
-def _get_role_by_name(name: str) -> sqlite3.Row | None:
+def _get_group_by_name(name: str) -> sqlite3.Row | None:
     conn = _db()
     try:
-        cur = conn.execute('SELECT id,name FROM roles WHERE name=?', (name,))
+        cur = conn.execute('SELECT * FROM groups WHERE name=?', (name,))
         return cur.fetchone()
     finally:
         conn.close()
 
 
-def _ensure_role(name: str) -> int:
+def _ensure_group(name: str, *, is_system: bool = False, is_admin: bool = False) -> int:
     conn = _db()
     try:
-        row = conn.execute('SELECT id FROM roles WHERE name=?', (name,)).fetchone()
+        row = conn.execute('SELECT id,is_system,is_admin FROM groups WHERE name=?', (name,)).fetchone()
         if row:
+            updates = []
+            params = []
+            if is_system and not bool(int(row['is_system'] or 0)):
+                updates.append('is_system=?')
+                params.append(1)
+            if is_admin and not bool(int(row['is_admin'] or 0)):
+                updates.append('is_admin=?')
+                params.append(1)
+            if updates:
+                params.append(int(row['id']))
+                conn.execute(f"UPDATE groups SET {', '.join(updates)} WHERE id=?", tuple(params))
+                conn.commit()
             return int(row['id'])
-        conn.execute('INSERT INTO roles(name) VALUES (?)', (name,))
+        conn.execute(
+            'INSERT INTO groups(name,is_system,is_admin) VALUES (?,?,?)',
+            (name, 1 if is_system else 0, 1 if is_admin else 0),
+        )
         conn.commit()
-        row2 = conn.execute('SELECT id FROM roles WHERE name=?', (name,)).fetchone()
+        row2 = conn.execute('SELECT id FROM groups WHERE name=?', (name,)).fetchone()
         return int(row2['id'])
     finally:
         conn.close()
 
 
-def _set_role_pages(role_id: int, page_keys: list[str]) -> None:
-    role_id = int(role_id)
-    keys = [k for k in (page_keys or []) if str(k or '').strip()]
+def _migrate_roles_to_groups() -> None:
+    """Copy the old single-role model into groups/memberships once."""
+    if _auth_meta_get('roles_to_groups_migrated') == '1':
+        return
+
     conn = _db()
     try:
-        conn.execute('DELETE FROM role_pages WHERE role_id=?', (role_id,))
-        for k in keys:
-            conn.execute('INSERT OR IGNORE INTO role_pages(role_id,page_key) VALUES (?,?)', (role_id, str(k)))
+        existing_groups = conn.execute('SELECT count(*) AS c FROM groups').fetchone()
+        roles = conn.execute(
+            """
+            SELECT id,name,auth_idle_timeout_minutes_override,videohub_allowed_outputs,
+                   videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets
+            FROM roles
+            """
+        ).fetchall()
+        if existing_groups and int(existing_groups['c'] or 0) > 0:
+            role_to_group = {}
+            for r in roles or []:
+                existing = conn.execute('SELECT id FROM groups WHERE name=?', (str(r['name'] or '').strip(),)).fetchone()
+                if existing:
+                    role_to_group[int(r['id'])] = int(existing['id'])
+            for u in conn.execute('SELECT id,role_id FROM users WHERE role_id IS NOT NULL').fetchall() or []:
+                gid = role_to_group.get(int(u['role_id']))
+                if gid:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO user_groups(user_id,group_id) VALUES (?,?)',
+                        (int(u['id']), gid),
+                    )
+            conn.execute(
+                'INSERT INTO auth_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                ('roles_to_groups_migrated', '1'),
+            )
+            conn.commit()
+            return
+
+        role_to_group: dict[int, int] = {}
+        for r in roles or []:
+            name = str(r['name'] or '').strip()
+            if not name:
+                continue
+            existing = conn.execute('SELECT id FROM groups WHERE name=?', (name,)).fetchone()
+            if existing:
+                gid = int(existing['id'])
+                conn.execute(
+                    """
+                    UPDATE groups
+                    SET is_system=CASE WHEN name='Admin' THEN 1 ELSE is_system END,
+                        is_admin=CASE WHEN name='Admin' THEN 1 ELSE is_admin END,
+                        auth_idle_timeout_minutes_override=COALESCE(auth_idle_timeout_minutes_override, ?),
+                        videohub_allowed_outputs=COALESCE(videohub_allowed_outputs, ?),
+                        videohub_allowed_inputs=COALESCE(videohub_allowed_inputs, ?),
+                        videohub_allowed_presets=COALESCE(videohub_allowed_presets, ?),
+                        videohub_can_edit_presets=COALESCE(videohub_can_edit_presets, ?)
+                    WHERE id=?
+                    """,
+                    (
+                        r['auth_idle_timeout_minutes_override'],
+                        r['videohub_allowed_outputs'],
+                        r['videohub_allowed_inputs'],
+                        r['videohub_allowed_presets'],
+                        r['videohub_can_edit_presets'],
+                        gid,
+                    ),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO groups(
+                      name,is_system,is_admin,auth_idle_timeout_minutes_override,
+                      videohub_allowed_outputs,videohub_allowed_inputs,
+                      videohub_allowed_presets,videohub_can_edit_presets
+                    ) VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        name,
+                        1 if name == 'Admin' else 0,
+                        1 if name == 'Admin' else 0,
+                        r['auth_idle_timeout_minutes_override'],
+                        r['videohub_allowed_outputs'],
+                        r['videohub_allowed_inputs'],
+                        r['videohub_allowed_presets'],
+                        r['videohub_can_edit_presets'],
+                    ),
+                )
+                gid = int(cur.lastrowid)
+            role_to_group[int(r['id'])] = gid
+
+        for rp in conn.execute('SELECT role_id,page_key FROM role_pages').fetchall() or []:
+            gid = role_to_group.get(int(rp['role_id']))
+            if gid:
+                conn.execute(
+                    'INSERT OR IGNORE INTO group_pages(group_id,page_key) VALUES (?,?)',
+                    (gid, str(rp['page_key'])),
+                )
+
+        for u in conn.execute('SELECT id,role_id FROM users WHERE role_id IS NOT NULL').fetchall() or []:
+            gid = role_to_group.get(int(u['role_id']))
+            if gid:
+                conn.execute(
+                    'INSERT OR IGNORE INTO user_groups(user_id,group_id) VALUES (?,?)',
+                    (int(u['id']), gid),
+                )
+        conn.execute(
+            'INSERT INTO auth_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+            ('roles_to_groups_migrated', '1'),
+        )
         conn.commit()
     finally:
         conn.close()
 
 
 def _bootstrap_default_users_roles() -> None:
-    """Create initial roles and default admin/admin if missing."""
+    """Create initial groups and default admin/admin if missing."""
     _init_auth_db()
-
-    admin_role_id = _ensure_role('Admin')
-    td_role_id = _ensure_role('TD')
-    sp_role_id = _ensure_role('SP')
-
-    # Seed initial page access lists once. Do not overwrite user-managed
-    # assignments from the Admin UI.
+    defaults_seeded = _auth_meta_get('default_groups_seeded') == '1'
+    had_groups_before_bootstrap = False
     try:
         conn = _db()
         try:
-            td_has = conn.execute('SELECT 1 FROM role_pages WHERE role_id=? LIMIT 1', (td_role_id,)).fetchone()
-            sp_has = conn.execute('SELECT 1 FROM role_pages WHERE role_id=? LIMIT 1', (sp_role_id,)).fetchone()
+            row = conn.execute('SELECT count(*) AS c FROM groups').fetchone()
+            had_groups_before_bootstrap = bool(row and int(row['c'] or 0) > 0)
         finally:
             conn.close()
+    except Exception:
+        had_groups_before_bootstrap = False
 
-        if not td_has or not sp_has:
-            all_pages = sorted(_PAGE_REGISTRY.keys())
-            if 'page:home' not in all_pages:
-                all_pages = ['page:home', *all_pages]
+    _migrate_roles_to_groups()
 
-            if not td_has:
-                td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin')]
-                _set_role_pages(td_role_id, td_pages)
-            if not sp_has:
-                sp_pages = [k for k in all_pages if k in ('page:home', 'page:timers')]
-                _set_role_pages(sp_role_id, sp_pages)
+    admin_group_id = _ensure_group('Admin', is_system=True, is_admin=True)
+    seed_td_sp = (not defaults_seeded) and (not had_groups_before_bootstrap)
+    td_group_id = _ensure_group('TD') if seed_td_sp else None
+    sp_group_id = _ensure_group('SP') if seed_td_sp else None
+    try:
+        conn = _db()
+        try:
+            conn.execute("UPDATE groups SET is_system=0 WHERE is_admin=0 AND name!='Admin'")
+            conn.commit()
+        finally:
+            conn.close()
     except Exception:
         pass
+
+    # Seed initial page access lists once. Do not overwrite user-managed
+    # assignments from the Admin UI.
+    if seed_td_sp and td_group_id is not None and sp_group_id is not None:
+        try:
+            conn = _db()
+            try:
+                td_has = conn.execute('SELECT 1 FROM group_pages WHERE group_id=? LIMIT 1', (td_group_id,)).fetchone()
+                sp_has = conn.execute('SELECT 1 FROM group_pages WHERE group_id=? LIMIT 1', (sp_group_id,)).fetchone()
+            finally:
+                conn.close()
+
+            if not td_has or not sp_has:
+                all_pages = sorted(_PAGE_REGISTRY.keys())
+                if 'page:home' not in all_pages:
+                    all_pages = ['page:home', *all_pages]
+
+                if not td_has:
+                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin')]
+                    _set_group_pages(td_group_id, td_pages)
+                if not sp_has:
+                    sp_pages = [k for k in all_pages if k in ('page:home', 'page:timers')]
+                    _set_group_pages(sp_group_id, sp_pages)
+        except Exception:
+            pass
+    if not defaults_seeded:
+        try:
+            _auth_meta_set('default_groups_seeded', '1')
+        except Exception:
+            pass
 
     # Default admin/admin
     conn = _db()
@@ -767,7 +1145,19 @@ def _bootstrap_default_users_roles() -> None:
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             conn.execute(
                 'INSERT INTO users(username,password_hash,role_id,is_active,created_at,updated_at) VALUES (?,?,?,?,?,?)',
-                ('admin', generate_password_hash('admin'), admin_role_id, 1, now, now),
+                ('admin', generate_password_hash('admin'), None, 1, now, now),
+            )
+            row = conn.execute('SELECT id FROM users WHERE username=?', ('admin',)).fetchone()
+            if row:
+                conn.execute(
+                    'INSERT OR IGNORE INTO user_groups(user_id,group_id) VALUES (?,?)',
+                    (int(row['id']), admin_group_id),
+                )
+            conn.commit()
+        else:
+            conn.execute(
+                'INSERT OR IGNORE INTO user_groups(user_id,group_id) VALUES (?,?)',
+                (int(row['id']), admin_group_id),
             )
             conn.commit()
     finally:
@@ -778,7 +1168,7 @@ def _user_record(user_id: int) -> sqlite3.Row | None:
     conn = _db()
     try:
         return conn.execute(
-            'SELECT u.*, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE u.id=?',
+            'SELECT u.* FROM users u WHERE u.id=?',
             (int(user_id),),
         ).fetchone()
     finally:
@@ -789,59 +1179,44 @@ def _user_by_username(username: str) -> sqlite3.Row | None:
     conn = _db()
     try:
         return conn.execute(
-            'SELECT u.*, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE lower(u.username)=lower(?)',
+            'SELECT u.* FROM users u WHERE lower(u.username)=lower(?)',
             (str(username or ''),),
         ).fetchone()
     finally:
         conn.close()
 
 
-def _role_allows_page(role_id: int | None, role_name: str | None, page_key: str) -> bool:
-    if not page_key:
-        return False
-    if str(role_name or '') == 'Admin':
-        return True
-    if role_id is None:
-        return False
-    conn = _db()
-    try:
-        row = conn.execute(
-            'SELECT 1 FROM role_pages WHERE role_id=? AND page_key=?',
-            (int(role_id), str(page_key)),
-        ).fetchone()
-        return bool(row)
-    finally:
-        conn.close()
+def _effective_idle_timeout_override_minutes_for_user(user_id: int | None) -> int | None:
+    """Return merged group idle override.
 
-
-def _role_idle_timeout_override_minutes(role_id: int | None) -> int | None:
-    if role_id is None:
+    None => inherit global config, 0 => disable, N => minutes. If multiple
+    groups specify values, the most permissive value wins.
+    """
+    if user_id is None:
         return None
-    conn = _db()
-    try:
-        row = conn.execute(
-            'SELECT auth_idle_timeout_minutes_override FROM roles WHERE id=?',
-            (int(role_id),),
-        ).fetchone()
-        if not row:
-            return None
+    groups = _get_user_groups(user_id)
+    best: int | None = None
+    for row in groups:
         v = row['auth_idle_timeout_minutes_override']
         if v is None:
-            return None
+            continue
         try:
-            return int(v)
+            n = int(v)
         except Exception:
-            return None
-    finally:
-        conn.close()
+            continue
+        if n <= 0:
+            return 0
+        if best is None or n > best:
+            best = n
+    return best
 
 
 def _parse_idle_timeout_override_raw(raw: str | None) -> int | None:
-    """Parse a per-role idle timeout override.
+    """Parse a group idle timeout override.
 
     Returns:
       None => inherit from global config
-      0 => disable idle logout for this role
+      0 => disable idle logout for this group
       N (>=1) => override minutes
     """
     try:
@@ -860,13 +1235,13 @@ def _parse_idle_timeout_override_raw(raw: str | None) -> int | None:
     return max(1, min(n, 24 * 60))
 
 
-def _set_role_idle_timeout_override(role_id: int, raw: str | None) -> None:
+def _set_group_idle_timeout_override(group_id: int, raw: str | None) -> None:
     v = _parse_idle_timeout_override_raw(raw)
     conn = _db()
     try:
         conn.execute(
-            'UPDATE roles SET auth_idle_timeout_minutes_override=? WHERE id=?',
-            (v, int(role_id)),
+            'UPDATE groups SET auth_idle_timeout_minutes_override=? WHERE id=?',
+            (v, int(group_id)),
         )
         conn.commit()
     finally:
@@ -888,21 +1263,30 @@ def _effective_idle_timeout_minutes_for_current_user() -> int | None:
     except Exception:
         global_minutes = 2
 
-    role_minutes = _role_idle_timeout_override_minutes(getattr(current_user, 'role_id', None))
-    if role_minutes is None:
+    try:
+        uid = int(current_user.get_id())
+    except Exception:
+        uid = None
+    group_minutes = _effective_idle_timeout_override_minutes_for_user(uid)
+    if group_minutes is None:
         return global_minutes
-    if role_minutes <= 0:
+    if group_minutes <= 0:
         return None
-    return max(1, min(int(role_minutes), 24 * 60))
+    return max(1, min(int(group_minutes), 24 * 60))
 
 
 class _User(UserMixin):
     def __init__(self, row: sqlite3.Row):
         self.id = int(row['id'])
         self.username = str(row['username'])
-        self.role_id = int(row['role_id']) if row['role_id'] is not None else None
-        self.role_name = str(row['role_name'] or '') if row['role_name'] is not None else ''
         self._active = bool(int(row['is_active'] or 0))
+        try:
+            groups = _get_user_groups(self.id)
+        except Exception:
+            groups = []
+        self.group_ids = [int(g['id']) for g in groups]
+        self.group_names = [str(g['name'] or '') for g in groups]
+        self.is_admin_group = any(bool(int(g['is_admin'] or 0)) for g in groups)
 
     def is_active(self) -> bool:
         return bool(self._active)
@@ -928,7 +1312,7 @@ def can_access(page_key: str) -> bool:
     if not getattr(current_user, 'is_authenticated', False):
         return False
     try:
-        return _role_allows_page(getattr(current_user, 'role_id', None), getattr(current_user, 'role_name', None), page_key)
+        return _user_allows_page(int(current_user.get_id()), page_key)
     except Exception:
         return False
 
@@ -1778,11 +2162,11 @@ def account_password_page():
     return render_template('account_password.html', page_title='Change Password')
 
 
-@app.route('/admin/roles', methods=['GET', 'POST'])
+@app.route('/admin/permissions', methods=['GET', 'POST'])
 @require_page('page:admin', 'Admin')
-def admin_roles_page():
+def admin_permissions_page():
     # When auth is disabled, admin pages are still reachable; make sure the DB
-    # and default roles exist so the page can render.
+    # and default groups exist so the page can render.
     try:
         _bootstrap_default_users_roles()
     except Exception:
@@ -1794,280 +2178,126 @@ def admin_roles_page():
     if request.method == 'POST':
         action = str(request.form.get('action') or '').strip()
 
-        if action == 'create_role':
-            name = str(request.form.get('role_name') or '').strip()
+        def _form_group_ids() -> list[int]:
+            out: list[int] = []
+            for raw in request.form.getlist('group_ids'):
+                try:
+                    gid = int(raw)
+                except Exception:
+                    continue
+                if gid > 0 and gid not in out:
+                    out.append(gid)
+            return out
+
+        if action == 'create_group':
+            name = str(request.form.get('group_name') or '').strip()
             if name:
                 try:
-                    _ensure_role(name)
-                    _audit('role_create', name)
+                    _ensure_group(name)
+                    _audit('group_create', name)
                 except Exception:
                     pass
 
-        if action == 'delete_role':
-            role_id = request.form.get('role_id')
+        if action == 'delete_group':
+            group_id = request.form.get('group_id')
             try:
-                rid = int(role_id)
+                gid = int(group_id)
             except Exception:
-                rid = None
-            if rid:
+                gid = None
+            if gid:
                 conn = _db()
                 try:
-                    r = conn.execute('SELECT id,name FROM roles WHERE id=?', (rid,)).fetchone()
-                    if r and str(r['name']) != 'Admin':
-                        # Unassign users from this role
-                        conn.execute('UPDATE users SET role_id=NULL WHERE role_id=?', (rid,))
-                        conn.execute('DELETE FROM role_pages WHERE role_id=?', (rid,))
-                        conn.execute('DELETE FROM roles WHERE id=?', (rid,))
+                    g = conn.execute('SELECT id,name,is_admin FROM groups WHERE id=?', (gid,)).fetchone()
+                    if g and not bool(int(g['is_admin'] or 0)):
+                        conn.execute('DELETE FROM user_groups WHERE group_id=?', (gid,))
+                        conn.execute('DELETE FROM group_pages WHERE group_id=?', (gid,))
+                        conn.execute('DELETE FROM groups WHERE id=?', (gid,))
                         conn.commit()
-                        _audit('role_delete', str(r['name']))
+                        _audit('group_delete', str(g['name']))
                 finally:
                     conn.close()
 
-        if action == 'save_pages':
-            role_id = request.form.get('role_id')
+        if action == 'save_group':
+            group_id = request.form.get('group_id')
             try:
-                rid = int(role_id)
+                gid = int(group_id)
             except Exception:
-                rid = None
-            if rid:
-                # Admin role is allow-all and not editable here.
-                role_name = ''
+                gid = None
+            if gid:
+                is_admin_group = False
                 try:
                     conn = _db()
                     try:
-                        rr = conn.execute('SELECT name FROM roles WHERE id=?', (rid,)).fetchone()
-                        role_name = str(rr['name'] or '') if rr else ''
+                        gr = conn.execute('SELECT is_admin FROM groups WHERE id=?', (gid,)).fetchone()
+                        is_admin_group = bool(gr and int(gr['is_admin'] or 0))
                     finally:
                         conn.close()
                 except Exception:
-                    role_name = ''
+                    is_admin_group = False
 
-                if role_name != 'Admin':
+                if not is_admin_group:
                     if 'auth_idle_timeout_minutes_override_role' in request.form:
                         try:
-                            _set_role_idle_timeout_override(rid, request.form.get('auth_idle_timeout_minutes_override_role'))
-                            _audit('role_idle_timeout_override_update', f'role_id={rid}')
+                            _set_group_idle_timeout_override(gid, request.form.get('auth_idle_timeout_minutes_override_role'))
+                            _audit('group_idle_timeout_override_update', f'group_id={gid}')
                         except Exception:
                             pass
 
                     keys = request.form.getlist('page_keys')
                     try:
-                        _set_role_pages(rid, [str(k) for k in keys])
-                        _audit('role_pages_update', f'role_id={rid} keys={len(keys)}')
+                        _set_group_pages(gid, [str(k) for k in keys])
+                        _audit('group_pages_update', f'group_id={gid} keys={len(keys)}')
                     except Exception:
                         pass
 
-                    # Per-role Routing allow-lists (only update if routing page is selected)
+                    # Per-group Routing allow-lists (only update if routing page is selected)
                     try:
                         if 'page:routing' in [str(k) for k in keys]:
                             outs_raw = request.form.get('videohub_allowed_outputs_role')
                             ins_raw = request.form.get('videohub_allowed_inputs_role')
-                            _set_role_videohub_allowlists(rid, outs_raw, ins_raw)
-                            _audit('role_videohub_allowlists_update', f'role_id={rid}')
+                            _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
+                            _audit('group_videohub_allowlists_update', f'group_id={gid}')
                     except Exception:
                         pass
 
-                    # Per-role VideoHub preset visibility (only update if VideoHub page is selected)
+                    # Per-group VideoHub preset visibility (only update if VideoHub page is selected)
                     try:
                         if 'page:videohub' in [str(k) for k in keys]:
                             preset_ids_raw = request.form.get('videohub_allowed_presets_role')
-                            _set_role_videohub_allowed_preset_ids(rid, preset_ids_raw)
-                            _audit('role_videohub_preset_allowlist_update', f'role_id={rid}')
+                            _set_group_videohub_allowed_preset_ids(gid, preset_ids_raw)
+                            _audit('group_videohub_preset_allowlist_update', f'group_id={gid}')
                     except Exception:
                         pass
 
-                    # Per-role VideoHub preset editing toggle (only update if VideoHub page is selected)
+                    # Per-group VideoHub preset editing toggle (only update if VideoHub page is selected)
                     try:
                         if 'page:videohub' in [str(k) for k in keys]:
                             can_edit = (request.form.get('videohub_can_edit_presets_role') == 'on')
-                            _set_role_videohub_can_edit_presets(rid, bool(can_edit))
-                            _audit('role_videohub_can_edit_presets_update', f'role_id={rid} enabled={int(bool(can_edit))}')
+                            _set_group_videohub_can_edit_presets(gid, bool(can_edit))
+                            _audit('group_videohub_can_edit_presets_update', f'group_id={gid} enabled={int(bool(can_edit))}')
                     except Exception:
                         pass
 
-    conn = _db()
-    try:
-        roles = conn.execute(
-            'SELECT id,name,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets FROM roles ORDER BY lower(name)'
-        ).fetchall()
-        role_pages = conn.execute('SELECT role_id,page_key FROM role_pages').fetchall()
-    finally:
-        conn.close()
-
-    pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()], key=lambda x: x[1].lower())
-    role_to_pages: dict[int, set[str]] = {}
-    for rp in role_pages or []:
-        try:
-            role_to_pages.setdefault(int(rp['role_id']), set()).add(str(rp['page_key']))
-        except Exception:
-            continue
-
-    role_to_vh: dict[int, dict[str, str]] = {}
-    for r in roles or []:
-        try:
-            rid = int(r['id'])
-        except Exception:
-            continue
-
-        # Store raw text for editing; blank means "allow all".
-        out_raw = r['videohub_allowed_outputs']
-        in_raw = r['videohub_allowed_inputs']
-        preset_raw = r['videohub_allowed_presets']
-        can_edit_raw = r['videohub_can_edit_presets']
-        try:
-            out_s = '' if out_raw is None else str(out_raw).strip()
-        except Exception:
-            out_s = ''
-        try:
-            in_s = '' if in_raw is None else str(in_raw).strip()
-        except Exception:
-            in_s = ''
-        try:
-            preset_s = '' if preset_raw is None else str(preset_raw).strip()
-        except Exception:
-            preset_s = ''
-        if out_s == '[]':
-            out_s = ''
-        if in_s == '[]':
-            in_s = ''
-        if preset_s == '[]':
-            preset_s = ''
-        try:
-            can_edit = True if can_edit_raw is None else bool(int(can_edit_raw))
-        except Exception:
-            can_edit = True
-        role_to_vh[rid] = {
-            'outputs': out_s,
-            'inputs': in_s,
-            'presets': preset_s,
-            'can_edit_presets': bool(can_edit),
-        }
-
-    return render_template(
-        'admin_roles.html',
-        page_title='Access Levels',
-        roles=roles,
-        pages=pages,
-        role_to_pages=role_to_pages,
-        role_to_vh=role_to_vh,
-    )
-
-
-@app.route('/api/admin/roles/<int:role_id>', methods=['POST'])
-@require_page('page:admin', 'Admin')
-def api_admin_role_update(role_id: int):
-    """Update role settings via JSON (used by Access Levels auto-save UI)."""
-    try:
-        data = request.get_json(silent=True) or {}
-    except Exception:
-        data = {}
-
-    rid = int(role_id)
-    role_name = ''
-    try:
-        conn = _db()
-        try:
-            rr = conn.execute('SELECT name FROM roles WHERE id=?', (rid,)).fetchone()
-            role_name = str(rr['name'] or '') if rr else ''
-        finally:
-            conn.close()
-    except Exception:
-        role_name = ''
-
-    # Admin role is allow-all and not editable here.
-    if role_name != 'Admin':
-        if 'auth_idle_timeout_minutes_override_role' in data:
-            try:
-                _set_role_idle_timeout_override(rid, data.get('auth_idle_timeout_minutes_override_role'))
-                _audit('role_idle_timeout_override_update', f'role_id={rid}')
-            except Exception:
-                pass
-
-        try:
-            keys = data.get('page_keys')
-            if not isinstance(keys, list):
-                keys = []
-            keys = [str(k) for k in keys]
-            _set_role_pages(rid, keys)
-            _audit('role_pages_update', f'role_id={rid} keys={len(keys)}')
-        except Exception:
-            pass
-
-        # Per-role Routing allow-lists (only update if routing page is selected)
-        try:
-            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
-            if 'page:routing' in keys_set:
-                outs_raw = data.get('videohub_allowed_outputs_role')
-                ins_raw = data.get('videohub_allowed_inputs_role')
-                _set_role_videohub_allowlists(rid, outs_raw, ins_raw)
-                _audit('role_videohub_allowlists_update', f'role_id={rid}')
-        except Exception:
-            pass
-
-        # Per-role VideoHub preset visibility (only update if VideoHub page is selected)
-        try:
-            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
-            if 'page:videohub' in keys_set:
-                preset_ids_raw = data.get('videohub_allowed_presets_role')
-                _set_role_videohub_allowed_preset_ids(rid, preset_ids_raw)
-                _audit('role_videohub_preset_allowlist_update', f'role_id={rid}')
-        except Exception:
-            pass
-
-        # Per-role VideoHub preset editing toggle (only update if VideoHub page is selected)
-        try:
-            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
-            if 'page:videohub' in keys_set:
-                enabled_raw = data.get('videohub_can_edit_presets_role')
-                enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
-                _set_role_videohub_can_edit_presets(rid, bool(enabled))
-                _audit('role_videohub_can_edit_presets_update', f'role_id={rid} enabled={int(bool(enabled))}')
-        except Exception:
-            pass
-
-    return jsonify({'ok': True})
-
-
-@app.route('/admin/users', methods=['GET', 'POST'])
-@require_page('page:admin', 'Admin')
-def admin_users_page():
-    # When auth is disabled, admin pages are still reachable; make sure the DB
-    # and default roles exist so the page can render.
-    try:
-        _bootstrap_default_users_roles()
-    except Exception:
-        try:
-            _init_auth_db()
-        except Exception:
-            pass
-
-    cfg = _auth_cfg()
-    try:
-        min_len = int(cfg.get('auth_min_password_length', 6))
-    except Exception:
-        min_len = 6
-    min_len = max(4, min(min_len, 128))
-
-    if request.method == 'POST':
-        action = str(request.form.get('action') or '').strip()
-
         if action == 'create_user':
+            cfg = _auth_cfg()
+            try:
+                min_len = int(cfg.get('auth_min_password_length', 6))
+            except Exception:
+                min_len = 6
+            min_len = max(4, min(min_len, 128))
             username = str(request.form.get('username') or '').strip()
             password = str(request.form.get('password') or '')
-            role_id = request.form.get('role_id')
-            try:
-                rid = int(role_id) if role_id else None
-            except Exception:
-                rid = None
+            group_ids = _form_group_ids()
 
             if username and len(password) >= min_len:
                 conn = _db()
                 try:
                     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    conn.execute(
+                    cur = conn.execute(
                         'INSERT INTO users(username,password_hash,role_id,is_active,created_at,updated_at) VALUES (?,?,?,?,?,?)',
-                        (username, generate_password_hash(password), rid, 1, now, now),
+                        (username, generate_password_hash(password), None, 1, now, now),
                     )
+                    _admin_replace_user_groups(conn, int(cur.lastrowid), group_ids)
                     conn.commit()
                     _audit('user_create', username)
                 except Exception:
@@ -2075,30 +2305,13 @@ def admin_users_page():
                 finally:
                     conn.close()
 
-        if action == 'update_user':
-            user_id = request.form.get('user_id')
-            try:
-                uid = int(user_id)
-            except Exception:
-                uid = None
-            role_id = request.form.get('role_id')
-            try:
-                rid = int(role_id) if role_id else None
-            except Exception:
-                rid = None
-            is_active = 1 if request.form.get('is_active') == 'on' else 0
-
-            if uid:
-                conn = _db()
-                try:
-                    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    conn.execute('UPDATE users SET role_id=?, is_active=?, updated_at=? WHERE id=?', (rid, is_active, now, uid))
-                    conn.commit()
-                    _audit('user_update', f'id={uid}')
-                finally:
-                    conn.close()
-
         if action == 'reset_password':
+            cfg = _auth_cfg()
+            try:
+                min_len = int(cfg.get('auth_min_password_length', 6))
+            except Exception:
+                min_len = 6
+            min_len = max(4, min(min_len, 128))
             user_id = request.form.get('user_id')
             new_pw = str(request.form.get('new_password') or '')
             try:
@@ -2124,39 +2337,267 @@ def admin_users_page():
             if uid:
                 conn = _db()
                 try:
-                    # Prevent deleting yourself or the last admin
-                    if int(current_user.get_id()) == uid:
+                    try:
+                        current_uid = int(current_user.get_id())
+                    except Exception:
+                        current_uid = None
+                    if current_uid == uid:
                         pass
                     else:
-                        # check if user is admin
-                        row = conn.execute('SELECT u.id, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE u.id=?', (uid,)).fetchone()
-                        if row and str(row['role_name'] or '') == 'Admin':
-                            admins = conn.execute(
-                                "SELECT count(*) AS c FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE r.name='Admin' AND u.is_active=1"
-                            ).fetchone()
-                            if admins and int(admins['c'] or 0) <= 1:
-                                pass
-                            else:
-                                conn.execute('DELETE FROM users WHERE id=?', (uid,))
-                                conn.commit()
-                                _audit('user_delete', f'id={uid}')
+                        row = conn.execute('SELECT is_active FROM users WHERE id=?', (uid,)).fetchone()
+                        is_active_user = bool(row and int(row['is_active'] or 0))
+                        if is_active_user and _admin_user_has_admin_group(conn, uid) and _admin_active_admin_count(conn) <= 1:
+                            pass
                         else:
+                            conn.execute('DELETE FROM user_groups WHERE user_id=?', (uid,))
                             conn.execute('DELETE FROM users WHERE id=?', (uid,))
                             conn.commit()
                             _audit('user_delete', f'id={uid}')
                 finally:
                     conn.close()
 
+        if action in ('create_group', 'delete_group', 'save_group'):
+            return redirect(url_for('admin_permissions_page', tab='groups'))
+        if action in ('create_user', 'reset_password', 'delete_user'):
+            return redirect(url_for('admin_permissions_page', tab='users'))
+
     conn = _db()
     try:
-        users = conn.execute(
-            'SELECT u.id,u.username,u.is_active,u.role_id, r.name AS role_name FROM users u LEFT JOIN roles r ON r.id=u.role_id ORDER BY lower(u.username)'
+        groups = conn.execute(
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
-        roles = conn.execute('SELECT id,name FROM roles ORDER BY lower(name)').fetchall()
+        group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
+        group_users = conn.execute(
+            """
+            SELECT ug.group_id,u.username
+            FROM user_groups ug
+            JOIN users u ON u.id=ug.user_id
+            ORDER BY lower(u.username)
+            """
+        ).fetchall()
+        users = conn.execute(
+            'SELECT u.id,u.username,u.is_active FROM users u ORDER BY lower(u.username)'
+        ).fetchall()
+        memberships = conn.execute(
+            """
+            SELECT ug.user_id,g.id AS group_id,g.name AS group_name,g.is_admin
+            FROM user_groups ug
+            JOIN groups g ON g.id=ug.group_id
+            ORDER BY lower(g.name)
+            """
+        ).fetchall()
     finally:
         conn.close()
 
-    return render_template('admin_users.html', page_title='Users', users=users, roles=roles, min_len=min_len)
+    pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()], key=lambda x: x[1].lower())
+    group_to_pages: dict[int, set[str]] = {}
+    for gp in group_pages or []:
+        try:
+            group_to_pages.setdefault(int(gp['group_id']), set()).add(str(gp['page_key']))
+        except Exception:
+            continue
+
+    group_to_users: dict[int, list[str]] = {}
+    for gu in group_users or []:
+        try:
+            group_to_users.setdefault(int(gu['group_id']), []).append(str(gu['username'] or ''))
+        except Exception:
+            continue
+
+    group_to_vh: dict[int, dict[str, str]] = {}
+    for g in groups or []:
+        try:
+            gid = int(g['id'])
+        except Exception:
+            continue
+
+        # Store raw text for editing; blank means "allow all".
+        out_raw = g['videohub_allowed_outputs']
+        in_raw = g['videohub_allowed_inputs']
+        preset_raw = g['videohub_allowed_presets']
+        can_edit_raw = g['videohub_can_edit_presets']
+        try:
+            out_s = '' if out_raw is None else str(out_raw).strip()
+        except Exception:
+            out_s = ''
+        try:
+            in_s = '' if in_raw is None else str(in_raw).strip()
+        except Exception:
+            in_s = ''
+        try:
+            preset_s = '' if preset_raw is None else str(preset_raw).strip()
+        except Exception:
+            preset_s = ''
+        if out_s == '[]':
+            out_s = ''
+        if in_s == '[]':
+            in_s = ''
+        if preset_s == '[]':
+            preset_s = ''
+        try:
+            can_edit = True if can_edit_raw is None else bool(int(can_edit_raw))
+        except Exception:
+            can_edit = True
+        group_to_vh[gid] = {
+            'outputs': out_s,
+            'inputs': in_s,
+            'presets': preset_s,
+            'can_edit_presets': bool(can_edit),
+        }
+
+    user_to_groups: dict[int, list[sqlite3.Row]] = {}
+    user_to_group_ids: dict[int, set[int]] = {}
+    for m in memberships or []:
+        try:
+            uid = int(m['user_id'])
+            gid = int(m['group_id'])
+        except Exception:
+            continue
+        user_to_groups.setdefault(uid, []).append(m)
+        user_to_group_ids.setdefault(uid, set()).add(gid)
+
+    cfg = _auth_cfg()
+    try:
+        min_len = int(cfg.get('auth_min_password_length', 6))
+    except Exception:
+        min_len = 6
+    min_len = max(4, min(min_len, 128))
+
+    return render_template(
+        'admin_permissions.html',
+        page_title='Permissions',
+        active_tab='groups' if str(request.args.get('tab') or '').lower() == 'groups' else 'users',
+        groups=groups,
+        pages=pages,
+        group_to_pages=group_to_pages,
+        group_to_vh=group_to_vh,
+        group_to_users=group_to_users,
+        users=users,
+        user_to_groups=user_to_groups,
+        user_to_group_ids=user_to_group_ids,
+        min_len=min_len,
+    )
+
+
+@app.route('/admin/groups')
+@require_page('page:admin', 'Admin')
+def admin_groups_page():
+    return redirect(url_for('admin_permissions_page', tab='groups'))
+
+
+@app.route('/api/admin/groups/<int:group_id>', methods=['POST'])
+@require_page('page:admin', 'Admin')
+def api_admin_group_update(group_id: int):
+    """Update group settings via JSON (used by Groups auto-save UI)."""
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+
+    gid = int(group_id)
+    is_admin_group = False
+    try:
+        conn = _db()
+        try:
+            gr = conn.execute('SELECT is_admin FROM groups WHERE id=?', (gid,)).fetchone()
+            is_admin_group = bool(gr and int(gr['is_admin'] or 0))
+        finally:
+            conn.close()
+    except Exception:
+        is_admin_group = False
+
+    # Admin groups are allow-all and not editable here.
+    if not is_admin_group:
+        if 'auth_idle_timeout_minutes_override_role' in data:
+            try:
+                _set_group_idle_timeout_override(gid, data.get('auth_idle_timeout_minutes_override_role'))
+                _audit('group_idle_timeout_override_update', f'group_id={gid}')
+            except Exception:
+                pass
+
+        try:
+            keys = data.get('page_keys')
+            if not isinstance(keys, list):
+                keys = []
+            keys = [str(k) for k in keys]
+            _set_group_pages(gid, keys)
+            _audit('group_pages_update', f'group_id={gid} keys={len(keys)}')
+        except Exception:
+            pass
+
+        # Per-group Routing allow-lists (only update if routing page is selected)
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:routing' in keys_set:
+                outs_raw = data.get('videohub_allowed_outputs_role')
+                ins_raw = data.get('videohub_allowed_inputs_role')
+                _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
+                _audit('group_videohub_allowlists_update', f'group_id={gid}')
+        except Exception:
+            pass
+
+        # Per-group VideoHub preset visibility (only update if VideoHub page is selected)
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:videohub' in keys_set:
+                preset_ids_raw = data.get('videohub_allowed_presets_role')
+                _set_group_videohub_allowed_preset_ids(gid, preset_ids_raw)
+                _audit('group_videohub_preset_allowlist_update', f'group_id={gid}')
+        except Exception:
+            pass
+
+        # Per-group VideoHub preset editing toggle (only update if VideoHub page is selected)
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:videohub' in keys_set:
+                enabled_raw = data.get('videohub_can_edit_presets_role')
+                enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
+                _set_group_videohub_can_edit_presets(gid, bool(enabled))
+                _audit('group_videohub_can_edit_presets_update', f'group_id={gid} enabled={int(bool(enabled))}')
+        except Exception:
+            pass
+
+    return jsonify({'ok': True})
+
+
+@app.route('/api/admin/users/<int:user_id>', methods=['POST'])
+@require_page('page:admin', 'Admin')
+def api_admin_user_update(user_id: int):
+    """Auto-save user account status and group membership."""
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+    group_ids_raw = data.get('group_ids')
+    group_ids: list[int] = []
+    if isinstance(group_ids_raw, list):
+        for raw in group_ids_raw:
+            try:
+                gid = int(raw)
+            except Exception:
+                continue
+            if gid > 0 and gid not in group_ids:
+                group_ids.append(gid)
+    is_active_raw = data.get('is_active', True)
+    is_active = bool(is_active_raw) if isinstance(is_active_raw, bool) else (str(is_active_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
+
+    conn = _db()
+    try:
+        ok = _admin_update_user(conn, int(user_id), group_ids, 1 if is_active else 0)
+        if not ok:
+            conn.rollback()
+            return jsonify({'ok': False, 'error': 'Cannot remove or disable the last active admin user'}), 400
+        conn.commit()
+        _audit('user_update', f'id={int(user_id)}')
+    finally:
+        conn.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/admin/users', methods=['GET', 'POST'])
+@require_page('page:admin', 'Admin')
+def admin_users_page():
+    return redirect(url_for('admin_permissions_page', tab='users'))
 
 
 @app.get('/admin/backup/authdb')
@@ -2510,19 +2951,15 @@ def api_reference_page():
 @app.route('/videohub')
 @require_page('page:videohub', 'VideoHub')
 def videohub_page():
-    # Allow-list is configured as 1-based preset IDs, per role.
+    # Allow-list is configured as 1-based preset IDs, per group.
     # Blank/NULL => allow all.
     allowed_preset_ids: list[int] = []
     can_edit_presets = True
     try:
         if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
-            # Admin is allow-all by design.
-            if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
-                allowed_preset_ids = []
-                can_edit_presets = True
-            else:
-                allowed_preset_ids = _get_role_videohub_allowed_preset_ids(getattr(current_user, 'role_id', None))
-                can_edit_presets = _get_role_videohub_can_edit_presets(getattr(current_user, 'role_id', None))
+            uid = int(current_user.get_id())
+            allowed_preset_ids = _effective_videohub_preset_ids_for_user(uid)
+            can_edit_presets = _effective_videohub_can_edit_presets_for_user(uid)
     except Exception:
         pass
 
@@ -2559,20 +2996,15 @@ def videohub_monitor_page():
 @app.route('/routing')
 @require_page('page:routing', 'Routing')
 def routing_page():
-    # Allow-lists are configured as 1-based indices, per role.
+    # Allow-lists are configured as 1-based indices, per group.
     # Blank/NULL => allow all.
     allowed_outputs: list[int] = []
     allowed_inputs: list[int] = []
     try:
         if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
-            # Admin is allow-all by design.
-            if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
-                allowed_outputs = []
-                allowed_inputs = []
-            else:
-                ro, ri = _get_role_videohub_allowlists(getattr(current_user, 'role_id', None))
-                allowed_outputs = ro
-                allowed_inputs = ri
+            ro, ri = _effective_videohub_allowlists_for_user(int(current_user.get_id()))
+            allowed_outputs = ro
+            allowed_inputs = ri
     except Exception:
         pass
 
@@ -2809,12 +3241,7 @@ def _can_edit_videohub_presets_current_user() -> bool:
     except Exception:
         return False
     try:
-        if str(getattr(current_user, 'role_name', '') or '') == 'Admin':
-            return True
-    except Exception:
-        pass
-    try:
-        return bool(_get_role_videohub_can_edit_presets(getattr(current_user, 'role_id', None)))
+        return bool(_effective_videohub_can_edit_presets_for_user(int(current_user.get_id())))
     except Exception:
         return False
 

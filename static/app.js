@@ -2512,9 +2512,219 @@ if (document.getElementById('timers-page')) {
   }
 }
 
-// --- Access Levels page (roles) ---
+// --- Permissions page (users + groups) ---
+if (document.getElementById('permissions-page')) {
+  const userList = document.getElementById('permissions-user-list');
+  const userSearch = document.getElementById('permissions-user-search');
+  const createUserCard = document.getElementById('permissions-create-user-card');
+  const usersCard = document.getElementById('permissions-users-card');
+  const userItems = Array.from(document.querySelectorAll('[data-user-select][data-user-id]'));
+  const userPanels = Array.from(document.querySelectorAll('[data-user-panel][data-user-id]'));
+  const USER_STORAGE_KEY = 'tdeck_permissions_selectedUserId';
+  const userSaveTimers = new Map();
+  const userSaveInFlight = new Map();
+  const userSaveQueued = new Map();
+
+  function _syncUsersListHeight() {
+    if (!createUserCard || !usersCard || !userList) return;
+    const createRect = createUserCard.getBoundingClientRect();
+    const cardBody = usersCard.querySelector('.card-body');
+    if (!createRect || !cardBody) return;
+    if (createRect.height <= 0 || usersCard.getBoundingClientRect().height <= 0) return;
+    userList.style.maxHeight = '';
+    const bodyRect = cardBody.getBoundingClientRect();
+    const listRect = userList.getBoundingClientRect();
+    if (bodyRect.height <= 0 || listRect.height <= 0) return;
+    const nonListHeight = Math.max(0, bodyRect.height - listRect.height);
+    const maxListHeight = Math.max(140, Math.floor(createRect.height - nonListHeight));
+    userList.style.maxHeight = `${maxListHeight}px`;
+    userList.style.overflowY = 'auto';
+  }
+
+  function _scheduleUsersListHeightSync() {
+    window.requestAnimationFrame(() => {
+      _syncUsersListHeight();
+      setTimeout(_syncUsersListHeight, 0);
+    });
+  }
+
+  _syncUsersListHeight();
+  window.addEventListener('resize', _scheduleUsersListHeightSync);
+  setTimeout(_syncUsersListHeight, 0);
+
+  function _showPermissionsTab(name) {
+    const target = name === 'groups' ? '#permissions-groups' : '#permissions-users';
+    const btn = document.querySelector(`[data-bs-target="${target}"]`);
+    if (!btn) return;
+    try {
+      if (window.bootstrap && window.bootstrap.Tab) {
+        window.bootstrap.Tab.getOrCreateInstance(btn).show();
+      } else {
+        btn.click();
+      }
+    } catch (e) {
+      try { btn.click(); } catch (ignored) {}
+    }
+  }
+
+  function _syncPermissionsHash() {
+    const h = String(window.location.hash || '').replace(/^#/, '');
+    if (h === 'groups' || h.startsWith('role-')) _showPermissionsTab('groups');
+    if (h === 'users' || h.startsWith('user-')) _showPermissionsTab('users');
+  }
+
+  _syncPermissionsHash();
+  window.addEventListener('hashchange', _syncPermissionsHash);
+  document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tabBtn => {
+    tabBtn.addEventListener('shown.bs.tab', _scheduleUsersListHeightSync);
+    tabBtn.addEventListener('click', _scheduleUsersListHeightSync);
+  });
+
+  function _userPanelById(userId) {
+    const id = String(userId || '').trim();
+    return userPanels.find(p => String(p.getAttribute('data-user-id')) === id) || null;
+  }
+
+  function _userSetMessage(panel, kind, msg) {
+    if (!panel) return;
+    const el = panel.querySelector(kind === 'error' ? '[data-user-error]' : '[data-user-saved]');
+    if (!el) return;
+    if (!msg) {
+      _uiClearAutoHide(el);
+      el.textContent = kind === 'error' ? '' : 'Saved';
+      el.classList.add('d-none');
+      return;
+    }
+    el.classList.remove('d-none');
+    if (kind === 'error') el.textContent = String(msg);
+    _uiScheduleAutoHide(el, () => el.classList.add('d-none'));
+  }
+
+  function _selectUser(userId, { persist = true, updateHash = true } = {}) {
+    const id = String(userId || '').trim();
+    if (!id) return;
+    userItems.forEach(item => item.classList.toggle('active', String(item.getAttribute('data-user-id')) === id));
+    userPanels.forEach(panel => panel.classList.toggle('d-none', String(panel.getAttribute('data-user-id')) !== id));
+    if (persist) {
+      try { window.localStorage.setItem(USER_STORAGE_KEY, id); } catch (e) {}
+    }
+    if (updateHash) {
+      try { window.location.hash = `user-${id}`; } catch (e) {}
+    }
+  }
+
+  function _readSelectedUserId() {
+    try {
+      const h = String(window.location.hash || '');
+      const m = h.match(/^#user-(\d+)$/);
+      if (m) return String(m[1]);
+    } catch (e) {}
+    try {
+      const stored = window.localStorage.getItem(USER_STORAGE_KEY);
+      if (stored) return String(stored);
+    } catch (e) {}
+    return userItems[0] ? String(userItems[0].getAttribute('data-user-id')) : null;
+  }
+
+  const initialUserId = _readSelectedUserId();
+  if (initialUserId) _selectUser(initialUserId, { persist: true, updateHash: false });
+
+  if (userList) {
+    userList.addEventListener('click', (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest('[data-user-select][data-user-id]') : null;
+      if (!btn) return;
+      _selectUser(btn.getAttribute('data-user-id'), { persist: true, updateHash: true });
+    });
+  }
+
+  if (userSearch) {
+    userSearch.addEventListener('input', () => {
+      const q = String(userSearch.value || '').trim().toLowerCase();
+      userItems.forEach(item => {
+        const name = String(item.getAttribute('data-user-name') || '').toLowerCase();
+        item.classList.toggle('d-none', !!q && !name.includes(q));
+      });
+    });
+  }
+
+  document.querySelectorAll('[data-group-search]').forEach(search => {
+    search.addEventListener('input', () => {
+      const q = String(search.value || '').trim().toLowerCase();
+      const scope = search.closest('form') || search.closest('[data-user-panel]') || document;
+      scope.querySelectorAll('[data-group-option][data-group-name]').forEach(option => {
+        const name = String(option.getAttribute('data-group-name') || '').toLowerCase();
+        option.classList.toggle('d-none', !!q && !name.includes(q));
+      });
+    });
+  });
+
+  function _userReadPayload(panel) {
+    const form = panel ? panel.querySelector('form[data-user-form]') : null;
+    if (!form) return null;
+    return {
+      is_active: !!(form.querySelector('input[name="is_active"]') || {}).checked,
+      group_ids: Array.from(form.querySelectorAll('input[name="group_ids"]:checked')).map(cb => String(cb.value)),
+    };
+  }
+
+  async function _userSaveNow(userId) {
+    const id = String(userId || '').trim();
+    const panel = _userPanelById(id);
+    const payload = _userReadPayload(panel);
+    if (!id || !panel || !payload) return false;
+    if (userSaveInFlight.get(id)) {
+      userSaveQueued.set(id, true);
+      return true;
+    }
+    userSaveInFlight.set(id, true);
+    _userSetMessage(panel, 'error', '');
+    _userSetMessage(panel, 'saved', '');
+    try {
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data || !data.ok) throw new Error((data && data.error) ? data.error : 'Save failed');
+      _userSetMessage(panel, 'saved', 'Saved');
+      return true;
+    } catch (e) {
+      _userSetMessage(panel, 'error', String(e.message || e));
+      return false;
+    } finally {
+      userSaveInFlight.set(id, false);
+      if (userSaveQueued.get(id)) {
+        userSaveQueued.set(id, false);
+        _userScheduleSave(id, { delayMs: 250 });
+      }
+    }
+  }
+
+  function _userScheduleSave(userId, { delayMs = 250 } = {}) {
+    const id = String(userId || '').trim();
+    if (!id) return;
+    const prior = userSaveTimers.get(id);
+    if (prior) clearTimeout(prior);
+    userSaveTimers.set(id, setTimeout(() => {
+      userSaveTimers.delete(id);
+      _userSaveNow(id);
+    }, Math.max(0, Number(delayMs) || 0)));
+  }
+
+  userPanels.forEach(panel => {
+    const form = panel.querySelector('form[data-user-form]');
+    if (!form) return;
+    const userId = String(form.getAttribute('data-user-id') || '').trim();
+    form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => _userScheduleSave(userId, { delayMs: 0 }));
+    });
+  });
+}
+
+// --- Groups editor ---
 if (document.getElementById('access-levels-page')) {
-  const ROLE_STORAGE_KEY = 'tdeck_accessLevels_selectedRoleId';
+  const ROLE_STORAGE_KEY = 'tdeck_groups_selectedGroupId';
   const roleList = document.getElementById('access-levels-role-list');
   const roleItems = Array.from(document.querySelectorAll('[data-role-item][data-role-id]'));
   const rolePanels = Array.from(document.querySelectorAll('[data-role-panel][data-role-id]'));
@@ -2673,7 +2883,7 @@ if (document.getElementById('access-levels-page')) {
     _roleSetError(panel, '');
 
     try {
-      const res = await fetch(`/api/admin/roles/${encodeURIComponent(id)}`, {
+      const res = await fetch(`/api/admin/groups/${encodeURIComponent(id)}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload),

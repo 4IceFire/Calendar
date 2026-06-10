@@ -1,0 +1,304 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Permissions' %}
+
+{% block content %}
+  <div id="permissions-page">
+    <ul class="nav nav-tabs mb-3" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link {% if active_tab != 'groups' %}active{% endif %}" id="users-tab" data-bs-toggle="tab" data-bs-target="#permissions-users" type="button" role="tab">Users</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link {% if active_tab == 'groups' %}active{% endif %}" id="groups-tab" data-bs-toggle="tab" data-bs-target="#permissions-groups" type="button" role="tab">Groups</button>
+      </li>
+    </ul>
+
+    <div class="tab-content">
+      <div class="tab-pane fade {% if active_tab != 'groups' %}show active{% endif %}" id="permissions-users" role="tabpanel" tabindex="0">
+        <div class="row g-4">
+          <div class="col-lg-4">
+            <div class="card tdeck-soft" id="permissions-create-user-card" style="height: min(640px, calc(100vh - 120px)); min-height: 520px">
+              <div class="card-body d-flex flex-column" style="min-height:0">
+                <h2 class="h5 mb-3">Create User</h2>
+                <form method="post" class="d-flex flex-column flex-grow-1" style="min-height:0">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="create_user">
+                  <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <input class="form-control" name="username" required>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">Password</label>
+                    <input class="form-control" type="password" name="password" required>
+                    <div class="small text-muted mt-1">Minimum length: {{ min_len }}</div>
+                  </div>
+                  <div class="mb-3 d-flex flex-column flex-grow-1" style="min-height:0">
+                    <label class="form-label">Groups</label>
+                    <input class="form-control form-control-sm mb-2" data-group-search="create" placeholder="Search groups">
+                    <div class="border rounded p-2 flex-grow-1 overflow-auto" style="min-height:0">
+                      {% for g in groups %}
+                        <div class="form-check" data-group-option="1" data-group-name="{{ g.name|lower }}">
+                          <input class="form-check-input" type="checkbox" name="group_ids" value="{{ g.id }}" id="create-group-{{ g.id }}">
+                          <label class="form-check-label" for="create-group-{{ g.id }}">{{ g.name }}{% if g.is_admin %} <span class="text-muted">(full access)</span>{% endif %}</label>
+                        </div>
+                      {% endfor %}
+                    </div>
+                  </div>
+                  <button class="btn btn-primary align-self-start" type="submit">Add user</button>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-lg-8">
+            <div class="card tdeck-soft" id="permissions-users-card" style="height: min(640px, calc(100vh - 120px)); min-height: 520px">
+              <div class="card-body d-flex flex-column" style="min-height:0">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <h2 class="h5 mb-0">Users</h2>
+                  <a class="btn btn-sm btn-outline-secondary" href="/admin/backup/authdb">Backup</a>
+                </div>
+                <input class="form-control form-control-sm mb-3" id="permissions-user-search" placeholder="Search users">
+                <div class="list-group flex-grow-1 overflow-auto" id="permissions-user-list" style="min-height:0">
+                  {% for u in users %}
+                    {% set assigned = user_to_groups.get(u.id, []) %}
+                    <button type="button" class="list-group-item list-group-item-action" data-user-select="1" data-user-id="{{ u.id }}" data-user-name="{{ u.username|lower }}">
+                      <div class="d-flex justify-content-between gap-2">
+                        <span class="fw-semibold">{{ u.username }}</span>
+                        {% if u.is_active %}
+                          <span class="badge text-bg-success">Active</span>
+                        {% else %}
+                          <span class="badge text-bg-secondary">Inactive</span>
+                        {% endif %}
+                      </div>
+                      <div class="small text-muted">
+                        {% if assigned %}
+                          {{ assigned|map(attribute='group_name')|join(', ') }}
+                        {% else %}
+                          No groups
+                        {% endif %}
+                      </div>
+                    </button>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-12">
+            <div class="card tdeck-soft">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+                  <div>
+                    <h2 class="h5 mb-1">Edit User</h2>
+                    <div class="small text-muted">Select a user. Account status and group changes auto-save.</div>
+                  </div>
+                </div>
+
+                {% for u in users %}
+                  {% set assigned = user_to_groups.get(u.id, []) %}
+                  {% set assigned_ids = user_to_group_ids.get(u.id, []) %}
+                  <div class="border rounded-3 p-3 mb-3 d-none" data-user-panel="1" data-user-id="{{ u.id }}">
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+                      <div>
+                        <div class="fw-semibold">{{ u.username }}</div>
+                        <div class="small text-muted">User ID: {{ u.id }}</div>
+                      </div>
+                      <form method="post">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                        <input type="hidden" name="action" value="delete_user">
+                        <input type="hidden" name="user_id" value="{{ u.id }}">
+                        <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+                      </form>
+                    </div>
+
+                    <div class="alert alert-danger d-none" data-user-error="1"></div>
+                    <div class="alert alert-success d-none" data-user-saved="1">Saved</div>
+
+                    <form method="post" data-user-form="1" data-user-id="{{ u.id }}">
+                      <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" role="switch" name="is_active" id="active-{{ u.id }}" {% if u.is_active %}checked{% endif %}>
+                        <label class="form-check-label" for="active-{{ u.id }}">Account active</label>
+                      </div>
+
+                      <label class="form-label">Groups</label>
+                      <input class="form-control form-control-sm mb-2" data-group-search="user" placeholder="Search groups">
+                      <div class="row g-2">
+                        {% for g in groups %}
+                          <div class="col-sm-6" data-group-option="1" data-group-name="{{ g.name|lower }}">
+                            <div class="form-check">
+                              <input class="form-check-input" type="checkbox" name="group_ids" value="{{ g.id }}"
+                                     id="user-{{ u.id }}-group-{{ g.id }}"
+                                     {% if g.id in assigned_ids %}checked{% endif %}>
+                              <label class="form-check-label" for="user-{{ u.id }}-group-{{ g.id }}">
+                                {{ g.name }}{% if g.is_admin %} <span class="text-muted">(full access)</span>{% endif %}
+                              </label>
+                            </div>
+                          </div>
+                        {% endfor %}
+                      </div>
+                    </form>
+
+                    <form method="post" class="row g-2 align-items-end mt-4">
+                      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                      <input type="hidden" name="action" value="reset_password">
+                      <input type="hidden" name="user_id" value="{{ u.id }}">
+                      <div class="col-12 col-md-8">
+                        <label class="form-label">Reset password</label>
+                        <input class="form-control form-control-sm" type="password" name="new_password" placeholder="New password">
+                      </div>
+                      <div class="col-12 col-md-4">
+                        <button class="btn btn-sm btn-outline-secondary" type="submit">Reset password</button>
+                      </div>
+                    </form>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-pane fade {% if active_tab == 'groups' %}show active{% endif %}" id="permissions-groups" role="tabpanel" tabindex="0">
+        <div id="access-levels-page" class="row g-4">
+          <div class="col-lg-4">
+            <div class="card tdeck-soft">
+              <div class="card-body">
+                <h2 class="h5 mb-3">Create Group</h2>
+                <form method="post">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="create_group">
+                  <div class="mb-3">
+                    <label class="form-label">Group name</label>
+                    <input class="form-control" name="group_name" placeholder="e.g. Service Producer" required>
+                  </div>
+                  <button class="btn btn-primary" type="submit">Add group</button>
+                </form>
+              </div>
+            </div>
+
+            <div class="card tdeck-soft mt-3">
+              <div class="card-body">
+                <h2 class="h5 mb-3">Groups</h2>
+                <div class="list-group" id="access-levels-role-list">
+                  {% for g in groups %}
+                    <div class="list-group-item d-flex justify-content-between align-items-center gap-2" data-role-item="1" data-role-id="{{ g.id }}">
+                      <button type="button" class="btn btn-link p-0 text-start flex-grow-1 text-decoration-none" data-role-select="1" data-role-id="{{ g.id }}">
+                        <div class="fw-semibold">{{ g.name }}</div>
+                        <div class="small text-muted">{{ group_to_users.get(g.id, [])|length }} user{% if group_to_users.get(g.id, [])|length != 1 %}s{% endif %}{% if g.is_admin %} | Full access{% endif %}</div>
+                      </button>
+                      {% if not g.is_admin %}
+                        <form method="post" class="ms-2">
+                          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                          <input type="hidden" name="action" value="delete_group">
+                          <input type="hidden" name="group_id" value="{{ g.id }}">
+                          <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+                        </form>
+                      {% endif %}
+                    </div>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-lg-8">
+            <div class="card tdeck-soft">
+              <div class="card-body">
+                <h2 class="h5 mb-1">Edit Group</h2>
+                <div class="small text-muted mb-3">Select a group. Changes auto-save.</div>
+
+                {% for g in groups %}
+                  <div class="border rounded-3 p-3 mb-3" data-role-panel="1" data-role-id="{{ g.id }}">
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                      <div>
+                        <div class="fw-semibold">{{ g.name }}</div>
+                        <div class="small text-muted">Group ID: {{ g.id }}</div>
+                      </div>
+                      {% if g.is_admin %}<span class="badge text-bg-primary">Full access</span>{% endif %}
+                    </div>
+
+                    {% set members = group_to_users.get(g.id, []) %}
+                    <div class="small text-muted mb-3">Members: {% if members %}{{ members|join(', ') }}{% else %}none{% endif %}</div>
+
+                    {% if g.is_admin %}
+                      <div class="alert alert-info mb-0">This group grants every page and management permission.</div>
+                    {% else %}
+                      <div class="alert alert-danger d-none" data-role-error="1"></div>
+                      <form method="post" data-role-form="1" data-role-id="{{ g.id }}">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                        <input type="hidden" name="action" value="save_group">
+                        <input type="hidden" name="group_id" value="{{ g.id }}">
+
+                        <div class="row">
+                          {% for key, label in pages %}
+                            <div class="col-md-6">
+                              <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="page_keys" value="{{ key }}"
+                                  {% if group_to_pages.get(g.id) and (key in group_to_pages.get(g.id)) %}checked{% endif %}>
+                                <label class="form-check-label">{{ label }}</label>
+                              </div>
+                            </div>
+                          {% endfor %}
+                        </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
+                            <div class="fw-semibold">Idle logout timeout override</div>
+                            <div class="small text-muted">Blank inherits global timeout. Use <code>0</code> to disable idle logout for this group.</div>
+                          </div>
+                          <div class="col-12 col-md-4">
+                            <label class="form-label">Override Minutes</label>
+                            <input class="form-control" type="text" name="auth_idle_timeout_minutes_override_role"
+                                   value="{{ g.auth_idle_timeout_minutes_override if g.auth_idle_timeout_minutes_override is not none else '' }}"
+                                   placeholder="inherit / 0 / 5">
+                          </div>
+                        </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
+                            <div class="fw-semibold">Routing allow-lists (VideoHub)</div>
+                            <div class="small text-muted">Blank or <code>all</code> allows all.</div>
+                          </div>
+                          <div class="col-12 col-md-6">
+                            <label class="form-label">Allowed Outputs</label>
+                            <input class="form-control" name="videohub_allowed_outputs_role" value="{{ (group_to_vh.get(g.id).outputs if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-outputs">
+                          </div>
+                          <div class="col-12 col-md-6">
+                            <label class="form-label">Allowed Inputs</label>
+                            <input class="form-control" name="videohub_allowed_inputs_role" value="{{ (group_to_vh.get(g.id).inputs if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-inputs">
+                          </div>
+                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the Routing page permission.</div></div>
+                        </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
+                            <div class="fw-semibold">VideoHub preset visibility</div>
+                            <div class="small text-muted">Blank or <code>all</code> allows all.</div>
+                          </div>
+                          <div class="col-12">
+                            <div class="form-check">
+                              <input class="form-check-input" type="checkbox" name="videohub_can_edit_presets_role" {% if group_to_vh.get(g.id) and group_to_vh.get(g.id).can_edit_presets %}checked{% endif %} data-role="vh-edit-presets">
+                              <label class="form-check-label">Allow editing presets and managing rooms</label>
+                            </div>
+                          </div>
+                          <div class="col-12 col-md-6">
+                            <label class="form-label">Allowed Preset IDs</label>
+                            <input class="form-control" name="videohub_allowed_presets_role" value="{{ (group_to_vh.get(g.id).presets if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-presets">
+                          </div>
+                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the VideoHub page permission.</div></div>
+                        </div>
+                      </form>
+                    {% endif %}
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

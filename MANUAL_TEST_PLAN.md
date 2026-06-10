@@ -4,7 +4,7 @@ This plan covers the recent fixes and optimization work:
 
 1. CLI support for advanced calendar trigger types
 2. Timer apply path no longer double-fires Companion button presses
-3. Per-role idle timeout override
+3. Group-based permissions and group idle timeout override
 4. Removal/cleanup of legacy or dead helpers
 5. Stable project-root path handling
 6. Shared JSON caching
@@ -43,7 +43,7 @@ These checks were run successfully:
 What still needs manual validation:
 
 - Browser behavior
-- Auth/role behavior
+- Auth/group behavior
 - Real device integration with Companion/ProPresenter/VideoHub
 - Real scheduler execution timing
 
@@ -52,7 +52,7 @@ What still needs manual validation:
 Recommended order:
 
 1. Start the app and confirm pages load
-2. Test role/idle-timeout behavior
+2. Test group permissions and idle-timeout behavior
 3. Test status indicators and dashboard refresh
 4. Test calendar UI and trigger rendering
 5. Test CLI advanced trigger support
@@ -94,7 +94,7 @@ python cli.py start calendar --background
    - `/calendar/triggers`
    - `/timers`
    - `/config`
-   - `/admin/roles`
+   - `/admin/permissions`
 
 Expected:
 
@@ -314,53 +314,172 @@ Expected:
 - The Companion press sequence fires once, not twice
 - ProPresenter timer still sets/resets/starts normally
 
-### I. Per-role idle timeout override
+### I. Group-based users and permissions
 
 Purpose:
-Verify the new role-level idle timeout field is both editable and enforced.
+Verify users can belong to multiple groups and inherit permissions from all assigned groups.
 
-#### I1. Admin roles UI
+#### I1. Migration check
 
 Steps:
 
-1. Open `/admin/roles`
-2. Select a non-Admin role
-3. Confirm there is an idle-timeout override field
+1. Start the app after updating
+2. Log in as `admin`
+3. Open `/admin/permissions`
+4. Check both the Users and Groups tabs
 
 Expected:
 
-- Field is visible for editable roles
-- Saving does not error
+- The old Admin, TD, and SP access levels appear as groups
+- Existing users keep equivalent group membership
+- The Admin group is marked as full access and cannot be deleted
 
-#### I2. Override inherits global timeout when blank
+#### I2. Create groups
 
 Steps:
 
-1. Leave role override blank
-2. Log in as a user in that role
+1. Open `/admin/permissions`
+2. Select the Groups tab
+3. Create a group named `Schedule Test`
+4. Give it Home and Schedule access
+5. Create a group named `Timers Test`
+6. Give it Home and Timers access
+
+Expected:
+
+- New groups appear in the group list
+- Changes auto-save without errors
+
+#### I3. Create users and assign groups
+
+Steps:
+
+1. Open `/admin/permissions`
+2. Select the Users tab
+3. Create a user with no groups
+4. Create a user assigned to `Schedule Test`
+5. Create a user assigned to both `Schedule Test` and `Timers Test`
+
+Expected:
+
+- Users are created successfully
+- Assigned groups appear in the user list and selected user panel
+- A user with no groups is allowed to exist
+
+#### I4. Confirm inherited permissions
+
+Steps:
+
+1. Log in as the user with no groups
+2. Confirm protected pages are not available
+3. Log in as the `Schedule Test` user
+4. Confirm Schedule is available and Timers is not
+5. Log in as the user in both test groups
+6. Confirm both Schedule and Timers are available
+
+Expected:
+
+- Users inherit the union of page permissions from all assigned groups
+
+#### I5. Remove users from groups
+
+Steps:
+
+1. Open `/admin/permissions`
+2. Select the Users tab
+3. Search for the multi-group user
+4. Select the user
+5. Remove `Timers Test`
+6. Wait for the autosave confirmation
+7. Log in as that user
+
+Expected:
+
+- Timers access is removed
+- Schedule access remains
+
+#### I6. Reset passwords
+
+Steps:
+
+1. Open `/admin/permissions`
+2. Select the Users tab
+3. Select a test user
+4. Enter a new password for that user
+5. Click Reset password
+6. Log out and log in as that user with the new password
+
+Expected:
+
+- Old password no longer works
+- New password works
+
+#### I7. Edit account status
+
+Steps:
+
+1. Open `/admin/permissions`
+2. Select the Users tab
+3. Select a test user
+4. Turn off Account active
+5. Wait for the autosave confirmation
+6. Try to log in as that user
+7. Turn Account active back on
+
+Expected:
+
+- Inactive users cannot log in
+- Reactivated users can log in again
+
+#### I8. VideoHub group merging
+
+Steps:
+
+1. Create one group with VideoHub access and allowed preset IDs `1,2`
+2. Create another group with VideoHub access and allowed preset IDs `3`
+3. Assign both groups to one test user
+4. Log in as that user and open `/videohub`
+
+Expected:
+
+- Presets 1, 2, and 3 are visible
+- If either group is blank/all, all presets are visible
+- A single value such as `3` stays saved as `[3]` and does not turn blank/all
+
+#### I9. Group idle timeout override
+
+Purpose:
+Verify the group-level idle timeout field is editable and enforced.
+
+##### I9a. Override inherits global timeout when blank
+
+Steps:
+
+1. Leave group override blank
+2. Log in as a user in that group
 3. Stay idle for slightly longer than the global timeout
 
 Expected:
 
 - Session expires according to global timeout
 
-#### I3. Override disables idle logout when `0`
+##### I9b. Override disables idle logout when `0`
 
 Steps:
 
-1. Set the role override to `0`
-2. Log in as a user in that role
+1. Set the group override to `0`
+2. Log in as a user in that group
 3. Stay idle longer than the global timeout
 
 Expected:
 
 - User should remain logged in
 
-#### I4. Override shortens timeout when positive
+##### I9c. Override shortens timeout when positive
 
 Steps:
 
-1. Set role override to a small value, for example `1`
+1. Set group override to a small value, for example `1`
 2. Log in as that user
 3. Stay idle for just over one minute
 
@@ -468,10 +587,15 @@ Use this quick checklist while testing:
 - `[ ]` G2. CLI manual API trigger
 - `[ ]` G3. CLI manual timer trigger
 - `[ ]` H. Timer apply does not double-fire
-- `[ ]` I1. Idle timeout field visible/saves
-- `[ ]` I2. Blank override inherits global
-- `[ ]` I3. Zero override disables timeout
-- `[ ]` I4. Positive override enforces timeout
+- `[ ]` I1. Migration and unified Permissions page
+- `[ ]` I2. Create groups
+- `[ ]` I3. Create users and assign groups
+- `[ ]` I4. Inherited permissions
+- `[ ]` I5. Remove users from groups
+- `[ ]` I6. Reset passwords
+- `[ ]` I7. Edit account status
+- `[ ]` I8. VideoHub/routing allow-list merging
+- `[ ]` I9. Group idle timeout overrides
 - `[ ]` J. Stable project-root path handling
 - `[ ]` K1. Event cache invalidation
 - `[ ]` K2. Timer preset cache invalidation
