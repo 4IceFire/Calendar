@@ -1,6 +1,7 @@
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response
 import copy
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -340,6 +341,8 @@ app.config.update(
 
 # --- Auth DB (SQLite) ---
 _AUTH_DB_PATH = (Path(__file__).resolve().parent / 'auth.db')
+_APP_ROOT = Path(__file__).resolve().parent
+_COMPANION_SURFACES_PATH = _APP_ROOT / 'companion_surfaces.json'
 
 
 def _db() -> sqlite3.Connection:
@@ -454,7 +457,8 @@ def _init_auth_db() -> None:
               videohub_allowed_outputs TEXT,
               videohub_allowed_inputs TEXT,
               videohub_allowed_presets TEXT,
-              videohub_can_edit_presets INTEGER
+              videohub_can_edit_presets INTEGER,
+              companion_click_surfaces TEXT
             )
             """
         )
@@ -470,6 +474,7 @@ def _init_auth_db() -> None:
             ('videohub_allowed_inputs', 'TEXT'),
             ('videohub_allowed_presets', 'TEXT'),
             ('videohub_can_edit_presets', 'INTEGER'),
+            ('companion_click_surfaces', 'TEXT'),
         ):
             if col_name not in group_cols:
                 try:
@@ -677,6 +682,46 @@ def _set_group_videohub_can_edit_presets(group_id: int, enabled: bool) -> None:
         conn.close()
 
 
+def _coerce_string_allow_list(v) -> list[str]:
+    """Coerce stored string allow-list values into sorted unique non-empty IDs."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        try:
+            v = json.loads(s)
+        except Exception:
+            return sorted(set([p.strip() for p in re.split(r'[\s,]+', s) if p.strip()]))
+    if isinstance(v, (int, float)):
+        return [str(v)]
+    if not isinstance(v, list):
+        return []
+    out = []
+    for item in v:
+        sid = str(item or '').strip()
+        if sid:
+            out.append(sid)
+    return sorted(set(out))
+
+
+def _set_group_companion_click_surfaces(group_id: int, surface_ids) -> None:
+    surface_ids = _coerce_string_allow_list(surface_ids)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET companion_click_surfaces=? WHERE id=?',
+            (
+                json.dumps(surface_ids),
+                int(group_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
     group_id = int(group_id)
     keys = [k for k in (page_keys or []) if str(k or '').strip()]
@@ -797,6 +842,32 @@ def _effective_group_allowlist(rows: list[sqlite3.Row], column: str) -> list[int
     return sorted(merged)
 
 
+def _effective_group_string_allowlist(rows: list[sqlite3.Row], column: str) -> list[str]:
+    """Merge string allow-lists.
+
+    Blank/NULL/"[]" means allow all. If any assigned group allows all, return
+    an empty list to represent unrestricted access.
+    """
+    if not rows:
+        return []
+    merged: set[str] = set()
+    saw_restricted = False
+    for row in rows:
+        raw = row[column]
+        try:
+            raw_s = '' if raw is None else str(raw).strip()
+        except Exception:
+            raw_s = ''
+        if not raw_s or raw_s.lower() in ('all', '*', 'inherit', 'default', 'global') or raw_s == '[]':
+            return []
+        values = _coerce_string_allow_list(raw_s)
+        saw_restricted = True
+        merged.update(values)
+    if not saw_restricted:
+        return []
+    return sorted(merged)
+
+
 def _effective_videohub_allowlists_for_user(user_id: int | None) -> tuple[list[int], list[int]]:
     if user_id is None or _user_is_admin(user_id):
         return ([], [])
@@ -831,6 +902,36 @@ def _effective_videohub_can_edit_presets_for_user(user_id: int | None) -> bool:
         except Exception:
             continue
     return False
+
+
+def _effective_companion_click_surface_ids_for_user(user_id: int | None) -> list[str]:
+    if user_id is None or _user_is_admin(user_id):
+        return []
+    return _effective_group_string_allowlist(_get_user_groups(user_id), 'companion_click_surfaces')
+
+
+def _can_click_companion_surface_for_current_user(surface_id: str) -> bool:
+    sid = str(surface_id or '').strip()
+    if not sid:
+        return False
+    try:
+        if not _auth_enabled():
+            return True
+    except Exception:
+        return True
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+    except Exception:
+        return False
+    try:
+        uid = int(current_user.get_id())
+        if _user_is_admin(uid):
+            return True
+        allowed = _effective_companion_click_surface_ids_for_user(uid)
+        return (not allowed) or (sid in set(allowed))
+    except Exception:
+        return False
 
 
 def _admin_active_admin_count(conn: sqlite3.Connection) -> int:
@@ -1684,6 +1785,7 @@ def _inject_auth():
         is_authed = False
     return {
         'auth_enabled': _auth_enabled(),
+        'can_click_companion_surface': _can_click_companion_surface_for_current_user,
         'can_access': can_access,
         'can_manage_videohub_rooms': _can_manage_videohub_rooms_for_current_user,
         'csrf_token': _csrf_token,
@@ -1818,6 +1920,14 @@ def _inject_theme():
         'dark_mode': dark_mode,
         'bs_theme': 'dark' if dark_mode else 'light',
         'message_timeout_ms': int(timeout_s * 1000),
+    }
+
+
+@app.context_processor
+def _inject_companion_surfaces():
+    return {
+        'companion_surface_by_id': _companion_surface_by_id,
+        'companion_surface_url': _companion_surface_url,
     }
 
 
@@ -2669,6 +2779,13 @@ def admin_permissions_page():
                     except Exception:
                         pass
 
+                    # Per-group Companion surface click allow-list.
+                    try:
+                        _set_group_companion_click_surfaces(gid, request.form.getlist('companion_click_surfaces_role'))
+                        _audit('group_companion_click_surfaces_update', f'group_id={gid}')
+                    except Exception:
+                        pass
+
         if action == 'create_user':
             min_len = _auth_min_password_length()
             username = str(request.form.get('username') or '').strip()
@@ -2777,7 +2894,7 @@ def admin_permissions_page():
     conn = _db()
     try:
         groups = conn.execute(
-            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets FROM groups ORDER BY is_system DESC, lower(name)'
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
         group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
         group_users = conn.execute(
@@ -2822,6 +2939,7 @@ def admin_permissions_page():
             continue
 
     group_to_vh: dict[int, dict[str, str]] = {}
+    group_to_companion: dict[int, dict[str, list[str]]] = {}
     for g in groups or []:
         try:
             gid = int(g['id'])
@@ -2861,6 +2979,9 @@ def admin_permissions_page():
             'presets': preset_s,
             'can_edit_presets': bool(can_edit),
         }
+        group_to_companion[gid] = {
+            'click_surfaces': _coerce_string_allow_list(g['companion_click_surfaces']),
+        }
 
     user_to_groups: dict[int, list[sqlite3.Row]] = {}
     user_to_group_ids: dict[int, set[int]] = {}
@@ -2884,6 +3005,8 @@ def admin_permissions_page():
         pages=pages,
         group_to_pages=group_to_pages,
         group_to_vh=group_to_vh,
+        group_to_companion=group_to_companion,
+        companion_surfaces=_load_companion_surfaces(),
         group_to_users=group_to_users,
         users=users,
         user_to_groups=user_to_groups,
@@ -2967,6 +3090,14 @@ def api_admin_group_update(group_id: int):
                 enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
                 _set_group_videohub_can_edit_presets(gid, bool(enabled))
                 _audit('group_videohub_can_edit_presets_update', f'group_id={gid} enabled={int(bool(enabled))}')
+        except Exception:
+            pass
+
+        # Per-group Companion surface click allow-list.
+        try:
+            if 'companion_click_surfaces_role' in data:
+                _set_group_companion_click_surfaces(gid, data.get('companion_click_surfaces_role'))
+                _audit('group_companion_click_surfaces_update', f'group_id={gid}')
         except Exception:
             pass
 
@@ -3547,6 +3678,12 @@ def calendar_page():
     return render_template('calendar.html')
 
 
+@app.route('/surface-controls')
+@require_page('page:surface_controls', 'Surface Controls')
+def surface_controls_page():
+    return render_template('surface_controls.html', companion_surface_displays=_load_surface_control_displays())
+
+
 @app.route('/calendar/triggers')
 @require_page('page:calendar', 'Schedule')
 def calendar_triggers_page():
@@ -3644,6 +3781,12 @@ def config_page():
     return render_template('config.html')
 
 
+@app.route('/config/companion-surfaces')
+@require_page('page:config', 'Config')
+def companion_surfaces_config_page():
+    return render_template('companion_surfaces_config.html')
+
+
 @app.route('/console')
 @require_page('page:console', 'Console')
 def console_page():
@@ -3673,6 +3816,281 @@ def _read_json_file(p: Path):
 
 def _write_json_file(p: Path, data):
     return bool(write_json(p, data))
+
+
+def _default_companion_surface_config() -> dict:
+    return {
+        'surfaces': [
+            {
+                'id': 'test-surface',
+                'label': 'Test',
+            },
+            {
+                'id': 'test-2',
+                'label': 'Another Test',
+            },
+        ],
+        'surface_controls': [
+            {
+                'surface_id': 'test-surface',
+                'label': 'Left display',
+                'width': '440px',
+                'height': '280px',
+                'size': '1',
+                'crop_top': '0px',
+                'crop_right': '0px',
+                'crop_bottom': '0px',
+                'crop_left': '0px',
+            },
+            {
+                'surface_id': 'test-2',
+                'label': 'Right display',
+                'width': '440px',
+                'height': '280px',
+                'size': '1',
+                'crop_top': '0px',
+                'crop_right': '0px',
+                'crop_bottom': '0px',
+                'crop_left': '0px',
+            },
+        ],
+    }
+
+
+def _css_px_value(value, default: str = '0px', minimum: float = 0) -> str:
+    raw = str(value if value is not None else '').strip()
+    if not raw:
+        raw = str(default).strip()
+    matches = re.findall(r'-?\d+(?:\.\d+)?', raw)
+    if not matches:
+        matches = re.findall(r'-?\d+(?:\.\d+)?', str(default))
+    if not matches:
+        return default
+    # If a legacy value is `min(100%, 440px)`, prefer the pixel-like final number.
+    number = float(matches[-1])
+    if number < minimum:
+        number = minimum
+    if number.is_integer():
+        return f'{int(number)}px'
+    return f'{number:g}px'
+
+
+def _css_scale_value(value, default: str = '1') -> str:
+    raw = str(value if value is not None else '').strip()
+    try:
+        number = float(raw)
+    except Exception:
+        try:
+            number = float(default)
+        except Exception:
+            number = 1.0
+    if not math.isfinite(number) or number <= 0:
+        number = 1.0
+    if number.is_integer():
+        return str(int(number))
+    return f'{number:g}'
+
+
+def _payload_has_number(value) -> bool:
+    raw = str(value if value is not None else '').strip()
+    return bool(raw and re.search(r'-?\d+(?:\.\d+)?', raw))
+
+
+def _normalize_companion_surface(raw) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    sid = str(raw.get('id') or raw.get('surface_id') or '').strip()
+    if not sid:
+        return None
+    label = str(raw.get('label') or raw.get('name') or sid).strip()
+    return {
+        'id': sid,
+        'label': label or sid,
+    }
+
+
+def _normalize_companion_surface_display(raw, surfaces_by_id: dict[str, dict[str, str]]) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    sid = str(raw.get('surface_id') or raw.get('id') or '').strip()
+    if not sid:
+        return None
+    surface = surfaces_by_id.get(sid) or {'id': sid, 'label': sid}
+    label = str(raw.get('label') or surface.get('label') or sid).strip()
+    width = _css_px_value(raw.get('width'), '440px')
+    height = _css_px_value(raw.get('height'), '280px')
+    out = {
+        'id': sid,
+        'surface_id': sid,
+        'label': label or sid,
+        'width': width,
+        'height': height,
+        'size': _css_scale_value(raw.get('size'), '1'),
+    }
+    for key in ('crop_top', 'crop_right', 'crop_bottom', 'crop_left'):
+        out[key] = _css_px_value(raw.get(key), '0px')
+    return out
+
+
+def _load_companion_surface_config() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    try:
+        data, _ = read_json(_COMPANION_SURFACES_PATH, default_factory=_default_companion_surface_config)
+    except Exception:
+        data = _default_companion_surface_config()
+
+    # Backward compatibility: the original file was a plain list of surfaces.
+    if isinstance(data, list):
+        surfaces_raw = data
+        displays_raw = data
+    elif isinstance(data, dict):
+        surfaces_raw = data.get('surfaces')
+        displays_raw = data.get('surface_controls') or data.get('displays')
+        if not isinstance(surfaces_raw, list):
+            surfaces_raw = []
+        if not isinstance(displays_raw, list):
+            displays_raw = surfaces_raw
+    else:
+        data = _default_companion_surface_config()
+        surfaces_raw = data['surfaces']
+        displays_raw = data['surface_controls']
+
+    surfaces: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in surfaces_raw:
+        surface = _normalize_companion_surface(item)
+        if not surface:
+            continue
+        sid = surface['id']
+        if sid in seen:
+            continue
+        seen.add(sid)
+        surfaces.append(surface)
+
+    surfaces_by_id = {s['id']: s for s in surfaces}
+    displays: list[dict[str, str]] = []
+    for item in displays_raw:
+        display = _normalize_companion_surface_display(item, surfaces_by_id)
+        if display:
+            displays.append(display)
+    return surfaces, displays
+
+
+def _companion_surface_config_payload() -> dict:
+    surfaces, displays = _load_companion_surface_config()
+    return {
+        'surfaces': surfaces,
+        'surface_controls': displays,
+    }
+
+
+def _normalize_companion_surface_config_payload(raw) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'Payload must be an object.'
+
+    surfaces_raw = raw.get('surfaces')
+    displays_raw = raw.get('surface_controls') if 'surface_controls' in raw else raw.get('displays')
+    if not isinstance(surfaces_raw, list):
+        return None, 'surfaces must be a list.'
+    if displays_raw is None:
+        displays_raw = []
+    if not isinstance(displays_raw, list):
+        return None, 'surface_controls must be a list.'
+
+    surfaces: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in surfaces_raw:
+        if not isinstance(item, dict):
+            return None, 'Each surface must be an object.'
+        if not str(item.get('id') or item.get('surface_id') or '').strip():
+            return None, 'Every surface needs an ID.'
+        if not str(item.get('label') or item.get('name') or '').strip():
+            return None, 'Every surface needs a label.'
+        surface = _normalize_companion_surface(item)
+        if not surface:
+            continue
+        sid = surface['id']
+        if sid in seen:
+            return None, f'Duplicate surface ID: {sid}'
+        seen.add(sid)
+        surfaces.append(surface)
+
+    surfaces_by_id = {s['id']: s for s in surfaces}
+    displays: list[dict[str, str]] = []
+    for index, item in enumerate(displays_raw, start=1):
+        if not isinstance(item, dict):
+            return None, 'Each display must be an object.'
+        if not str(item.get('surface_id') or item.get('id') or '').strip():
+            return None, f'Display {index} needs a surface.'
+        if not str(item.get('label') or '').strip():
+            return None, f'Display {index} needs a label.'
+        for key in ('width', 'height', 'crop_top', 'crop_right', 'crop_bottom', 'crop_left'):
+            if key in item and item.get(key) not in (None, '') and not _payload_has_number(item.get(key)):
+                return None, f'Display {index} has an invalid {key} value.'
+        if 'size' in item:
+            try:
+                size_value = float(str(item.get('size') or '').strip())
+            except Exception:
+                return None, f'Display {index} has an invalid size value.'
+            if not math.isfinite(size_value) or size_value <= 0:
+                return None, f'Display {index} size must be greater than zero.'
+        display = _normalize_companion_surface_display(item, surfaces_by_id)
+        if not display:
+            continue
+        sid = display['surface_id']
+        if sid not in surfaces_by_id:
+            return None, f'Display references unknown surface ID: {sid}'
+        displays.append(display)
+
+    return {
+        'surfaces': surfaces,
+        'surface_controls': displays,
+    }, None
+
+
+def _save_companion_surface_config(payload: dict) -> bool:
+    try:
+        _COMPANION_SURFACES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return bool(write_json(_COMPANION_SURFACES_PATH, payload))
+
+
+def _load_companion_surfaces() -> list[dict[str, str]]:
+    surfaces, _ = _load_companion_surface_config()
+    return surfaces
+
+
+def _load_surface_control_displays() -> list[dict[str, str]]:
+    _, displays = _load_companion_surface_config()
+    return displays
+
+
+def _companion_surface_by_id(surface_id: str) -> dict[str, str] | None:
+    sid = str(surface_id or '').strip()
+    if not sid:
+        return None
+    for surface in _load_companion_surfaces():
+        if str(surface.get('id') or '') == sid:
+            return surface
+    return None
+
+
+def _companion_base_url() -> str:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    host = str(cfg.get('companion_surface_ip') or cfg.get('companion_ip') or '127.0.0.1').strip() or '127.0.0.1'
+    try:
+        port = int(cfg.get('companion_surface_port') or cfg.get('companion_port') or 8000)
+    except Exception:
+        port = 8000
+    return f"http://{host}:{port}"
+
+
+def _companion_surface_url(surface_id: str) -> str:
+    sid = str(surface_id or '').strip().strip('/')
+    return f"{_companion_base_url()}/emulator/{sid}"
 
 
 _videohub_rooms_lock = threading.Lock()
@@ -4763,6 +5181,43 @@ def api_set_config():
                 pass
 
         return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/companion-surfaces-config', methods=['GET'])
+def api_get_companion_surfaces_config():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    payload = _companion_surface_config_payload()
+    resp = jsonify(payload)
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
+
+
+@app.route('/api/companion-surfaces-config', methods=['POST'])
+def api_set_companion_surfaces_config():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+    payload, err = _normalize_companion_surface_config_payload(data)
+    if err or payload is None:
+        return jsonify({'ok': False, 'error': err or 'Invalid surface config.'}), 400
+    try:
+        if not _save_companion_surface_config(payload):
+            return jsonify({'ok': False, 'error': 'Could not save companion_surfaces.json'}), 500
+        _audit('companion_surfaces_config_update', f"surfaces={len(payload.get('surfaces') or [])} displays={len(payload.get('surface_controls') or [])}")
+        return jsonify({'ok': True, 'config': payload})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

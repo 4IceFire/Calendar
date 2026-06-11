@@ -1,0 +1,29 @@
+{% macro companion_surface(surface, width=None, height=None, size=None, can_click=False, crop_top=None, crop_right=None, crop_bottom=None, crop_left=None) -%}
+  {%- set sid = surface.id if surface is mapping else surface -%}
+  {%- set final_width = width or (surface.width if surface is mapping and surface.width else '440px') -%}
+  {%- set final_height = height or (surface.height if surface is mapping and surface.height else '280px') -%}
+  {%- set final_size = size or (surface.size if surface is mapping and surface.size else '1') -%}
+  {%- set final_crop_top = crop_top or (surface.crop_top if surface is mapping and surface.crop_top else '0px') -%}
+  {%- set final_crop_right = crop_right or (surface.crop_right if surface is mapping and surface.crop_right else '0px') -%}
+  {%- set final_crop_bottom = crop_bottom or (surface.crop_bottom if surface is mapping and surface.crop_bottom else '0px') -%}
+  {%- set final_crop_left = crop_left or (surface.crop_left if surface is mapping and surface.crop_left else '0px') -%}
+  <div class="companion-surface{% if not can_click %} companion-surface-readonly{% endif %}"
+       style="--companion-surface-width: {{ final_width }}; --companion-surface-height: {{ final_height }}; --companion-surface-size: {{ final_size }}; --companion-surface-crop-top: {{ final_crop_top }}; --companion-surface-crop-right: {{ final_crop_right }}; --companion-surface-crop-bottom: {{ final_crop_bottom }}; --companion-surface-crop-left: {{ final_crop_left }};"
+       data-companion-surface-id="{{ sid|e }}"
+       data-can-click="{{ '1' if can_click else '0' }}">
+    <iframe class="companion-surface-frame"
+            src="{{ companion_surface_url(sid) }}"
+            title="Companion surface {{ sid }}"
+            loading="eager"
+            tabindex="{% if can_click %}0{% else %}-1{% endif %}"
+            allow="fullscreen"
+            allowtransparency="true"></iframe>
+    {% if not can_click %}
+      <button class="companion-surface-blocker"
+              type="button"
+              tabindex="-1"
+              aria-label="Companion surface is read only"
+              onclick="console.log('Companion surface click blocked: {{ sid|e }}')"></button>
+    {% endif %}
+  </div>
+{%- endmacro %}

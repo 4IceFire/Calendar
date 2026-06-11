@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% from '_companion_surface.html' import companion_surface with context %}
+
+{% block content %}
+  {% if companion_surface_displays %}
+    <div class="surface-controls-grid">
+      {% for surface in companion_surface_displays %}
+        <section class="surface-control-item">
+          {{ companion_surface(surface, can_click=can_click_companion_surface(surface.id)) }}
+        </section>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="alert alert-info">No Companion surfaces are configured.</div>
+  {% endif %}
+{% endblock %}

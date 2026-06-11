@@ -231,6 +231,30 @@
                           </div>
                           <div class="col-12"><div class="form-text">Editing is enabled only when this group has the VideoHub page permission.</div></div>
                         </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
+                            <div class="fw-semibold">Companion surface clicking</div>
+                            <div class="small text-muted">No selected surfaces means this group can click every configured surface.</div>
+                          </div>
+                          {% if companion_surfaces %}
+                            {% set selected_surfaces = (group_to_companion.get(g.id).click_surfaces if group_to_companion and group_to_companion.get(g.id) else []) %}
+                            {% for surface in companion_surfaces %}
+                              <div class="col-12 col-md-6">
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="companion_click_surfaces_role" value="{{ surface.id }}"
+                                    {% if selected_surfaces and (surface.id in selected_surfaces) %}checked{% endif %}>
+                                  <label class="form-check-label">{{ surface.label }} <span class="text-muted">({{ surface.id }})</span></label>
+                                </div>
+                              </div>
+                            {% endfor %}
+                          {% else %}
+                            <div class="col-12">
+                              <div class="text-muted small">No Companion surfaces are configured.</div>
+                            </div>
+                          {% endif %}
+                        </div>
                       </form>
                     {% endif %}
                   </div>

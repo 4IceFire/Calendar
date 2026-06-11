@@ -15,6 +15,7 @@ videohub_room_images/
 
 # Local Config/Event Files
 *.json
+!companion_surfaces.json
 
 auth.db
 .DS_Store

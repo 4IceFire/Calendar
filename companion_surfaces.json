@@ -1,0 +1,38 @@
+{
+  "surfaces": [
+    {
+      "id": "test-surface",
+      "label": "Test"
+    },
+    {
+      "id": "test-2",
+      "label": "Another Test"
+    }
+  ],
+  "surface_controls": [
+    {
+      "id": "test-2",
+      "surface_id": "test-2",
+      "label": "Left display",
+      "width": "440px",
+      "height": "280px",
+      "size": "1",
+      "crop_top": "0px",
+      "crop_right": "0px",
+      "crop_bottom": "0px",
+      "crop_left": "0px"
+    },
+    {
+      "id": "test-2",
+      "surface_id": "test-2",
+      "label": "Right display",
+      "width": "440px",
+      "height": "280px",
+      "size": "1",
+      "crop_top": "0px",
+      "crop_right": "0px",
+      "crop_bottom": "0px",
+      "crop_left": "0px"
+    }
+  ]
+}

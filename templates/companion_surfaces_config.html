@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Companion Surfaces' %}
+
+{% block page_actions %}
+  <a class="btn btn-outline-secondary" href="/config">Config</a>
+  <a class="btn btn-outline-secondary" href="/surface-controls">View Surfaces</a>
+{% endblock %}
+
+{% block content %}
+  <div id="companion-surfaces-config-page">
+    <div id="companion-surfaces-status" class="mb-3"></div>
+
+    <div class="row g-3">
+      <div class="col-12 col-xl-5">
+        <div class="card">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+              <h2 class="h5 mb-0">Surfaces</h2>
+              <button id="companion-surface-add" class="btn btn-sm btn-outline-primary" type="button">Add Surface</button>
+            </div>
+            <div class="small text-muted mb-3">Reusable Companion surface IDs and names.</div>
+            <div id="companion-surfaces-list" class="d-flex flex-column gap-2"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-12 col-xl-7">
+        <div class="card">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+              <h2 class="h5 mb-0">Surface Controls Page</h2>
+            </div>
+            <div class="small text-muted mb-3">These display slots are hardcoded on <code>/surface-controls</code>. Choose the Companion surface, label the slot, and set its size and crop.</div>
+            <div id="companion-displays-list" class="d-flex flex-column gap-2"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

@@ -44,28 +44,35 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - Keep `videohub_room_images/` out of source control; room backgrounds are local media, not repo assets.
 
 ## Auth Model Notes
-- UI pages are protected by role-based page access in the Web UI (`require_page` checks).
+- UI pages are protected by group-based page access in the Web UI (`require_page` checks).
+- Users can belong to multiple groups. A user's effective page permissions are the union of all non-admin groups they belong to.
+- The `Admin` group is the only protected full-access group. It grants every page and management permission and should remain non-deletable.
+- Legacy `roles` / `role_pages` data may still exist in `auth.db` only as a migration source. New permissions work should use `groups`, `group_pages`, and `user_groups`.
+- User management lives on `/admin/permissions` for browsing/creating users and groups, and `/admin/users/<id>` for per-user profile, access, security, sessions, and activity management.
+- Account security state lives on the `users` table: email/full name, active/locked status, failed login count, force-password-change flag, password timestamps, and session version.
+- Logged-in sessions are tracked in `user_sessions`; revoking sessions or forcing password changes should use that table/session-version flow.
 - API endpoints are intentionally callable without login unless an endpoint is explicitly marked otherwise.
-- For VideoHub preset visibility, enforce role restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
+- For VideoHub preset visibility, enforce group restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
 - VideoHub room metadata is global for all presets and users. Access control applies to who can manage the room layout UI, not to the room data itself.
 
-## VideoHub Role Controls (Where To Look)
-- Storage: role settings live in `auth.db` table `roles` and are migrated/used in `webui.py`.
+## VideoHub Group Controls (Where To Look)
+- Storage: group settings live in `auth.db` table `groups` and are migrated/used in `webui.py`.
 - Preset storage remains in `videohub_presets.json`; global room metadata is stored separately in `videohub_rooms.json`.
 - Room background uploads are served from `/media/videohub_room_images/<filename>` and stored in `videohub_room_images/`.
-- Routing page allow-lists (per role):
+- Routing page allow-lists (per group):
   - Columns: `videohub_allowed_outputs`, `videohub_allowed_inputs`
   - Semantics: blank/NULL/"all" => allow all; otherwise JSON list or CSV of 1-based port numbers.
-  - UI: configured on Access Levels page; enforced on `/routing` page.
-- VideoHub presets visibility (per role, UI-only):
+  - UI: configured on the Groups tab of `/admin/permissions`; enforced on `/routing` page.
+  - If a user has multiple groups, blank/all in any applicable group means all ports are allowed; otherwise restricted lists are unioned.
+- VideoHub presets visibility (per group, UI-only):
   - Column: `videohub_allowed_presets`
   - Semantics: blank/NULL/"all" => all presets visible; otherwise JSON list or CSV of 1-based preset IDs.
-  - UI config: `templates/admin_roles.html` + autosave payload in `static/app.js`.
+  - UI config: `templates/admin_permissions.html` + autosave payload in `static/app.js`.
   - Enforcement: only in the VideoHub page UI (the `/api/videohub/presets*` endpoints remain unauthenticated by design).
-- VideoHub preset editing toggle (per role, UI-only):
+- VideoHub preset editing toggle (per group, UI-only):
   - Column: `videohub_can_edit_presets` (INTEGER, default allow when NULL for backward compatibility).
   - Meaning: when off, VideoHub page allows viewing/applying presets but disables create/save/delete/lock and room-based routing edits.
-  - UI config: checkbox on Access Levels page; autosave in `static/app.js`.
+  - UI config: checkbox on the Groups tab of `/admin/permissions`; autosave in `static/app.js`.
   - Enforcement: `webui.py` passes `can_edit_presets` into `templates/videohub.html` via `data-can-edit-presets`.
 - VideoHub Rooms management:
   - The room editor is a separate page at `/videohub/rooms`, but it is not a page-access permission that can be assigned independently in Access Levels.
@@ -84,3 +91,30 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - Input filter semantics:
   - Filtered inputs are global and stored in `videohub_rooms.json`.
   - Input selection defaults to the filtered list and can toggle to show all inputs.
+
+## Companion Surface Embeds
+- Surface definitions live in `companion_surfaces.json`.
+  - Use the object format with `surfaces` and `surface_controls`.
+  - `surfaces` is the reusable catalogue; each entry should include `id` and `label`.
+  - `surface_controls` represents the hardcoded display slots on the standalone `/surface-controls` page; each entry should include `surface_id`, `label`, `width`, `height`, and `size`, and may include `crop_top`, `crop_right`, `crop_bottom`, and `crop_left`.
+  - Display `label` values describe where that surface is being shown in TDeck. They are for config/admin clarity and should not be rendered above the surface unless the containing page explicitly wants labels.
+  - `width`, `height`, and crop values are saved as CSS pixel strings such as `440px`. The TDeck editor presents these as plain numeric inputs and adds `px` during save.
+  - A surface can appear multiple times in `surface_controls` with different sizes or crops.
+  - `surface_id` maps to the Bitfocus Companion surface ID and is embedded as `/emulator/<surface_id>`.
+  - The Companion base URL uses `companion_ip` / `companion_port` from `config.json`; optional `companion_surface_ip` / `companion_surface_port` override keys are supported if a separate endpoint is ever needed.
+- Reusable UI lives in `templates/_companion_surface.html`.
+  - Import it with `{% from '_companion_surface.html' import companion_surface with context %}` so the macro can access the Companion URL helper.
+  - Render with `{{ companion_surface(surface, can_click=can_click_companion_surface(surface.id)) }}` or pass per-display overrides such as `width`, `height`, `size`, and crop values.
+  - The macro renders only the surface iframe/blocker; page labels/layout belong in the containing template.
+- `/surface-controls` is the test page and renders every configured surface.
+- `/config/companion-surfaces` is the TDeck editor for `companion_surfaces.json`.
+  - It is protected by the normal Config page permission.
+  - The backing API is `/api/companion-surfaces-config`.
+  - The editor auto-saves shortly after changes and only shows visible status for validation/save errors; `/surface-controls` picks up layout changes on refresh.
+  - The editor can add/remove surfaces from the catalogue, but should not add/remove/reorder `/surface-controls` display slots. Those slots are page-owned and hardcoded by the display entries already in `companion_surfaces.json`.
+- Group click permissions live on `groups.companion_click_surfaces`.
+  - Blank/NULL/`[]` means the group can click all configured surfaces.
+  - A non-empty JSON list restricts clicking to those surface IDs.
+  - Admin can always click every surface.
+  - These permissions only block pointer/touch/keyboard interaction in TDeck's iframe UI. They do not secure Companion directly if a user opens Companion outside TDeck.
+- Viewing a surface is controlled by the containing page's normal page permission. The surface click check should not be used as a view permission.
