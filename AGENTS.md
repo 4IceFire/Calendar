@@ -95,16 +95,17 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 ## Companion Surface Embeds
 - Surface definitions live in `companion_surfaces.json`.
   - Use the object format with `surfaces` and `surface_controls`.
-  - `surfaces` is the reusable catalogue; each entry should include `id` and `label`.
-  - `surface_controls` represents the hardcoded display slots on the standalone `/surface-controls` page; each entry should include `surface_id`, `label`, `width`, `height`, and `size`, and may include `crop_top`, `crop_right`, `crop_bottom`, and `crop_left`.
+  - `surfaces` is the reusable catalogue; each entry should include `id`, `label`, and `layout`.
+  - `layout` is the Companion button-grid size as rows x columns, such as `3x5` or `2x5`. TDeck uses it to calculate the iframe display box.
+  - `surface_controls` represents the hardcoded display slots on the standalone `/surface-controls` page; each entry should include `surface_id`, `label`, and `size`.
   - Display `label` values describe where that surface is being shown in TDeck. They are for config/admin clarity and should not be rendered above the surface unless the containing page explicitly wants labels.
-  - `width`, `height`, and crop values are saved as CSS pixel strings such as `440px`. The TDeck editor presents these as plain numeric inputs and adds `px` during save.
-  - A surface can appear multiple times in `surface_controls` with different sizes or crops.
+  - Do not store crop settings in `companion_surfaces.json`; adjust the surface `layout` and display `size` instead.
+  - A surface can appear multiple times in `surface_controls` with different display labels or scale values.
   - `surface_id` maps to the Bitfocus Companion surface ID and is embedded as `/emulator/<surface_id>`.
   - The Companion base URL uses `companion_ip` / `companion_port` from `config.json`; optional `companion_surface_ip` / `companion_surface_port` override keys are supported if a separate endpoint is ever needed.
 - Reusable UI lives in `templates/_companion_surface.html`.
   - Import it with `{% from '_companion_surface.html' import companion_surface with context %}` so the macro can access the Companion URL helper.
-  - Render with `{{ companion_surface(surface, can_click=can_click_companion_surface(surface.id)) }}` or pass per-display overrides such as `width`, `height`, `size`, and crop values.
+  - Render with `{{ companion_surface(surface, can_click=can_click_companion_surface(surface.id)) }}` or pass per-display overrides such as `width`, `height`, and `size`.
   - The macro renders only the surface iframe/blocker; page labels/layout belong in the containing template.
 - `/surface-controls` is the test page and renders every configured surface.
 - `/config/companion-surfaces` is the TDeck editor for `companion_surfaces.json`.

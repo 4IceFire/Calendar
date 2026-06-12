@@ -343,6 +343,18 @@ app.config.update(
 _AUTH_DB_PATH = (Path(__file__).resolve().parent / 'auth.db')
 _APP_ROOT = Path(__file__).resolve().parent
 _COMPANION_SURFACES_PATH = _APP_ROOT / 'companion_surfaces.json'
+_COMPANION_SURFACE_LAYOUTS: dict[str, tuple[int, int]] = {
+    '2x5': (2, 5),
+    '3x5': (3, 5),
+    '4x5': (4, 5),
+    '2x4': (2, 4),
+    '3x4': (3, 4),
+    '4x4': (4, 4),
+    '4x8': (4, 8),
+}
+_COMPANION_SURFACE_DEFAULT_LAYOUT = '3x5'
+_COMPANION_SURFACE_CELL_PX = 110
+_COMPANION_SURFACE_GUTTER_PX = 10
 
 
 def _db() -> sqlite3.Connection:
@@ -3824,55 +3836,27 @@ def _default_companion_surface_config() -> dict:
             {
                 'id': 'test-surface',
                 'label': 'Test',
+                'layout': '3x5',
             },
             {
                 'id': 'test-2',
                 'label': 'Another Test',
+                'layout': '2x5',
             },
         ],
         'surface_controls': [
             {
                 'surface_id': 'test-surface',
                 'label': 'Left display',
-                'width': '440px',
-                'height': '280px',
                 'size': '1',
-                'crop_top': '0px',
-                'crop_right': '0px',
-                'crop_bottom': '0px',
-                'crop_left': '0px',
             },
             {
                 'surface_id': 'test-2',
                 'label': 'Right display',
-                'width': '440px',
-                'height': '280px',
                 'size': '1',
-                'crop_top': '0px',
-                'crop_right': '0px',
-                'crop_bottom': '0px',
-                'crop_left': '0px',
             },
         ],
     }
-
-
-def _css_px_value(value, default: str = '0px', minimum: float = 0) -> str:
-    raw = str(value if value is not None else '').strip()
-    if not raw:
-        raw = str(default).strip()
-    matches = re.findall(r'-?\d+(?:\.\d+)?', raw)
-    if not matches:
-        matches = re.findall(r'-?\d+(?:\.\d+)?', str(default))
-    if not matches:
-        return default
-    # If a legacy value is `min(100%, 440px)`, prefer the pixel-like final number.
-    number = float(matches[-1])
-    if number < minimum:
-        number = minimum
-    if number.is_integer():
-        return f'{int(number)}px'
-    return f'{number:g}px'
 
 
 def _css_scale_value(value, default: str = '1') -> str:
@@ -3891,9 +3875,25 @@ def _css_scale_value(value, default: str = '1') -> str:
     return f'{number:g}'
 
 
-def _payload_has_number(value) -> bool:
-    raw = str(value if value is not None else '').strip()
-    return bool(raw and re.search(r'-?\d+(?:\.\d+)?', raw))
+def _companion_surface_layout_value(value) -> str:
+    layout = str(value or '').strip().lower().replace(' ', '')
+    return layout if layout in _COMPANION_SURFACE_LAYOUTS else _COMPANION_SURFACE_DEFAULT_LAYOUT
+
+
+def _companion_surface_dimensions(layout: str, size: str = '1') -> tuple[str, str]:
+    rows, cols = _COMPANION_SURFACE_LAYOUTS.get(
+        _companion_surface_layout_value(layout),
+        _COMPANION_SURFACE_LAYOUTS[_COMPANION_SURFACE_DEFAULT_LAYOUT],
+    )
+    try:
+        scale = float(size)
+    except Exception:
+        scale = 1.0
+    if not math.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    width = int(round(((cols * _COMPANION_SURFACE_CELL_PX) + _COMPANION_SURFACE_GUTTER_PX) * scale))
+    height = int(round(((rows * _COMPANION_SURFACE_CELL_PX) + _COMPANION_SURFACE_GUTTER_PX) * scale))
+    return f'{width}px', f'{height}px'
 
 
 def _normalize_companion_surface(raw) -> dict[str, str] | None:
@@ -3906,10 +3906,11 @@ def _normalize_companion_surface(raw) -> dict[str, str] | None:
     return {
         'id': sid,
         'label': label or sid,
+        'layout': _companion_surface_layout_value(raw.get('layout') or raw.get('dimensions') or raw.get('surface_layout')),
     }
 
 
-def _normalize_companion_surface_display(raw, surfaces_by_id: dict[str, dict[str, str]]) -> dict[str, str] | None:
+def _normalize_companion_surface_display(raw, surfaces_by_id: dict[str, dict[str, str]], include_render_size: bool = True) -> dict[str, str] | None:
     if not isinstance(raw, dict):
         return None
     sid = str(raw.get('surface_id') or raw.get('id') or '').strip()
@@ -3917,19 +3918,27 @@ def _normalize_companion_surface_display(raw, surfaces_by_id: dict[str, dict[str
         return None
     surface = surfaces_by_id.get(sid) or {'id': sid, 'label': sid}
     label = str(raw.get('label') or surface.get('label') or sid).strip()
-    width = _css_px_value(raw.get('width'), '440px')
-    height = _css_px_value(raw.get('height'), '280px')
+    size = _css_scale_value(raw.get('size'), '1')
     out = {
         'id': sid,
         'surface_id': sid,
         'label': label or sid,
-        'width': width,
-        'height': height,
-        'size': _css_scale_value(raw.get('size'), '1'),
+        'size': size,
     }
-    for key in ('crop_top', 'crop_right', 'crop_bottom', 'crop_left'):
-        out[key] = _css_px_value(raw.get(key), '0px')
+    if include_render_size:
+        out['width'], out['height'] = _companion_surface_dimensions(surface.get('layout'), size)
     return out
+
+
+def _normalize_companion_surface_display_list(raw_items, surfaces_by_id: dict[str, dict[str, str]], *, include_render_size: bool = True) -> list[dict[str, str]]:
+    displays: list[dict[str, str]] = []
+    if not isinstance(raw_items, list):
+        return displays
+    for item in raw_items:
+        display = _normalize_companion_surface_display(item, surfaces_by_id, include_render_size=include_render_size)
+        if display:
+            displays.append(display)
+    return displays
 
 
 def _load_companion_surface_config() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -3967,11 +3976,7 @@ def _load_companion_surface_config() -> tuple[list[dict[str, str]], list[dict[st
         surfaces.append(surface)
 
     surfaces_by_id = {s['id']: s for s in surfaces}
-    displays: list[dict[str, str]] = []
-    for item in displays_raw:
-        display = _normalize_companion_surface_display(item, surfaces_by_id)
-        if display:
-            displays.append(display)
+    displays = _normalize_companion_surface_display_list(displays_raw, surfaces_by_id)
     return surfaces, displays
 
 
@@ -4005,6 +4010,9 @@ def _normalize_companion_surface_config_payload(raw) -> tuple[dict | None, str |
             return None, 'Every surface needs an ID.'
         if not str(item.get('label') or item.get('name') or '').strip():
             return None, 'Every surface needs a label.'
+        raw_layout = str(item.get('layout') or item.get('dimensions') or item.get('surface_layout') or '').strip().lower().replace(' ', '')
+        if raw_layout and raw_layout not in _COMPANION_SURFACE_LAYOUTS:
+            return None, 'Every surface needs a valid layout.'
         surface = _normalize_companion_surface(item)
         if not surface:
             continue
@@ -4015,31 +4023,34 @@ def _normalize_companion_surface_config_payload(raw) -> tuple[dict | None, str |
         surfaces.append(surface)
 
     surfaces_by_id = {s['id']: s for s in surfaces}
-    displays: list[dict[str, str]] = []
-    for index, item in enumerate(displays_raw, start=1):
-        if not isinstance(item, dict):
-            return None, 'Each display must be an object.'
-        if not str(item.get('surface_id') or item.get('id') or '').strip():
-            return None, f'Display {index} needs a surface.'
-        if not str(item.get('label') or '').strip():
-            return None, f'Display {index} needs a label.'
-        for key in ('width', 'height', 'crop_top', 'crop_right', 'crop_bottom', 'crop_left'):
-            if key in item and item.get(key) not in (None, '') and not _payload_has_number(item.get(key)):
-                return None, f'Display {index} has an invalid {key} value.'
-        if 'size' in item:
-            try:
-                size_value = float(str(item.get('size') or '').strip())
-            except Exception:
-                return None, f'Display {index} has an invalid size value.'
-            if not math.isfinite(size_value) or size_value <= 0:
-                return None, f'Display {index} size must be greater than zero.'
-        display = _normalize_companion_surface_display(item, surfaces_by_id)
-        if not display:
-            continue
-        sid = display['surface_id']
-        if sid not in surfaces_by_id:
-            return None, f'Display references unknown surface ID: {sid}'
-        displays.append(display)
+    def _normalize_payload_displays(items, list_label: str) -> tuple[list[dict[str, str]] | None, str | None]:
+        displays_out: list[dict[str, str]] = []
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                return None, f'Each {list_label} display must be an object.'
+            if not str(item.get('surface_id') or item.get('id') or '').strip():
+                return None, f'{list_label} display {index} needs a surface.'
+            if not str(item.get('label') or '').strip():
+                return None, f'{list_label} display {index} needs a label.'
+            if 'size' in item:
+                try:
+                    size_value = float(str(item.get('size') or '').strip())
+                except Exception:
+                    return None, f'{list_label} display {index} has an invalid size value.'
+                if not math.isfinite(size_value) or size_value <= 0:
+                    return None, f'{list_label} display {index} size must be greater than zero.'
+            display = _normalize_companion_surface_display(item, surfaces_by_id, include_render_size=False)
+            if not display:
+                continue
+            sid = display['surface_id']
+            if sid not in surfaces_by_id:
+                return None, f'{list_label} display references unknown surface ID: {sid}'
+            displays_out.append(display)
+        return displays_out, None
+
+    displays, err = _normalize_payload_displays(displays_raw, 'Surface Controls Page')
+    if err or displays is None:
+        return None, err or 'Invalid Surface Controls Page displays.'
 
     return {
         'surfaces': surfaces,

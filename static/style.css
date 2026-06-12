@@ -531,11 +531,11 @@ html[data-bs-theme="dark"] .timer-stage-card{
   align-items: start;
 }
 
-.surface-control-item{
-  min-width: 0;
-}
+  .surface-control-item{
+    min-width: 0;
+  }
 
-.surface-control-heading{
+  .surface-control-heading{
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
@@ -557,10 +557,10 @@ html[data-bs-theme="dark"] .timer-stage-card{
   .companion-surface-frame{
     display: block;
     position: absolute;
-    top: calc(-1 * var(--companion-surface-crop-top, 0px));
-    left: calc(-1 * var(--companion-surface-crop-left, 0px));
-    width: calc(100% + var(--companion-surface-crop-left, 0px) + var(--companion-surface-crop-right, 0px));
-    height: calc(100% + var(--companion-surface-crop-top, 0px) + var(--companion-surface-crop-bottom, 0px));
+    top: 0;
+    left: 0;
+    width: calc(100% / var(--companion-surface-size, 1));
+    height: calc(100% / var(--companion-surface-size, 1));
     border: 0;
     background: transparent;
     transform: scale(var(--companion-surface-size, 1));
@@ -591,17 +591,48 @@ html[data-bs-theme="dark"] .timer-stage-card{
   background: rgba(127, 127, 127, 0.05);
 }
 
-.companion-config-row .btn{
-  white-space: nowrap;
-}
-
-@media (max-width: 767.98px){
-  .surface-controls-grid{
-    grid-template-columns: 1fr;
+  .companion-config-row .btn{
+    white-space: nowrap;
   }
 
-  .companion-surface{
+  .companion-surface-config-grid{
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(96px, 0.7fr);
+    gap: 0.5rem;
+    align-items: end;
+  }
+
+  .companion-surface-config-grid > *{
+    min-width: 0;
+  }
+
+  .companion-surface-config-grid .form-control,
+  .companion-surface-config-grid .form-select{
+    min-width: 0;
     width: 100%;
   }
-}
+
+  .companion-config-delete-cell{
+    display: flex;
+    justify-content: flex-end;
+    grid-column: 1 / -1;
+  }
+  
+  @media (max-width: 767.98px){
+    .surface-controls-grid{
+      grid-template-columns: 1fr;
+    }
+
+    .companion-surface{
+      width: 100%;
+    }
+
+    .companion-surface-config-grid{
+      grid-template-columns: 1fr;
+    }
+
+    .companion-config-delete-cell{
+      justify-content: flex-start;
+    }
+  }
 
