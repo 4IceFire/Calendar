@@ -1,0 +1,169 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Import Config' %}
+
+{% block page_actions %}
+  <a class="btn btn-outline-secondary" href="/config/export">Export Config</a>
+  <a class="btn btn-outline-secondary" href="/config">Config</a>
+{% endblock %}
+
+{% block content %}
+<div id="config-import-page" class="config-transport-page">
+  <div id="config-import-status"></div>
+
+  <div class="card tdeck-soft mb-3">
+    <div class="card-body">
+      <h2 class="h5 mb-3">Upload Export</h2>
+      <form id="config-import-upload-form" class="d-flex flex-column flex-md-row gap-2 align-items-md-center">
+        <input class="form-control" type="file" id="config-import-file" accept=".zip,application/zip" required>
+        <button class="btn btn-primary" type="submit">Inspect File</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="config-import-preview" class="card tdeck-soft d-none">
+    <div class="card-body">
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <div>
+          <h2 class="h5 mb-1">Choose Items To Import</h2>
+          <div class="text-muted small" id="config-import-meta"></div>
+        </div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-outline-secondary btn-sm" type="button" data-import-select="all">Select all</button>
+          <button class="btn btn-outline-secondary btn-sm" type="button" data-import-select="none">Clear</button>
+        </div>
+      </div>
+
+      <div class="alert alert-warning">
+        Import replaces the selected files on this instance. A timestamped backup zip is created first.
+      </div>
+
+      <div id="config-import-items" class="config-transport-list"></div>
+
+      <div class="mt-3 d-flex justify-content-end">
+        <button class="btn btn-danger" id="config-import-apply" type="button">Import Selected</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const root = document.getElementById('config-import-page');
+  if (!root) return;
+
+  let importToken = '';
+  const status = document.getElementById('config-import-status');
+  const preview = document.getElementById('config-import-preview');
+  const meta = document.getElementById('config-import-meta');
+  const itemsEl = document.getElementById('config-import-items');
+  const uploadForm = document.getElementById('config-import-upload-form');
+  const fileInput = document.getElementById('config-import-file');
+  const applyBtn = document.getElementById('config-import-apply');
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+
+  function setStatus(message, kind) {
+    if (!message) {
+      status.innerHTML = '';
+      return;
+    }
+    const cls = kind === 'ok' ? 'success' : kind === 'warn' ? 'warning' : 'danger';
+    status.innerHTML = `<div class="alert alert-${cls}">${escapeHtml(message)}</div>`;
+  }
+
+  function renderItems(items) {
+    itemsEl.innerHTML = (items || []).map((item) => `
+      <label class="config-transport-row">
+        <input class="form-check-input" type="checkbox" name="import_items" value="${escapeHtml(item.id)}" checked>
+        <span class="config-transport-main">
+          <span class="config-transport-title">${escapeHtml(item.label || item.id)}</span>
+          <span class="config-transport-path">${escapeHtml(item.path || '')}</span>
+          <span class="config-transport-description">${escapeHtml(item.description || '')}</span>
+        </span>
+        <span class="config-transport-meta">${item.kind === 'directory' ? `${Number(item.file_count || 0)} files` : 'File'}</span>
+      </label>
+    `).join('');
+  }
+
+  uploadForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setStatus('', '');
+    preview.classList.add('d-none');
+    importToken = '';
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      setStatus('Choose a TDeck config export zip first.', 'error');
+      return;
+    }
+    const formData = new FormData();
+    formData.append('file', file);
+    const btn = uploadForm.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/config/import/inspect', {method: 'POST', body: formData});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not inspect import file.');
+      importToken = data.token || '';
+      const manifest = data.manifest || {};
+      const items = manifest.items || [];
+      renderItems(items);
+      meta.textContent = `${items.length} item${items.length === 1 ? '' : 's'} found. Created ${manifest.created_at || 'unknown time'}.`;
+      preview.classList.remove('d-none');
+      setStatus('Import file inspected. Choose what to import.', 'ok');
+    } catch (err) {
+      setStatus(String(err.message || err), 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  root.addEventListener('click', (event) => {
+    const selectBtn = event.target.closest('[data-import-select]');
+    if (selectBtn) {
+      const mode = selectBtn.getAttribute('data-import-select');
+      root.querySelectorAll('input[name="import_items"]').forEach((input) => {
+        input.checked = mode === 'all';
+      });
+      return;
+    }
+  });
+
+  applyBtn.addEventListener('click', async () => {
+    const selected = Array.from(root.querySelectorAll('input[name="import_items"]:checked')).map((input) => input.value);
+    if (!importToken || !selected.length) {
+      setStatus('Select at least one item to import.', 'error');
+      return;
+    }
+    const ok = window.confirm('Import will replace the selected files on this instance. Continue?');
+    if (!ok) return;
+    applyBtn.disabled = true;
+    setStatus('Importing selected config...', 'warn');
+    try {
+      const res = await fetch('/api/config/import/apply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: importToken, items: selected}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Import failed.');
+      importToken = '';
+      const backup = data.backup_path ? ` Backup: ${data.backup_path}` : '';
+      setStatus(`Imported ${Number((data.imported || []).length)} item(s).${backup}`, 'ok');
+      preview.classList.add('d-none');
+    } catch (err) {
+      setStatus(String(err.message || err), 'error');
+    } finally {
+      applyBtn.disabled = false;
+    }
+  });
+})();
+</script>
+{% endblock %}

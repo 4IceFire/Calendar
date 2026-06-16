@@ -591,6 +591,53 @@ html[data-bs-theme="dark"] .timer-stage-card{
   background: rgba(127, 127, 127, 0.05);
 }
 
+/* Config export/import */
+.config-transport-list{
+  display: grid;
+  gap: 0.6rem;
+}
+
+.config-transport-row{
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.75rem;
+  border: 1px solid rgba(127, 127, 127, 0.24);
+  border-radius: 0.5rem;
+  background: rgba(127, 127, 127, 0.05);
+}
+
+.config-transport-row-disabled{
+  opacity: 0.62;
+}
+
+.config-transport-main{
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.config-transport-title{
+  font-weight: 600;
+}
+
+.config-transport-path,
+.config-transport-description,
+.config-transport-meta{
+  color: var(--bs-secondary-color);
+  font-size: 0.875rem;
+}
+
+.config-transport-path{
+  font-family: var(--bs-font-monospace);
+  overflow-wrap: anywhere;
+}
+
+.config-transport-meta{
+  white-space: nowrap;
+}
+
   .companion-config-row .btn{
     white-space: nowrap;
   }
@@ -633,6 +680,15 @@ html[data-bs-theme="dark"] .timer-stage-card{
 
     .companion-config-delete-cell{
       justify-content: flex-start;
+    }
+
+    .config-transport-row{
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .config-transport-meta{
+      grid-column: 2;
+      white-space: normal;
     }
   }
 

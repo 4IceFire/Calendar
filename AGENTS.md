@@ -9,6 +9,7 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - Data/config: `config.json`, `events.json`, `timer_presets.json`, `videohub_presets.json`, `videohub_rooms.json`, `auth.db`.
 - VideoHub room images: local uploads live in `videohub_room_images/` and should remain ignored by Git.
 - Logs/runtime files: `calendar.log`, `calendar_triggers.json`, and `calendar.pid`.
+- Config import rollback zips live in `config_import_backups/` and should remain ignored by Git.
 
 ## Build, Test, and Development Commands
 - Create venv and install deps:
@@ -42,6 +43,16 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - Keep secrets and environment-specific values out of Git; use `config.json` and local overrides.
 - If you change `webserver_port`, update Docker port mappings (`docker-compose.yml`) accordingly.
 - Keep `videohub_room_images/` out of source control; room backgrounds are local media, not repo assets.
+
+## Config Export/Import
+- Config transport lives under the normal Config page access: `/config/export` and `/config/import`.
+- Do not add a separate permission for config transport; anyone who can access Config can export/import selected setup items.
+- Exports are a single TDeck zip containing `manifest.json` plus selected payload files/folders.
+- Exportable setup items include `config.json`, the configured events file, `timer_presets.json`, `trigger_templates.json`, `button_templates.json`, `calendar_triggers.json`, `companion_surfaces.json`, the configured VideoHub presets file, `videohub_rooms.json`, `home_state.json`, `auth.db`, and optional `videohub_room_images/` media.
+- Import inspects the zip first, then lets the user choose which contained items to overwrite on the target instance.
+- Imports overwrite selected files/folders instead of merging. Before replacing anything, the app creates a timestamped rollback zip in `config_import_backups/`.
+- Config transport actions should log to the server console and Web UI console buffer with a `[CONFIG]` prefix.
+- The old standalone Auth DB backup UI should stay removed; user/group/session data is transported via the `auth.db` item in Config export/import.
 
 ## Auth Model Notes
 - UI pages are protected by group-based page access in the Web UI (`require_page` checks).

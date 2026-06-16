@@ -1,10 +1,12 @@
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response
 import copy
+import io
 import logging
 import math
 import threading
 import time
 from pathlib import Path
+import shutil
 import sys
 import subprocess
 import shlex
@@ -13,12 +15,14 @@ import sqlite3
 import secrets
 import uuid
 from typing import Any
+import zipfile
 
 from werkzeug.serving import make_server
 from werkzeug.utils import secure_filename
 import json
 import re
 from datetime import datetime, timedelta
+from tempfile import NamedTemporaryFile
 
 from package.json_cache import read_json, write_json
 
@@ -2008,6 +2012,335 @@ def _truncate_for_log(value, max_len: int = 240) -> str:
         return s[:max_len] + '…'
     return s
 
+_CONFIG_IMPORT_UPLOADS: dict[str, dict[str, Any]] = {}
+_CONFIG_IMPORT_UPLOAD_LOCK = threading.Lock()
+
+
+def _config_transport_log(message: str) -> None:
+    line = f"[CONFIG] {message}"
+    try:
+        print(line)
+    except Exception:
+        pass
+    try:
+        _console_append(line + "\n")
+    except Exception:
+        pass
+
+
+def _config_access_error_json():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    return None
+
+
+def _safe_relpath(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_APP_ROOT.resolve()).as_posix()
+    except Exception:
+        return path.name
+
+
+def _resolve_transport_path(relpath: str) -> Path | None:
+    rel = str(relpath or '').replace('\\', '/').strip().lstrip('/')
+    if not rel or rel.startswith('../') or '/../' in rel or rel == '..':
+        return None
+    try:
+        out = (_APP_ROOT / rel).resolve()
+        out.relative_to(_APP_ROOT.resolve())
+    except Exception:
+        return None
+    return out
+
+
+def _transport_file_item(item_id: str, label: str, relpath: str, description: str, *, actual_path: Path | None = None) -> dict[str, Any]:
+    path = actual_path or _resolve_transport_path(relpath) or (_APP_ROOT / Path(relpath).name)
+    item = {
+        'id': item_id,
+        'label': label,
+        'kind': 'file',
+        'path': relpath.replace('\\', '/').lstrip('/') if actual_path is not None else _safe_relpath(path),
+        'description': description,
+        'available': path.exists() and path.is_file(),
+        'size': path.stat().st_size if path.exists() and path.is_file() else 0,
+    }
+    if actual_path is not None:
+        item['_actual_path'] = str(actual_path)
+    return item
+
+
+def _transport_dir_item(item_id: str, label: str, relpath: str, description: str) -> dict[str, Any]:
+    path = _resolve_transport_path(relpath) or (_APP_ROOT / Path(relpath).name)
+    count = 0
+    size = 0
+    if path.exists() and path.is_dir():
+        for child in path.rglob('*'):
+            try:
+                if child.is_file():
+                    count += 1
+                    size += child.stat().st_size
+            except Exception:
+                pass
+    return {
+        'id': item_id,
+        'label': label,
+        'kind': 'directory',
+        'path': _safe_relpath(path),
+        'description': description,
+        'available': path.exists() and path.is_dir() and count > 0,
+        'size': size,
+        'file_count': count,
+    }
+
+
+def _config_transport_items() -> list[dict[str, Any]]:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    items: list[dict[str, Any]] = [
+        _transport_file_item('config', 'App config', 'config.json', 'Main TDeck settings, ports, integrations, theme, and auth options.'),
+        _transport_file_item('events', 'Calendar events', str(cfg.get('EVENTS_FILE') or 'events.json'), 'Scheduled calendar events and their trigger definitions.'),
+        _transport_file_item('timer_presets', 'Timer presets', str(getattr(utils, 'TIMER_PRESETS_FILE', 'timer_presets.json')), 'Timer preset names, times, and Companion button actions.'),
+        _transport_file_item('trigger_templates', 'Trigger templates', 'trigger_templates.json', 'Reusable trigger templates for calendar events.'),
+        _transport_file_item('button_templates', 'Button templates', 'button_templates.json', 'Reusable Companion button templates.'),
+        _transport_file_item('calendar_triggers', 'Generated calendar triggers', 'calendar_triggers.json', 'Current generated trigger queue/state for the scheduler.'),
+        _transport_file_item('companion_surfaces', 'Companion surfaces', 'companion_surfaces.json', 'Configured Companion surface catalogue and display slots.'),
+        _transport_file_item('videohub_presets', 'VideoHub presets', str(cfg.get('videohub_presets_file') or 'videohub_presets.json'), 'VideoHub preset routes, names, and locks.'),
+        _transport_file_item('videohub_rooms', 'VideoHub rooms', 'videohub_rooms.json', 'Global VideoHub room layout, output placement, backgrounds, and input filters.'),
+        _transport_file_item('home_state', 'Home dashboard state', 'home_state.json', 'Last-known Home dashboard state used by the overview page.', actual_path=_home_state_path()),
+        _transport_file_item('auth_db', 'Users database', _safe_relpath(_AUTH_DB_PATH), 'Users, groups, permissions, sessions, password hashes, and account security state.'),
+        _transport_dir_item('videohub_room_images', 'VideoHub room media', 'videohub_room_images', 'Uploaded room background images and other local room media.'),
+    ]
+
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for item in items:
+        key = str(item.get('path') or item.get('id') or '')
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _config_transport_item_map() -> dict[str, dict[str, Any]]:
+    return {str(item.get('id')): item for item in _config_transport_items()}
+
+
+def _zip_write_sqlite_backup(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
+    with NamedTemporaryFile(prefix='tdeck-auth-', suffix='.db', delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        src = sqlite3.connect(str(path))
+        dst = sqlite3.connect(str(tmp_path))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        zf.write(tmp_path, arcname)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _write_transport_item_to_zip(zf: zipfile.ZipFile, item: dict[str, Any], *, root: str = 'payload') -> bool:
+    actual = str(item.get('_actual_path') or '').strip()
+    path = Path(actual) if actual else _resolve_transport_path(str(item.get('path') or ''))
+    if path is None or not path.exists():
+        return False
+    rel = str(item.get('path') or path.name).replace('\\', '/').lstrip('/')
+    if item.get('kind') == 'directory':
+        if not path.is_dir():
+            return False
+        wrote = False
+        for child in path.rglob('*'):
+            try:
+                if not child.is_file():
+                    continue
+                child_rel = child.relative_to(_APP_ROOT).as_posix()
+                zf.write(child, f'{root}/{child_rel}')
+                wrote = True
+            except Exception as e:
+                _config_transport_log(f"Skipped {child}: {e}")
+        return wrote
+
+    if not path.is_file():
+        return False
+    if path.resolve() == _AUTH_DB_PATH.resolve():
+        _zip_write_sqlite_backup(zf, path, f'{root}/{rel}')
+    else:
+        zf.write(path, f'{root}/{rel}')
+    return True
+
+
+def _create_config_transport_zip(item_ids: list[str], *, reason: str) -> tuple[bytes, list[dict[str, Any]]]:
+    item_map = _config_transport_item_map()
+    selected = [item_map[i] for i in item_ids if i in item_map and item_map[i].get('available')]
+    manifest = {
+        'format': 'tdeck-config-transport',
+        'version': 1,
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'reason': reason,
+        'items': [],
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in selected:
+            wrote = _write_transport_item_to_zip(zf, item)
+            if wrote:
+                manifest['items'].append({
+                    'id': item.get('id'),
+                    'label': item.get('label'),
+                    'kind': item.get('kind'),
+                    'path': item.get('path'),
+                    'description': item.get('description'),
+                    'size': item.get('size', 0),
+                    'file_count': item.get('file_count', 1 if item.get('kind') == 'file' else 0),
+                })
+        zf.writestr('manifest.json', json.dumps(manifest, indent=2, ensure_ascii=False))
+    return buf.getvalue(), list(manifest['items'])
+
+
+def _inspect_config_transport_zip(path: Path) -> dict[str, Any]:
+    with zipfile.ZipFile(path, 'r') as zf:
+        try:
+            raw = zf.read('manifest.json')
+        except KeyError:
+            raise ValueError('This zip does not contain a TDeck config manifest.')
+        manifest = json.loads(raw.decode('utf-8'))
+        if not isinstance(manifest, dict) or manifest.get('format') != 'tdeck-config-transport':
+            raise ValueError('This is not a TDeck config export.')
+        names = set(zf.namelist())
+    items = []
+    for item in manifest.get('items') or []:
+        if not isinstance(item, dict):
+            continue
+        rel = str(item.get('path') or '').replace('\\', '/').lstrip('/')
+        if not rel:
+            continue
+        kind = str(item.get('kind') or 'file')
+        if kind == 'directory':
+            has_payload = any(n.startswith(f'payload/{rel.rstrip("/")}/') for n in names)
+        else:
+            has_payload = f'payload/{rel}' in names
+        if has_payload:
+            item = dict(item)
+            item['available'] = True
+            items.append(item)
+    manifest['items'] = items
+    return manifest
+
+
+def _remember_config_import_upload(path: Path, manifest: dict[str, Any]) -> str:
+    token = secrets.token_urlsafe(24)
+    now = time.time()
+    with _CONFIG_IMPORT_UPLOAD_LOCK:
+        expired = [k for k, v in _CONFIG_IMPORT_UPLOADS.items() if now - float(v.get('ts') or 0) > 3600]
+        for k in expired:
+            old = _CONFIG_IMPORT_UPLOADS.pop(k, None)
+            try:
+                Path(str(old.get('path'))).unlink(missing_ok=True)
+            except Exception:
+                pass
+        _CONFIG_IMPORT_UPLOADS[token] = {'path': str(path), 'manifest': manifest, 'ts': now}
+    return token
+
+
+def _create_pre_import_backup(selected_items: list[dict[str, Any]]) -> Path | None:
+    ids = [str(item.get('id')) for item in selected_items if str(item.get('id') or '')]
+    if not ids:
+        return None
+    data, items = _create_config_transport_zip(ids, reason='pre-import-backup')
+    if not items:
+        return None
+    backup_dir = _APP_ROOT / 'config_import_backups'
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    path = backup_dir / f'pre-import-{stamp}.zip'
+    path.write_bytes(data)
+    return path
+
+
+def _clear_imported_config_caches() -> None:
+    try:
+        utils.reload_config(force=True)
+    except Exception:
+        pass
+    try:
+        _apply_logging_config()
+    except Exception:
+        pass
+    try:
+        _videohub_rooms_cache['snapshot'] = None
+        _videohub_rooms_cache['config'] = None
+    except Exception:
+        pass
+    try:
+        _home_state_sync_from_disk()
+    except Exception:
+        pass
+    try:
+        _init_auth_db()
+    except Exception:
+        pass
+
+
+def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> tuple[list[dict[str, Any]], Path | None]:
+    manifest = _inspect_config_transport_zip(zip_path)
+    item_map = {str(item.get('id')): item for item in manifest.get('items') or [] if isinstance(item, dict)}
+    selected = [item_map[i] for i in selected_ids if i in item_map]
+    if not selected:
+        raise ValueError('Select at least one item to import.')
+
+    backup_path = _create_pre_import_backup(selected)
+    imported: list[dict[str, Any]] = []
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        all_names = set(zf.namelist())
+        for item in selected:
+            rel = str(item.get('path') or '').replace('\\', '/').lstrip('/')
+            current_item = _config_transport_item_map().get(str(item.get('id') or '')) or {}
+            actual_target = str(current_item.get('_actual_path') or '').strip()
+            target = Path(actual_target) if actual_target else _resolve_transport_path(rel)
+            if target is None:
+                raise ValueError(f"Invalid import path for {item.get('label') or item.get('id')}.")
+            kind = str(item.get('kind') or 'file')
+            if kind == 'directory':
+                prefix = f'payload/{rel.rstrip("/")}/'
+                members = [n for n in all_names if n.startswith(prefix) and not n.endswith('/')]
+                if target.exists():
+                    shutil.rmtree(target)
+                target.mkdir(parents=True, exist_ok=True)
+                count = 0
+                for name in members:
+                    child_rel = name[len('payload/'):].lstrip('/')
+                    child_target = _resolve_transport_path(child_rel)
+                    if child_target is None:
+                        continue
+                    child_target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as src, child_target.open('wb') as dst:
+                        shutil.copyfileobj(src, dst)
+                    count += 1
+                imported.append({'id': item.get('id'), 'label': item.get('label'), 'path': rel, 'count': count})
+            else:
+                member = f'payload/{rel}'
+                if member not in all_names:
+                    raise ValueError(f"Missing payload for {item.get('label') or rel}.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, target.open('wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                imported.append({'id': item.get('id'), 'label': item.get('label'), 'path': rel, 'count': 1})
+
+    _clear_imported_config_caches()
+    return imported, backup_path
+
 
 class _ConsoleTee:
     """Tee writes to the original stream AND the console buffer."""
@@ -3365,30 +3698,6 @@ def admin_users_page():
     return redirect(url_for('admin_permissions_page', tab='users') + '#users')
 
 
-@app.get('/admin/backup/authdb')
-@require_page('page:admin', 'Admin')
-def admin_backup_authdb():
-    """Download the auth database as a backup (Admin only)."""
-    try:
-        _bootstrap_default_users_roles()
-    except Exception:
-        pass
-
-    try:
-        src = Path(_AUTH_DB_PATH)
-        if not src.exists():
-            _init_auth_db()
-        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        filename = f'auth-{stamp}.db'
-        return send_file(str(src), as_attachment=True, download_name=filename)
-    except Exception as e:
-        try:
-            _audit('backup_authdb_fail', str(e))
-        except Exception:
-            pass
-        return abort(500)
-
-
 @app.route('/')
 @require_page('page:home', 'Home')
 def home():
@@ -3791,6 +4100,45 @@ def timers_page():
 @require_page('page:config', 'Config')
 def config_page():
     return render_template('config.html')
+
+
+@app.route('/config/export', methods=['GET', 'POST'])
+@require_page('page:config', 'Config')
+def config_export_page():
+    items = _config_transport_items()
+    if request.method == 'POST':
+        selected = request.form.getlist('items')
+        try:
+            data, exported = _create_config_transport_zip(selected, reason='manual-export')
+            if not exported:
+                return render_template('config_export.html', items=items, error='Select at least one available item to export.')
+            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            filename = f'tdeck-config-{stamp}.zip'
+            _config_transport_log(f"Exported config package {filename}: {', '.join(str(i.get('path')) for i in exported)}")
+            try:
+                _audit('config_export', f"items={len(exported)}")
+            except Exception:
+                pass
+            return send_file(
+                io.BytesIO(data),
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name=filename,
+            )
+        except Exception as e:
+            _config_transport_log(f"Export failed: {e}")
+            try:
+                _audit('config_export_fail', str(e))
+            except Exception:
+                pass
+            return render_template('config_export.html', items=items, error=str(e))
+    return render_template('config_export.html', items=items)
+
+
+@app.route('/config/import')
+@require_page('page:config', 'Config')
+def config_import_page():
+    return render_template('config_import.html')
 
 
 @app.route('/config/companion-surfaces')
@@ -5194,6 +5542,97 @@ def api_set_config():
         return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/api/config/export-items')
+def api_config_export_items():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+    return jsonify({'ok': True, 'items': _config_transport_items()})
+
+
+@app.post('/api/config/import/inspect')
+def api_config_import_inspect():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+
+    upload = request.files.get('file')
+    if upload is None or not str(upload.filename or '').strip():
+        return jsonify({'ok': False, 'error': 'Upload a TDeck config export zip.'}), 400
+    filename = secure_filename(upload.filename or 'config.zip')
+    if not filename.lower().endswith('.zip'):
+        return jsonify({'ok': False, 'error': 'Config imports must be .zip files exported from TDeck.'}), 400
+
+    try:
+        with NamedTemporaryFile(prefix='tdeck-config-import-', suffix='.zip', delete=False) as tmp:
+            temp_path = Path(tmp.name)
+            upload.save(tmp)
+        manifest = _inspect_config_transport_zip(temp_path)
+        token = _remember_config_import_upload(temp_path, manifest)
+        _config_transport_log(f"Inspected config import {filename}: {len(manifest.get('items') or [])} item(s)")
+        return jsonify({'ok': True, 'token': token, 'manifest': manifest})
+    except Exception as e:
+        try:
+            temp_path.unlink(missing_ok=True)  # type: ignore[name-defined]
+        except Exception:
+            pass
+        _config_transport_log(f"Import inspect failed: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.post('/api/config/import/apply')
+def api_config_import_apply():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception:
+        body = {}
+    token = str(body.get('token') or '').strip()
+    selected = body.get('items') or []
+    if not token:
+        return jsonify({'ok': False, 'error': 'Import upload is missing. Upload the export zip again.'}), 400
+    if not isinstance(selected, list):
+        return jsonify({'ok': False, 'error': 'Invalid import selection.'}), 400
+    selected_ids = [str(v) for v in selected if str(v or '').strip()]
+
+    with _CONFIG_IMPORT_UPLOAD_LOCK:
+        entry = _CONFIG_IMPORT_UPLOADS.pop(token, None)
+    if not entry:
+        return jsonify({'ok': False, 'error': 'Import upload expired. Upload the export zip again.'}), 400
+
+    zip_path = Path(str(entry.get('path') or ''))
+    try:
+        imported, backup_path = _apply_config_transport_import(zip_path, selected_ids)
+        _config_transport_log(
+            f"Imported config items: {', '.join(str(i.get('path')) for i in imported)}"
+            + (f"; backup={backup_path}" if backup_path else '')
+        )
+        try:
+            _audit('config_import', f"items={len(imported)} backup={backup_path or ''}")
+        except Exception:
+            pass
+        return jsonify({
+            'ok': True,
+            'imported': imported,
+            'backup_path': str(backup_path) if backup_path else '',
+        })
+    except Exception as e:
+        _config_transport_log(f"Import failed: {e}")
+        try:
+            _audit('config_import_fail', str(e))
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            zip_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.route('/api/companion-surfaces-config', methods=['GET'])
