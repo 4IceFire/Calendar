@@ -49,6 +49,8 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - Do not add a separate permission for config transport; anyone who can access Config can export/import selected setup items.
 - Exports are a single TDeck zip containing `manifest.json` plus selected payload files/folders.
 - Exportable setup items include `config.json`, the configured events file, `timer_presets.json`, `trigger_templates.json`, `button_templates.json`, `calendar_triggers.json`, `companion_surfaces.json`, the configured VideoHub presets file, `videohub_rooms.json`, `home_state.json`, `auth.db`, and optional `videohub_room_images/` media.
+- VideoHub room backgrounds depend on both `videohub_rooms.json` and `videohub_room_images/`; selecting VideoHub rooms should automatically carry room media when that media exists in the export/import package.
+- When importing `videohub_room_images/`, keep the folder itself and replace its contents; deleting/recreating the root folder can fail with access denied on Windows/OneDrive.
 - Import inspects the zip first, then lets the user choose which contained items to overwrite on the target instance.
 - Imports overwrite selected files/folders instead of merging. Before replacing anything, the app creates a timestamped rollback zip in `config_import_backups/`.
 - Config transport actions should log to the server console and Web UI console buffer with a `[CONFIG]` prefix.

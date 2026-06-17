@@ -3,14 +3,16 @@
 {% set page_title = 'Config' %}
 
 {% block page_actions %}
-		<a class="btn btn-outline-secondary" href="/config/export">Export Config</a>
-		<a class="btn btn-outline-secondary" href="/config/import">Import Config</a>
 		<a class="btn btn-outline-secondary" href="/config/companion-surfaces">Companion Surfaces</a>
 		<button id="config-save" class="btn btn-primary">Save</button>
 {% endblock %}
 
 {% block content %}
 <div id="config-page">
+	<div class="d-flex flex-wrap justify-content-end gap-2 mb-3">
+		<a class="btn btn-outline-secondary" href="/config/export">Export Config</a>
+		<a class="btn btn-outline-secondary" href="/config/import">Import Config</a>
+	</div>
 	<div id="config-status" class="mb-3"></div>
 
 	<div class="row g-3">

@@ -2132,6 +2132,23 @@ def _config_transport_item_map() -> dict[str, dict[str, Any]]:
     return {str(item.get('id')): item for item in _config_transport_items()}
 
 
+def _expand_config_transport_selection(item_ids: list[str], item_map: dict[str, dict[str, Any]]) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw in item_ids or []:
+        item_id = str(raw or '').strip()
+        if not item_id or item_id in seen:
+            continue
+        seen.add(item_id)
+        selected.append(item_id)
+
+    # Room backgrounds are referenced by videohub_rooms.json. Keep those files
+    # travelling with the room config whenever the export/import package has them.
+    if 'videohub_rooms' in seen and 'videohub_room_images' in item_map and 'videohub_room_images' not in seen:
+        selected.append('videohub_room_images')
+    return selected
+
+
 def _zip_write_sqlite_backup(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
     with NamedTemporaryFile(prefix='tdeck-auth-', suffix='.db', delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -2183,7 +2200,8 @@ def _write_transport_item_to_zip(zf: zipfile.ZipFile, item: dict[str, Any], *, r
 
 def _create_config_transport_zip(item_ids: list[str], *, reason: str) -> tuple[bytes, list[dict[str, Any]]]:
     item_map = _config_transport_item_map()
-    selected = [item_map[i] for i in item_ids if i in item_map and item_map[i].get('available')]
+    expanded_ids = _expand_config_transport_selection(item_ids, item_map)
+    selected = [item_map[i] for i in expanded_ids if i in item_map and item_map[i].get('available')]
     manifest = {
         'format': 'tdeck-config-transport',
         'version': 1,
@@ -2293,10 +2311,36 @@ def _clear_imported_config_caches() -> None:
         pass
 
 
+def _clear_directory_contents(path: Path) -> tuple[int, list[str]]:
+    removed = 0
+    errors: list[str] = []
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
+        return removed, errors
+    if not path.is_dir():
+        raise ValueError(f"Import target is not a directory: {path}")
+
+    for child in list(path.iterdir()):
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                try:
+                    child.chmod(0o666)
+                except Exception:
+                    pass
+                child.unlink()
+            removed += 1
+        except Exception as e:
+            errors.append(f"{child.name}: {e}")
+    return removed, errors
+
+
 def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> tuple[list[dict[str, Any]], Path | None]:
     manifest = _inspect_config_transport_zip(zip_path)
     item_map = {str(item.get('id')): item for item in manifest.get('items') or [] if isinstance(item, dict)}
-    selected = [item_map[i] for i in selected_ids if i in item_map]
+    expanded_ids = _expand_config_transport_selection(selected_ids, item_map)
+    selected = [item_map[i] for i in expanded_ids if i in item_map]
     if not selected:
         raise ValueError('Select at least one item to import.')
 
@@ -2315,9 +2359,12 @@ def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> t
             if kind == 'directory':
                 prefix = f'payload/{rel.rstrip("/")}/'
                 members = [n for n in all_names if n.startswith(prefix) and not n.endswith('/')]
-                if target.exists():
-                    shutil.rmtree(target)
-                target.mkdir(parents=True, exist_ok=True)
+                removed_count, clear_errors = _clear_directory_contents(target)
+                if clear_errors:
+                    _config_transport_log(
+                        f"Could not remove {len(clear_errors)} existing file(s) from {target}; "
+                        "continuing with imported files."
+                    )
                 count = 0
                 for name in members:
                     child_rel = name[len('payload/'):].lstrip('/')
@@ -2328,7 +2375,7 @@ def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> t
                     with zf.open(name) as src, child_target.open('wb') as dst:
                         shutil.copyfileobj(src, dst)
                     count += 1
-                imported.append({'id': item.get('id'), 'label': item.get('label'), 'path': rel, 'count': count})
+                imported.append({'id': item.get('id'), 'label': item.get('label'), 'path': rel, 'count': count, 'removed': removed_count})
             else:
                 member = f'payload/{rel}'
                 if member not in all_names:
