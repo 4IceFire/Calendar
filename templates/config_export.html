@@ -1,0 +1,77 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Export Config' %}
+
+{% block page_actions %}
+  <a class="btn btn-outline-secondary" href="/config/import">Import Config</a>
+  <a class="btn btn-outline-secondary" href="/config">Config</a>
+{% endblock %}
+
+{% block content %}
+<div class="config-transport-page">
+  {% if error %}
+    <div class="alert alert-danger">{{ error }}</div>
+  {% endif %}
+
+  <form method="post">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <div class="card tdeck-soft">
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+          <div>
+            <h2 class="h5 mb-1">Choose Items</h2>
+            <div class="text-muted small">Selected items are downloaded as one TDeck config zip.</div>
+          </div>
+          <div class="d-flex flex-wrap justify-content-end gap-2">
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-select-config-items="all">Select all available</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-select-config-items="none">Clear</button>
+            <button class="btn btn-primary btn-sm" type="submit">Download Export</button>
+          </div>
+        </div>
+
+        <div class="config-transport-list">
+          {% for item in items %}
+            <label class="config-transport-row{% if not item.available %} config-transport-row-disabled{% endif %}">
+              <input class="form-check-input" type="checkbox" name="items" value="{{ item.id }}" {% if item.available %}checked{% else %}disabled{% endif %}>
+              <span class="config-transport-main">
+                <span class="config-transport-title">{{ item.label }}</span>
+                <span class="config-transport-path">{{ item.path }}</span>
+                <span class="config-transport-description">{{ item.description }}</span>
+              </span>
+              <span class="config-transport-meta">
+                {% if item.available %}
+                  {% if item.kind == 'directory' %}
+                    {{ item.file_count }} file{% if item.file_count != 1 %}s{% endif %}
+                  {% else %}
+                    File
+                  {% endif %}
+                {% else %}
+                  Missing
+                {% endif %}
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </form>
+</div>
+
+<script>
+document.addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-select-config-items]');
+  if (!btn) return;
+  const mode = btn.getAttribute('data-select-config-items');
+  document.querySelectorAll('.config-transport-page input[name="items"]:not(:disabled)').forEach((input) => {
+    input.checked = mode === 'all';
+  });
+});
+
+document.addEventListener('change', (event) => {
+  const input = event.target.closest('.config-transport-page input[name="items"]');
+  if (!input || input.value !== 'videohub_rooms' || !input.checked) return;
+  const media = document.querySelector('.config-transport-page input[name="items"][value="videohub_room_images"]:not(:disabled)');
+  if (media) media.checked = true;
+});
+</script>
+{% endblock %}

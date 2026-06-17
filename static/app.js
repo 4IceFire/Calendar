@@ -14,6 +14,15 @@ function _applyServiceIndicator(serviceKey, label, connected) {
   });
 }
 
+function _escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function _applyServiceIndicatorUnknown(serviceKey, label) {
   const pairs = [
     [`${serviceKey}-dot`, `${serviceKey}-label`],
@@ -3125,6 +3134,7 @@ if (document.getElementById('access-levels-page')) {
     const inEl = form.querySelector('input[name="videohub_allowed_inputs_role"]');
     const presetsEl = form.querySelector('input[name="videohub_allowed_presets_role"]');
     const canEditEl = form.querySelector('input[name="videohub_can_edit_presets_role"]');
+    const companionClickSurfaceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="companion_click_surfaces_role"]:checked')).map(cb => String(cb.value || ''));
 
     return {
       page_keys: pageKeys,
@@ -3133,6 +3143,7 @@ if (document.getElementById('access-levels-page')) {
       videohub_allowed_inputs_role: inEl ? String(inEl.value || '') : '',
       videohub_allowed_presets_role: presetsEl ? String(presetsEl.value || '') : '',
       videohub_can_edit_presets_role: canEditEl ? !!canEditEl.checked : true,
+      companion_click_surfaces_role: companionClickSurfaceIds,
     };
   }
 
@@ -3220,5 +3231,265 @@ if (document.getElementById('access-levels-page')) {
       });
     });
   });
+}
+
+if (document.getElementById('companion-surfaces-config-page')) {
+  const statusEl = document.getElementById('companion-surfaces-status');
+  const surfacesList = document.getElementById('companion-surfaces-list');
+  const displaysList = document.getElementById('companion-displays-list');
+  const addSurfaceBtn = document.getElementById('companion-surface-add');
+  let surfaceConfig = {surfaces: [], surface_controls: []};
+  let saveTimer = null;
+
+  function _csSetStatus(msg, type = 'info') {
+    if (!statusEl) return;
+    const text = String(msg || '').trim();
+    if (!text) {
+      statusEl.innerHTML = '';
+      return;
+    }
+    statusEl.innerHTML = `<div class="alert alert-${type} py-2 mb-0">${_escapeHtml(text)}</div>`;
+  }
+
+  function _csNewSurface() {
+    const idx = (surfaceConfig.surfaces || []).length + 1;
+    return {id: `surface-${idx}`, label: `Surface ${idx}`, layout: '3x5'};
+  }
+
+  function _csSurfaceOptions(selectedId) {
+    return (surfaceConfig.surfaces || []).map(s => {
+      const id = String(s.id || '');
+      const label = String(s.label || id);
+      return `<option value="${_escapeHtml(id)}"${id === String(selectedId || '') ? ' selected' : ''}>${_escapeHtml(label)} (${_escapeHtml(id)})</option>`;
+    }).join('');
+  }
+
+  function _csLayoutOptions(selectedLayout) {
+    const layouts = [
+      ['3x5', '3x5'],
+      ['2x5', '2x5'],
+      ['4x5', '4x5'],
+      ['3x4', '3x4'],
+      ['2x4', '2x4'],
+      ['4x4', '4x4'],
+      ['4x8', '4x8'],
+    ];
+    const selected = String(selectedLayout || '3x5');
+    return layouts.map(([value, label]) => (
+      `<option value="${_escapeHtml(value)}"${value === selected ? ' selected' : ''}>${_escapeHtml(label)}</option>`
+    )).join('');
+  }
+
+  function _csScaleFromInput(value) {
+    const raw = String(value ?? '').trim();
+    const number = Number(raw || 1);
+    if (!Number.isFinite(number) || number <= 0) {
+      throw new Error('Size must be greater than zero.');
+    }
+    return `${Number.isInteger(number) ? number : Number(number.toFixed(3))}`;
+  }
+
+  function _csRender() {
+    if (!surfacesList || !displaysList) return;
+    const surfaces = surfaceConfig.surfaces || [];
+    const displays = surfaceConfig.surface_controls || [];
+
+    surfacesList.innerHTML = surfaces.length ? surfaces.map((surface, idx) => `
+      <div class="companion-config-row" data-surface-idx="${idx}" data-surface-old-id="${_escapeHtml(surface.id || '')}">
+        <div class="companion-surface-config-grid">
+          <div>
+            <label class="form-label small text-muted mb-1">ID</label>
+            <input class="form-control form-control-sm" data-surface-field="id" value="${_escapeHtml(surface.id || '')}">
+          </div>
+          <div>
+            <label class="form-label small text-muted mb-1">Label</label>
+            <input class="form-control form-control-sm" data-surface-field="label" value="${_escapeHtml(surface.label || '')}">
+          </div>
+          <div>
+            <label class="form-label small text-muted mb-1">Surface Size</label>
+            <select class="form-select form-select-sm" data-surface-field="layout">${_csLayoutOptions(surface.layout)}</select>
+          </div>
+          <div class="companion-config-delete-cell">
+            <button class="btn btn-sm btn-outline-danger" type="button" data-surface-delete="1" title="Delete">Delete</button>
+          </div>
+        </div>
+      </div>
+    `).join('') : '<div class="text-muted small">No surfaces configured.</div>';
+
+    function _renderDisplayList(list) {
+      return list.length ? list.map((display, idx) => `
+      <div class="companion-config-row" data-display-idx="${idx}">
+        <div class="row g-2 align-items-end">
+          <div class="col-12 col-lg-5">
+            <label class="form-label small text-muted mb-1">Display Label</label>
+            <input class="form-control form-control-sm" data-display-field="label" value="${_escapeHtml(display.label || `Display ${idx + 1}`)}">
+          </div>
+          <div class="col-12 col-md-8 col-lg-5">
+            <label class="form-label small text-muted mb-1">Surface</label>
+            <select class="form-select form-select-sm" data-display-field="surface_id">${_csSurfaceOptions(display.surface_id || display.id)}</select>
+          </div>
+          <div class="col-12 col-md-4 col-lg-2">
+            <label class="form-label small text-muted mb-1">Size</label>
+            <input class="form-control form-control-sm" type="number" min="0.1" step="0.05" inputmode="decimal" data-display-field="size" value="${_escapeHtml(String(display.size || '1'))}">
+          </div>
+        </div>
+      </div>
+      `).join('') : '<div class="text-muted small">No displays configured.</div>';
+    }
+
+    displaysList.innerHTML = _renderDisplayList(displays);
+  }
+
+  function _csReadFromUi() {
+    const surfaces = [];
+    const idMap = new Map();
+    if (surfacesList) {
+      surfacesList.querySelectorAll('[data-surface-idx]').forEach(row => {
+        const oldId = String(row.getAttribute('data-surface-old-id') || '').trim();
+        const id = String((row.querySelector('[data-surface-field="id"]') || {}).value || '').trim();
+        const label = String((row.querySelector('[data-surface-field="label"]') || {}).value || '').trim();
+        const layout = String((row.querySelector('[data-surface-field="layout"]') || {}).value || '3x5').trim();
+        if (id) {
+          surfaces.push({id, label: label || id, layout: layout || '3x5'});
+          if (oldId && oldId !== id) idMap.set(oldId, id);
+        }
+      });
+    }
+
+    const validIds = new Set(surfaces.map(s => s.id));
+    function _readDisplayList(listEl) {
+      const displays = [];
+      if (!listEl) return displays;
+      listEl.querySelectorAll('[data-display-idx]').forEach(row => {
+        let surfaceId = String((row.querySelector('[data-display-field="surface_id"]') || {}).value || '').trim();
+        if (!validIds.has(surfaceId) && idMap.has(surfaceId)) surfaceId = idMap.get(surfaceId);
+        if (!surfaceId || !validIds.has(surfaceId)) return;
+        const label = String((row.querySelector('[data-display-field="label"]') || {}).value || '').trim();
+        const display = {
+          surface_id: surfaceId,
+          label: label || `Display ${displays.length + 1}`,
+          size: _csScaleFromInput((row.querySelector('[data-display-field="size"]') || {}).value),
+        };
+        displays.push(display);
+      });
+      return displays;
+    }
+    return {
+      surfaces,
+      surface_controls: _readDisplayList(displaysList),
+    };
+  }
+
+  function _csValidate(cfg) {
+    const ids = new Set();
+    for (const surface of cfg.surfaces || []) {
+      const id = String(surface.id || '').trim();
+      if (!id) throw new Error('Every surface needs an ID.');
+      if (ids.has(id)) throw new Error(`Duplicate surface ID: ${id}`);
+      if (!['2x5', '3x5', '4x5', '2x4', '3x4', '4x4', '4x8'].includes(String(surface.layout || ''))) {
+        throw new Error(`Surface "${id}" needs a valid size.`);
+      }
+      ids.add(id);
+    }
+    for (const display of cfg.surface_controls || []) {
+      const id = String(display.surface_id || '').trim();
+      if (!ids.has(id)) throw new Error(`Display references unknown surface ID: ${id}`);
+      if (!String(display.label || '').trim()) throw new Error('Every display needs a label.');
+    }
+  }
+
+  async function _csSaveNow() {
+    const cfg = _csReadFromUi();
+    _csValidate(cfg);
+    _csSetStatus('', 'info');
+    const res = await fetch('/api/companion-surfaces-config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(cfg),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data || !data.ok) {
+      throw new Error((data && data.error) ? data.error : 'Save failed');
+    }
+    surfaceConfig = data.config || cfg;
+    _csSetStatus('', 'info');
+    return true;
+  }
+
+  function _csScheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      _csSaveNow().catch(e => _csSetStatus(String(e.message || e), 'danger'));
+    }, 700);
+  }
+
+  async function _csLoad() {
+    _csSetStatus('', 'info');
+    try {
+      const res = await fetch('/api/companion-surfaces-config?_ts=' + Date.now(), {cache: 'no-store'});
+      const data = await res.json();
+      if (!res.ok || !data || !Array.isArray(data.surfaces)) {
+        throw new Error((data && data.error) ? data.error : 'Unable to load Companion surfaces.');
+      }
+      surfaceConfig = {
+        surfaces: data.surfaces || [],
+        surface_controls: data.surface_controls || [],
+      };
+      _csRender();
+      _csSetStatus('', 'info');
+    } catch (e) {
+      _csSetStatus(String(e.message || e), 'danger');
+    }
+  }
+
+  if (addSurfaceBtn) addSurfaceBtn.addEventListener('click', () => {
+    surfaceConfig = _csReadFromUi();
+    surfaceConfig.surfaces.push(_csNewSurface());
+    _csRender();
+    _csScheduleSave();
+  });
+
+  document.addEventListener('input', ev => {
+    const target = ev.target;
+    if (!target || !document.getElementById('companion-surfaces-config-page').contains(target)) return;
+    _csScheduleSave();
+  });
+
+  document.addEventListener('change', ev => {
+    const target = ev.target;
+    if (!target || !document.getElementById('companion-surfaces-config-page').contains(target)) return;
+    _csScheduleSave();
+  });
+
+  document.addEventListener('click', ev => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('button') : null;
+    if (!btn || !document.getElementById('companion-surfaces-config-page').contains(btn)) return;
+
+    const surfaceRow = btn.closest('[data-surface-idx]');
+    const displayRow = btn.closest('[data-display-idx]');
+    surfaceConfig = _csReadFromUi();
+
+    if (surfaceRow) {
+      const idx = parseInt(surfaceRow.getAttribute('data-surface-idx') || '-1', 10);
+      if (btn.hasAttribute('data-surface-delete')) {
+        const removed = surfaceConfig.surfaces[idx];
+        const removedId = removed ? String(removed.id || '') : '';
+        if ((surfaceConfig.surface_controls || []).some(d => String(d.surface_id || '') === removedId)) {
+          _csSetStatus(`Surface "${removedId}" is being used by a display slot. Change that slot first.`, 'danger');
+          return;
+        }
+        surfaceConfig.surfaces.splice(idx, 1);
+      } else {
+        return;
+      }
+      _csRender();
+      _csScheduleSave();
+    } else if (displayRow) {
+      return;
+    }
+  });
+
+  _csLoad();
 }
 

@@ -1,0 +1,28 @@
+{
+  "surfaces": [
+    {
+      "id": "test-surface",
+      "label": "Test",
+      "layout": "3x5"
+    },
+    {
+      "id": "test-2",
+      "label": "Another Test",
+      "layout": "2x5"
+    }
+  ],
+  "surface_controls": [
+    {
+      "id": "test-2",
+      "surface_id": "test-2",
+      "label": "Left display",
+      "size": "1"
+    },
+    {
+      "id": "test-2",
+      "surface_id": "test-2",
+      "label": "Right display",
+      "size": "1"
+    }
+  ]
+}

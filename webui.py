@@ -1,9 +1,12 @@
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response
 import copy
+import io
 import logging
+import math
 import threading
 import time
 from pathlib import Path
+import shutil
 import sys
 import subprocess
 import shlex
@@ -12,12 +15,14 @@ import sqlite3
 import secrets
 import uuid
 from typing import Any
+import zipfile
 
 from werkzeug.serving import make_server
 from werkzeug.utils import secure_filename
 import json
 import re
 from datetime import datetime, timedelta
+from tempfile import NamedTemporaryFile
 
 from package.json_cache import read_json, write_json
 
@@ -340,6 +345,20 @@ app.config.update(
 
 # --- Auth DB (SQLite) ---
 _AUTH_DB_PATH = (Path(__file__).resolve().parent / 'auth.db')
+_APP_ROOT = Path(__file__).resolve().parent
+_COMPANION_SURFACES_PATH = _APP_ROOT / 'companion_surfaces.json'
+_COMPANION_SURFACE_LAYOUTS: dict[str, tuple[int, int]] = {
+    '2x5': (2, 5),
+    '3x5': (3, 5),
+    '4x5': (4, 5),
+    '2x4': (2, 4),
+    '3x4': (3, 4),
+    '4x4': (4, 4),
+    '4x8': (4, 8),
+}
+_COMPANION_SURFACE_DEFAULT_LAYOUT = '3x5'
+_COMPANION_SURFACE_CELL_PX = 110
+_COMPANION_SURFACE_GUTTER_PX = 10
 
 
 def _db() -> sqlite3.Connection:
@@ -454,7 +473,8 @@ def _init_auth_db() -> None:
               videohub_allowed_outputs TEXT,
               videohub_allowed_inputs TEXT,
               videohub_allowed_presets TEXT,
-              videohub_can_edit_presets INTEGER
+              videohub_can_edit_presets INTEGER,
+              companion_click_surfaces TEXT
             )
             """
         )
@@ -470,6 +490,7 @@ def _init_auth_db() -> None:
             ('videohub_allowed_inputs', 'TEXT'),
             ('videohub_allowed_presets', 'TEXT'),
             ('videohub_can_edit_presets', 'INTEGER'),
+            ('companion_click_surfaces', 'TEXT'),
         ):
             if col_name not in group_cols:
                 try:
@@ -677,6 +698,46 @@ def _set_group_videohub_can_edit_presets(group_id: int, enabled: bool) -> None:
         conn.close()
 
 
+def _coerce_string_allow_list(v) -> list[str]:
+    """Coerce stored string allow-list values into sorted unique non-empty IDs."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        try:
+            v = json.loads(s)
+        except Exception:
+            return sorted(set([p.strip() for p in re.split(r'[\s,]+', s) if p.strip()]))
+    if isinstance(v, (int, float)):
+        return [str(v)]
+    if not isinstance(v, list):
+        return []
+    out = []
+    for item in v:
+        sid = str(item or '').strip()
+        if sid:
+            out.append(sid)
+    return sorted(set(out))
+
+
+def _set_group_companion_click_surfaces(group_id: int, surface_ids) -> None:
+    surface_ids = _coerce_string_allow_list(surface_ids)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET companion_click_surfaces=? WHERE id=?',
+            (
+                json.dumps(surface_ids),
+                int(group_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
     group_id = int(group_id)
     keys = [k for k in (page_keys or []) if str(k or '').strip()]
@@ -797,6 +858,32 @@ def _effective_group_allowlist(rows: list[sqlite3.Row], column: str) -> list[int
     return sorted(merged)
 
 
+def _effective_group_string_allowlist(rows: list[sqlite3.Row], column: str) -> list[str]:
+    """Merge string allow-lists.
+
+    Blank/NULL/"[]" means allow all. If any assigned group allows all, return
+    an empty list to represent unrestricted access.
+    """
+    if not rows:
+        return []
+    merged: set[str] = set()
+    saw_restricted = False
+    for row in rows:
+        raw = row[column]
+        try:
+            raw_s = '' if raw is None else str(raw).strip()
+        except Exception:
+            raw_s = ''
+        if not raw_s or raw_s.lower() in ('all', '*', 'inherit', 'default', 'global') or raw_s == '[]':
+            return []
+        values = _coerce_string_allow_list(raw_s)
+        saw_restricted = True
+        merged.update(values)
+    if not saw_restricted:
+        return []
+    return sorted(merged)
+
+
 def _effective_videohub_allowlists_for_user(user_id: int | None) -> tuple[list[int], list[int]]:
     if user_id is None or _user_is_admin(user_id):
         return ([], [])
@@ -831,6 +918,36 @@ def _effective_videohub_can_edit_presets_for_user(user_id: int | None) -> bool:
         except Exception:
             continue
     return False
+
+
+def _effective_companion_click_surface_ids_for_user(user_id: int | None) -> list[str]:
+    if user_id is None or _user_is_admin(user_id):
+        return []
+    return _effective_group_string_allowlist(_get_user_groups(user_id), 'companion_click_surfaces')
+
+
+def _can_click_companion_surface_for_current_user(surface_id: str) -> bool:
+    sid = str(surface_id or '').strip()
+    if not sid:
+        return False
+    try:
+        if not _auth_enabled():
+            return True
+    except Exception:
+        return True
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+    except Exception:
+        return False
+    try:
+        uid = int(current_user.get_id())
+        if _user_is_admin(uid):
+            return True
+        allowed = _effective_companion_click_surface_ids_for_user(uid)
+        return (not allowed) or (sid in set(allowed))
+    except Exception:
+        return False
 
 
 def _admin_active_admin_count(conn: sqlite3.Connection) -> int:
@@ -1684,6 +1801,7 @@ def _inject_auth():
         is_authed = False
     return {
         'auth_enabled': _auth_enabled(),
+        'can_click_companion_surface': _can_click_companion_surface_for_current_user,
         'can_access': can_access,
         'can_manage_videohub_rooms': _can_manage_videohub_rooms_for_current_user,
         'csrf_token': _csrf_token,
@@ -1821,6 +1939,14 @@ def _inject_theme():
     }
 
 
+@app.context_processor
+def _inject_companion_surfaces():
+    return {
+        'companion_surface_by_id': _companion_surface_by_id,
+        'companion_surface_url': _companion_surface_url,
+    }
+
+
 @app.errorhandler(400)
 def _handle_bad_request(err):
     try:
@@ -1885,6 +2011,382 @@ def _truncate_for_log(value, max_len: int = 240) -> str:
     if len(s) > max_len:
         return s[:max_len] + '…'
     return s
+
+_CONFIG_IMPORT_UPLOADS: dict[str, dict[str, Any]] = {}
+_CONFIG_IMPORT_UPLOAD_LOCK = threading.Lock()
+
+
+def _config_transport_log(message: str) -> None:
+    line = f"[CONFIG] {message}"
+    try:
+        print(line)
+    except Exception:
+        pass
+    try:
+        _console_append(line + "\n")
+    except Exception:
+        pass
+
+
+def _config_access_error_json():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    return None
+
+
+def _safe_relpath(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_APP_ROOT.resolve()).as_posix()
+    except Exception:
+        return path.name
+
+
+def _resolve_transport_path(relpath: str) -> Path | None:
+    rel = str(relpath or '').replace('\\', '/').strip().lstrip('/')
+    if not rel or rel.startswith('../') or '/../' in rel or rel == '..':
+        return None
+    try:
+        out = (_APP_ROOT / rel).resolve()
+        out.relative_to(_APP_ROOT.resolve())
+    except Exception:
+        return None
+    return out
+
+
+def _transport_file_item(item_id: str, label: str, relpath: str, description: str, *, actual_path: Path | None = None) -> dict[str, Any]:
+    path = actual_path or _resolve_transport_path(relpath) or (_APP_ROOT / Path(relpath).name)
+    item = {
+        'id': item_id,
+        'label': label,
+        'kind': 'file',
+        'path': relpath.replace('\\', '/').lstrip('/') if actual_path is not None else _safe_relpath(path),
+        'description': description,
+        'available': path.exists() and path.is_file(),
+        'size': path.stat().st_size if path.exists() and path.is_file() else 0,
+    }
+    if actual_path is not None:
+        item['_actual_path'] = str(actual_path)
+    return item
+
+
+def _transport_dir_item(item_id: str, label: str, relpath: str, description: str) -> dict[str, Any]:
+    path = _resolve_transport_path(relpath) or (_APP_ROOT / Path(relpath).name)
+    count = 0
+    size = 0
+    if path.exists() and path.is_dir():
+        for child in path.rglob('*'):
+            try:
+                if child.is_file():
+                    count += 1
+                    size += child.stat().st_size
+            except Exception:
+                pass
+    return {
+        'id': item_id,
+        'label': label,
+        'kind': 'directory',
+        'path': _safe_relpath(path),
+        'description': description,
+        'available': path.exists() and path.is_dir() and count > 0,
+        'size': size,
+        'file_count': count,
+    }
+
+
+def _config_transport_items() -> list[dict[str, Any]]:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+
+    items: list[dict[str, Any]] = [
+        _transport_file_item('config', 'App config', 'config.json', 'Main TDeck settings, ports, integrations, theme, and auth options.'),
+        _transport_file_item('events', 'Calendar events', str(cfg.get('EVENTS_FILE') or 'events.json'), 'Scheduled calendar events and their trigger definitions.'),
+        _transport_file_item('timer_presets', 'Timer presets', str(getattr(utils, 'TIMER_PRESETS_FILE', 'timer_presets.json')), 'Timer preset names, times, and Companion button actions.'),
+        _transport_file_item('trigger_templates', 'Trigger templates', 'trigger_templates.json', 'Reusable trigger templates for calendar events.'),
+        _transport_file_item('button_templates', 'Button templates', 'button_templates.json', 'Reusable Companion button templates.'),
+        _transport_file_item('calendar_triggers', 'Generated calendar triggers', 'calendar_triggers.json', 'Current generated trigger queue/state for the scheduler.'),
+        _transport_file_item('companion_surfaces', 'Companion surfaces', 'companion_surfaces.json', 'Configured Companion surface catalogue and display slots.'),
+        _transport_file_item('videohub_presets', 'VideoHub presets', str(cfg.get('videohub_presets_file') or 'videohub_presets.json'), 'VideoHub preset routes, names, and locks.'),
+        _transport_file_item('videohub_rooms', 'VideoHub rooms', 'videohub_rooms.json', 'Global VideoHub room layout, output placement, backgrounds, and input filters.'),
+        _transport_file_item('home_state', 'Home dashboard state', 'home_state.json', 'Last-known Home dashboard state used by the overview page.', actual_path=_home_state_path()),
+        _transport_file_item('auth_db', 'Users database', _safe_relpath(_AUTH_DB_PATH), 'Users, groups, permissions, sessions, password hashes, and account security state.'),
+        _transport_dir_item('videohub_room_images', 'VideoHub room media', 'videohub_room_images', 'Uploaded room background images and other local room media.'),
+    ]
+
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for item in items:
+        key = str(item.get('path') or item.get('id') or '')
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _config_transport_item_map() -> dict[str, dict[str, Any]]:
+    return {str(item.get('id')): item for item in _config_transport_items()}
+
+
+def _expand_config_transport_selection(item_ids: list[str], item_map: dict[str, dict[str, Any]]) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw in item_ids or []:
+        item_id = str(raw or '').strip()
+        if not item_id or item_id in seen:
+            continue
+        seen.add(item_id)
+        selected.append(item_id)
+
+    # Room backgrounds are referenced by videohub_rooms.json. Keep those files
+    # travelling with the room config whenever the export/import package has them.
+    if 'videohub_rooms' in seen and 'videohub_room_images' in item_map and 'videohub_room_images' not in seen:
+        selected.append('videohub_room_images')
+    return selected
+
+
+def _zip_write_sqlite_backup(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
+    with NamedTemporaryFile(prefix='tdeck-auth-', suffix='.db', delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        src = sqlite3.connect(str(path))
+        dst = sqlite3.connect(str(tmp_path))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        zf.write(tmp_path, arcname)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _write_transport_item_to_zip(zf: zipfile.ZipFile, item: dict[str, Any], *, root: str = 'payload') -> bool:
+    actual = str(item.get('_actual_path') or '').strip()
+    path = Path(actual) if actual else _resolve_transport_path(str(item.get('path') or ''))
+    if path is None or not path.exists():
+        return False
+    rel = str(item.get('path') or path.name).replace('\\', '/').lstrip('/')
+    if item.get('kind') == 'directory':
+        if not path.is_dir():
+            return False
+        wrote = False
+        for child in path.rglob('*'):
+            try:
+                if not child.is_file():
+                    continue
+                child_rel = child.relative_to(_APP_ROOT).as_posix()
+                zf.write(child, f'{root}/{child_rel}')
+                wrote = True
+            except Exception as e:
+                _config_transport_log(f"Skipped {child}: {e}")
+        return wrote
+
+    if not path.is_file():
+        return False
+    if path.resolve() == _AUTH_DB_PATH.resolve():
+        _zip_write_sqlite_backup(zf, path, f'{root}/{rel}')
+    else:
+        zf.write(path, f'{root}/{rel}')
+    return True
+
+
+def _create_config_transport_zip(item_ids: list[str], *, reason: str) -> tuple[bytes, list[dict[str, Any]]]:
+    item_map = _config_transport_item_map()
+    expanded_ids = _expand_config_transport_selection(item_ids, item_map)
+    selected = [item_map[i] for i in expanded_ids if i in item_map and item_map[i].get('available')]
+    manifest = {
+        'format': 'tdeck-config-transport',
+        'version': 1,
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'reason': reason,
+        'items': [],
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in selected:
+            wrote = _write_transport_item_to_zip(zf, item)
+            if wrote:
+                manifest['items'].append({
+                    'id': item.get('id'),
+                    'label': item.get('label'),
+                    'kind': item.get('kind'),
+                    'path': item.get('path'),
+                    'description': item.get('description'),
+                    'size': item.get('size', 0),
+                    'file_count': item.get('file_count', 1 if item.get('kind') == 'file' else 0),
+                })
+        zf.writestr('manifest.json', json.dumps(manifest, indent=2, ensure_ascii=False))
+    return buf.getvalue(), list(manifest['items'])
+
+
+def _inspect_config_transport_zip(path: Path) -> dict[str, Any]:
+    with zipfile.ZipFile(path, 'r') as zf:
+        try:
+            raw = zf.read('manifest.json')
+        except KeyError:
+            raise ValueError('This zip does not contain a TDeck config manifest.')
+        manifest = json.loads(raw.decode('utf-8'))
+        if not isinstance(manifest, dict) or manifest.get('format') != 'tdeck-config-transport':
+            raise ValueError('This is not a TDeck config export.')
+        names = set(zf.namelist())
+    items = []
+    for item in manifest.get('items') or []:
+        if not isinstance(item, dict):
+            continue
+        rel = str(item.get('path') or '').replace('\\', '/').lstrip('/')
+        if not rel:
+            continue
+        kind = str(item.get('kind') or 'file')
+        if kind == 'directory':
+            has_payload = any(n.startswith(f'payload/{rel.rstrip("/")}/') for n in names)
+        else:
+            has_payload = f'payload/{rel}' in names
+        if has_payload:
+            item = dict(item)
+            item['available'] = True
+            items.append(item)
+    manifest['items'] = items
+    return manifest
+
+
+def _remember_config_import_upload(path: Path, manifest: dict[str, Any]) -> str:
+    token = secrets.token_urlsafe(24)
+    now = time.time()
+    with _CONFIG_IMPORT_UPLOAD_LOCK:
+        expired = [k for k, v in _CONFIG_IMPORT_UPLOADS.items() if now - float(v.get('ts') or 0) > 3600]
+        for k in expired:
+            old = _CONFIG_IMPORT_UPLOADS.pop(k, None)
+            try:
+                Path(str(old.get('path'))).unlink(missing_ok=True)
+            except Exception:
+                pass
+        _CONFIG_IMPORT_UPLOADS[token] = {'path': str(path), 'manifest': manifest, 'ts': now}
+    return token
+
+
+def _create_pre_import_backup(selected_items: list[dict[str, Any]]) -> Path | None:
+    ids = [str(item.get('id')) for item in selected_items if str(item.get('id') or '')]
+    if not ids:
+        return None
+    data, items = _create_config_transport_zip(ids, reason='pre-import-backup')
+    if not items:
+        return None
+    backup_dir = _APP_ROOT / 'config_import_backups'
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    path = backup_dir / f'pre-import-{stamp}.zip'
+    path.write_bytes(data)
+    return path
+
+
+def _clear_imported_config_caches() -> None:
+    try:
+        utils.reload_config(force=True)
+    except Exception:
+        pass
+    try:
+        _apply_logging_config()
+    except Exception:
+        pass
+    try:
+        _videohub_rooms_cache['snapshot'] = None
+        _videohub_rooms_cache['config'] = None
+    except Exception:
+        pass
+    try:
+        _home_state_sync_from_disk()
+    except Exception:
+        pass
+    try:
+        _init_auth_db()
+    except Exception:
+        pass
+
+
+def _clear_directory_contents(path: Path) -> tuple[int, list[str]]:
+    removed = 0
+    errors: list[str] = []
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
+        return removed, errors
+    if not path.is_dir():
+        raise ValueError(f"Import target is not a directory: {path}")
+
+    for child in list(path.iterdir()):
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                try:
+                    child.chmod(0o666)
+                except Exception:
+                    pass
+                child.unlink()
+            removed += 1
+        except Exception as e:
+            errors.append(f"{child.name}: {e}")
+    return removed, errors
+
+
+def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> tuple[list[dict[str, Any]], Path | None]:
+    manifest = _inspect_config_transport_zip(zip_path)
+    item_map = {str(item.get('id')): item for item in manifest.get('items') or [] if isinstance(item, dict)}
+    expanded_ids = _expand_config_transport_selection(selected_ids, item_map)
+    selected = [item_map[i] for i in expanded_ids if i in item_map]
+    if not selected:
+        raise ValueError('Select at least one item to import.')
+
+    backup_path = _create_pre_import_backup(selected)
+    imported: list[dict[str, Any]] = []
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        all_names = set(zf.namelist())
+        for item in selected:
+            rel = str(item.get('path') or '').replace('\\', '/').lstrip('/')
+            current_item = _config_transport_item_map().get(str(item.get('id') or '')) or {}
+            actual_target = str(current_item.get('_actual_path') or '').strip()
+            target = Path(actual_target) if actual_target else _resolve_transport_path(rel)
+            if target is None:
+                raise ValueError(f"Invalid import path for {item.get('label') or item.get('id')}.")
+            kind = str(item.get('kind') or 'file')
+            if kind == 'directory':
+                prefix = f'payload/{rel.rstrip("/")}/'
+                members = [n for n in all_names if n.startswith(prefix) and not n.endswith('/')]
+                removed_count, clear_errors = _clear_directory_contents(target)
+                if clear_errors:
+                    _config_transport_log(
+                        f"Could not remove {len(clear_errors)} existing file(s) from {target}; "
+                        "continuing with imported files."
+                    )
+                count = 0
+                for name in members:
+                    child_rel = name[len('payload/'):].lstrip('/')
+                    child_target = _resolve_transport_path(child_rel)
+                    if child_target is None:
+                        continue
+                    child_target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as src, child_target.open('wb') as dst:
+                        shutil.copyfileobj(src, dst)
+                    count += 1
+                imported.append({'id': item.get('id'), 'label': item.get('label'), 'path': rel, 'count': count, 'removed': removed_count})
+            else:
+                member = f'payload/{rel}'
+                if member not in all_names:
+                    raise ValueError(f"Missing payload for {item.get('label') or rel}.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, target.open('wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                imported.append({'id': item.get('id'), 'label': item.get('label'), 'path': rel, 'count': 1})
+
+    _clear_imported_config_caches()
+    return imported, backup_path
 
 
 class _ConsoleTee:
@@ -2669,6 +3171,13 @@ def admin_permissions_page():
                     except Exception:
                         pass
 
+                    # Per-group Companion surface click allow-list.
+                    try:
+                        _set_group_companion_click_surfaces(gid, request.form.getlist('companion_click_surfaces_role'))
+                        _audit('group_companion_click_surfaces_update', f'group_id={gid}')
+                    except Exception:
+                        pass
+
         if action == 'create_user':
             min_len = _auth_min_password_length()
             username = str(request.form.get('username') or '').strip()
@@ -2777,7 +3286,7 @@ def admin_permissions_page():
     conn = _db()
     try:
         groups = conn.execute(
-            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets FROM groups ORDER BY is_system DESC, lower(name)'
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
         group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
         group_users = conn.execute(
@@ -2822,6 +3331,7 @@ def admin_permissions_page():
             continue
 
     group_to_vh: dict[int, dict[str, str]] = {}
+    group_to_companion: dict[int, dict[str, list[str]]] = {}
     for g in groups or []:
         try:
             gid = int(g['id'])
@@ -2861,6 +3371,9 @@ def admin_permissions_page():
             'presets': preset_s,
             'can_edit_presets': bool(can_edit),
         }
+        group_to_companion[gid] = {
+            'click_surfaces': _coerce_string_allow_list(g['companion_click_surfaces']),
+        }
 
     user_to_groups: dict[int, list[sqlite3.Row]] = {}
     user_to_group_ids: dict[int, set[int]] = {}
@@ -2884,6 +3397,8 @@ def admin_permissions_page():
         pages=pages,
         group_to_pages=group_to_pages,
         group_to_vh=group_to_vh,
+        group_to_companion=group_to_companion,
+        companion_surfaces=_load_companion_surfaces(),
         group_to_users=group_to_users,
         users=users,
         user_to_groups=user_to_groups,
@@ -2967,6 +3482,14 @@ def api_admin_group_update(group_id: int):
                 enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
                 _set_group_videohub_can_edit_presets(gid, bool(enabled))
                 _audit('group_videohub_can_edit_presets_update', f'group_id={gid} enabled={int(bool(enabled))}')
+        except Exception:
+            pass
+
+        # Per-group Companion surface click allow-list.
+        try:
+            if 'companion_click_surfaces_role' in data:
+                _set_group_companion_click_surfaces(gid, data.get('companion_click_surfaces_role'))
+                _audit('group_companion_click_surfaces_update', f'group_id={gid}')
         except Exception:
             pass
 
@@ -3220,30 +3743,6 @@ def admin_user_detail_page(user_id: int):
 @require_page('page:admin', 'Admin')
 def admin_users_page():
     return redirect(url_for('admin_permissions_page', tab='users') + '#users')
-
-
-@app.get('/admin/backup/authdb')
-@require_page('page:admin', 'Admin')
-def admin_backup_authdb():
-    """Download the auth database as a backup (Admin only)."""
-    try:
-        _bootstrap_default_users_roles()
-    except Exception:
-        pass
-
-    try:
-        src = Path(_AUTH_DB_PATH)
-        if not src.exists():
-            _init_auth_db()
-        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        filename = f'auth-{stamp}.db'
-        return send_file(str(src), as_attachment=True, download_name=filename)
-    except Exception as e:
-        try:
-            _audit('backup_authdb_fail', str(e))
-        except Exception:
-            pass
-        return abort(500)
 
 
 @app.route('/')
@@ -3547,6 +4046,12 @@ def calendar_page():
     return render_template('calendar.html')
 
 
+@app.route('/surface-controls')
+@require_page('page:surface_controls', 'Surface Controls')
+def surface_controls_page():
+    return render_template('surface_controls.html', companion_surface_displays=_load_surface_control_displays())
+
+
 @app.route('/calendar/triggers')
 @require_page('page:calendar', 'Schedule')
 def calendar_triggers_page():
@@ -3644,6 +4149,51 @@ def config_page():
     return render_template('config.html')
 
 
+@app.route('/config/export', methods=['GET', 'POST'])
+@require_page('page:config', 'Config')
+def config_export_page():
+    items = _config_transport_items()
+    if request.method == 'POST':
+        selected = request.form.getlist('items')
+        try:
+            data, exported = _create_config_transport_zip(selected, reason='manual-export')
+            if not exported:
+                return render_template('config_export.html', items=items, error='Select at least one available item to export.')
+            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            filename = f'tdeck-config-{stamp}.zip'
+            _config_transport_log(f"Exported config package {filename}: {', '.join(str(i.get('path')) for i in exported)}")
+            try:
+                _audit('config_export', f"items={len(exported)}")
+            except Exception:
+                pass
+            return send_file(
+                io.BytesIO(data),
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name=filename,
+            )
+        except Exception as e:
+            _config_transport_log(f"Export failed: {e}")
+            try:
+                _audit('config_export_fail', str(e))
+            except Exception:
+                pass
+            return render_template('config_export.html', items=items, error=str(e))
+    return render_template('config_export.html', items=items)
+
+
+@app.route('/config/import')
+@require_page('page:config', 'Config')
+def config_import_page():
+    return render_template('config_import.html')
+
+
+@app.route('/config/companion-surfaces')
+@require_page('page:config', 'Config')
+def companion_surfaces_config_page():
+    return render_template('companion_surfaces_config.html')
+
+
 @app.route('/console')
 @require_page('page:console', 'Console')
 def console_page():
@@ -3673,6 +4223,280 @@ def _read_json_file(p: Path):
 
 def _write_json_file(p: Path, data):
     return bool(write_json(p, data))
+
+
+def _default_companion_surface_config() -> dict:
+    return {
+        'surfaces': [
+            {
+                'id': 'test-surface',
+                'label': 'Test',
+                'layout': '3x5',
+            },
+            {
+                'id': 'test-2',
+                'label': 'Another Test',
+                'layout': '2x5',
+            },
+        ],
+        'surface_controls': [
+            {
+                'surface_id': 'test-surface',
+                'label': 'Left display',
+                'size': '1',
+            },
+            {
+                'surface_id': 'test-2',
+                'label': 'Right display',
+                'size': '1',
+            },
+        ],
+    }
+
+
+def _css_scale_value(value, default: str = '1') -> str:
+    raw = str(value if value is not None else '').strip()
+    try:
+        number = float(raw)
+    except Exception:
+        try:
+            number = float(default)
+        except Exception:
+            number = 1.0
+    if not math.isfinite(number) or number <= 0:
+        number = 1.0
+    if number.is_integer():
+        return str(int(number))
+    return f'{number:g}'
+
+
+def _companion_surface_layout_value(value) -> str:
+    layout = str(value or '').strip().lower().replace(' ', '')
+    return layout if layout in _COMPANION_SURFACE_LAYOUTS else _COMPANION_SURFACE_DEFAULT_LAYOUT
+
+
+def _companion_surface_dimensions(layout: str, size: str = '1') -> tuple[str, str]:
+    rows, cols = _COMPANION_SURFACE_LAYOUTS.get(
+        _companion_surface_layout_value(layout),
+        _COMPANION_SURFACE_LAYOUTS[_COMPANION_SURFACE_DEFAULT_LAYOUT],
+    )
+    try:
+        scale = float(size)
+    except Exception:
+        scale = 1.0
+    if not math.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    width = int(round(((cols * _COMPANION_SURFACE_CELL_PX) + _COMPANION_SURFACE_GUTTER_PX) * scale))
+    height = int(round(((rows * _COMPANION_SURFACE_CELL_PX) + _COMPANION_SURFACE_GUTTER_PX) * scale))
+    return f'{width}px', f'{height}px'
+
+
+def _normalize_companion_surface(raw) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    sid = str(raw.get('id') or raw.get('surface_id') or '').strip()
+    if not sid:
+        return None
+    label = str(raw.get('label') or raw.get('name') or sid).strip()
+    return {
+        'id': sid,
+        'label': label or sid,
+        'layout': _companion_surface_layout_value(raw.get('layout') or raw.get('dimensions') or raw.get('surface_layout')),
+    }
+
+
+def _normalize_companion_surface_display(raw, surfaces_by_id: dict[str, dict[str, str]], include_render_size: bool = True) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    sid = str(raw.get('surface_id') or raw.get('id') or '').strip()
+    if not sid:
+        return None
+    surface = surfaces_by_id.get(sid) or {'id': sid, 'label': sid}
+    label = str(raw.get('label') or surface.get('label') or sid).strip()
+    size = _css_scale_value(raw.get('size'), '1')
+    out = {
+        'id': sid,
+        'surface_id': sid,
+        'label': label or sid,
+        'size': size,
+    }
+    if include_render_size:
+        out['width'], out['height'] = _companion_surface_dimensions(surface.get('layout'), size)
+    return out
+
+
+def _normalize_companion_surface_display_list(raw_items, surfaces_by_id: dict[str, dict[str, str]], *, include_render_size: bool = True) -> list[dict[str, str]]:
+    displays: list[dict[str, str]] = []
+    if not isinstance(raw_items, list):
+        return displays
+    for item in raw_items:
+        display = _normalize_companion_surface_display(item, surfaces_by_id, include_render_size=include_render_size)
+        if display:
+            displays.append(display)
+    return displays
+
+
+def _load_companion_surface_config() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    try:
+        data, _ = read_json(_COMPANION_SURFACES_PATH, default_factory=_default_companion_surface_config)
+    except Exception:
+        data = _default_companion_surface_config()
+
+    # Backward compatibility: the original file was a plain list of surfaces.
+    if isinstance(data, list):
+        surfaces_raw = data
+        displays_raw = data
+    elif isinstance(data, dict):
+        surfaces_raw = data.get('surfaces')
+        displays_raw = data.get('surface_controls') or data.get('displays')
+        if not isinstance(surfaces_raw, list):
+            surfaces_raw = []
+        if not isinstance(displays_raw, list):
+            displays_raw = surfaces_raw
+    else:
+        data = _default_companion_surface_config()
+        surfaces_raw = data['surfaces']
+        displays_raw = data['surface_controls']
+
+    surfaces: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in surfaces_raw:
+        surface = _normalize_companion_surface(item)
+        if not surface:
+            continue
+        sid = surface['id']
+        if sid in seen:
+            continue
+        seen.add(sid)
+        surfaces.append(surface)
+
+    surfaces_by_id = {s['id']: s for s in surfaces}
+    displays = _normalize_companion_surface_display_list(displays_raw, surfaces_by_id)
+    return surfaces, displays
+
+
+def _companion_surface_config_payload() -> dict:
+    surfaces, displays = _load_companion_surface_config()
+    return {
+        'surfaces': surfaces,
+        'surface_controls': displays,
+    }
+
+
+def _normalize_companion_surface_config_payload(raw) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'Payload must be an object.'
+
+    surfaces_raw = raw.get('surfaces')
+    displays_raw = raw.get('surface_controls') if 'surface_controls' in raw else raw.get('displays')
+    if not isinstance(surfaces_raw, list):
+        return None, 'surfaces must be a list.'
+    if displays_raw is None:
+        displays_raw = []
+    if not isinstance(displays_raw, list):
+        return None, 'surface_controls must be a list.'
+
+    surfaces: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in surfaces_raw:
+        if not isinstance(item, dict):
+            return None, 'Each surface must be an object.'
+        if not str(item.get('id') or item.get('surface_id') or '').strip():
+            return None, 'Every surface needs an ID.'
+        if not str(item.get('label') or item.get('name') or '').strip():
+            return None, 'Every surface needs a label.'
+        raw_layout = str(item.get('layout') or item.get('dimensions') or item.get('surface_layout') or '').strip().lower().replace(' ', '')
+        if raw_layout and raw_layout not in _COMPANION_SURFACE_LAYOUTS:
+            return None, 'Every surface needs a valid layout.'
+        surface = _normalize_companion_surface(item)
+        if not surface:
+            continue
+        sid = surface['id']
+        if sid in seen:
+            return None, f'Duplicate surface ID: {sid}'
+        seen.add(sid)
+        surfaces.append(surface)
+
+    surfaces_by_id = {s['id']: s for s in surfaces}
+    def _normalize_payload_displays(items, list_label: str) -> tuple[list[dict[str, str]] | None, str | None]:
+        displays_out: list[dict[str, str]] = []
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                return None, f'Each {list_label} display must be an object.'
+            if not str(item.get('surface_id') or item.get('id') or '').strip():
+                return None, f'{list_label} display {index} needs a surface.'
+            if not str(item.get('label') or '').strip():
+                return None, f'{list_label} display {index} needs a label.'
+            if 'size' in item:
+                try:
+                    size_value = float(str(item.get('size') or '').strip())
+                except Exception:
+                    return None, f'{list_label} display {index} has an invalid size value.'
+                if not math.isfinite(size_value) or size_value <= 0:
+                    return None, f'{list_label} display {index} size must be greater than zero.'
+            display = _normalize_companion_surface_display(item, surfaces_by_id, include_render_size=False)
+            if not display:
+                continue
+            sid = display['surface_id']
+            if sid not in surfaces_by_id:
+                return None, f'{list_label} display references unknown surface ID: {sid}'
+            displays_out.append(display)
+        return displays_out, None
+
+    displays, err = _normalize_payload_displays(displays_raw, 'Surface Controls Page')
+    if err or displays is None:
+        return None, err or 'Invalid Surface Controls Page displays.'
+
+    return {
+        'surfaces': surfaces,
+        'surface_controls': displays,
+    }, None
+
+
+def _save_companion_surface_config(payload: dict) -> bool:
+    try:
+        _COMPANION_SURFACES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return bool(write_json(_COMPANION_SURFACES_PATH, payload))
+
+
+def _load_companion_surfaces() -> list[dict[str, str]]:
+    surfaces, _ = _load_companion_surface_config()
+    return surfaces
+
+
+def _load_surface_control_displays() -> list[dict[str, str]]:
+    _, displays = _load_companion_surface_config()
+    return displays
+
+
+def _companion_surface_by_id(surface_id: str) -> dict[str, str] | None:
+    sid = str(surface_id or '').strip()
+    if not sid:
+        return None
+    for surface in _load_companion_surfaces():
+        if str(surface.get('id') or '') == sid:
+            return surface
+    return None
+
+
+def _companion_base_url() -> str:
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    host = str(cfg.get('companion_surface_ip') or cfg.get('companion_ip') or '127.0.0.1').strip() or '127.0.0.1'
+    try:
+        port = int(cfg.get('companion_surface_port') or cfg.get('companion_port') or 8000)
+    except Exception:
+        port = 8000
+    return f"http://{host}:{port}"
+
+
+def _companion_surface_url(surface_id: str) -> str:
+    sid = str(surface_id or '').strip().strip('/')
+    return f"{_companion_base_url()}/emulator/{sid}"
 
 
 _videohub_rooms_lock = threading.Lock()
@@ -4763,6 +5587,134 @@ def api_set_config():
                 pass
 
         return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/api/config/export-items')
+def api_config_export_items():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+    return jsonify({'ok': True, 'items': _config_transport_items()})
+
+
+@app.post('/api/config/import/inspect')
+def api_config_import_inspect():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+
+    upload = request.files.get('file')
+    if upload is None or not str(upload.filename or '').strip():
+        return jsonify({'ok': False, 'error': 'Upload a TDeck config export zip.'}), 400
+    filename = secure_filename(upload.filename or 'config.zip')
+    if not filename.lower().endswith('.zip'):
+        return jsonify({'ok': False, 'error': 'Config imports must be .zip files exported from TDeck.'}), 400
+
+    try:
+        with NamedTemporaryFile(prefix='tdeck-config-import-', suffix='.zip', delete=False) as tmp:
+            temp_path = Path(tmp.name)
+            upload.save(tmp)
+        manifest = _inspect_config_transport_zip(temp_path)
+        token = _remember_config_import_upload(temp_path, manifest)
+        _config_transport_log(f"Inspected config import {filename}: {len(manifest.get('items') or [])} item(s)")
+        return jsonify({'ok': True, 'token': token, 'manifest': manifest})
+    except Exception as e:
+        try:
+            temp_path.unlink(missing_ok=True)  # type: ignore[name-defined]
+        except Exception:
+            pass
+        _config_transport_log(f"Import inspect failed: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.post('/api/config/import/apply')
+def api_config_import_apply():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception:
+        body = {}
+    token = str(body.get('token') or '').strip()
+    selected = body.get('items') or []
+    if not token:
+        return jsonify({'ok': False, 'error': 'Import upload is missing. Upload the export zip again.'}), 400
+    if not isinstance(selected, list):
+        return jsonify({'ok': False, 'error': 'Invalid import selection.'}), 400
+    selected_ids = [str(v) for v in selected if str(v or '').strip()]
+
+    with _CONFIG_IMPORT_UPLOAD_LOCK:
+        entry = _CONFIG_IMPORT_UPLOADS.pop(token, None)
+    if not entry:
+        return jsonify({'ok': False, 'error': 'Import upload expired. Upload the export zip again.'}), 400
+
+    zip_path = Path(str(entry.get('path') or ''))
+    try:
+        imported, backup_path = _apply_config_transport_import(zip_path, selected_ids)
+        _config_transport_log(
+            f"Imported config items: {', '.join(str(i.get('path')) for i in imported)}"
+            + (f"; backup={backup_path}" if backup_path else '')
+        )
+        try:
+            _audit('config_import', f"items={len(imported)} backup={backup_path or ''}")
+        except Exception:
+            pass
+        return jsonify({
+            'ok': True,
+            'imported': imported,
+            'backup_path': str(backup_path) if backup_path else '',
+        })
+    except Exception as e:
+        _config_transport_log(f"Import failed: {e}")
+        try:
+            _audit('config_import_fail', str(e))
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            zip_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+@app.route('/api/companion-surfaces-config', methods=['GET'])
+def api_get_companion_surfaces_config():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    payload = _companion_surface_config_payload()
+    resp = jsonify(payload)
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
+
+
+@app.route('/api/companion-surfaces-config', methods=['POST'])
+def api_set_companion_surfaces_config():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:config'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+    payload, err = _normalize_companion_surface_config_payload(data)
+    if err or payload is None:
+        return jsonify({'ok': False, 'error': err or 'Invalid surface config.'}), 400
+    try:
+        if not _save_companion_surface_config(payload):
+            return jsonify({'ok': False, 'error': 'Could not save companion_surfaces.json'}), 500
+        _audit('companion_surfaces_config_update', f"surfaces={len(payload.get('surfaces') or [])} displays={len(payload.get('surface_controls') or [])}")
+        return jsonify({'ok': True, 'config': payload})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

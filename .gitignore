@@ -11,10 +11,12 @@ realtimestt.log
 calendar.pid
 calendar_triggers.json
 transcription_sender_ui.pid
+config_import_backups/
 videohub_room_images/
 
 # Local Config/Event Files
 *.json
+!companion_surfaces.json
 
 auth.db
 .DS_Store

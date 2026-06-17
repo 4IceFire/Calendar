@@ -63,7 +63,6 @@
               <div class="card-body d-flex flex-column" style="min-height:0">
                 <div class="d-flex justify-content-between align-items-center mb-3">
                   <h2 class="h5 mb-0">Users</h2>
-                  <a class="btn btn-sm btn-outline-secondary" href="/admin/backup/authdb">Backup</a>
                 </div>
                 <input class="form-control form-control-sm mb-3" id="permissions-user-search" placeholder="Search users">
                 <div class="list-group flex-grow-1 overflow-auto" id="permissions-user-list" style="min-height:0">
@@ -230,6 +229,30 @@
                             <input class="form-control" name="videohub_allowed_presets_role" value="{{ (group_to_vh.get(g.id).presets if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-presets">
                           </div>
                           <div class="col-12"><div class="form-text">Editing is enabled only when this group has the VideoHub page permission.</div></div>
+                        </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
+                            <div class="fw-semibold">Companion surface clicking</div>
+                            <div class="small text-muted">No selected surfaces means this group can click every configured surface.</div>
+                          </div>
+                          {% if companion_surfaces %}
+                            {% set selected_surfaces = (group_to_companion.get(g.id).click_surfaces if group_to_companion and group_to_companion.get(g.id) else []) %}
+                            {% for surface in companion_surfaces %}
+                              <div class="col-12 col-md-6">
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="companion_click_surfaces_role" value="{{ surface.id }}"
+                                    {% if selected_surfaces and (surface.id in selected_surfaces) %}checked{% endif %}>
+                                  <label class="form-check-label">{{ surface.label }} <span class="text-muted">({{ surface.id }})</span></label>
+                                </div>
+                              </div>
+                            {% endfor %}
+                          {% else %}
+                            <div class="col-12">
+                              <div class="text-muted small">No Companion surfaces are configured.</div>
+                            </div>
+                          {% endif %}
                         </div>
                       </form>
                     {% endif %}
