@@ -30,7 +30,6 @@
             {% if not auth_enabled or can_access('page:surface_controls') %}<li class="nav-item"><a class="nav-link" href="/surface-controls">Surface Controls</a></li>{% endif %}
             {% if not auth_enabled or can_access('page:templates') %}<li class="nav-item"><a class="nav-link" href="/templates">Templates</a></li>{% endif %}
             {% if not auth_enabled or can_access('page:api_reference') %}<li class="nav-item"><a class="nav-link" href="/api-reference">API Reference</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:console') %}<li class="nav-item"><a class="nav-link" href="/console">Console</a></li>{% endif %}
           </ul>
         </div>
         <div class="tdeck-nav-right">
@@ -50,6 +49,9 @@
           </div>
 
           <div class="dropdown tdeck-account-dropdown">
+            {% if not auth_enabled or can_access('page:console') %}
+              <a id="activity-log-alert-badge" class="tdeck-log-alert-badge d-none" href="/console" title="Unseen log warnings/errors">0</a>
+            {% endif %}
             <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
               {% if auth_enabled %}
                 {% if is_authenticated %}{{ current_user.username }}{% else %}Account{% endif %}
@@ -66,6 +68,9 @@
                   {% if can_access('page:config') %}
                     <li><a class="dropdown-item" href="/config">Config</a></li>
                   {% endif %}
+                  {% if can_access('page:console') %}
+                    <li><a id="activity-log-menu-link" class="dropdown-item tdeck-log-menu-link" href="/console"><span>Log</span><span id="activity-log-menu-badge" class="tdeck-log-menu-badge d-none">0</span></a></li>
+                  {% endif %}
                   {% if can_access('page:admin') %}
                     <li><hr class="dropdown-divider"></li>
                     <li><a class="dropdown-item" href="/admin/permissions">Permissions</a></li>
@@ -79,6 +84,7 @@
                 <li><span class="dropdown-item-text small text-muted">Authentication is disabled</span></li>
                 <li><hr class="dropdown-divider"></li>
                 <li><a class="dropdown-item" href="/config">Config</a></li>
+                <li><a id="activity-log-menu-link" class="dropdown-item tdeck-log-menu-link" href="/console"><span>Log</span><span id="activity-log-menu-badge" class="tdeck-log-menu-badge d-none">0</span></a></li>
                 <li><a class="dropdown-item" href="/admin/permissions">Permissions</a></li>
               {% endif %}
             </ul>

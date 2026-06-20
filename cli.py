@@ -13,6 +13,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 from typing import List, Optional
+import sqlite3
 
 from package.core import list_apps, get_app
 from package.apps.calendar import storage, utils
@@ -21,6 +22,56 @@ logger = utils.get_logger()
 from videohub import VideohubClient, get_videohub_client_from_config
 
 PID_FILE = "calendar.pid"
+
+
+def _activity_log_cli_event(action: str, summary: str, *, status: str = "success", target_id=None, details: dict | None = None) -> None:
+    try:
+        conn = sqlite3.connect(str(utils.get_project_path("auth.db")))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_log (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  ts TEXT NOT NULL,
+                  actor_user_id INTEGER,
+                  actor_username TEXT,
+                  actor_display TEXT,
+                  source TEXT NOT NULL DEFAULT 'system',
+                  action TEXT NOT NULL,
+                  target_type TEXT,
+                  target_id TEXT,
+                  status TEXT NOT NULL DEFAULT 'info',
+                  summary TEXT,
+                  details_json TEXT,
+                  ip TEXT,
+                  request_path TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO activity_log(
+                  ts,actor_display,source,action,target_type,target_id,status,summary,details_json
+                )
+                VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "CLI",
+                    "system",
+                    str(action or ""),
+                    "calendar_event",
+                    str(target_id or ""),
+                    str(status or "info"),
+                    str(summary or ""),
+                    json.dumps(details or {}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def _validate_time_hhmm(s: str) -> bool:
@@ -593,6 +644,12 @@ def _set_active(ident: str, value: bool):
         return
     ev.active = value
     _persist_and_touch(events)
+    _activity_log_cli_event(
+        "calendar.event.update",
+        f"Set event '{ev.name}' active={value}",
+        target_id=getattr(ev, "id", ident),
+        details={"event_id": getattr(ev, "id", ident), "event_name": ev.name, "active": bool(value)},
+    )
     print(f"Set active={value} for '{ev.name}'")
 
 
@@ -888,6 +945,21 @@ def main(argv=None):
             )
             events.append(event)
             storage.save_events(events, events_file)
+            _activity_log_cli_event(
+                "calendar.event.create",
+                f"Created event '{args.name}'",
+                target_id=new_id,
+                details={
+                    "event_id": new_id,
+                    "event_name": args.name,
+                    "active": bool(args.active),
+                    "date": args.date,
+                    "time": args.time,
+                    "repeating": bool(args.repeating),
+                    "trigger_count": len(times),
+                    "events_file": events_file,
+                },
+            )
             print(f"Added event '{args.name}'")
             return 0
         except Exception as e:
@@ -912,6 +984,17 @@ def main(argv=None):
             return 1
         events.remove(ev)
         storage.save_events(events, events_file)
+        _activity_log_cli_event(
+            "calendar.event.delete",
+            f"Deleted event '{ev.name}'",
+            target_id=getattr(ev, "id", args.ident),
+            details={
+                "event_id": getattr(ev, "id", args.ident),
+                "event_name": ev.name,
+                "trigger_count": len(getattr(ev, "times", []) or []),
+                "events_file": events_file,
+            },
+        )
         print(f"Removed '{ev.name}'")
         return 0
 
@@ -926,6 +1009,9 @@ def main(argv=None):
         from package.apps.calendar.models import WeekDay
         from datetime import datetime
         try:
+            old_name = ev.name
+            old_active = bool(getattr(ev, "active", True))
+            old_trigger_count = len(getattr(ev, "times", []) or [])
             if args.name:
                 ev.name = args.name
             if args.day:
@@ -944,6 +1030,24 @@ def main(argv=None):
                     times.append(_trigger_from_spec(spec))
                 ev.times = times
             storage.save_events(events, events_file)
+            _activity_log_cli_event(
+                "calendar.event.update",
+                f"Updated event '{ev.name}'",
+                target_id=getattr(ev, "id", args.ident),
+                details={
+                    "event_id": getattr(ev, "id", args.ident),
+                    "old_name": old_name,
+                    "event_name": ev.name,
+                    "old_active": old_active,
+                    "active": bool(getattr(ev, "active", True)),
+                    "date": ev.date.strftime("%Y-%m-%d"),
+                    "time": ev.time.strftime("%H:%M:%S"),
+                    "repeating": bool(ev.repeating),
+                    "old_trigger_count": old_trigger_count,
+                    "trigger_count": len(getattr(ev, "times", []) or []),
+                    "events_file": events_file,
+                },
+            )
             print(f"Updated '{ev.name}'")
         except Exception as e:
             print(f"Failed to update event: {e}")

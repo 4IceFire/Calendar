@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context
 import copy
 import io
 import logging
@@ -8,8 +8,6 @@ import time
 from pathlib import Path
 import shutil
 import sys
-import subprocess
-import shlex
 from collections import deque
 import sqlite3
 import secrets
@@ -543,6 +541,61 @@ def _init_auth_db() -> None:
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS activity_log (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT NOT NULL,
+              actor_user_id INTEGER,
+              actor_username TEXT,
+              actor_display TEXT,
+              source TEXT NOT NULL DEFAULT 'system',
+              action TEXT NOT NULL,
+              target_type TEXT,
+              target_id TEXT,
+              status TEXT NOT NULL DEFAULT 'info',
+              summary TEXT,
+              details_json TEXT,
+              ip TEXT,
+              request_path TEXT
+            )
+            """
+        )
+        try:
+            activity_cols = [str(r['name']) for r in conn.execute('PRAGMA table_info(activity_log)').fetchall()]
+        except Exception:
+            activity_cols = []
+        for col_name, col_type in (
+            ('actor_display', 'TEXT'),
+            ('source', "TEXT NOT NULL DEFAULT 'system'"),
+            ('target_type', 'TEXT'),
+            ('target_id', 'TEXT'),
+            ('status', "TEXT NOT NULL DEFAULT 'info'"),
+            ('summary', 'TEXT'),
+            ('details_json', 'TEXT'),
+            ('request_path', 'TEXT'),
+        ):
+            if col_name not in activity_cols:
+                try:
+                    conn.execute(f'ALTER TABLE activity_log ADD COLUMN {col_name} {col_type}')
+                except Exception:
+                    pass
+        try:
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_activity_log_ts_id ON activity_log(ts DESC, id DESC)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_activity_log_actor ON activity_log(actor_user_id, id DESC)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_activity_log_action ON activity_log(action, id DESC)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_activity_log_status ON activity_log(status, id DESC)')
+        except Exception:
+            pass
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activity_log_ack (
+              actor_user_id INTEGER PRIMARY KEY,
+              acknowledged_activity_id INTEGER NOT NULL DEFAULT 0,
+              acknowledged_at TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS auth_meta (
               key TEXT PRIMARY KEY,
               value TEXT
@@ -564,6 +617,52 @@ def _init_auth_db() -> None:
             )
             """
         )
+        migrated_row = conn.execute(
+            'SELECT value FROM auth_meta WHERE key=?',
+            ('audit_to_activity_log_migrated',),
+        ).fetchone()
+        migrated = str(migrated_row['value']) if migrated_row and migrated_row['value'] is not None else None
+        if migrated != '1':
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT id,ts,user_id,username,action,detail,ip
+                    FROM audit
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+                for row in rows:
+                    details = {'legacy_audit_id': int(row['id'])}
+                    if row['detail'] is not None:
+                        details['detail'] = str(row['detail'])
+                    fallback_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    conn.execute(
+                        """
+                        INSERT INTO activity_log(
+                          ts,actor_user_id,actor_username,actor_display,source,action,
+                          status,summary,details_json,ip
+                        )
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            str(row['ts'] or fallback_ts),
+                            int(row['user_id']) if row['user_id'] is not None else None,
+                            str(row['username'] or '') or None,
+                            str(row['username'] or '') or 'System',
+                            'legacy',
+                            str(row['action'] or ''),
+                            'info',
+                            str(row['action'] or '').replace('_', ' '),
+                            json.dumps(details, ensure_ascii=False),
+                            str(row['ip'] or '') or None,
+                        ),
+                    )
+                conn.execute(
+                    'INSERT INTO auth_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                    ('audit_to_activity_log_migrated', '1'),
+                )
+            except Exception:
+                pass
         conn.commit()
     finally:
         conn.close()
@@ -749,6 +848,105 @@ def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _group_settings_snapshot(group_id: int) -> dict:
+    gid = int(group_id)
+    conn = _db()
+    try:
+        group = conn.execute('SELECT * FROM groups WHERE id=?', (gid,)).fetchone()
+        pages = conn.execute('SELECT page_key FROM group_pages WHERE group_id=? ORDER BY page_key', (gid,)).fetchall()
+    finally:
+        conn.close()
+    if not group:
+        return {}
+    return {
+        'id': gid,
+        'name': str(group['name'] or ''),
+        'auth_idle_timeout_minutes_override': group['auth_idle_timeout_minutes_override'] if 'auth_idle_timeout_minutes_override' in group.keys() else None,
+        'page_keys': sorted([str(r['page_key']) for r in pages or []]),
+        'videohub_allowed_outputs': _parse_group_allowlist_field(group['videohub_allowed_outputs'] if 'videohub_allowed_outputs' in group.keys() else None),
+        'videohub_allowed_inputs': _parse_group_allowlist_field(group['videohub_allowed_inputs'] if 'videohub_allowed_inputs' in group.keys() else None),
+        'videohub_allowed_presets': _parse_group_allowlist_field(group['videohub_allowed_presets'] if 'videohub_allowed_presets' in group.keys() else None),
+        'videohub_can_edit_presets': bool(int(group['videohub_can_edit_presets'] or 0)) if 'videohub_can_edit_presets' in group.keys() and group['videohub_can_edit_presets'] is not None else False,
+        'companion_click_surfaces': _coerce_string_allow_list(group['companion_click_surfaces'] if 'companion_click_surfaces' in group.keys() else None),
+    }
+
+
+def _log_group_setting_changes(before: dict, after: dict) -> None:
+    if not before or not after:
+        return
+    gid = after.get('id') or before.get('id')
+    name = after.get('name') or before.get('name') or f'Group #{gid}'
+    source = _activity_source_default()
+
+    def _changed(key: str) -> bool:
+        return before.get(key) != after.get(key)
+
+    if _changed('page_keys'):
+        before_pages = set(before.get('page_keys') or [])
+        after_pages = set(after.get('page_keys') or [])
+        added = sorted(after_pages - before_pages)
+        removed = sorted(before_pages - after_pages)
+        log_event(
+            'group.pages.update',
+            f"Updated page access for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={'group_id': gid, 'group_name': name, 'added_pages': added, 'removed_pages': removed, 'page_keys': sorted(after_pages)},
+        )
+    if _changed('auth_idle_timeout_minutes_override'):
+        log_event(
+            'group.idle_timeout.update',
+            f"Updated idle timeout override for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={'group_id': gid, 'group_name': name, 'old': before.get('auth_idle_timeout_minutes_override'), 'new': after.get('auth_idle_timeout_minutes_override')},
+        )
+    if _changed('videohub_allowed_outputs') or _changed('videohub_allowed_inputs'):
+        log_event(
+            'group.videohub.routing_allowlist.update',
+            f"Updated VideoHub routing allow-lists for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={'group_id': gid, 'group_name': name, 'old_outputs': before.get('videohub_allowed_outputs'), 'new_outputs': after.get('videohub_allowed_outputs'), 'old_inputs': before.get('videohub_allowed_inputs'), 'new_inputs': after.get('videohub_allowed_inputs')},
+        )
+    if _changed('videohub_allowed_presets'):
+        log_event(
+            'group.videohub.preset_allowlist.update',
+            f"Updated VideoHub preset visibility for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={'group_id': gid, 'group_name': name, 'old': before.get('videohub_allowed_presets'), 'new': after.get('videohub_allowed_presets')},
+        )
+    if _changed('videohub_can_edit_presets'):
+        log_event(
+            'group.videohub.preset_edit.update',
+            f"Updated VideoHub preset edit permission for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={'group_id': gid, 'group_name': name, 'old': before.get('videohub_can_edit_presets'), 'new': after.get('videohub_can_edit_presets')},
+        )
+    if _changed('companion_click_surfaces'):
+        log_event(
+            'group.companion.click_surfaces.update',
+            f"Updated Companion click surfaces for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={'group_id': gid, 'group_name': name, 'old': before.get('companion_click_surfaces'), 'new': after.get('companion_click_surfaces')},
+        )
 
 
 def _get_user_groups(user_id: int | None) -> list[sqlite3.Row]:
@@ -1041,23 +1239,389 @@ def _can_manage_videohub_rooms_for_current_user() -> bool:
         return False
 
 
+_ACTIVITY_LIVE_MAX = 500
+_activity_live_lock = threading.Lock()
+_activity_live_events: deque[dict[str, Any]] = deque(maxlen=_ACTIVITY_LIVE_MAX)
+
+
+def _activity_now() -> str:
+    try:
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return ''
+
+
+def _activity_request_path() -> str:
+    try:
+        if has_request_context():
+            return str(request.path or '')
+    except Exception:
+        pass
+    return ''
+
+
+def _activity_request_ip() -> str:
+    try:
+        if has_request_context():
+            return str(request.remote_addr or '')
+    except Exception:
+        pass
+    return ''
+
+
+def _activity_current_actor() -> tuple[int | None, str, str]:
+    try:
+        if has_request_context() and getattr(current_user, 'is_authenticated', False):
+            uid = int(current_user.get_id())
+            uname = str(getattr(current_user, 'username', None) or '')
+            return uid, uname, uname or f'User #{uid}'
+    except Exception:
+        pass
+    return None, '', ''
+
+
+def _activity_source_default() -> str:
+    path = _activity_request_path()
+    if path.startswith('/api/'):
+        return 'api'
+    if path:
+        return 'web'
+    return 'system'
+
+
+_ACTIVITY_REDACT_KEYS = {
+    'password',
+    'new_password',
+    'current_password',
+    'password_hash',
+    'token',
+    'secret',
+    'csrf',
+    'flask_secret_key',
+    'session',
+    'cookie',
+}
+
+
+def _activity_sanitize(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return '...'
+    if isinstance(value, dict):
+        out = {}
+        for k, v in list(value.items())[:80]:
+            key = str(k)
+            if any(secret_key in key.lower() for secret_key in _ACTIVITY_REDACT_KEYS):
+                out[key] = '[redacted]'
+            else:
+                out[key] = _activity_sanitize(v, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_activity_sanitize(v, depth=depth + 1) for v in list(value)[:80]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, str) and len(value) > 1000:
+            return value[:1000] + '...'
+        return value
+    try:
+        return str(value)[:1000]
+    except Exception:
+        return ''
+
+
+def _activity_details_json(details: Any) -> str | None:
+    if details is None:
+        return None
+    try:
+        text = json.dumps(_activity_sanitize(details), ensure_ascii=False)
+    except Exception:
+        try:
+            text = json.dumps({'detail': str(details)[:1000]}, ensure_ascii=False)
+        except Exception:
+            return None
+    if len(text) > 12000:
+        text = text[:12000] + '...'
+    return text
+
+
+def _activity_ts_param(value: str | None, *, end: bool = False) -> str | None:
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    raw = raw.replace('T', ' ')
+    if len(raw) == 10:
+        return raw + (' 23:59:59' if end else ' 00:00:00')
+    if len(raw) == 16:
+        return raw + (':59' if end else ':00')
+    if len(raw) >= 19:
+        return raw[:19]
+    return None
+
+
+def _activity_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    def get(name: str, default=None):
+        try:
+            return row[name]  # type: ignore[index]
+        except Exception:
+            try:
+                return row.get(name, default)  # type: ignore[attr-defined]
+            except Exception:
+                return default
+
+    details_raw = get('details_json')
+    details = None
+    if details_raw:
+        try:
+            details = json.loads(str(details_raw))
+        except Exception:
+            details = details_raw
+    return {
+        'id': int(get('id') or 0),
+        'ts': str(get('ts') or ''),
+        'actor_user_id': get('actor_user_id'),
+        'actor_username': str(get('actor_username') or ''),
+        'actor_display': str(get('actor_display') or ''),
+        'source': str(get('source') or 'system'),
+        'action': str(get('action') or ''),
+        'target_type': str(get('target_type') or ''),
+        'target_id': str(get('target_id') or ''),
+        'status': str(get('status') or 'info'),
+        'summary': str(get('summary') or ''),
+        'details': details,
+        'details_json': str(details_raw or ''),
+        'ip': str(get('ip') or ''),
+        'request_path': str(get('request_path') or ''),
+    }
+
+
+def _activity_ack_user_id() -> int:
+    try:
+        if _auth_enabled():
+            if has_request_context() and getattr(current_user, 'is_authenticated', False):
+                return int(current_user.get_id())
+            return -1
+    except Exception:
+        return -1
+    return 0
+
+
+def _ensure_activity_log_ack_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_log_ack (
+          actor_user_id INTEGER PRIMARY KEY,
+          acknowledged_activity_id INTEGER NOT NULL DEFAULT 0,
+          acknowledged_at TEXT
+        )
+        """
+    )
+
+
+def _activity_alert_summary() -> dict[str, Any]:
+    uid = _activity_ack_user_id()
+    conn = _db()
+    try:
+        _ensure_activity_log_ack_table(conn)
+        ack_row = conn.execute(
+            'SELECT acknowledged_activity_id FROM activity_log_ack WHERE actor_user_id=?',
+            (uid,),
+        ).fetchone()
+        ack_id = int(ack_row['acknowledged_activity_id'] or 0) if ack_row else 0
+        row = conn.execute(
+            """
+            SELECT
+              count(*) AS c,
+              max(id) AS max_id,
+              sum(CASE WHEN lower(status)='failure' THEN 1 ELSE 0 END) AS failures,
+              sum(CASE WHEN lower(status)='warning' THEN 1 ELSE 0 END) AS warnings
+            FROM activity_log
+            WHERE id > ?
+              AND lower(status) IN ('warning', 'failure')
+            """,
+            (ack_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    total = int(row['c'] or 0) if row else 0
+    failures = int(row['failures'] or 0) if row else 0
+    warnings = int(row['warnings'] or 0) if row else 0
+    return {
+        'count': total,
+        'failures': failures,
+        'warnings': warnings,
+        'severity': 'failure' if failures else ('warning' if warnings else ''),
+        'acknowledged_activity_id': ack_id,
+        'latest_activity_id': int(row['max_id'] or ack_id) if row else ack_id,
+    }
+
+
+def _activity_acknowledge_alerts() -> dict[str, Any]:
+    uid = _activity_ack_user_id()
+    conn = _db()
+    try:
+        _ensure_activity_log_ack_table(conn)
+        row = conn.execute(
+            "SELECT max(id) AS max_id FROM activity_log WHERE lower(status) IN ('warning', 'failure')"
+        ).fetchone()
+        max_id = int(row['max_id'] or 0) if row else 0
+        conn.execute(
+            """
+            INSERT INTO activity_log_ack(actor_user_id, acknowledged_activity_id, acknowledged_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(actor_user_id) DO UPDATE SET
+              acknowledged_activity_id=excluded.acknowledged_activity_id,
+              acknowledged_at=excluded.acknowledged_at
+            """,
+            (uid, max_id, _activity_now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return _activity_alert_summary()
+
+
+def log_event(
+    action: str,
+    summary: str | None = None,
+    *,
+    source: str | None = None,
+    status: str = 'info',
+    target_type: str | None = None,
+    target_id: str | int | None = None,
+    details: Any = None,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
+    actor_display: str | None = None,
+    ip: str | None = None,
+    request_path: str | None = None,
+    ts: str | None = None,
+) -> dict[str, Any] | None:
+    """Persist a structured activity event and publish it to the live buffer."""
+
+    action_s = str(action or '').strip()
+    if not action_s:
+        return None
+    status_s = str(status or 'info').strip().lower()
+    if status_s not in ('success', 'failure', 'warning', 'info'):
+        status_s = 'info'
+    source_s = str(source or _activity_source_default() or 'system').strip().lower()
+    ts_s = str(ts or _activity_now())
+
+    current_uid, current_uname, current_display = _activity_current_actor()
+    actor_uid = actor_user_id if actor_user_id is not None else current_uid
+    actor_name = str(actor_username if actor_username is not None else current_uname).strip()
+    actor_label = str(actor_display if actor_display is not None else current_display).strip()
+    if not actor_label:
+        if actor_name:
+            actor_label = actor_name
+        elif source_s == 'companion':
+            actor_label = f"Companion{(' ' + str(ip or _activity_request_ip())) if (ip or _activity_request_ip()) else ''}"
+        elif source_s == 'scheduler':
+            actor_label = 'Scheduler'
+        elif source_s == 'api':
+            actor_label = f"API{(' ' + str(ip or _activity_request_ip())) if (ip or _activity_request_ip()) else ''}"
+        else:
+            actor_label = 'System'
+
+    ip_s = str(ip if ip is not None else _activity_request_ip()).strip()
+    path_s = str(request_path if request_path is not None else _activity_request_path()).strip()
+    details_json = _activity_details_json(details)
+    summary_s = str(summary or action_s.replace('_', ' ').replace('.', ' ')).strip()
+    target_id_s = str(target_id) if target_id is not None else None
+
+    row_id = None
+    try:
+        conn = _db()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_log (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  ts TEXT NOT NULL,
+                  actor_user_id INTEGER,
+                  actor_username TEXT,
+                  actor_display TEXT,
+                  source TEXT NOT NULL DEFAULT 'system',
+                  action TEXT NOT NULL,
+                  target_type TEXT,
+                  target_id TEXT,
+                  status TEXT NOT NULL DEFAULT 'info',
+                  summary TEXT,
+                  details_json TEXT,
+                  ip TEXT,
+                  request_path TEXT
+                )
+                """
+            )
+            cur = conn.execute(
+                """
+                INSERT INTO activity_log(
+                  ts,actor_user_id,actor_username,actor_display,source,action,
+                  target_type,target_id,status,summary,details_json,ip,request_path
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    ts_s,
+                    actor_uid,
+                    actor_name or None,
+                    actor_label or None,
+                    source_s,
+                    action_s,
+                    str(target_type or '').strip() or None,
+                    target_id_s,
+                    status_s,
+                    summary_s,
+                    details_json,
+                    ip_s or None,
+                    path_s or None,
+                ),
+            )
+            row_id = int(cur.lastrowid or 0)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        row_id = None
+
+    event = {
+        'id': int(row_id or 0),
+        'ts': ts_s,
+        'actor_user_id': actor_uid,
+        'actor_username': actor_name,
+        'actor_display': actor_label,
+        'source': source_s,
+        'action': action_s,
+        'target_type': str(target_type or ''),
+        'target_id': target_id_s or '',
+        'status': status_s,
+        'summary': summary_s,
+        'details': _activity_sanitize(details) if details is not None else None,
+        'details_json': details_json or '',
+        'ip': ip_s,
+        'request_path': path_s,
+    }
+    with _activity_live_lock:
+        _activity_live_events.append(event)
+    return event
+
+
 def _audit(action: str, detail: str | None = None) -> None:
+    ts = _activity_now()
+    uid, uname, _actor_display = _activity_current_actor()
+    ip = _activity_request_ip()
     try:
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_event(
+            str(action or ''),
+            str(action or '').replace('_', ' '),
+            source=_activity_source_default(),
+            status='info',
+            details={'detail': detail} if detail is not None else None,
+            actor_user_id=uid,
+            actor_username=uname or None,
+            ip=ip or None,
+            ts=ts,
+        )
     except Exception:
-        ts = ''
-    try:
-        uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
-    except Exception:
-        uid = None
-    try:
-        uname = str(getattr(current_user, 'username', None) or '') if getattr(current_user, 'is_authenticated', False) else ''
-    except Exception:
-        uname = ''
-    try:
-        ip = str(request.remote_addr or '')
-    except Exception:
-        ip = ''
+        pass
     try:
         conn = _db()
         try:
@@ -1967,7 +2531,7 @@ def _handle_forbidden(err):
     return render_template('access_denied.html'), 403
 
 
-# --- Console capture + CLI runner (Web UI) ---
+# --- Low-level stdout/stderr capture (diagnostic only) ---
 _CONSOLE_MAX_LINES = 2000
 _console_lock = threading.Lock()
 _console_lines: deque[tuple[int, str, str]] = deque(maxlen=_CONSOLE_MAX_LINES)
@@ -1975,7 +2539,7 @@ _console_seq = 0
 
 
 def _console_append(text: str) -> None:
-    """Append text to the in-memory console buffer.
+    """Append text to the in-memory diagnostic buffer.
 
     The buffer stores newline-terminated lines for convenient rendering.
     """
@@ -2023,7 +2587,14 @@ def _config_transport_log(message: str) -> None:
     except Exception:
         pass
     try:
-        _console_append(line + "\n")
+        log_event(
+            'config.transport',
+            line,
+            source='web' if _activity_request_path() else 'system',
+            status='info',
+            target_type='config',
+            details={'message': message},
+        )
     except Exception:
         pass
 
@@ -2390,7 +2961,7 @@ def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> t
 
 
 class _ConsoleTee:
-    """Tee writes to the original stream AND the console buffer."""
+    """Tee writes to the original stream AND the diagnostic buffer."""
 
     def __init__(self, original, stream_name: str):
         self._original = original
@@ -2421,7 +2992,7 @@ class _ConsoleTee:
 
 class _ConsoleLogHandler(logging.Handler):
     def filter(self, record: logging.LogRecord) -> bool:
-        # Hide noisy request/access logs in the Web Console.
+        # Hide noisy request/access logs from the diagnostic buffer.
         try:
             name = record.name or ''
         except Exception:
@@ -2434,7 +3005,7 @@ class _ConsoleLogHandler(logging.Handler):
             msg = record.getMessage() or ''
         except Exception:
             msg = ''
-        if '"GET /api/console/logs' in msg or '"POST /api/console/run' in msg:
+        if '"GET /api/activity-log' in msg or '"GET /api/activity-log/live' in msg:
             return False
         return True
 
@@ -2447,7 +3018,7 @@ class _ConsoleLogHandler(logging.Handler):
 
 
 def _install_console_capture() -> None:
-    """Capture server stdout/stderr + logging into the console buffer."""
+    """Capture server stdout/stderr + logging into the diagnostic buffer."""
     try:
         if not getattr(sys.stdout, '_webui_console_wrapped', False):
             sys.stdout = _ConsoleTee(sys.stdout, 'stdout')
@@ -2651,7 +3222,15 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
         suffix = ''
 
     try:
-        _console_append(f"[STATUS] {label} is now {state}{suffix}\n")
+        log_event(
+            f'{service}.connection.{"connected" if bool(connected) else "disconnected"}',
+            f"{label} is now {state}{suffix}",
+            source='system',
+            status='success' if bool(connected) else 'warning',
+            target_type='integration',
+            target_id=str(service or label or ''),
+            details={'service': service, 'label': label, 'connected': bool(connected), 'state': state, 'detail': detail},
+        )
     except Exception:
         pass
 
@@ -3129,17 +3708,16 @@ def admin_permissions_page():
                     is_admin_group = False
 
                 if not is_admin_group:
+                    before_group = _group_settings_snapshot(gid)
                     if 'auth_idle_timeout_minutes_override_role' in request.form:
                         try:
                             _set_group_idle_timeout_override(gid, request.form.get('auth_idle_timeout_minutes_override_role'))
-                            _audit('group_idle_timeout_override_update', f'group_id={gid}')
                         except Exception:
                             pass
 
                     keys = request.form.getlist('page_keys')
                     try:
                         _set_group_pages(gid, [str(k) for k in keys])
-                        _audit('group_pages_update', f'group_id={gid} keys={len(keys)}')
                     except Exception:
                         pass
 
@@ -3149,7 +3727,6 @@ def admin_permissions_page():
                             outs_raw = request.form.get('videohub_allowed_outputs_role')
                             ins_raw = request.form.get('videohub_allowed_inputs_role')
                             _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
-                            _audit('group_videohub_allowlists_update', f'group_id={gid}')
                     except Exception:
                         pass
 
@@ -3158,7 +3735,6 @@ def admin_permissions_page():
                         if 'page:videohub' in [str(k) for k in keys]:
                             preset_ids_raw = request.form.get('videohub_allowed_presets_role')
                             _set_group_videohub_allowed_preset_ids(gid, preset_ids_raw)
-                            _audit('group_videohub_preset_allowlist_update', f'group_id={gid}')
                     except Exception:
                         pass
 
@@ -3167,14 +3743,16 @@ def admin_permissions_page():
                         if 'page:videohub' in [str(k) for k in keys]:
                             can_edit = (request.form.get('videohub_can_edit_presets_role') == 'on')
                             _set_group_videohub_can_edit_presets(gid, bool(can_edit))
-                            _audit('group_videohub_can_edit_presets_update', f'group_id={gid} enabled={int(bool(can_edit))}')
                     except Exception:
                         pass
 
                     # Per-group Companion surface click allow-list.
                     try:
                         _set_group_companion_click_surfaces(gid, request.form.getlist('companion_click_surfaces_role'))
-                        _audit('group_companion_click_surfaces_update', f'group_id={gid}')
+                    except Exception:
+                        pass
+                    try:
+                        _log_group_setting_changes(before_group, _group_settings_snapshot(gid))
                     except Exception:
                         pass
 
@@ -3436,10 +4014,10 @@ def api_admin_group_update(group_id: int):
 
     # Admin groups are allow-all and not editable here.
     if not is_admin_group:
+        before_group = _group_settings_snapshot(gid)
         if 'auth_idle_timeout_minutes_override_role' in data:
             try:
                 _set_group_idle_timeout_override(gid, data.get('auth_idle_timeout_minutes_override_role'))
-                _audit('group_idle_timeout_override_update', f'group_id={gid}')
             except Exception:
                 pass
 
@@ -3449,7 +4027,6 @@ def api_admin_group_update(group_id: int):
                 keys = []
             keys = [str(k) for k in keys]
             _set_group_pages(gid, keys)
-            _audit('group_pages_update', f'group_id={gid} keys={len(keys)}')
         except Exception:
             pass
 
@@ -3460,7 +4037,6 @@ def api_admin_group_update(group_id: int):
                 outs_raw = data.get('videohub_allowed_outputs_role')
                 ins_raw = data.get('videohub_allowed_inputs_role')
                 _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
-                _audit('group_videohub_allowlists_update', f'group_id={gid}')
         except Exception:
             pass
 
@@ -3470,7 +4046,6 @@ def api_admin_group_update(group_id: int):
             if 'page:videohub' in keys_set:
                 preset_ids_raw = data.get('videohub_allowed_presets_role')
                 _set_group_videohub_allowed_preset_ids(gid, preset_ids_raw)
-                _audit('group_videohub_preset_allowlist_update', f'group_id={gid}')
         except Exception:
             pass
 
@@ -3481,7 +4056,6 @@ def api_admin_group_update(group_id: int):
                 enabled_raw = data.get('videohub_can_edit_presets_role')
                 enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
                 _set_group_videohub_can_edit_presets(gid, bool(enabled))
-                _audit('group_videohub_can_edit_presets_update', f'group_id={gid} enabled={int(bool(enabled))}')
         except Exception:
             pass
 
@@ -3489,7 +4063,10 @@ def api_admin_group_update(group_id: int):
         try:
             if 'companion_click_surfaces_role' in data:
                 _set_group_companion_click_surfaces(gid, data.get('companion_click_surfaces_role'))
-                _audit('group_companion_click_surfaces_update', f'group_id={gid}')
+        except Exception:
+            pass
+        try:
+            _log_group_setting_changes(before_group, _group_settings_snapshot(gid))
         except Exception:
             pass
 
@@ -3519,12 +4096,29 @@ def api_admin_user_update(user_id: int):
 
     conn = _db()
     try:
+        before = _user_access_snapshot(conn, int(user_id))
         ok = _admin_update_user(conn, int(user_id), group_ids, 1 if is_active else 0)
         if not ok:
             conn.rollback()
             return jsonify({'ok': False, 'error': 'Cannot remove or disable the last active admin user'}), 400
         conn.commit()
-        _audit('user_update', f'id={int(user_id)}')
+        after = _user_access_snapshot(conn, int(user_id))
+        group_changes = _group_snapshot_diff(before.get('groups') or [], after.get('groups') or [])
+        if before.get('is_active') != after.get('is_active') or group_changes.get('added_groups') or group_changes.get('removed_groups'):
+            log_event(
+                'user.access.update',
+                f"Updated access for user '{after.get('username') or before.get('username') or user_id}'",
+                source='api',
+                status='success',
+                target_type='user',
+                target_id=int(user_id),
+                details={
+                    'user_id': int(user_id),
+                    'username': after.get('username') or before.get('username'),
+                    'active': {'old': before.get('is_active'), 'new': after.get('is_active')},
+                    **group_changes,
+                },
+            )
     finally:
         conn.close()
     return jsonify({'ok': True})
@@ -3532,6 +4126,36 @@ def api_admin_user_update(user_id: int):
 
 def _generated_password() -> str:
     return secrets.token_urlsafe(12).replace('-', 'A').replace('_', '9')[:16]
+
+
+def _user_access_snapshot(conn: sqlite3.Connection, user_id: int) -> dict:
+    user = conn.execute('SELECT id,username,full_name,email,is_active FROM users WHERE id=?', (int(user_id),)).fetchone()
+    groups = conn.execute(
+        """
+        SELECT g.id,g.name
+        FROM user_groups ug
+        JOIN groups g ON g.id=ug.group_id
+        WHERE ug.user_id=?
+        ORDER BY lower(g.name)
+        """,
+        (int(user_id),),
+    ).fetchall()
+    return {
+        'id': int(user_id),
+        'username': str(user['username'] or '') if user else '',
+        'full_name': str(user['full_name'] or '') if user else '',
+        'email': str(user['email'] or '') if user else '',
+        'is_active': bool(int(user['is_active'] or 0)) if user else False,
+        'groups': [{'id': int(g['id']), 'name': str(g['name'] or '')} for g in groups or []],
+    }
+
+
+def _group_snapshot_diff(old_groups: list[dict], new_groups: list[dict]) -> dict:
+    old_by_id = {int(g.get('id')): dict(g) for g in old_groups or [] if g.get('id') is not None}
+    new_by_id = {int(g.get('id')): dict(g) for g in new_groups or [] if g.get('id') is not None}
+    added = [new_by_id[gid] for gid in sorted(set(new_by_id) - set(old_by_id))]
+    removed = [old_by_id[gid] for gid in sorted(set(old_by_id) - set(new_by_id))]
+    return {'added_groups': added, 'removed_groups': removed}
 
 
 def _admin_user_detail_context(user_id: int, error: str | None = None, message: str | None = None) -> dict[str, Any]:
@@ -3567,13 +4191,20 @@ def _admin_user_detail_context(user_id: int, error: str | None = None, message: 
         ).fetchall()
         audit_rows = conn.execute(
             """
-            SELECT ts,username,action,detail,ip
-            FROM audit
-            WHERE user_id=? OR detail LIKE ?
+            SELECT
+              ts,
+              actor_username AS username,
+              action,
+              COALESCE(summary, details_json) AS detail,
+              ip
+            FROM activity_log
+            WHERE actor_user_id=?
+               OR (target_type='user' AND target_id=?)
+               OR details_json LIKE ?
             ORDER BY id DESC
             LIMIT 30
             """,
-            (int(user_id), f'%id={int(user_id)}%'),
+            (int(user_id), str(int(user_id)), f'%id={int(user_id)}%'),
         ).fetchall()
     finally:
         conn.close()
@@ -3592,6 +4223,7 @@ def _admin_user_detail_context(user_id: int, error: str | None = None, message: 
         'generated_password': generated_password,
         'error': error,
         'message': message,
+        'saved': str(request.args.get('saved') or '').strip(),
     }
 
 
@@ -3643,7 +4275,20 @@ def admin_user_detail_page(user_id: int):
                     (username, full_name, email, now, actor, int(user_id)),
                 )
                 conn.commit()
-                _audit('user_profile_update', f'id={int(user_id)}')
+                log_event(
+                    'user.profile.update',
+                    f"Updated profile for user '{username}'",
+                    source='web',
+                    status='success',
+                    target_type='user',
+                    target_id=int(user_id),
+                    details={
+                        'user_id': int(user_id),
+                        'username': {'old': str(user['username'] or ''), 'new': username},
+                        'full_name': {'old': str(user['full_name'] or ''), 'new': full_name},
+                        'email': {'old': str(user['email'] or ''), 'new': email},
+                    },
+                )
                 return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='profile'))
 
             if action == 'update_access':
@@ -3651,13 +4296,30 @@ def admin_user_detail_page(user_id: int):
                 group_ids = _form_group_ids()
                 if _would_remove_last_active_admin(conn, int(user_id), is_active=is_active, group_ids=group_ids):
                     return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Cannot remove or disable the last active admin user.'))
+                before = _user_access_snapshot(conn, int(user_id))
                 conn.execute(
                     'UPDATE users SET is_active=?,updated_at=?,updated_by=? WHERE id=?',
                     (1 if is_active else 0, now, actor, int(user_id)),
                 )
                 _admin_replace_user_groups(conn, int(user_id), group_ids)
                 conn.commit()
-                _audit('user_access_update', f'id={int(user_id)} groups={len(group_ids)} active={int(is_active)}')
+                after = _user_access_snapshot(conn, int(user_id))
+                group_changes = _group_snapshot_diff(before.get('groups') or [], after.get('groups') or [])
+                if before.get('is_active') != after.get('is_active') or group_changes.get('added_groups') or group_changes.get('removed_groups'):
+                    log_event(
+                        'user.access.update',
+                        f"Updated access for user '{after.get('username') or before.get('username') or user_id}'",
+                        source='web',
+                        status='success',
+                        target_type='user',
+                        target_id=int(user_id),
+                        details={
+                            'user_id': int(user_id),
+                            'username': after.get('username') or before.get('username'),
+                            'active': {'old': before.get('is_active'), 'new': after.get('is_active')},
+                            **group_changes,
+                        },
+                    )
                 return redirect(url_for('admin_user_detail_page', user_id=int(user_id), saved='access'))
 
             if action == 'lock_user':
@@ -4627,6 +5289,65 @@ def _normalize_videohub_rooms_config(raw) -> dict:
     return out
 
 
+def _videohub_room_name_map(cfg: dict) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for room in (cfg.get('rooms') or []):
+        if not isinstance(room, dict):
+            continue
+        rid = str(room.get('id') or '').strip()
+        if rid:
+            names[rid] = str(room.get('name') or rid)
+    names[''] = 'Unassigned'
+    return names
+
+
+def _videohub_rooms_diff(old_cfg: dict, new_cfg: dict) -> dict:
+    old_rooms = {str(r.get('id') or ''): dict(r) for r in (old_cfg.get('rooms') or []) if isinstance(r, dict) and str(r.get('id') or '').strip()}
+    new_rooms = {str(r.get('id') or ''): dict(r) for r in (new_cfg.get('rooms') or []) if isinstance(r, dict) and str(r.get('id') or '').strip()}
+    room_names = {**_videohub_room_name_map(old_cfg), **_videohub_room_name_map(new_cfg)}
+    created = [{'id': rid, 'name': room_names.get(rid, rid)} for rid in sorted(set(new_rooms) - set(old_rooms))]
+    deleted = [{'id': rid, 'name': room_names.get(rid, rid)} for rid in sorted(set(old_rooms) - set(new_rooms))]
+    updated = []
+    for rid in sorted(set(old_rooms) & set(new_rooms)):
+        changes = {}
+        for key in ('name', 'background_image'):
+            if old_rooms[rid].get(key) != new_rooms[rid].get(key):
+                changes[key] = {'old': old_rooms[rid].get(key), 'new': new_rooms[rid].get(key)}
+        if changes:
+            updated.append({'id': rid, 'name': room_names.get(rid, rid), 'changes': changes})
+
+    old_layouts = old_cfg.get('output_layouts') if isinstance(old_cfg.get('output_layouts'), dict) else {}
+    new_layouts = new_cfg.get('output_layouts') if isinstance(new_cfg.get('output_layouts'), dict) else {}
+    output_room_changes = []
+    for out_n in sorted(set([str(k) for k in old_layouts.keys()] + [str(k) for k in new_layouts.keys()]), key=lambda x: int(x) if str(x).isdigit() else 999999):
+        old_layout = old_layouts.get(out_n) if isinstance(old_layouts.get(out_n), dict) else {}
+        new_layout = new_layouts.get(out_n) if isinstance(new_layouts.get(out_n), dict) else {}
+        old_room = str(old_layout.get('room_id') or '')
+        new_room = str(new_layout.get('room_id') or '')
+        if old_room != new_room:
+            output_room_changes.append({
+                'output': int(out_n) if str(out_n).isdigit() else out_n,
+                'old_room_id': old_room,
+                'old_room_name': room_names.get(old_room, old_room or 'Unassigned'),
+                'new_room_id': new_room,
+                'new_room_name': room_names.get(new_room, new_room or 'Unassigned'),
+            })
+
+    old_inputs = [int(x) for x in (old_cfg.get('filtered_inputs') or []) if isinstance(x, int) or str(x).isdigit()]
+    new_inputs = [int(x) for x in (new_cfg.get('filtered_inputs') or []) if isinstance(x, int) or str(x).isdigit()]
+    diff = {
+        'rooms_created': created,
+        'rooms_updated': updated,
+        'rooms_deleted': deleted,
+        'output_room_changes': output_room_changes,
+    }
+    added_inputs = sorted(set(new_inputs) - set(old_inputs))
+    removed_inputs = sorted(set(old_inputs) - set(new_inputs))
+    if added_inputs or removed_inputs:
+        diff['filtered_inputs'] = {'added': added_inputs, 'removed': removed_inputs}
+    return diff
+
+
 def _load_videohub_rooms_config() -> dict:
     p = _videohub_rooms_config_path()
     with _videohub_rooms_lock:
@@ -4912,6 +5633,77 @@ def _load_button_templates_bundle() -> tuple[dict, list[dict], bool]:
 def _load_button_templates_tree() -> tuple[dict, bool]:
     tree, _, changed = _load_button_templates_bundle()
     return tree, changed
+
+
+def _button_templates_tree_diff(old_tree: dict, new_tree: dict) -> dict:
+    def _by_id(items) -> dict[str, dict]:
+        out = {}
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            iid = str(item.get('id') or '').strip()
+            if iid:
+                out[iid] = dict(item)
+        return out
+
+    old_folders = _by_id(old_tree.get('folders') if isinstance(old_tree, dict) else [])
+    new_folders = _by_id(new_tree.get('folders') if isinstance(new_tree, dict) else [])
+    old_templates = _by_id(old_tree.get('templates') if isinstance(old_tree, dict) else [])
+    new_templates = _by_id(new_tree.get('templates') if isinstance(new_tree, dict) else [])
+
+    def _item_name(item: dict, fallback: str) -> str:
+        return str(item.get('name') or item.get('label') or fallback)
+
+    diff = {
+        'folders_created': [],
+        'folders_updated': [],
+        'folders_deleted': [],
+        'templates_created': [],
+        'templates_updated': [],
+        'templates_deleted': [],
+    }
+
+    for fid in sorted(set(new_folders) - set(old_folders)):
+        diff['folders_created'].append({'id': fid, 'name': _item_name(new_folders[fid], fid), 'parent_id': new_folders[fid].get('parentId')})
+    for fid in sorted(set(old_folders) - set(new_folders)):
+        diff['folders_deleted'].append({'id': fid, 'name': _item_name(old_folders[fid], fid), 'parent_id': old_folders[fid].get('parentId')})
+    for fid in sorted(set(old_folders) & set(new_folders)):
+        changes = {}
+        for key in ('name', 'parentId', 'order'):
+            if old_folders[fid].get(key) != new_folders[fid].get(key):
+                changes[key] = {'old': old_folders[fid].get(key), 'new': new_folders[fid].get(key)}
+        if changes:
+            diff['folders_updated'].append({'id': fid, 'name': _item_name(new_folders[fid], fid), 'changes': changes})
+
+    for tid in sorted(set(new_templates) - set(old_templates)):
+        diff['templates_created'].append({'id': tid, 'label': _item_name(new_templates[tid], tid), 'folder_id': new_templates[tid].get('folderId')})
+    for tid in sorted(set(old_templates) - set(new_templates)):
+        diff['templates_deleted'].append({'id': tid, 'label': _item_name(old_templates[tid], tid), 'folder_id': old_templates[tid].get('folderId')})
+    for tid in sorted(set(old_templates) & set(new_templates)):
+        changes = {}
+        for key in ('label', 'pattern', 'buttonURL', 'folderId', 'order'):
+            if old_templates[tid].get(key) != new_templates[tid].get(key):
+                changes[key] = {'old': old_templates[tid].get(key), 'new': new_templates[tid].get(key)}
+        if changes:
+            diff['templates_updated'].append({'id': tid, 'label': _item_name(new_templates[tid], tid), 'changes': changes})
+    return {key: value for key, value in diff.items() if value}
+
+
+def _button_templates_tree_diff_summary(diff: dict) -> str:
+    parts = []
+    labels = (
+        ('folders_created', 'folder created'),
+        ('folders_updated', 'folder changed'),
+        ('folders_deleted', 'folder deleted'),
+        ('templates_created', 'template created'),
+        ('templates_updated', 'template changed'),
+        ('templates_deleted', 'template deleted'),
+    )
+    for key, label in labels:
+        count = len(diff.get(key) or [])
+        if count:
+            parts.append(f"{count} {label}{'' if count == 1 else 's'}")
+    return ', '.join(parts) if parts else 'no visible changes'
 
 
 def _save_button_templates_tree(tree: dict) -> bool:
@@ -5204,6 +5996,10 @@ def api_add_button_template():
     ok = _save_button_templates_tree(tree)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    try:
+        log_event('template.button.create', f"Created button template '{label}'", source='web', status='success', target_type='button_template', target_id=tpl.get('id'), details={'label': label, 'pattern': pattern, 'folder_id': folder_id})
+    except Exception:
+        pass
     return jsonify({'ok': True, 'template': tpl})
 
 
@@ -5224,6 +6020,10 @@ def api_delete_button_template(tpl_id: str):
     ok = _save_button_templates_tree(tree)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    try:
+        log_event('template.button.delete', f"Deleted button template '{removed.get('label', tpl_id) if isinstance(removed, dict) else tpl_id}'", source='web', status='success', target_type='button_template', target_id=tpl_id, details={'removed': removed})
+    except Exception:
+        pass
     return jsonify({'ok': True, 'removed': removed})
 
 
@@ -5288,6 +6088,10 @@ def api_update_button_template(tpl_id: str):
 
     # Propagate URL change across stored data
     replace_stats = _replace_button_url_everywhere(old_url, new_url)
+    try:
+        log_event('template.button.update', f"Updated button template '{label}'", source='web', status='success', target_type='button_template', target_id=tpl_id, details={'old': old, 'new': arr[int(idx)], 'replaced': replace_stats})
+    except Exception:
+        pass
     return jsonify({'ok': True, 'template': arr[int(idx)], 'replaced': {'old': old_url, 'new': new_url}, **replace_stats})
 
 
@@ -5305,9 +6109,23 @@ def api_put_buttons_tree():
         return jsonify({'ok': False, 'error': 'tree required'}), 400
 
     # Save as-is (UI is the authority). A subsequent GET /api/templates will normalize.
+    old_tree, _ = _load_button_templates_tree()
     ok = _save_button_templates_tree(tree)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    try:
+        diff = _button_templates_tree_diff(old_tree, tree)
+        summary = _button_templates_tree_diff_summary(diff)
+        log_event(
+            'template.button.save_tree',
+            f"Updated button template tree: {summary}",
+            source='web',
+            status='success',
+            target_type='button_template_tree',
+            details={'changes': diff, 'template_count': len(tree.get('templates') or []), 'folder_count': len(tree.get('folders') or [])},
+        )
+    except Exception:
+        pass
     return jsonify({'ok': True})
 
 
@@ -5356,6 +6174,10 @@ def api_add_trigger_template():
     ok = _save_trigger_templates_list(arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    try:
+        log_event('template.trigger.create', f"Created trigger template '{label}'", source='web', status='success', target_type='trigger_template', target_id=arr[-1].get('id'), details={'label': label, 'trigger_count': len(normalized_times)})
+    except Exception:
+        pass
     return jsonify({'ok': True, 'template': arr[-1]})
 
 
@@ -5368,6 +6190,10 @@ def api_delete_trigger_template(idx: int):
     ok = _save_trigger_templates_list(arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    try:
+        log_event('template.trigger.delete', f"Deleted trigger template '{removed.get('label', idx) if isinstance(removed, dict) else idx}'", source='web', status='success', target_type='trigger_template', target_id=(removed.get('id') if isinstance(removed, dict) else idx), details={'removed': removed})
+    except Exception:
+        pass
     return jsonify({'ok': True, 'removed': removed})
 
 
@@ -5417,6 +6243,10 @@ def api_update_trigger_template(idx: int):
     ok = _save_trigger_templates_list(arr)
     if not ok:
         return jsonify({'ok': False, 'error': 'failed to save'}), 500
+    try:
+        log_event('template.trigger.update', f"Updated trigger template '{label}'", source='web', status='success', target_type='trigger_template', target_id=tpl_id, details={'old': prev, 'new': arr[idx], 'trigger_count': len(normalized_times)})
+    except Exception:
+        pass
     return jsonify({'ok': True, 'template': arr[idx]})
 
 
@@ -5528,6 +6358,7 @@ def api_set_config():
 
     try:
         cfg = utils.get_config()
+        old_cfg = copy.deepcopy(cfg)
 
         # Compute port change before writing so we can tell the UI what's happening.
         try:
@@ -5545,6 +6376,19 @@ def api_set_config():
         # persist
         utils.save_config(cfg)
         utils.reload_config(force=True)
+        try:
+            changed_keys = sorted([str(k) for k in set(old_cfg.keys()) | set(cfg.keys()) if old_cfg.get(k) != cfg.get(k)])
+            log_event(
+                'config.update',
+                f"Updated config ({len(changed_keys)} setting{'s' if len(changed_keys) != 1 else ''})",
+                source='web',
+                status='success',
+                target_type='config',
+                target_id='config.json',
+                details={'changed_keys': changed_keys},
+            )
+        except Exception:
+            pass
         # re-apply logging configuration in case `debug` was changed
         try:
             _apply_logging_config()
@@ -5573,7 +6417,15 @@ def api_set_config():
                 except Exception:
                     pass
                 try:
-                    _console_append(f"[WEB] Port changed; restarting server on port {port}...\n")
+                    log_event(
+                        'web.port.restart',
+                        f'Port changed; restarting server on port {port}',
+                        source='system',
+                        status='info',
+                        target_type='webserver',
+                        target_id=str(port),
+                        details={'port': port},
+                    )
                 except Exception:
                     pass
                 try:
@@ -5759,7 +6611,17 @@ def api_videohub_presets_create():
         cfg = {}
     try:
         preset = app_inst.upsert_preset(cfg, body)  # type: ignore[attr-defined]
-        return jsonify({'ok': True, 'preset': preset.to_dict() if hasattr(preset, 'to_dict') else preset})
+        preset_dict = preset.to_dict() if hasattr(preset, 'to_dict') else preset
+        log_event(
+            'videohub.preset.create',
+            f"Created VideoHub preset #{preset_dict.get('id') if isinstance(preset_dict, dict) else ''}".strip(),
+            source='web',
+            status='success',
+            target_type='videohub_preset',
+            target_id=preset_dict.get('id') if isinstance(preset_dict, dict) else None,
+            details={'preset': preset_dict},
+        )
+        return jsonify({'ok': True, 'preset': preset_dict})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
 
@@ -5781,7 +6643,17 @@ def api_videohub_presets_update(preset_id: int):
         cfg = {}
     try:
         preset = app_inst.upsert_preset(cfg, body)  # type: ignore[attr-defined]
-        return jsonify({'ok': True, 'preset': preset.to_dict() if hasattr(preset, 'to_dict') else preset})
+        preset_dict = preset.to_dict() if hasattr(preset, 'to_dict') else preset
+        log_event(
+            'videohub.preset.update',
+            f"Updated VideoHub preset #{preset_id}",
+            source='web',
+            status='success',
+            target_type='videohub_preset',
+            target_id=preset_id,
+            details={'preset': preset_dict},
+        )
+        return jsonify({'ok': True, 'preset': preset_dict})
     except ValueError as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:
@@ -5801,6 +6673,14 @@ def api_videohub_presets_delete(preset_id: int):
         ok = bool(app_inst.delete_preset(cfg, preset_id))  # type: ignore[attr-defined]
         if not ok:
             return jsonify({'ok': False, 'error': 'preset not found'}), 404
+        log_event(
+            'videohub.preset.delete',
+            f"Deleted VideoHub preset #{preset_id}",
+            source='web',
+            status='success',
+            target_type='videohub_preset',
+            target_id=preset_id,
+        )
         return jsonify({'ok': True})
     except ValueError as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
@@ -5837,7 +6717,17 @@ def api_videohub_presets_lock(preset_id: int):
 
     try:
         updated = app_inst.set_preset_locked(cfg, preset_id, bool(locked))  # type: ignore[attr-defined]
-        return jsonify({'ok': True, 'preset': updated.to_dict() if hasattr(updated, 'to_dict') else updated})
+        updated_dict = updated.to_dict() if hasattr(updated, 'to_dict') else updated
+        log_event(
+            'videohub.preset.lock',
+            f"{'Locked' if bool(locked) else 'Unlocked'} VideoHub preset #{preset_id}",
+            source='web',
+            status='success',
+            target_type='videohub_preset',
+            target_id=preset_id,
+            details={'locked': bool(locked), 'preset': updated_dict},
+        )
+        return jsonify({'ok': True, 'preset': updated_dict})
     except KeyError:
         return jsonify({'ok': False, 'error': 'preset not found'}), 404
     except Exception as e:
@@ -5848,6 +6738,18 @@ def api_videohub_presets_lock(preset_id: int):
 def api_videohub_presets_apply(preset_id: int):
     app_inst = _get_videohub_app()
     if app_inst is None or not hasattr(app_inst, 'apply_preset'):
+        try:
+            log_event(
+                'videohub.preset.apply',
+                f'Failed to apply VideoHub preset #{preset_id}: backend unavailable',
+                source='api',
+                status='failure',
+                target_type='videohub_preset',
+                target_id=preset_id,
+                details={'preset_id': preset_id, 'error': 'VideoHub backend not available'},
+            )
+        except Exception:
+            pass
         return jsonify({'ok': False, 'error': 'VideoHub backend not available'}), 500
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
@@ -5860,13 +6762,45 @@ def api_videohub_presets_apply(preset_id: int):
         except Exception:
             pass
         try:
-            _console_append(f"[VIDEOHUB] Applied preset #{preset_id}\n")
+            log_event(
+                'videohub.preset.apply',
+                f'Applied VideoHub preset #{preset_id}',
+                source='api',
+                status='success',
+                target_type='videohub_preset',
+                target_id=preset_id,
+                details={'preset_id': preset_id, 'result': result},
+            )
         except Exception:
             pass
         return jsonify({'ok': True, 'result': result})
     except KeyError:
+        try:
+            log_event(
+                'videohub.preset.apply',
+                f'Failed to apply VideoHub preset #{preset_id}: preset not found',
+                source='api',
+                status='failure',
+                target_type='videohub_preset',
+                target_id=preset_id,
+                details={'preset_id': preset_id, 'error': 'preset not found'},
+            )
+        except Exception:
+            pass
         return jsonify({'ok': False, 'error': 'preset not found'}), 404
     except Exception as e:
+        try:
+            log_event(
+                'videohub.preset.apply',
+                f'Failed to apply VideoHub preset #{preset_id}',
+                source='api',
+                status='failure',
+                target_type='videohub_preset',
+                target_id=preset_id,
+                details={'preset_id': preset_id, 'error': str(e)},
+            )
+        except Exception:
+            pass
         return jsonify({'ok': False, 'error': str(e)}), 400
 
 
@@ -5927,7 +6861,16 @@ def api_videohub_presets_from_device():
 
         preset = app_inst.upsert_preset(cfg, payload)  # type: ignore[attr-defined]
         try:
-            _console_append(f"[VIDEOHUB] Saved snapshot from device as preset #{getattr(preset, 'id', '?')}\n")
+            saved_id = getattr(preset, 'id', None)
+            log_event(
+                'videohub.preset.snapshot',
+                f"Saved VideoHub snapshot as preset #{saved_id or '?'}",
+                source='api',
+                status='success',
+                target_type='videohub_preset',
+                target_id=saved_id,
+                details={'preset_id': saved_id, 'name': name, 'route_count': len(routes)},
+            )
         except Exception:
             pass
 
@@ -6109,6 +7052,7 @@ def api_videohub_rooms_config_put():
 
     old_cfg = _load_videohub_rooms_config()
     new_cfg = _save_videohub_rooms_config(body)
+    room_changes = _videohub_rooms_diff(old_cfg, new_cfg)
 
     # Cleanup orphaned images when rooms are deleted or image is replaced.
     try:
@@ -6119,7 +7063,8 @@ def api_videohub_rooms_config_put():
         new_map = {}
         for r in (new_cfg.get('rooms') or []):
             if isinstance(r, dict):
-                new_map[str(r.get('id') or '')] = str(r.get('background_image') or '')
+                rid = str(r.get('id') or '')
+                new_map[rid] = str(r.get('background_image') or '')
         for rid, old_img in old_map.items():
             if not old_img:
                 continue
@@ -6138,6 +7083,24 @@ def api_videohub_rooms_config_put():
             rr['background_url'] = f"/media/videohub_room_images/{bg}" if bg else ''
             rooms.append(rr)
         new_cfg['rooms'] = rooms
+    except Exception:
+        pass
+    try:
+        filtered_changed = bool(room_changes.get('filtered_inputs'))
+        log_event(
+            'videohub.room.config.save',
+            (
+                f"Saved VideoHub rooms "
+                f"({len(room_changes.get('rooms_created') or [])} created, {len(room_changes.get('rooms_updated') or [])} updated, "
+                f"{len(room_changes.get('rooms_deleted') or [])} deleted, {len(room_changes.get('output_room_changes') or [])} outputs moved"
+                f"{', filtered inputs changed' if filtered_changed else ''})"
+            ),
+            source='web',
+            status='success',
+            target_type='videohub_rooms',
+            target_id='videohub_rooms.json',
+            details={'changes': room_changes, 'room_count': len(new_cfg.get('rooms') or [])},
+        )
     except Exception:
         pass
     return jsonify({'ok': True, 'config': new_cfg})
@@ -6198,6 +7161,18 @@ def api_videohub_rooms_background_upload():
     if room_out is None:
         room_out = {'id': room_id, 'background_image': new_name}
     room_out['background_url'] = f"/media/videohub_room_images/{new_name}"
+    try:
+        log_event(
+            'videohub.room.background.upload',
+            f"Uploaded VideoHub room background for {room_id}",
+            source='web',
+            status='success',
+            target_type='videohub_room',
+            target_id=room_id,
+            details={'filename': new_name, 'original_name': original_name, 'size_bytes': len(content), 'old_filename': old_name},
+        )
+    except Exception:
+        pass
     return jsonify({'ok': True, 'room': room_out})
 
 
@@ -6233,6 +7208,18 @@ def api_videohub_rooms_background_delete(room_id: str):
     if room_out is None:
         room_out = {'id': rid, 'background_image': ''}
     room_out['background_url'] = ''
+    try:
+        log_event(
+            'videohub.room.background.delete',
+            f"Deleted VideoHub room background for {rid}",
+            source='web',
+            status='success',
+            target_type='videohub_room',
+            target_id=rid,
+            details={'filename': old_name},
+        )
+    except Exception:
+        pass
     return jsonify({'ok': True, 'room': room_out})
 
 
@@ -6394,136 +7381,168 @@ def api_home_overview():
     return jsonify(payload)
 
 
-@app.route('/api/console/logs', methods=['GET'])
-def api_console_logs():
-    """Return captured stdout/stderr/logging lines.
+def _activity_log_access_error():
+    if not _auth_enabled():
+        return None
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:console'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    except Exception:
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    return None
 
-    Query:
-      - since: last seen line id (int). Returns only newer lines when possible.
-      - limit: max lines to return (int, default 400, max 2000)
-    """
+
+@app.route('/api/activity-log', methods=['GET'])
+def api_activity_log():
+    access_error = _activity_log_access_error()
+    if access_error:
+        return access_error
+
+    try:
+        limit = int(request.args.get('limit', '50') or '50')
+    except Exception:
+        limit = 50
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+
+    try:
+        page = int(request.args.get('page', '1') or '1')
+    except Exception:
+        page = 1
+    if page < 1:
+        page = 1
+
+    where = []
+    params: list[Any] = []
+    for arg_name, col_name in (
+        ('source', 'source'),
+        ('status', 'status'),
+        ('action', 'action'),
+        ('target_type', 'target_type'),
+        ('actor_user_id', 'actor_user_id'),
+    ):
+        raw = str(request.args.get(arg_name) or '').strip()
+        if raw:
+            where.append(f'{col_name} = ?')
+            params.append(raw)
+    start_ts = _activity_ts_param(request.args.get('start'))
+    end_ts = _activity_ts_param(request.args.get('end'), end=True)
+    if start_ts:
+        where.append('ts >= ?')
+        params.append(start_ts)
+    if end_ts:
+        where.append('ts <= ?')
+        params.append(end_ts)
+    q = str(request.args.get('q') or '').strip()
+    if q:
+        like = f'%{q}%'
+        where.append('(summary LIKE ? OR action LIKE ? OR actor_display LIKE ? OR actor_username LIKE ? OR target_type LIKE ? OR target_id LIKE ? OR details_json LIKE ? OR request_path LIKE ? OR ip LIKE ?)')
+        params.extend([like, like, like, like, like, like, like, like, like])
+    where_sql = (' WHERE ' + ' AND '.join(where)) if where else ''
+    sql = 'SELECT * FROM activity_log'
+    if where:
+        sql += where_sql
+    sql += ' ORDER BY id DESC LIMIT ? OFFSET ?'
+    query_params = list(params)
+    query_params.extend([limit, (page - 1) * limit])
+
+    try:
+        conn = _db()
+        try:
+            rows = conn.execute(sql, tuple(query_params)).fetchall()
+            count_row = conn.execute(f'SELECT count(*) AS c FROM activity_log{where_sql}', tuple(params)).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+    events = [_activity_row_to_dict(r) for r in rows]
+    total = int(count_row['c'] or 0) if count_row else 0
+    total_pages = max(1, math.ceil(total / limit)) if total else 1
+    return jsonify({'ok': True, 'events': events, 'page': page, 'page_size': limit, 'total': total, 'total_pages': total_pages})
+
+
+@app.route('/api/activity-log/live', methods=['GET'])
+def api_activity_log_live():
+    access_error = _activity_log_access_error()
+    if access_error:
+        return access_error
+
     try:
         since = int(request.args.get('since', '0') or '0')
     except Exception:
         since = 0
 
-    try:
-        limit = int(request.args.get('limit', '400') or '400')
-    except Exception:
-        limit = 400
-    if limit < 1:
-        limit = 1
-    if limit > _CONSOLE_MAX_LINES:
-        limit = _CONSOLE_MAX_LINES
+    source = str(request.args.get('source') or '').strip().lower()
+    status = str(request.args.get('status') or '').strip().lower()
+    q = str(request.args.get('q') or '').strip().lower()
+    start_ts = _activity_ts_param(request.args.get('start'))
+    end_ts = _activity_ts_param(request.args.get('end'), end=True)
 
-    with _console_lock:
-        lines = list(_console_lines)
-        next_id = _console_seq
-
-    if since > 0:
-        lines = [(i, ts, t) for (i, ts, t) in lines if i > since]
-    if len(lines) > limit:
-        lines = lines[-limit:]
-
-    return jsonify({
-        'ok': True,
-        'next': next_id,
-        'lines': [{'ts': ts, 'text': t} for (_, ts, t) in lines],
-    })
-
-
-def _project_root() -> str:
-    try:
-        return str(Path(__file__).resolve().parent)
-    except Exception:
-        return str(Path.cwd())
-
-
-@app.route('/api/console/run', methods=['POST'])
-def api_console_run():
-    """Run a cli.py command (subcommands only, no shell).
-
-    Body JSON:
-      {"command": "list"}
-
-    Executed as: <python> cli.py <args...>
-    """
-    body = request.get_json(silent=True) or {}
-    cmd = str(body.get('command', '')).strip()
-    if not cmd:
-        return jsonify({'ok': False, 'error': 'Missing command'}), 400
+    where = ['id > ?']
+    params: list[Any] = [since]
+    if source:
+        where.append('source = ?')
+        params.append(source)
+    if status:
+        where.append('status = ?')
+        params.append(status)
+    if start_ts:
+        where.append('ts >= ?')
+        params.append(start_ts)
+    if end_ts:
+        where.append('ts <= ?')
+        params.append(end_ts)
+    if q:
+        like = f'%{q}%'
+        where.append('(summary LIKE ? OR action LIKE ? OR actor_display LIKE ? OR actor_username LIKE ? OR target_type LIKE ? OR target_id LIKE ? OR details_json LIKE ? OR request_path LIKE ? OR ip LIKE ?)')
+        params.extend([like, like, like, like, like, like, like, like, like])
 
     try:
-        args = shlex.split(cmd, posix=False)
-    except Exception:
-        args = cmd.split()
-
-    if not args:
-        return jsonify({'ok': False, 'error': 'Missing command'}), 400
-
-    # Be forgiving: users may type prefixes out of habit.
-    # Allow: "list", "cli list", "cli.py list", "python cli.py list"
-    try:
-        a0 = str(args[0]).lower()
-    except Exception:
-        a0 = ''
-
-    if a0 in ('cli',):
-        args = args[1:]
-    elif a0.endswith('cli.py'):
-        args = args[1:]
-    elif a0 in ('python', 'python3', 'py') and len(args) >= 2:
+        conn = _db()
         try:
-            a1 = str(args[1]).lower()
-        except Exception:
-            a1 = ''
-        if a1.endswith('cli.py'):
-            args = args[2:]
-
-    if not args:
-        args = ['--help']
-
-    if len(args) == 1 and args[0].lower() == 'help':
-        args = ['--help']
-
-    py = sys.executable or 'python'
-    cli_path = str(Path(_project_root()) / 'cli.py')
-
-    _console_append(f"\n$ cli {' '.join(args)}\n")
-
-    try:
-        proc = subprocess.run(
-            [py, cli_path, *args],
-            cwd=_project_root(),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        _console_append("[cli] ERROR: command timed out\n")
-        return jsonify({'ok': False, 'error': 'Command timed out'}), 408
+            rows = conn.execute(
+                f"SELECT * FROM activity_log WHERE {' AND '.join(where)} ORDER BY id ASC LIMIT 200",
+                tuple(params),
+            ).fetchall()
+            max_row = conn.execute('SELECT max(id) AS max_id FROM activity_log').fetchone()
+        finally:
+            conn.close()
     except Exception as e:
-        _console_append(f"[cli] ERROR: {e}\n")
         return jsonify({'ok': False, 'error': str(e)}), 500
 
-    out = proc.stdout or ''
-    err = proc.stderr or ''
-    if out:
-        _console_append(out)
-        if not out.endswith('\n'):
-            _console_append('\n')
-    if err:
-        _console_append(err)
-        if not err.endswith('\n'):
-            _console_append('\n')
+    events = [_activity_row_to_dict(r) for r in rows]
+    try:
+        next_id = max(int(max_row['max_id'] or 0), since) if max_row else since
+    except Exception:
+        next_id = max([int(e.get('id') or 0) for e in events] + [since])
+    return jsonify({'ok': True, 'next': next_id, 'events': events})
 
-    return jsonify({
-        'ok': True,
-        'exit_code': int(proc.returncode),
-        'stdout': out,
-        'stderr': err,
-    })
+
+@app.route('/api/activity-log/alerts', methods=['GET'])
+def api_activity_log_alerts():
+    access_error = _activity_log_access_error()
+    if access_error:
+        return access_error
+    try:
+        return jsonify({'ok': True, **_activity_alert_summary()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/activity-log/alerts/acknowledge', methods=['POST'])
+def api_activity_log_alerts_acknowledge():
+    access_error = _activity_log_access_error()
+    if access_error:
+        return access_error
+    try:
+        return jsonify({'ok': True, **_activity_acknowledge_alerts()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 def _validate_time_hhmm(s: str) -> bool:
@@ -6966,8 +7985,14 @@ def _fire_timer_button_presses_now(*, pp_timer_id: int, preset_number: int, pres
         return {'fired': False, 'count': 0}
 
     try:
-        _console_append(
-            f"[TIMERS] Timer preset #{preset_number} '{preset_name or time_str}' -> firing {len(presses)} Companion press(es) now\n"
+        log_event(
+            'timers.companion.fire',
+            f"Timer preset #{preset_number} '{preset_name or time_str}' firing {len(presses)} Companion press(es)",
+            source='api',
+            status='info',
+            target_type='timer_preset',
+            target_id=preset_number,
+            details={'preset': preset_number, 'name': preset_name, 'time': time_str, 'press_count': len(presses)},
         )
     except Exception:
         pass
@@ -6985,7 +8010,15 @@ def _fire_timer_button_presses_now(*, pp_timer_id: int, preset_number: int, pres
 
     if comp is None or not getattr(comp, 'connected', False):
         try:
-            _console_append("[TIMERS] Companion not connected; timer presses skipped\n")
+            log_event(
+                'timers.companion.fire',
+                'Companion not connected; timer presses skipped',
+                source='api',
+                status='warning',
+                target_type='timer_preset',
+                target_id=preset_number,
+                details={'preset': preset_number, 'press_count': len(presses), 'error': 'companion_not_connected'},
+            )
         except Exception:
             pass
         return {'fired': False, 'count': len(presses), 'error': 'companion_not_connected'}
@@ -6999,10 +8032,19 @@ def _fire_timer_button_presses_now(*, pp_timer_id: int, preset_number: int, pres
             ok = False
         if ok:
             ok_count += 1
-        try:
-            _console_append(f"[TIMERS] POST {u} -> {'OK' if ok else 'FAIL'}\n")
-        except Exception:
-            pass
+
+    try:
+        log_event(
+            'timers.companion.fire.complete',
+            f"Timer preset #{preset_number} Companion presses complete: {ok_count} OK, {len(presses) - ok_count} failed",
+            source='api',
+            status='success' if ok_count == len(presses) else 'warning',
+            target_type='timer_preset',
+            target_id=preset_number,
+            details={'preset': preset_number, 'ok': ok_count, 'fail': len(presses) - ok_count, 'presses': presses},
+        )
+    except Exception:
+        pass
 
     return {'fired': True, 'count': len(presses), 'ok': ok_count, 'fail': len(presses) - ok_count}
 
@@ -7575,6 +8617,56 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                 'presets_changed': presets_changed,
                 'config_changed': config_changed,
             })
+            if presets_changed or config_changed:
+                timer_action_name = {
+                    'replace_all': 'timers.preset.replace_all',
+                    'set_all': 'timers.preset.replace_all',
+                    'update_preset': 'timers.preset.update',
+                    'create_preset': 'timers.preset.create',
+                    'delete_preset': 'timers.preset.delete',
+                    'move_preset': 'timers.preset.move',
+                    'adjust_all_presets': 'timers.preset.adjust_all',
+                    'set_stream_start_preset': 'timers.stream_start.update',
+                }.get(action, f'timers.{action}')
+                preset_target = extra.get('preset') if action != 'set_stream_start_preset' else extra.get('stream_start_preset')
+                if action in ('replace_all', 'set_all'):
+                    timer_summary = f"Replaced timer presets ({len(presets)} total)"
+                    target_type = 'timer_presets'
+                    preset_target = 'timer_presets.json'
+                elif action == 'update_preset':
+                    timer_summary = f"Updated timer preset #{extra.get('preset')}"
+                    target_type = 'timer_preset'
+                elif action == 'create_preset':
+                    timer_summary = f"Created timer preset #{extra.get('preset')}"
+                    target_type = 'timer_preset'
+                elif action == 'delete_preset':
+                    timer_summary = f"Deleted timer preset #{extra.get('preset')}"
+                    target_type = 'timer_preset'
+                elif action == 'move_preset':
+                    timer_summary = f"Moved timer preset #{extra.get('preset')} to #{extra.get('to')}"
+                    target_type = 'timer_preset'
+                elif action == 'adjust_all_presets':
+                    timer_summary = f"Adjusted {extra.get('adjusted_count', 0)} timer presets by {extra.get('delta_minutes')} minutes"
+                    target_type = 'timer_presets'
+                    preset_target = 'timer_presets.json'
+                elif action == 'set_stream_start_preset':
+                    timer_summary = f"Updated stream start timer preset to #{extra.get('stream_start_preset') or 'none'}"
+                    target_type = 'timer_config'
+                else:
+                    timer_summary = f"Updated timers ({action})"
+                    target_type = 'timer_presets'
+                try:
+                    log_event(
+                        timer_action_name,
+                        timer_summary,
+                        source='api',
+                        status='success',
+                        target_type=target_type,
+                        target_id=preset_target,
+                        details={'action': action, 'changes': extra, 'config_changes': config_changes},
+                    )
+                except Exception:
+                    pass
             payload = _timer_state_payload(cfg=cfg, presets=presets, **extra)
 
         except Exception as e:
@@ -7583,9 +8675,14 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
     if apply_after is not None:
         preset_number, apply_cfg, apply_presets, updated, time_raw, time_was_relative = apply_after
         try:
-            _console_append(
-                f"[TIMERS] /api/timers/mutate apply=true from {request.remote_addr} "
-                f"preset={preset_number} time={updated.get('time')}\n"
+            log_event(
+                'timers.preset.apply',
+                f"Applied timer preset #{preset_number}",
+                source='api',
+                status='info',
+                target_type='timer_preset',
+                target_id=preset_number,
+                details={'preset': preset_number, 'time': updated.get('time'), 'time_input': str(time_raw) if time_was_relative else None},
             )
         except Exception:
             pass
@@ -7792,7 +8889,15 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
     # If ProPresenter client is missing, still succeed for Companion presses.
     if ProPresentor is None:
         try:
-            _console_append('[TIMERS] ProPresenter client not available; skipped timer control\n')
+            log_event(
+                'timers.propresenter.skip',
+                'ProPresenter client not available; skipped timer control',
+                source='api',
+                status='warning',
+                target_type='timer_preset',
+                target_id=preset_number,
+                details={'preset': preset_number, 'timer_id': pp_timer_id},
+            )
         except Exception:
             pass
         return (
@@ -8072,10 +9177,13 @@ def api_apply_timer_preset():
     except Exception:
         body_for_log = None
     try:
-        _console_append(
-            f"[COMPANION] Received /api/timers/apply from {request.remote_addr} "
-            f"args={_truncate_for_log(dict(request.args))} "
-            f"json={_truncate_for_log(body_for_log)}\n"
+        log_event(
+            'companion.request.timers.apply',
+            'Companion requested timer preset apply',
+            source='companion',
+            status='info',
+            target_type='timer_preset',
+            details={'args': dict(request.args), 'json': body_for_log},
         )
     except Exception:
         pass
@@ -8199,7 +9307,15 @@ def api_prop_set_timer():
         reset_ok = bool(pp.timer_operation(timer_id, 'reset'))
 
     try:
-        _console_append(f"[PP] /api/propresenter/timer/set timer_id={timer_id} time={time_str} -> {'OK' if set_ok else 'FAIL'}\n")
+        log_event(
+            'propresenter.timer.set',
+            f"Set ProPresenter timer {timer_id} to {time_str}",
+            source='api',
+            status='success' if set_ok else 'failure',
+            target_type='propresenter_timer',
+            target_id=timer_id,
+            details={'timer_id': timer_id, 'time': time_str, 'reset': reset_ok},
+        )
     except Exception:
         pass
 
@@ -8232,7 +9348,15 @@ def api_prop_start_timer():
     ok = bool(pp.timer_operation(timer_id, 'start'))
 
     try:
-        _console_append(f"[PP] /api/propresenter/timer/start timer_id={timer_id} -> {'OK' if ok else 'FAIL'}\n")
+        log_event(
+            'propresenter.timer.start',
+            f"Started ProPresenter timer {timer_id}",
+            source='api',
+            status='success' if ok else 'failure',
+            target_type='propresenter_timer',
+            target_id=timer_id,
+            details={'timer_id': timer_id},
+        )
     except Exception:
         pass
 
@@ -8265,7 +9389,15 @@ def api_prop_stop_timer():
     ok = bool(pp.timer_operation(timer_id, 'stop'))
 
     try:
-        _console_append(f"[PP] /api/propresenter/timer/stop timer_id={timer_id} -> {'OK' if ok else 'FAIL'}\n")
+        log_event(
+            'propresenter.timer.stop',
+            f"Stopped ProPresenter timer {timer_id}",
+            source='api',
+            status='success' if ok else 'failure',
+            target_type='propresenter_timer',
+            target_id=timer_id,
+            details={'timer_id': timer_id},
+        )
     except Exception:
         pass
 
@@ -8298,7 +9430,15 @@ def api_prop_reset_timer():
     ok = bool(pp.timer_operation(timer_id, 'reset'))
 
     try:
-        _console_append(f"[PP] /api/propresenter/timer/reset timer_id={timer_id} -> {'OK' if ok else 'FAIL'}\n")
+        log_event(
+            'propresenter.timer.reset',
+            f"Reset ProPresenter timer {timer_id}",
+            source='api',
+            status='success' if ok else 'failure',
+            target_type='propresenter_timer',
+            target_id=timer_id,
+            details={'timer_id': timer_id},
+        )
     except Exception:
         pass
 
@@ -8340,7 +9480,14 @@ def api_prop_stage_message():
 
     try:
         extra = f" ({detail})" if detail and not sent else ""
-        _console_append(f"[PP] /api/propresenter/stage/message -> {'OK' if sent else 'FAIL'}{extra}\n")
+        log_event(
+            'propresenter.stage.message',
+            f"Sent ProPresenter stage message: {'OK' if sent else 'FAIL'}{extra}",
+            source='api',
+            status='success' if sent else 'failure',
+            target_type='propresenter_stage',
+            details={'sent': sent, 'detail': detail, 'message': message},
+        )
     except Exception:
         pass
 
@@ -8375,7 +9522,14 @@ def api_prop_stage_clear():
     cleared = bool(pp.clear_stage_message())
 
     try:
-        _console_append(f"[PP] /api/propresenter/stage/clear -> {'OK' if cleared else 'FAIL'}\n")
+        log_event(
+            'propresenter.stage.clear',
+            'Cleared ProPresenter stage message',
+            source='api',
+            status='success' if cleared else 'failure',
+            target_type='propresenter_stage',
+            details={'cleared': cleared},
+        )
     except Exception:
         pass
 
@@ -8396,10 +9550,13 @@ def api_prop_stage_stream_start():
     except Exception:
         body_for_log = None
     try:
-        _console_append(
-            f"[COMPANION] Received /api/propresenter/stage/stream_start from {request.remote_addr} "
-            f"args={_truncate_for_log(dict(request.args))} "
-            f"json={_truncate_for_log(body_for_log)}\n"
+        log_event(
+            'companion.request.propresenter.stream_start',
+            'Companion requested stream-start stage message',
+            source='companion',
+            status='info',
+            target_type='propresenter_stage',
+            details={'args': dict(request.args), 'json': body_for_log},
         )
     except Exception:
         pass
@@ -8440,8 +9597,14 @@ def api_prop_stage_stream_start():
 
     try:
         extra = f" ({detail})" if detail and not sent else ""
-        _console_append(
-            f"[PP] /api/propresenter/stage/stream_start preset={preset_number} -> {'OK' if sent else 'FAIL'}{extra}\n"
+        log_event(
+            'propresenter.stage.stream_start',
+            f"Sent stream-start stage message from preset #{preset_number}: {'OK' if sent else 'FAIL'}{extra}",
+            source='api',
+            status='success' if sent else 'failure',
+            target_type='timer_preset',
+            target_id=preset_number,
+            details={'preset': preset_number, 'sent': sent, 'detail': detail, 'message': message},
         )
     except Exception:
         pass
@@ -8487,10 +9650,13 @@ def api_videohub_route():
         body = {}
 
     try:
-        _console_append(
-            f"[COMPANION] Received /api/videohub/route from {request.remote_addr} "
-            f"args={_truncate_for_log(dict(request.args))} "
-            f"json={_truncate_for_log(body)}\n"
+        log_event(
+            'companion.request.videohub.route',
+            'Companion requested VideoHub route change',
+            source='companion',
+            status='info',
+            target_type='videohub_route',
+            details={'args': dict(request.args), 'json': body},
         )
     except Exception:
         pass
@@ -8517,10 +9683,35 @@ def api_videohub_route():
     try:
         vh.route_video_output(output=output_idx, input_=input_idx, monitoring=monitor)
     except Exception as e:
+        try:
+            log_event(
+                'videohub.route',
+                f'VideoHub route failed: output {output_n} to input {input_n}',
+                source='api',
+                status='failure',
+                target_type='videohub_route',
+                target_id=str(output_n),
+                details={'output': output_n, 'input': input_n, 'monitor': monitor, 'zero_based': zero_based, 'error': str(e)},
+            )
+        except Exception:
+            pass
         return jsonify({'ok': False, 'error': str(e)}), 500
 
     try:
         _home_set_last_videohub_route(output=output_n, input_=input_n, monitor=monitor)
+    except Exception:
+        pass
+
+    try:
+        log_event(
+            'videohub.route',
+            f'Routed VideoHub output {output_n} to input {input_n}',
+            source='api',
+            status='success',
+            target_type='videohub_route',
+            target_id=str(output_n),
+            details={'output': output_n, 'input': input_n, 'monitor': monitor, 'zero_based': zero_based},
+        )
     except Exception:
         pass
 
@@ -8549,6 +9740,23 @@ def api_delete_event_ui(ident: int):
         ev = matching[0]
         events.remove(ev)
         storage.save_events(events, events_file)
+        try:
+            log_event(
+                'calendar.event.delete',
+                f"Deleted event '{ev.name}'",
+                source='web',
+                status='success',
+                target_type='calendar_event',
+                target_id=ident,
+                details={
+                    'event_id': ident,
+                    'event_name': ev.name,
+                    'events_file': events_file,
+                    'trigger_count': len(getattr(ev, 'times', []) or []),
+                },
+            )
+        except Exception:
+            pass
         return jsonify({'removed': True, 'id': ident, 'name': ev.name})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -8690,6 +9898,9 @@ def api_update_event_ui(ident: int):
                 ) 
 
         # replace fields on existing event object
+        old_name = ev.name
+        old_active = bool(getattr(ev, 'active', True))
+        old_trigger_count = len(getattr(ev, 'times', []) or [])
         ev.name = name
         ev.day = WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday
         ev.date = date_obj
@@ -8699,6 +9910,30 @@ def api_update_event_ui(ident: int):
         ev.times = times
 
         storage.save_events(events, events_file)
+        try:
+            log_event(
+                'calendar.event.update',
+                f"Updated event '{ev.name}'",
+                source='web',
+                status='success',
+                target_type='calendar_event',
+                target_id=ident,
+                details={
+                    'event_id': ident,
+                    'old_name': old_name,
+                    'event_name': ev.name,
+                    'old_active': old_active,
+                    'active': bool(ev.active),
+                    'date': ev.date.strftime('%Y-%m-%d'),
+                    'time': ev.time.strftime('%H:%M:%S'),
+                    'repeating': bool(ev.repeating),
+                    'old_trigger_count': old_trigger_count,
+                    'trigger_count': len(ev.times or []),
+                    'events_file': events_file,
+                },
+            )
+        except Exception:
+            pass
         return jsonify({'ok': True, 'id': ident})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -8796,6 +10031,27 @@ def api_create_event_ui():
         ev = Event(name, new_id, WeekDay[day] if day in WeekDay.__members__ else WeekDay.Monday, date_obj, time_obj, repeating, times, active)
         events.append(ev)
         storage.save_events(events, events_file)
+        try:
+            log_event(
+                'calendar.event.create',
+                f"Created event '{ev.name}'",
+                source='web',
+                status='success',
+                target_type='calendar_event',
+                target_id=new_id,
+                details={
+                    'event_id': new_id,
+                    'event_name': ev.name,
+                    'active': bool(ev.active),
+                    'date': ev.date.strftime('%Y-%m-%d'),
+                    'time': ev.time.strftime('%H:%M:%S'),
+                    'repeating': bool(ev.repeating),
+                    'trigger_count': len(ev.times or []),
+                    'events_file': events_file,
+                },
+            )
+        except Exception:
+            pass
         return jsonify({'ok': True, 'id': new_id})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

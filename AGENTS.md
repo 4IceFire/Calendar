@@ -53,8 +53,18 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - When importing `videohub_room_images/`, keep the folder itself and replace its contents; deleting/recreating the root folder can fail with access denied on Windows/OneDrive.
 - Import inspects the zip first, then lets the user choose which contained items to overwrite on the target instance.
 - Imports overwrite selected files/folders instead of merging. Before replacing anything, the app creates a timestamped rollback zip in `config_import_backups/`.
-- Config transport actions should log to the server console and Web UI console buffer with a `[CONFIG]` prefix.
+- Config transport actions should log to the server console and persistent Activity Log with a `[CONFIG]` prefix.
 - The old standalone Auth DB backup UI should stay removed; user/group/session data is transported via the `auth.db` item in Config export/import.
+
+## Activity Logging
+- The user-facing log system is the persistent Activity Log, shown at `/console` for route/backward-compatibility but titled Activity Log in the UI.
+- Use `log_event(...)` in `webui.py` for every user-visible state change, external action, permission/security event, config transport action, and hardware/control action.
+- Let `log_event(...)` infer the logged-in actor from `current_user` whenever possible. For non-user actions, set `source` to one of `web`, `api`, `companion`, `scheduler`, or `system`.
+- Use stable dotted action names such as `videohub.preset.apply`, `config.import`, `user.password_reset`, `timers.preset.apply`, and `propresenter.timer.start`.
+- Use `status` values `success`, `failure`, `warning`, or `info`.
+- Put human-readable text in `summary`; put structured context in `details` so the Activity Log can show expandable diagnostic data.
+- Never log secrets, passwords, tokens, session cookies, CSRF values, or raw credentials. The helper redacts common sensitive keys, but callers should still avoid passing secrets.
+- Do not use `print(...)`, `_console_append(...)`, or raw Python logging as the primary user-facing activity record. Keep `calendar.log` and Python logging for low-level runtime diagnostics only.
 
 ## Auth Model Notes
 - UI pages are protected by group-based page access in the Web UI (`require_page` checks).

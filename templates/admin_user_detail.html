@@ -15,7 +15,7 @@
     {% if error %}
       <div class="alert alert-danger py-2">{{ error }}</div>
     {% endif %}
-    {% if message %}
+    {% if message and saved != 'password' %}
       <div class="alert alert-success py-2">{{ message }}</div>
     {% endif %}
     {% if generated_password %}
@@ -63,7 +63,6 @@
           <div class="card-body">
             <h2 class="h5 mb-3">Access</h2>
             <div class="alert alert-danger d-none py-2" data-user-detail-access-error></div>
-            <div class="alert alert-success d-none py-2" data-user-detail-access-saved>Saved</div>
             <form method="post" data-user-detail-access-form="1">
               <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="update_access">
@@ -94,8 +93,6 @@
                   </div>
                 {% endfor %}
               </div>
-
-              <button class="btn btn-primary" type="submit">Save access</button>
             </form>
 
             <div class="d-flex flex-wrap gap-2 mt-3">
@@ -126,6 +123,10 @@
         <div class="card tdeck-soft h-100">
           <div class="card-body">
             <h2 class="h5 mb-3">Security</h2>
+            {% if saved == 'password' %}
+              <div class="alert alert-success py-2">Password changed successfully.</div>
+            {% endif %}
+            <div class="alert alert-danger d-none py-2" data-user-detail-password-error></div>
             <form method="post">
               <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="reset_password">
