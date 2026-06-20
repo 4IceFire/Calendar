@@ -151,6 +151,97 @@ html[data-bs-theme="dark"]{
   z-index: 1040;
 }
 
+.tdeck-log-alert-badge{
+  position: absolute;
+  top: -0.85rem;
+  right: -0.45rem;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.32rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  text-decoration: none;
+  color: #111827;
+  border: 1px solid rgba(255,255,255,0.55);
+  box-shadow: 0 0.2rem 0.6rem rgba(0,0,0,0.28);
+}
+
+.tdeck-log-alert-badge:hover{
+  color: #111827;
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.tdeck-log-alert-warning{
+  background: #ffc107;
+}
+
+.tdeck-log-alert-failure{
+  background: #dc3545;
+  color: #fff;
+}
+
+.tdeck-log-alert-failure:hover{
+  color: #fff;
+}
+
+.tdeck-log-menu-link{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.dropdown-item.tdeck-log-menu-warning{
+  background: rgba(255, 193, 7, 0.26);
+  color: var(--bs-dropdown-link-color);
+  box-shadow: inset 4px 0 0 #ffc107;
+}
+
+.dropdown-item.tdeck-log-menu-warning:hover,
+.dropdown-item.tdeck-log-menu-warning:focus{
+  background: rgba(255, 193, 7, 0.36);
+}
+
+.dropdown-item.tdeck-log-menu-failure{
+  background: rgba(220, 53, 69, 0.30);
+  color: var(--bs-dropdown-link-color);
+  box-shadow: inset 4px 0 0 #dc3545;
+}
+
+.dropdown-item.tdeck-log-menu-failure:hover,
+.dropdown-item.tdeck-log-menu-failure:focus{
+  background: rgba(220, 53, 69, 0.42);
+}
+
+.tdeck-log-menu-badge{
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.32rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  color: #111827;
+}
+
+.tdeck-log-menu-badge-warning{
+  background: #ffc107;
+}
+
+.tdeck-log-menu-badge-failure{
+  background: #dc3545;
+  color: #fff;
+}
+
 @media (max-width: 991.98px){
   .tdeck-nav-right{
     width: 100%;
@@ -200,6 +291,106 @@ html[data-bs-theme="dark"] .card{
 .tdeck-table td, .tdeck-table th{
   padding-top: 0.6rem;
   padding-bottom: 0.6rem;
+}
+
+/* Activity Log severity colors */
+.activity-log-table{
+  font-size: 0.82rem;
+}
+
+.activity-log-table th,
+.activity-log-table td{
+  padding-top: 0.26rem;
+  padding-bottom: 0.26rem;
+}
+
+.activity-log-row{
+  --activity-log-accent: var(--bs-secondary);
+  --activity-log-bg: rgba(var(--bs-secondary-rgb), 0.06);
+  --activity-log-hover-bg: rgba(var(--bs-secondary-rgb), 0.11);
+  box-shadow: inset 4px 0 0 var(--activity-log-accent);
+}
+
+.activity-log-row > td{
+  background-color: var(--activity-log-bg);
+}
+
+.activity-log-summary{
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.activity-log-meta,
+.activity-log-details{
+  font-size: 0.74rem;
+  line-height: 1.2;
+}
+
+.activity-log-pre{
+  max-height: 12rem;
+  overflow: auto;
+  font-size: 0.72rem;
+}
+
+.activity-log-actor-name{
+  max-width: 11rem;
+}
+
+.activity-log-pager{
+  flex-wrap: wrap;
+}
+
+.activity-log-page-jump{
+  width: 4.5rem;
+  text-align: center;
+}
+
+.activity-log-row:hover > td{
+  background-color: var(--activity-log-hover-bg);
+}
+
+.activity-log-row-success{
+  --activity-log-accent: var(--bs-success);
+  --activity-log-bg: rgba(var(--bs-success-rgb), 0.08);
+  --activity-log-hover-bg: rgba(var(--bs-success-rgb), 0.14);
+}
+
+.activity-log-row-failure{
+  --activity-log-accent: var(--bs-danger);
+  --activity-log-bg: rgba(var(--bs-danger-rgb), 0.09);
+  --activity-log-hover-bg: rgba(var(--bs-danger-rgb), 0.16);
+}
+
+.activity-log-row-warning{
+  --activity-log-accent: var(--bs-warning);
+  --activity-log-bg: rgba(var(--bs-warning-rgb), 0.12);
+  --activity-log-hover-bg: rgba(var(--bs-warning-rgb), 0.20);
+}
+
+.activity-log-row-info{
+  --activity-log-accent: var(--bs-secondary);
+  --activity-log-bg: rgba(var(--bs-secondary-rgb), 0.055);
+  --activity-log-hover-bg: rgba(var(--bs-secondary-rgb), 0.11);
+}
+
+html[data-bs-theme="dark"] .activity-log-row-success{
+  --activity-log-bg: rgba(var(--bs-success-rgb), 0.14);
+  --activity-log-hover-bg: rgba(var(--bs-success-rgb), 0.22);
+}
+
+html[data-bs-theme="dark"] .activity-log-row-failure{
+  --activity-log-bg: rgba(var(--bs-danger-rgb), 0.16);
+  --activity-log-hover-bg: rgba(var(--bs-danger-rgb), 0.25);
+}
+
+html[data-bs-theme="dark"] .activity-log-row-warning{
+  --activity-log-bg: rgba(var(--bs-warning-rgb), 0.16);
+  --activity-log-hover-bg: rgba(var(--bs-warning-rgb), 0.26);
+}
+
+html[data-bs-theme="dark"] .activity-log-row-info{
+  --activity-log-bg: rgba(var(--bs-secondary-rgb), 0.14);
+  --activity-log-hover-bg: rgba(var(--bs-secondary-rgb), 0.22);
 }
 
 /* Inputs on soft panels: slightly stronger borders for contrast */

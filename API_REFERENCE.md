@@ -342,10 +342,10 @@ Timer selection is either:
 
 ---
 
-## Web Console
+## Activity Log
 
-### Fetch logs
-- **GET** `/api/console/logs`
+### Fetch historical activity
+- **GET** `/api/activity-log`
 
-### Run CLI command
-- **POST** `/api/console/run`
+### Fetch live activity
+- **GET** `/api/activity-log/live`

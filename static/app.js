@@ -58,6 +58,61 @@ updateStatusIndicators();
 // refresh every 15s while the server keeps the backend snapshot warm in the background
 setInterval(updateStatusIndicators, 15000);
 
+async function updateActivityLogAlertBadge() {
+  const badge = document.getElementById('activity-log-alert-badge');
+  const menuLink = document.getElementById('activity-log-menu-link');
+  const menuBadge = document.getElementById('activity-log-menu-badge');
+  if (!badge && !menuLink && !menuBadge) return null;
+  try {
+    const res = await fetch('/api/activity-log/alerts', {cache: 'no-store'});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || 'Failed to load log alerts');
+    const count = Number(data.count || 0);
+    const severity = String(data.severity || '') === 'failure' ? 'failure' : 'warning';
+    const label = count > 99 ? '99+' : String(count);
+    if (badge) badge.classList.remove('tdeck-log-alert-warning', 'tdeck-log-alert-failure');
+    if (menuLink) menuLink.classList.remove('tdeck-log-menu-warning', 'tdeck-log-menu-failure');
+    if (menuBadge) menuBadge.classList.remove('tdeck-log-menu-badge-warning', 'tdeck-log-menu-badge-failure');
+    if (count > 0) {
+      if (badge) {
+        badge.textContent = label;
+        badge.classList.add(severity === 'failure' ? 'tdeck-log-alert-failure' : 'tdeck-log-alert-warning');
+        badge.classList.remove('d-none');
+        badge.setAttribute('aria-label', `${count} unseen log warning${count === 1 ? '' : 's'} or failure${count === 1 ? '' : 's'}`);
+      }
+      if (menuLink) {
+        menuLink.classList.add(severity === 'failure' ? 'tdeck-log-menu-failure' : 'tdeck-log-menu-warning');
+        menuLink.setAttribute('aria-label', `Log, ${count} unseen warning/error alert${count === 1 ? '' : 's'}`);
+      }
+      if (menuBadge) {
+        menuBadge.textContent = label;
+        menuBadge.classList.add(severity === 'failure' ? 'tdeck-log-menu-badge-failure' : 'tdeck-log-menu-badge-warning');
+        menuBadge.classList.remove('d-none');
+      }
+    } else {
+      if (badge) {
+        badge.textContent = '0';
+        badge.classList.add('d-none');
+        badge.removeAttribute('aria-label');
+      }
+      if (menuLink) menuLink.removeAttribute('aria-label');
+      if (menuBadge) {
+        menuBadge.textContent = '0';
+        menuBadge.classList.add('d-none');
+      }
+    }
+    return data;
+  } catch (e) {
+    if (badge) badge.classList.add('d-none');
+    if (menuLink) menuLink.classList.remove('tdeck-log-menu-warning', 'tdeck-log-menu-failure');
+    if (menuBadge) menuBadge.classList.add('d-none');
+    return null;
+  }
+}
+
+updateActivityLogAlertBadge();
+setInterval(updateActivityLogAlertBadge, 15000);
+
 function _uiMessageTimeoutMs() {
   try {
     const ms = window.TDECK_UI && window.TDECK_UI.messageTimeoutMs;
@@ -1116,9 +1171,9 @@ if (document.getElementById('config-page')) {
   }
 }
 
-// --- Console page ---
-function _consoleSetStatus(msg, kind) {
-  const el = document.getElementById('console-status');
+// --- Activity Log page ---
+function _activityLogSetStatus(msg, kind) {
+  const el = document.getElementById('activity-log-status');
   if (!el) return;
   if (!msg) {
     _uiClearAutoHide(el);
@@ -1135,90 +1190,409 @@ function _consoleSetStatus(msg, kind) {
   });
 }
 
-if (document.getElementById('console-page')) {
-  const logEl = document.getElementById('console-log');
-  const cmdEl = document.getElementById('console-command');
-  const runBtn = document.getElementById('console-run');
-  let since = 0;
-  let polling = false;
+if (document.getElementById('activity-log-page')) {
+  const bodyEl = document.getElementById('activity-log-body');
+  const searchEl = document.getElementById('activity-log-search');
+  const sourceEl = document.getElementById('activity-log-source');
+  const statusEl = document.getElementById('activity-log-status-filter');
+  const rangeEl = document.getElementById('activity-log-range');
+  const startEl = document.getElementById('activity-log-start');
+  const endEl = document.getElementById('activity-log-end');
+  const clearDateTimeBtn = document.getElementById('activity-log-clear-datetime');
+  const refreshBtn = document.getElementById('activity-log-refresh');
+  const ackAlertsBtn = document.getElementById('activity-log-ack-alerts');
+  const alertSummaryEl = document.getElementById('activity-log-alert-summary');
+  const firstBtn = document.getElementById('activity-log-first');
+  const prevBtn = document.getElementById('activity-log-prev');
+  const nextBtn = document.getElementById('activity-log-next');
+  const lastBtn = document.getElementById('activity-log-last');
+  const pageJumpEl = document.getElementById('activity-log-page-jump');
+  const pageInfoEl = document.getElementById('activity-log-page-info');
+  const eventsById = new Map();
+  const pageSize = 50;
+  let currentPage = 1;
+  let totalPages = 1;
+  let totalRows = 0;
+  let liveSince = 0;
+  let loading = false;
+  let pollInFlight = false;
+  let searchTimer = null;
 
-  function _appendToLog(text) {
-    if (!logEl || text == null) return;
-    logEl.textContent += String(text);
-    logEl.scrollTop = logEl.scrollHeight;
+  function _activityStatusClass(status) {
+    const s = String(status || '').toLowerCase();
+    if (s === 'success') return 'text-bg-success';
+    if (s === 'failure') return 'text-bg-danger';
+    if (s === 'warning') return 'text-bg-warning';
+    return 'text-bg-secondary';
   }
 
-  async function pollConsole() {
-    if (polling) return;
-    polling = true;
-    try {
-      const res = await fetch(`/api/console/logs?since=${encodeURIComponent(String(since))}`);
-      if (!res.ok) throw new Error('Failed to load console logs');
-      const data = await res.json();
-      if (!data || !data.ok) throw new Error(data && data.error ? data.error : 'Failed to load console logs');
-      const lines = data.lines || [];
-      if (lines.length) {
-        const rendered = lines.map((ln) => {
-          // Backward-compatible with older string-only API.
-          if (typeof ln === 'string') return ln;
-          const ts = String(ln.ts || '').trim();
-          const text = String(ln.text || '');
-          // Prefix every captured line with date/time.
-          return ts ? `${ts} ${text}` : text;
-        }).join('');
-        _appendToLog(rendered);
+  function _activityRowClass(status) {
+    const s = String(status || '').toLowerCase();
+    if (s === 'success') return 'activity-log-row activity-log-row-success';
+    if (s === 'failure') return 'activity-log-row activity-log-row-failure';
+    if (s === 'warning') return 'activity-log-row activity-log-row-warning';
+    return 'activity-log-row activity-log-row-info';
+  }
+
+  function _activitySourceLabel(source) {
+    const s = String(source || 'system');
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function _activityDetailsText(ev) {
+    if (!ev) return '';
+    if (ev.details_json) return String(ev.details_json);
+    if (ev.details != null) {
+      try { return JSON.stringify(ev.details, null, 2); } catch (e) { return String(ev.details); }
+    }
+    return '';
+  }
+
+  function _activityPad(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function _activityDateTimeValue(d) {
+    if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}-${_activityPad(d.getMonth() + 1)}-${_activityPad(d.getDate())}T${_activityPad(d.getHours())}:${_activityPad(d.getMinutes())}`;
+  }
+
+  function _activityStartOfDay(d) {
+    const out = new Date(d);
+    out.setHours(0, 0, 0, 0);
+    return out;
+  }
+
+  function _activityEndOfDay(d) {
+    const out = new Date(d);
+    out.setHours(23, 59, 0, 0);
+    return out;
+  }
+
+  function _activityAddDays(d, days) {
+    const out = new Date(d);
+    out.setDate(out.getDate() + days);
+    return out;
+  }
+
+  function _activityApplyRangePreset(preset) {
+    const now = new Date();
+    let start = null;
+    let end = null;
+    if (preset === 'today') {
+      start = _activityStartOfDay(now);
+      end = _activityEndOfDay(now);
+    } else if (preset === 'yesterday') {
+      const y = _activityAddDays(now, -1);
+      start = _activityStartOfDay(y);
+      end = _activityEndOfDay(y);
+    } else if (preset === 'last7') {
+      start = _activityStartOfDay(_activityAddDays(now, -6));
+      end = _activityEndOfDay(now);
+    } else if (preset === 'last30') {
+      start = _activityStartOfDay(_activityAddDays(now, -29));
+      end = _activityEndOfDay(now);
+    } else if (preset === 'thisMonth') {
+      start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      end = _activityEndOfDay(now);
+    } else if (preset === 'lastMonth') {
+      start = new Date(now.getFullYear(), now.getMonth() - 1, 1, 0, 0, 0, 0);
+      end = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 0, 0);
+    } else if (preset === 'custom') {
+      return;
+    }
+    if (startEl) startEl.value = start ? _activityDateTimeValue(start) : '';
+    if (endEl) endEl.value = end ? _activityDateTimeValue(end) : '';
+  }
+
+  function _activityClearDateTimeFilter() {
+    if (rangeEl) rangeEl.value = '';
+    if (startEl) startEl.value = '';
+    if (endEl) endEl.value = '';
+    _activityLoad({reset: true});
+  }
+
+  function _activityUpdateAlertControls(data) {
+    const count = Number((data && data.count) || 0);
+    const failures = Number((data && data.failures) || 0);
+    const warnings = Number((data && data.warnings) || 0);
+    if (ackAlertsBtn) {
+      ackAlertsBtn.classList.toggle('d-none', count <= 0);
+      ackAlertsBtn.disabled = count <= 0;
+      ackAlertsBtn.classList.remove('btn-outline-secondary', 'btn-warning', 'btn-danger');
+      if (count > 0) {
+        ackAlertsBtn.classList.add(failures > 0 ? 'btn-danger' : 'btn-warning');
+        ackAlertsBtn.textContent = `Mark ${count} Alert${count === 1 ? '' : 's'} Seen`;
+      } else {
+        ackAlertsBtn.classList.add('btn-outline-secondary');
+        ackAlertsBtn.textContent = 'Mark Warnings/Errors Seen';
       }
-      since = Number(data.next || since) || since;
-    } catch (e) {
-      // Don't spam the UI; just show the latest error.
-      _consoleSetStatus(String(e.message || e), 'error');
-    } finally {
-      polling = false;
+    }
+    if (alertSummaryEl) {
+      if (count > 0) {
+        const parts = [];
+        if (failures) parts.push(`${failures} failure${failures === 1 ? '' : 's'}`);
+        if (warnings) parts.push(`${warnings} warning${warnings === 1 ? '' : 's'}`);
+        alertSummaryEl.textContent = `Unseen: ${parts.join(', ')}`;
+      } else {
+        alertSummaryEl.textContent = '';
+      }
     }
   }
 
-  async function runCommand() {
-    const cmd = String((cmdEl && cmdEl.value) || '').trim();
-    if (!cmd) return;
-    _consoleSetStatus('', 'ok');
-    if (runBtn) runBtn.disabled = true;
+  async function _activityRefreshAlerts() {
+    const data = await updateActivityLogAlertBadge();
+    _activityUpdateAlertControls(data);
+  }
+
+  async function _activityAcknowledgeAlerts() {
+    if (!ackAlertsBtn) return;
+    ackAlertsBtn.disabled = true;
     try {
-      const res = await fetch('/api/console/run', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command: cmd}),
-      });
+      const res = await fetch('/api/activity-log/alerts/acknowledge', {method: 'POST', cache: 'no-store'});
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'Command failed');
-      }
-      // The server also appends output to the live log buffer; polling will show it.
-      _consoleSetStatus(`Exit code: ${data.exit_code}`, 'ok');
-      if (cmdEl) cmdEl.value = '';
-      // Immediately poll once so output appears quickly.
-      await pollConsole();
+      if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || 'Failed to acknowledge log alerts');
+      _activityUpdateAlertControls(data);
+      await updateActivityLogAlertBadge();
+      _activityLogSetStatus('Warnings/errors marked as seen.', 'ok');
     } catch (e) {
-      _consoleSetStatus(String(e.message || e), 'error');
+      _activityLogSetStatus(String(e.message || e), 'error');
     } finally {
-      if (runBtn) runBtn.disabled = false;
+      await _activityRefreshAlerts();
     }
   }
 
-  // initial load + poll
-  pollConsole();
-  setInterval(pollConsole, 1000);
-
-  if (runBtn) {
-    runBtn.addEventListener('click', runCommand);
+  function _activityUpdatePager() {
+    totalPages = Math.max(1, Number(totalPages || 1));
+    currentPage = Math.min(Math.max(1, Number(currentPage || 1)), totalPages);
+    if (pageJumpEl) {
+      pageJumpEl.max = String(totalPages);
+      pageJumpEl.value = String(currentPage);
+      pageJumpEl.disabled = loading || totalPages <= 1;
+    }
+    if (pageInfoEl) {
+      pageInfoEl.textContent = `of ${totalPages} (${totalRows} logs)`;
+    }
+    if (firstBtn) firstBtn.disabled = loading || currentPage <= 1;
+    if (prevBtn) prevBtn.disabled = loading || currentPage <= 1;
+    if (nextBtn) nextBtn.disabled = loading || currentPage >= totalPages;
+    if (lastBtn) lastBtn.disabled = loading || currentPage >= totalPages;
   }
-  if (cmdEl) {
-    cmdEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        runCommand();
+
+  function _activityGoToPage(page) {
+    const nextPage = Math.min(Math.max(1, Number(page || 1)), Math.max(1, totalPages));
+    if (nextPage === currentPage && !loading) {
+      _activityUpdatePager();
+      return;
+    }
+    currentPage = nextPage;
+    _activityLoad();
+  }
+
+  function _activityRender() {
+    if (!bodyEl) return;
+    const events = Array.from(eventsById.values()).sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+    bodyEl.textContent = '';
+    if (!events.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.className = 'text-muted small p-3';
+      td.textContent = 'No activity recorded.';
+      tr.appendChild(td);
+      bodyEl.appendChild(tr);
+      return;
+    }
+    events.forEach((ev) => {
+      const tr = document.createElement('tr');
+      tr.className = _activityRowClass(ev.status);
+
+      const timeTd = document.createElement('td');
+      timeTd.className = 'small text-nowrap';
+      timeTd.textContent = String(ev.ts || '');
+      tr.appendChild(timeTd);
+
+      const actorTd = document.createElement('td');
+      actorTd.className = 'activity-log-actor';
+      const actor = document.createElement('div');
+      actor.className = 'fw-semibold text-truncate activity-log-actor-name';
+      actor.textContent = String(ev.actor_display || ev.actor_username || 'System');
+      actorTd.appendChild(actor);
+      if (ev.ip) {
+        const ip = document.createElement('div');
+        ip.className = 'text-muted text-truncate activity-log-meta';
+        ip.textContent = String(ev.ip);
+        actorTd.appendChild(ip);
+      }
+      tr.appendChild(actorTd);
+
+      const summaryTd = document.createElement('td');
+      const summary = document.createElement('div');
+      summary.className = 'activity-log-summary';
+      summary.textContent = String(ev.summary || ev.action || '');
+      summaryTd.appendChild(summary);
+      const meta = document.createElement('div');
+      meta.className = 'text-muted activity-log-meta';
+      const target = [ev.target_type, ev.target_id].filter(Boolean).join(' ');
+      meta.textContent = [String(ev.action || ''), target, String(ev.request_path || '')].filter(Boolean).join(' | ');
+      summaryTd.appendChild(meta);
+      const details = _activityDetailsText(ev);
+      if (details) {
+        const detailEl = document.createElement('details');
+        detailEl.className = 'mt-1 activity-log-details';
+        const detailSummary = document.createElement('summary');
+        detailSummary.textContent = 'Details';
+        const pre = document.createElement('pre');
+        pre.className = 'border rounded p-2 mt-1 mb-0 bg-body-tertiary activity-log-pre';
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.textContent = details;
+        detailEl.appendChild(detailSummary);
+        detailEl.appendChild(pre);
+        summaryTd.appendChild(detailEl);
+      }
+      tr.appendChild(summaryTd);
+
+      const sourceTd = document.createElement('td');
+      sourceTd.className = 'small';
+      sourceTd.textContent = _activitySourceLabel(ev.source);
+      tr.appendChild(sourceTd);
+
+      const statusTd = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = `badge ${_activityStatusClass(ev.status)}`;
+      badge.textContent = _activitySourceLabel(ev.status || 'info');
+      statusTd.appendChild(badge);
+      tr.appendChild(statusTd);
+
+      bodyEl.appendChild(tr);
+    });
+    _activityUpdatePager();
+  }
+
+  function _activityParams() {
+    const params = new URLSearchParams();
+    params.set('limit', String(pageSize));
+    params.set('page', String(currentPage));
+    const q = String((searchEl && searchEl.value) || '').trim();
+    const source = String((sourceEl && sourceEl.value) || '').trim();
+    const status = String((statusEl && statusEl.value) || '').trim();
+    const start = String((startEl && startEl.value) || '').trim();
+    const end = String((endEl && endEl.value) || '').trim();
+    if (q) params.set('q', q);
+    if (source) params.set('source', source);
+    if (status) params.set('status', status);
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    return params;
+  }
+
+  async function _activityLoad({reset = false} = {}) {
+    if (loading) return;
+    loading = true;
+    _activityUpdatePager();
+    if (reset) {
+      currentPage = 1;
+      liveSince = 0;
+    }
+    eventsById.clear();
+    _activityRender();
+    try {
+      const params = _activityParams();
+      const res = await fetch(`/api/activity-log?${params.toString()}`, {cache: 'no-store'});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to load activity log');
+      (data.events || []).forEach((ev) => {
+        if (ev && ev.id != null) eventsById.set(Number(ev.id), ev);
+      });
+      currentPage = Number(data.page || currentPage) || 1;
+      totalPages = Number(data.total_pages || 1) || 1;
+      totalRows = Number(data.total || 0) || 0;
+      const maxId = Math.max(...Array.from(eventsById.keys()), 0);
+      if (maxId > liveSince) liveSince = maxId;
+      _activityRender();
+      _activityLogSetStatus('', 'ok');
+    } catch (e) {
+      _activityLogSetStatus(String(e.message || e), 'error');
+    } finally {
+      loading = false;
+      _activityUpdatePager();
+    }
+  }
+
+  async function _activityPoll() {
+    if (pollInFlight || currentPage !== 1) return;
+    pollInFlight = true;
+    try {
+      const params = _activityParams();
+      params.set('since', String(liveSince));
+      params.delete('limit');
+      params.delete('page');
+      const res = await fetch(`/api/activity-log/live?${params.toString()}`, {cache: 'no-store'});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to load live activity');
+      let changed = false;
+      (data.events || []).forEach((ev) => {
+        if (ev && ev.id != null) {
+          eventsById.set(Number(ev.id), ev);
+          changed = true;
+        }
+      });
+      liveSince = Number(data.next || liveSince) || liveSince;
+      if (changed) {
+        const sortedIds = Array.from(eventsById.keys()).sort((a, b) => b - a);
+        sortedIds.slice(pageSize).forEach((id) => eventsById.delete(id));
+        totalRows += (data.events || []).length;
+        totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+        _activityRender();
+      }
+    } catch (e) {
+      _activityLogSetStatus(String(e.message || e), 'error');
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  function _activityScheduleReload() {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => _activityLoad({reset: true}), 250);
+  }
+
+  if (refreshBtn) refreshBtn.addEventListener('click', () => _activityLoad({reset: true}));
+  if (ackAlertsBtn) ackAlertsBtn.addEventListener('click', _activityAcknowledgeAlerts);
+  if (firstBtn) firstBtn.addEventListener('click', () => _activityGoToPage(1));
+  if (prevBtn) prevBtn.addEventListener('click', () => _activityGoToPage(currentPage - 1));
+  if (nextBtn) nextBtn.addEventListener('click', () => _activityGoToPage(currentPage + 1));
+  if (lastBtn) lastBtn.addEventListener('click', () => _activityGoToPage(totalPages));
+  if (pageJumpEl) {
+    pageJumpEl.addEventListener('change', () => _activityGoToPage(pageJumpEl.value));
+    pageJumpEl.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        _activityGoToPage(pageJumpEl.value);
       }
     });
   }
+  if (searchEl) searchEl.addEventListener('input', _activityScheduleReload);
+  if (sourceEl) sourceEl.addEventListener('change', () => _activityLoad({reset: true}));
+  if (statusEl) statusEl.addEventListener('change', () => _activityLoad({reset: true}));
+  if (rangeEl) rangeEl.addEventListener('change', () => {
+    _activityApplyRangePreset(String(rangeEl.value || ''));
+    _activityLoad({reset: true});
+  });
+  if (clearDateTimeBtn) clearDateTimeBtn.addEventListener('click', _activityClearDateTimeFilter);
+  [startEl, endEl].forEach((el) => {
+    if (!el) return;
+    el.addEventListener('change', () => {
+      if (rangeEl) rangeEl.value = 'custom';
+      _activityLoad({reset: true});
+    });
+  });
+
+  _activityUpdatePager();
+  _activityRefreshAlerts();
+  _activityLoad({reset: true});
+  setInterval(_activityPoll, 2000);
+  setInterval(_activityRefreshAlerts, 15000);
 }
 
 // --- Timers page ---
@@ -2888,7 +3262,7 @@ if (document.getElementById('admin-user-detail-page')) {
   const minPasswordLength = Math.max(4, Math.min(Number(root.getAttribute('data-min-password-length')) || 6, 128));
   const accessForm = root.querySelector('[data-user-detail-access-form]');
   const accessError = root.querySelector('[data-user-detail-access-error]');
-  const accessSaved = root.querySelector('[data-user-detail-access-saved]');
+  const passwordError = root.querySelector('[data-user-detail-password-error]');
   let accessSaveTimer = null;
   let accessSaveInFlight = false;
   let accessSaveQueued = false;
@@ -2897,6 +3271,10 @@ if (document.getElementById('admin-user-detail-page')) {
     if (!field) return false;
     field.setCustomValidity(String(msg || 'Invalid value'));
     field.reportValidity();
+    if (passwordError) {
+      passwordError.textContent = String(msg || 'Invalid value');
+      passwordError.classList.remove('d-none');
+    }
     const clear = () => field.setCustomValidity('');
     field.addEventListener('input', clear, { once: true });
     field.addEventListener('change', clear, { once: true });
@@ -2915,7 +3293,7 @@ if (document.getElementById('admin-user-detail-page')) {
   });
 
   function _detailSetAccessMessage(kind, msg) {
-    const el = kind === 'error' ? accessError : accessSaved;
+    const el = kind === 'error' ? accessError : null;
     if (!el) return;
     if (!msg) {
       _uiClearAutoHide(el);
@@ -2989,6 +3367,10 @@ if (document.getElementById('admin-user-detail-page')) {
     form.addEventListener('submit', (e) => {
       const generated = e.submitter && String(e.submitter.getAttribute('name') || '') === 'generate_password';
       if (generated) return true;
+      if (passwordError) {
+        passwordError.classList.add('d-none');
+        passwordError.textContent = '';
+      }
       const passwordEl = form.querySelector('input[name="new_password"]');
       const password = String((passwordEl || {}).value || '');
       if (password.length < minPasswordLength) {

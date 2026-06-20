@@ -1,25 +1,108 @@
 {% extends 'base.html' %}
 
-{% set page_title = 'Console' %}
+{% set page_title = '' %}
 
 {% block content %}
-<div id="console-page">
-  <div id="console-status" class="mb-3"></div>
-
-  <div class="mb-3">
-    <div class="input-group">
-      <span class="input-group-text">cli</span>
-      <input id="console-command" type="text" class="form-control" placeholder="list" autocomplete="off" />
-      <button id="console-run" class="btn btn-primary" type="button">Run</button>
+<div id="activity-log-page">
+  <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h1 class="h3 mb-1 tdeck-title">Log</h1>
+      <div class="text-muted small">Read-only history of user, system, API, and control actions.</div>
     </div>
-    <div class="form-text">Runs the app CLI as <code>cli &lt;command&gt;</code> (example: <code>cli list</code>). Do not type <code>python cli.py</code>.</div>
+    <div class="d-flex flex-wrap align-items-center gap-2">
+      <span id="activity-log-alert-summary" class="small text-muted"></span>
+      <button id="activity-log-ack-alerts" class="btn btn-outline-secondary btn-sm d-none" type="button">Mark Warnings/Errors Seen</button>
+    </div>
+  </div>
+  <div id="activity-log-status" class="mb-3"></div>
+
+  <div class="row g-2 align-items-end mb-2">
+    <div class="col-md-3">
+      <label class="form-label small text-muted" for="activity-log-search">Search</label>
+      <input id="activity-log-search" class="form-control form-control-sm" placeholder="Action, user, target, or detail">
+    </div>
+    <div class="col-sm-6 col-md-2">
+      <label class="form-label small text-muted" for="activity-log-source">Source</label>
+      <select id="activity-log-source" class="form-select form-select-sm">
+        <option value="">All</option>
+        <option value="web">Web</option>
+        <option value="api">API</option>
+        <option value="companion">Companion</option>
+        <option value="scheduler">Scheduler</option>
+        <option value="system">System</option>
+        <option value="legacy">Legacy</option>
+      </select>
+    </div>
+    <div class="col-sm-6 col-md-2">
+      <label class="form-label small text-muted" for="activity-log-status-filter">Status</label>
+      <select id="activity-log-status-filter" class="form-select form-select-sm">
+        <option value="">All</option>
+        <option value="success">Success</option>
+        <option value="failure">Failure</option>
+        <option value="warning">Warning</option>
+        <option value="info">Info</option>
+      </select>
+    </div>
+    <div class="col-sm-6 col-md-2">
+      <label class="form-label small text-muted" for="activity-log-range">Date Range</label>
+      <select id="activity-log-range" class="form-select form-select-sm">
+        <option value="">All Time</option>
+        <option value="today">Today</option>
+        <option value="yesterday">Yesterday</option>
+        <option value="last7">Last 7 Days</option>
+        <option value="last30">Last 30 Days</option>
+        <option value="thisMonth">This Month</option>
+        <option value="lastMonth">Last Month</option>
+        <option value="custom">Custom Range</option>
+      </select>
+    </div>
+    <div class="col-sm-6 col-md-3">
+      <button id="activity-log-refresh" class="btn btn-outline-secondary btn-sm w-100" type="button">Refresh</button>
+    </div>
   </div>
 
-  <div class="card mb-3">
-    <div class="card-body">
-      <h2 class="h6">Live Output</h2>
-      <pre id="console-log" class="border rounded p-2 mb-0" style="height: 55vh; overflow: auto; white-space: pre-wrap;"></pre>
+  <div class="row g-2 align-items-end mb-3">
+    <div class="col-sm-6 col-md-3">
+      <label class="form-label small text-muted" for="activity-log-start">From</label>
+      <input id="activity-log-start" class="form-control form-control-sm" type="datetime-local">
     </div>
+    <div class="col-sm-6 col-md-3">
+      <label class="form-label small text-muted" for="activity-log-end">To</label>
+      <input id="activity-log-end" class="form-control form-control-sm" type="datetime-local">
+    </div>
+    <div class="col-sm-6 col-md-2">
+      <button id="activity-log-clear-datetime" class="btn btn-outline-secondary btn-sm w-100" type="button">Clear Date/Time</button>
+    </div>
+    <div class="col-sm-12 col-md-4">
+      <div class="d-flex justify-content-md-end align-items-center gap-2 activity-log-pager">
+        <button id="activity-log-first" class="btn btn-outline-secondary btn-sm" type="button">First</button>
+        <button id="activity-log-prev" class="btn btn-outline-secondary btn-sm" type="button">Previous</button>
+        <label class="visually-hidden" for="activity-log-page-jump">Page</label>
+        <input id="activity-log-page-jump" class="form-control form-control-sm activity-log-page-jump" type="number" min="1" value="1">
+        <span id="activity-log-page-info" class="small text-muted text-nowrap">of 1 (0 logs)</span>
+        <button id="activity-log-next" class="btn btn-outline-secondary btn-sm" type="button">Next</button>
+        <button id="activity-log-last" class="btn btn-outline-secondary btn-sm" type="button">Last</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="table-responsive border rounded">
+    <table class="table table-sm table-hover align-middle mb-0 activity-log-table">
+      <thead class="table-light">
+        <tr>
+          <th style="width: 150px;">Time</th>
+          <th style="width: 150px;">Who</th>
+          <th>What happened</th>
+          <th style="width: 120px;">Source</th>
+          <th style="width: 110px;">Status</th>
+        </tr>
+      </thead>
+      <tbody id="activity-log-body">
+        <tr>
+          <td colspan="5" class="text-muted small p-3">Loading activity...</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </div>
 {% endblock %}

@@ -4,6 +4,7 @@ import time as t
 from datetime import datetime, timedelta
 from typing import List, Optional
 import json
+import sqlite3
 import requests
 
 from package.apps.calendar.models import Event, TriggerJob
@@ -11,6 +12,76 @@ from package.apps.calendar import storage, utils
 logger = utils.get_logger()
 
 _button_templates_cache: dict = {"mtime": None, "labels_by_url": {}}
+
+
+def _activity_log_scheduler_event(
+    *,
+    action: str,
+    summary: str,
+    status: str,
+    job: TriggerJob,
+    details: dict | None = None,
+) -> None:
+    """Best-effort Activity Log writer for the standalone scheduler process."""
+
+    try:
+        db_path = utils.get_project_path("auth.db")
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_log (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  ts TEXT NOT NULL,
+                  actor_user_id INTEGER,
+                  actor_username TEXT,
+                  actor_display TEXT,
+                  source TEXT NOT NULL DEFAULT 'system',
+                  action TEXT NOT NULL,
+                  target_type TEXT,
+                  target_id TEXT,
+                  status TEXT NOT NULL DEFAULT 'info',
+                  summary TEXT,
+                  details_json TEXT,
+                  ip TEXT,
+                  request_path TEXT
+                )
+                """
+            )
+            payload = {
+                "event_id": getattr(job.event, "id", None),
+                "event_name": getattr(job.event, "name", ""),
+                "trigger_index": getattr(job, "trigger_index", None),
+                "trigger_name": _resolve_trigger_display_name(job.trigger),
+                "due": job.due.strftime("%Y-%m-%d %H:%M:%S") if getattr(job, "due", None) else None,
+                "offset_minutes": getattr(job.trigger, "offset_minutes", 0),
+            }
+            if details:
+                payload.update(details)
+            conn.execute(
+                """
+                INSERT INTO activity_log(
+                  ts,actor_display,source,action,target_type,target_id,status,summary,details_json
+                )
+                VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Scheduler",
+                    "scheduler",
+                    str(action or "scheduler.trigger"),
+                    "calendar_event",
+                    str(getattr(job.event, "id", "") or ""),
+                    str(status or "info"),
+                    str(summary or ""),
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def _read_button_templates_any() -> list[dict]:
@@ -460,12 +531,32 @@ class ClockScheduler:
                     f"API {str((api or {}).get('method') or 'POST').upper()} {str((api or {}).get('path') or '')} OK | "
                     f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
                 )
+                _activity_log_scheduler_event(
+                    action="scheduler.trigger.api",
+                    summary=f"Scheduled event trigger ran API action for '{job.event.name}'",
+                    status="success",
+                    job=job,
+                    details={
+                        "method": str((api or {}).get("method") or "POST").upper(),
+                        "path": str((api or {}).get("path") or ""),
+                    },
+                )
                 self._dbg("Internal API action -> OK")
             else:
                 print(f"[ACTION] Internal API action failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}; see calendar.log")
                 logger.error(
                     f"API {str((api or {}).get('method') or 'POST').upper()} {str((api or {}).get('path') or '')} FAIL | "
                     f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
+                )
+                _activity_log_scheduler_event(
+                    action="scheduler.trigger.api",
+                    summary=f"Scheduled event trigger API action failed for '{job.event.name}'",
+                    status="failure",
+                    job=job,
+                    details={
+                        "method": str((api or {}).get("method") or "POST").upper(),
+                        "path": str((api or {}).get("path") or ""),
+                    },
                 )
                 self._dbg("Internal API action -> FAIL")
             return
@@ -476,6 +567,13 @@ class ClockScheduler:
                 logger.error(
                     f"TIMER action invalid payload | event=#{getattr(job.event,'id',None)} "
                     f"'{job.event.name}' | due={job.due}"
+                )
+                _activity_log_scheduler_event(
+                    action="scheduler.trigger.timer",
+                    summary=f"Scheduled event trigger has invalid timer action for '{job.event.name}'",
+                    status="failure",
+                    job=job,
+                    details={"error": "invalid timer payload"},
                 )
                 self._dbg("Timer action -> FAIL (invalid payload)")
                 return
@@ -489,6 +587,17 @@ class ClockScheduler:
                     f"apply={bool(timer.get('apply', False))} OK | "
                     f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
                 )
+                _activity_log_scheduler_event(
+                    action="scheduler.trigger.timer",
+                    summary=f"Scheduled event trigger updated timer preset for '{job.event.name}'",
+                    status="success",
+                    job=job,
+                    details={
+                        "preset": timer.get("preset"),
+                        "time": timer.get("time"),
+                        "apply": bool(timer.get("apply", False)),
+                    },
+                )
                 self._dbg("Timer action -> OK")
             else:
                 print(f"[ACTION] Timer action failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}; see calendar.log")
@@ -496,6 +605,17 @@ class ClockScheduler:
                     f"TIMER preset={timer.get('preset')} time={timer.get('time')} "
                     f"apply={bool(timer.get('apply', False))} FAIL | "
                     f"event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}"
+                )
+                _activity_log_scheduler_event(
+                    action="scheduler.trigger.timer",
+                    summary=f"Scheduled event trigger timer action failed for '{job.event.name}'",
+                    status="failure",
+                    job=job,
+                    details={
+                        "preset": timer.get("preset"),
+                        "time": timer.get("time"),
+                        "apply": bool(timer.get("apply", False)),
+                    },
                 )
                 self._dbg("Timer action -> FAIL")
             return
@@ -510,6 +630,13 @@ class ClockScheduler:
                     self._companion_down = False
 
                 logger.info(f"POST {job.trigger.buttonURL} OK | event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}")
+                _activity_log_scheduler_event(
+                    action="scheduler.trigger.companion",
+                    summary=f"Scheduled event trigger pressed Companion button for '{job.event.name}'",
+                    status="success",
+                    job=job,
+                    details={"button_url": job.trigger.buttonURL},
+                )
                 self._dbg(f"Companion POST '{job.trigger.buttonURL}' -> OK")
             else:
                 # POST failed: mark as down and print a short summary to stdout
@@ -519,6 +646,13 @@ class ClockScheduler:
                     self._companion_down = True
 
                 logger.error(f"POST {job.trigger.buttonURL} FAIL | event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}")
+                _activity_log_scheduler_event(
+                    action="scheduler.trigger.companion",
+                    summary=f"Scheduled event trigger Companion press failed for '{job.event.name}'",
+                    status="failure",
+                    job=job,
+                    details={"button_url": job.trigger.buttonURL},
+                )
                 self._dbg(f"Companion POST '{job.trigger.buttonURL}' -> FAIL")
         else:
             # Companion not connected: print a short summary once and log it
@@ -526,6 +660,14 @@ class ClockScheduler:
                 print(f"[COMPANION] Companion not connected at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}; scheduled POST skipped; see calendar.log")
                 logger.warning(f"Companion not connected; would POST {job.trigger.buttonURL} | event=#{getattr(job.event,'id',None)} '{job.event.name}' | due={job.due}")
                 self._companion_down = True
+
+            _activity_log_scheduler_event(
+                action="scheduler.trigger.companion",
+                summary=f"Scheduled event trigger skipped Companion press for '{job.event.name}'",
+                status="warning",
+                job=job,
+                details={"button_url": job.trigger.buttonURL, "error": "companion_not_connected"},
+            )
 
             self._dbg("Companion not connected; skipping POST")
 

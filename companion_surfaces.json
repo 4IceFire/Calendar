@@ -13,8 +13,8 @@
   ],
   "surface_controls": [
     {
-      "id": "test-2",
-      "surface_id": "test-2",
+      "id": "test-surface",
+      "surface_id": "test-surface",
       "label": "Left display",
       "size": "1"
     },
