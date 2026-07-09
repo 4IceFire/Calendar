@@ -1392,15 +1392,7 @@ def _activity_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _activity_ack_user_id() -> int:
-    try:
-        if _auth_enabled():
-            if has_request_context() and getattr(current_user, 'is_authenticated', False):
-                return int(current_user.get_id())
-            return -1
-    except Exception:
-        return -1
-    return 0
+_ACTIVITY_GLOBAL_ACK_USER_ID = 0
 
 
 def _ensure_activity_log_ack_table(conn: sqlite3.Connection) -> None:
@@ -1416,13 +1408,11 @@ def _ensure_activity_log_ack_table(conn: sqlite3.Connection) -> None:
 
 
 def _activity_alert_summary() -> dict[str, Any]:
-    uid = _activity_ack_user_id()
     conn = _db()
     try:
         _ensure_activity_log_ack_table(conn)
         ack_row = conn.execute(
-            'SELECT acknowledged_activity_id FROM activity_log_ack WHERE actor_user_id=?',
-            (uid,),
+            'SELECT max(acknowledged_activity_id) AS acknowledged_activity_id FROM activity_log_ack',
         ).fetchone()
         ack_id = int(ack_row['acknowledged_activity_id'] or 0) if ack_row else 0
         row = conn.execute(
@@ -1454,7 +1444,6 @@ def _activity_alert_summary() -> dict[str, Any]:
 
 
 def _activity_acknowledge_alerts() -> dict[str, Any]:
-    uid = _activity_ack_user_id()
     conn = _db()
     try:
         _ensure_activity_log_ack_table(conn)
@@ -1470,7 +1459,7 @@ def _activity_acknowledge_alerts() -> dict[str, Any]:
               acknowledged_activity_id=excluded.acknowledged_activity_id,
               acknowledged_at=excluded.acknowledged_at
             """,
-            (uid, max_id, _activity_now()),
+            (_ACTIVITY_GLOBAL_ACK_USER_ID, max_id, _activity_now()),
         )
         conn.commit()
     finally:
