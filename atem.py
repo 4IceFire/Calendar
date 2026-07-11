@@ -16,6 +16,12 @@ try:
 except Exception:  # pragma: no cover - optional dependency until installed
     PyATEMMax = None  # type: ignore
 
+try:
+    from atem_meter import AtemMeterClient, empty_level_payload
+except Exception:  # pragma: no cover - optional at import time
+    AtemMeterClient = None  # type: ignore
+    empty_level_payload = None  # type: ignore
+
 
 DEFAULT_PORT = 9910
 DEFAULT_TIMEOUT = 3.0
@@ -118,6 +124,7 @@ class AtemAudioClient:
         self._lock = threading.RLock()
         self._switcher = None
         self._connected = False
+        self._meter_client = None
 
     def _build_switcher(self):
         if PyATEMMax is None:
@@ -134,6 +141,13 @@ class AtemAudioClient:
             sw = self._switcher
             self._switcher = None
             self._connected = False
+            meter_client = self._meter_client
+            self._meter_client = None
+            if meter_client is not None:
+                try:
+                    meter_client.close()
+                except Exception:
+                    pass
             if sw is not None:
                 try:
                     sw.disconnect()
@@ -170,14 +184,55 @@ class AtemAudioClient:
             except Exception:
                 pass
             raise TimeoutError("ATEM connection timed out")
-        try:
-            sw.setAudioLevelsEnable(True)
-            time.sleep(0.1)
-        except Exception:
-            pass
         self._switcher = sw
         self._connected = True
+        self._ensure_metering()
         return sw
+
+    def _ensure_metering(self) -> None:
+        if AtemMeterClient is None:
+            return
+        if self._meter_client is None:
+            self._meter_client = AtemMeterClient(self.host, self.port, timeout=self.timeout)
+        try:
+            self._meter_client.start()
+        except Exception:
+            pass
+
+    def _meter_levels(self) -> dict[str, Any] | None:
+        try:
+            self._ensure_metering()
+            if self._meter_client is not None:
+                return self._meter_client.get_levels()
+        except Exception:
+            pass
+        return None
+
+    def _meter_status(self) -> dict[str, Any]:
+        if AtemMeterClient is None:
+            return {
+                "enabled": False,
+                "connected": False,
+                "active": False,
+                "unavailableReason": "ATEM meter client is unavailable",
+            }
+        try:
+            self._ensure_metering()
+            if self._meter_client is not None:
+                return self._meter_client.status()
+        except Exception as e:
+            return {
+                "enabled": False,
+                "connected": False,
+                "active": False,
+                "unavailableReason": str(e),
+            }
+        return {
+            "enabled": False,
+            "connected": False,
+            "active": False,
+            "unavailableReason": "ATEM meter client is not running",
+        }
 
     def _with_switcher(self, callback):
         with self._lock:
@@ -291,8 +346,24 @@ class AtemAudioClient:
             },
         }
 
+    @staticmethod
+    def _empty_level_payload() -> dict[str, Any]:
+        if empty_level_payload is not None:
+            return empty_level_payload()
+        return {
+            "left": -60.0,
+            "right": -60.0,
+            "peakLeft": -60.0,
+            "peakRight": -60.0,
+            "max": -60.0,
+            "peakMax": -60.0,
+            "raw": {"left": 0, "right": 0, "peakLeft": 0, "peakRight": 0},
+        }
+
     def get_audio_state(self) -> dict[str, Any]:
         def _read(sw: Any) -> dict[str, Any]:
+            meter_levels = self._meter_levels() or {}
+            meter_sources = meter_levels.get("sources") if isinstance(meter_levels, dict) else {}
             sources = [{"id": MASTER_SOURCE_ID, "label": "Master", "kind": "master"}]
             for item in self._audio_source_defs(sw):
                 source_id = int(item["source"])
@@ -309,10 +380,7 @@ class AtemAudioClient:
                     "muted": mix_option == "off",
                     "mixOption": mix_option or "off",
                 })
-                try:
-                    row["level"] = self._level_payload(sw, sw.audioMixer.levels.sources[source_id])
-                except Exception:
-                    row["level"] = self._level_payload(sw, None)
+                row["level"] = (meter_sources or {}).get(str(source_id)) or self._empty_level_payload()
                 sources.append(row)
 
             try:
@@ -321,10 +389,7 @@ class AtemAudioClient:
                 master_volume = 0.0
             sources[0]["volume"] = master_volume
             sources[0]["muted"] = False
-            try:
-                sources[0]["level"] = self._level_payload(sw, sw.audioMixer.levels.master)
-            except Exception:
-                sources[0]["level"] = self._level_payload(sw, None)
+            sources[0]["level"] = meter_levels.get("master") if isinstance(meter_levels, dict) and meter_levels.get("master") else self._empty_level_payload()
 
             try:
                 monitor = sw.audioMixer.monitor
@@ -341,6 +406,7 @@ class AtemAudioClient:
                 "port": self.port,
                 "sources": sources,
                 "monitor": {"solo": solo, "soloSource": solo_source},
+                "metering": self._meter_status(),
             }
 
         return self._with_switcher(_read)

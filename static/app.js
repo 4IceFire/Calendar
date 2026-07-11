@@ -4049,8 +4049,13 @@ if (document.getElementById('foyer-audio-page')) {
       if (!data || !Array.isArray(data.sources)) throw new Error((data && data.error) || 'Could not load ATEM audio state');
       const nextSources = data.sources;
       monitorState = data.monitor || {};
-      if (data.ok === false && data.error) _foyerSetStatus(data.error, 'warning');
-      else _foyerSetStatus('', 'info');
+      if (data.ok === false && data.error) {
+        _foyerSetStatus(data.error, 'warning');
+      } else if (!meterOnly && data.metering && data.metering.enabled === false && data.metering.unavailableReason) {
+        _foyerSetStatus(`Audio metering unavailable: ${data.metering.unavailableReason}`, 'warning');
+      } else if (!meterOnly) {
+        _foyerSetStatus('', 'info');
+      }
       const nextSignature = _sourcesSignature(nextSources);
       stateSources = nextSources;
       if (!meterOnly && !root.hasAttribute('data-volume-dragging')) {

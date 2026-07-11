@@ -5071,6 +5071,7 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
                 'ok': True,
                 'source_ids': [str(s.get('id')) for s in sources if isinstance(s, dict)],
                 'source_labels': [{'id': str(s.get('id')), 'label': str(s.get('label') or '')} for s in sources if isinstance(s, dict)],
+                'metering': state.get('metering') if isinstance(state, dict) else None,
                 'levels': [
                     {
                         'id': str(s.get('id')),
