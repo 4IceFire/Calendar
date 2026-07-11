@@ -309,7 +309,7 @@ class AtemMeterClient:
         last_enable_sent = 0.0
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(1.0)
+            sock.settimeout(0.25)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
 
             syn = _Packet(flags=FLAG_SYN, data=bytes([1, 0, 0, 0, 0, 0, 0, 0]))
@@ -325,16 +325,16 @@ class AtemMeterClient:
             while not self._stop.is_set():
                 if state == STATE_SYN_SENT and time.time() - started_at > self.timeout:
                     raise TimeoutError("ATEM meter connection timed out")
+                if state == STATE_ESTABLISHED and session_id is not None:
+                    now = time.time()
+                    if not sent_enable or now - last_enable_sent > 2.0:
+                        local_sequence = self._send_audio_levels_enable(sock, session_id, local_sequence, True)
+                        sent_enable = True
+                        last_enable_sent = now
 
                 try:
                     raw, _addr = sock.recvfrom(2048)
                 except socket.timeout:
-                    if state == STATE_ESTABLISHED:
-                        now = time.time()
-                        if now - last_enable_sent > 2.0:
-                            local_sequence = self._send_audio_levels_enable(sock, session_id, local_sequence, True)
-                            last_enable_sent = now
-                        continue
                     continue
 
                 packet = _Packet.from_bytes(raw)
@@ -371,14 +371,6 @@ class AtemMeterClient:
                     if not enable_ack:
                         enable_ack = True
                         self._send_ack(sock, session_id, remote_sequence)
-                    if not sent_enable and session_id is not None:
-                        local_sequence = self._send_audio_levels_enable(sock, session_id, local_sequence, True)
-                        sent_enable = True
-                        last_enable_sent = time.time()
                     continue
 
-                if not sent_enable and session_id is not None:
-                    local_sequence = self._send_audio_levels_enable(sock, session_id, local_sequence, True)
-                    sent_enable = True
-                    last_enable_sent = time.time()
                 self._handle_commands(packet.data)
