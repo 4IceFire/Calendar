@@ -3979,6 +3979,12 @@ if (document.getElementById('foyer-audio-page')) {
     return (sources || []).filter(_sourceVisible).map(s => `${String(s.id)}:${String(s.label || '')}:${String(!!s.muted)}:${String(s.mixOption || '')}`).join('|');
   }
 
+  function _clampedVolume(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(-60, Math.min(n, 6));
+  }
+
   function _renderMeterLane(id, side, db) {
     const pct = _meterPct(db);
     return `
@@ -4076,6 +4082,67 @@ if (document.getElementById('foyer-audio-page')) {
     }
   }
 
+  function _syncSourceControls(sources) {
+    for (const source of (sources || [])) {
+      if (!_sourceVisible(source)) continue;
+      const id = String(source.id || '');
+      const volume = _clampedVolume(source.volume);
+      const activeVolumeId = String(root.getAttribute('data-active-volume') || '');
+      const slider = document.querySelector(`[data-foyer-volume="${CSS.escape(id)}"]`);
+      if (slider && activeVolumeId !== id) slider.value = String(volume);
+      if (activeVolumeId !== id) {
+        const readout = document.querySelector(`[data-volume-readout="${CSS.escape(id)}"]`);
+        const pct = document.querySelector(`[data-volume-percent="${CSS.escape(id)}"]`);
+        if (readout) readout.textContent = _formatDb(volume);
+        if (pct) pct.textContent = `${_pctFromDb(volume)}%`;
+      }
+
+      const muteBtn = document.querySelector(`[data-foyer-mute="${CSS.escape(id)}"]`);
+      if (muteBtn) {
+        const muted = !!source.muted;
+        muteBtn.classList.toggle('foyer-audio-on-active', !muted);
+        muteBtn.setAttribute('aria-pressed', muted ? 'false' : 'true');
+      }
+
+      const soloBtn = document.querySelector(`[data-foyer-solo="${CSS.escape(id)}"]`);
+      if (soloBtn) {
+        const soloActive = !!monitorState.solo && String(monitorState.soloSource || '') === id;
+        soloBtn.classList.toggle('btn-warning', soloActive);
+        soloBtn.classList.toggle('btn-outline-secondary', !soloActive);
+      }
+    }
+  }
+
+  function _syncMonitorControls() {
+    if (!canMonitor) return;
+    const activeVolumeId = String(root.getAttribute('data-active-volume') || '');
+    const volume = _clampedVolume(monitorState.volume);
+    const slider = document.querySelector('[data-foyer-monitor-volume]');
+    if (slider && activeVolumeId !== 'monitor') slider.value = String(volume);
+    if (activeVolumeId !== 'monitor') {
+      const readout = document.querySelector('[data-monitor-volume-readout]');
+      const pct = document.querySelector('[data-monitor-volume-percent]');
+      if (readout) readout.textContent = _formatDb(volume);
+      if (pct) pct.textContent = `${_pctFromDb(volume)}%`;
+    }
+
+    const onBtn = document.querySelector('[data-foyer-monitor-toggle="enabled"]');
+    if (onBtn) {
+      const enabled = !!monitorState.enabled;
+      onBtn.classList.toggle('btn-primary', enabled);
+      onBtn.classList.toggle('btn-outline-secondary', !enabled);
+      onBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    }
+
+    const dimBtn = document.querySelector('[data-foyer-monitor-toggle="dim"]');
+    if (dimBtn) {
+      const dim = !!monitorState.dim;
+      dimBtn.classList.toggle('btn-warning', dim);
+      dimBtn.classList.toggle('btn-outline-secondary', !dim);
+      dimBtn.setAttribute('aria-pressed', dim ? 'true' : 'false');
+    }
+  }
+
   async function _loadState(options) {
     const meterOnly = !!(options && options.meterOnly);
     try {
@@ -4104,6 +4171,8 @@ if (document.getElementById('foyer-audio-page')) {
         _render();
       } else {
         _updateMeters(nextSources);
+        _syncSourceControls(nextSources);
+        _syncMonitorControls();
       }
     } catch (e) {
       _foyerSetStatus(e && e.message ? e.message : 'Could not load ATEM audio state', 'danger');
@@ -4203,6 +4272,7 @@ if (document.getElementById('foyer-audio-page')) {
   function _clearDraggingSoon() {
     setTimeout(() => {
       root.removeAttribute('data-volume-dragging');
+      root.removeAttribute('data-active-volume');
     }, 250);
   }
 
@@ -4223,11 +4293,13 @@ if (document.getElementById('foyer-audio-page')) {
     if (!slider && !monitorSlider) return;
     root.setAttribute('data-volume-dragging', '1');
     if (monitorSlider) {
+      root.setAttribute('data-active-volume', 'monitor');
       const db = Number(monitorSlider.value);
       _updateLocalMonitorVolume(db);
       return;
     }
     const id = String(slider.getAttribute('data-foyer-volume') || '');
+    root.setAttribute('data-active-volume', id);
     const db = Number(slider.value);
     _updateLocalVolume(id, db);
     _sendVolume(id, db);
