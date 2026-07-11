@@ -381,7 +381,8 @@ class AtemAudioClient:
                 "port": self.port,
                 "sources": sources,
                 "monitor": {
-                    "enabled": monitor_audio,
+                    "enabled": not monitor_mute,
+                    "monitorAudio": monitor_audio,
                     "dim": monitor_dim,
                     "muted": monitor_mute,
                     "volume": monitor_volume,
@@ -442,7 +443,7 @@ class AtemAudioClient:
     def set_monitor(self, *, enabled: bool | None = None, dim: bool | None = None, volume: float | None = None) -> None:
         def _set(sw: Any) -> None:
             if enabled is not None:
-                sw.setAudioMixerMonitorMonitorAudio(bool(enabled))
+                sw.setAudioMixerMonitorMute(not bool(enabled))
             if dim is not None:
                 sw.setAudioMixerMonitorDim(bool(dim))
             if volume is not None:
