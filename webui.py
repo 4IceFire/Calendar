@@ -3290,6 +3290,8 @@ _STATUS_CACHE_TTL_SECONDS = 2.0
 _STATUS_REFRESH_INTERVAL_SECONDS = 5.0
 _VIDEOHUB_LABELS_CACHE_TTL_SECONDS = 10.0
 _VIDEOHUB_STATE_CACHE_TTL_SECONDS = 5.0
+_atem_probe_failures = 0
+_ATEM_OFFLINE_AFTER_FAILURES = 3
 
 # Track last-known connectivity so we can log state changes (ONLINE/OFFLINE)
 # without spamming the console on every poll.
@@ -3435,6 +3437,7 @@ def _probe_videohub_status(cfg: dict) -> dict:
 
 
 def _probe_atem_status(cfg: dict) -> dict:
+    global _atem_probe_failures
     connected = False
     detail = ''
     try:
@@ -3452,6 +3455,21 @@ def _probe_atem_status(cfg: dict) -> dict:
         detail = f"{ip}:{port}" if ip and port else (ip or '')
     except Exception:
         detail = ''
+
+    raw_connected = bool(connected)
+    with _status_cache_lock:
+        was_connected = bool(_atem_status_cache.get('connected', False))
+
+    if raw_connected:
+        _atem_probe_failures = 0
+    else:
+        _atem_probe_failures += 1
+        if was_connected and _atem_probe_failures < _ATEM_OFFLINE_AFTER_FAILURES:
+            connected = True
+            if detail:
+                detail = f"{detail} (missed probe {_atem_probe_failures}/{_ATEM_OFFLINE_AFTER_FAILURES})"
+        else:
+            connected = False
 
     return {
         'connected': bool(connected),

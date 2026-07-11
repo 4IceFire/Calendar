@@ -7,6 +7,7 @@ This module wraps PyATEMMax in the same lightweight style as the repo's
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -48,6 +49,9 @@ _FALLBACK_AUDIO_SOURCES = [
     {"id": "2002", "source": 2002, "label": "Media Player 2", "kind": "input"},
 ]
 
+_CLIENT_CACHE_LOCK = threading.Lock()
+_CLIENT_CACHE: dict[tuple[str, int, float, bool], "AtemAudioClient"] = {}
+
 
 @dataclass(frozen=True)
 class AtemConfig:
@@ -82,7 +86,20 @@ def get_atem_client_from_config(
         timeout_value = DEFAULT_TIMEOUT
     timeout_value = max(0.5, min(timeout_value, 15.0))
 
-    return AtemAudioClient(host_value, port_value, timeout=timeout_value, debug=debug)
+    key = (host_value, port_value, timeout_value, bool(debug))
+    with _CLIENT_CACHE_LOCK:
+        client = _CLIENT_CACHE.get(key)
+        if client is not None:
+            return client
+        client = AtemAudioClient(host_value, port_value, timeout=timeout_value, debug=debug)
+        for old_client in _CLIENT_CACHE.values():
+            try:
+                old_client.close()
+            except Exception:
+                pass
+        _CLIENT_CACHE.clear()
+        _CLIENT_CACHE[key] = client
+        return client
 
 
 class AtemAudioClient:
@@ -98,6 +115,9 @@ class AtemAudioClient:
         self.port = int(port or DEFAULT_PORT)
         self.timeout = float(timeout or DEFAULT_TIMEOUT)
         self.debug = bool(debug)
+        self._lock = threading.RLock()
+        self._switcher = None
+        self._connected = False
 
     def _build_switcher(self):
         if PyATEMMax is None:
@@ -109,30 +129,71 @@ class AtemAudioClient:
             pass
         return sw
 
-    def _with_switcher(self, callback):
+    def close(self) -> None:
+        with self._lock:
+            sw = self._switcher
+            self._switcher = None
+            self._connected = False
+            if sw is not None:
+                try:
+                    sw.disconnect()
+                except Exception:
+                    pass
+
+    def _switcher_is_connected(self, sw: Any) -> bool:
+        try:
+            return bool(getattr(sw, "connected", False) or getattr(sw, "switcherAlive", False))
+        except Exception:
+            return False
+
+    def _ensure_switcher(self):
         if not self.host:
             raise ValueError("ATEM host is required")
+        if self._switcher is not None and self._switcher_is_connected(self._switcher):
+            self._connected = True
+            return self._switcher
+
+        if self._switcher is not None:
+            try:
+                self._switcher.disconnect()
+            except Exception:
+                pass
+            self._switcher = None
+            self._connected = False
+
         sw = self._build_switcher()
-        connected = False
-        try:
-            sw.connect(self.host, connTimeout=max(1, int(round(self.timeout))))
-            connected = bool(sw.waitForConnection(infinite=False, timeout=self.timeout))
-            if not connected:
-                raise TimeoutError("ATEM connection timed out")
-            result = callback(sw)
-            time.sleep(0.08)
-            return result
-        finally:
+        sw.connect(self.host, connTimeout=max(1, int(round(self.timeout))))
+        connected = bool(sw.waitForConnection(infinite=False, timeout=self.timeout))
+        if not connected:
             try:
                 sw.disconnect()
             except Exception:
                 pass
+            raise TimeoutError("ATEM connection timed out")
+        self._switcher = sw
+        self._connected = True
+        return sw
+
+    def _with_switcher(self, callback):
+        with self._lock:
+            try:
+                sw = self._ensure_switcher()
+                result = callback(sw)
+                time.sleep(0.08)
+                return result
+            except Exception:
+                self.close()
+                raise
 
     def ping(self) -> bool:
         try:
-            self._with_switcher(lambda sw: True)
+            with self._lock:
+                sw = self._ensure_switcher()
+                if not self._switcher_is_connected(sw):
+                    raise TimeoutError("ATEM connection lost")
             return True
         except Exception:
+            self.close()
             return False
 
     @staticmethod
