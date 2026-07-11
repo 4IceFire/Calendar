@@ -254,6 +254,34 @@
                             </div>
                           {% endif %}
                         </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
+                            <div class="fw-semibold">Foyer Audio controls</div>
+                            <div class="small text-muted">Checked channels are visible on the Foyer Audio page. No checked channels means no audio controls.</div>
+                          </div>
+                          <div class="col-12">
+                            <div class="form-check">
+                              <input class="form-check-input" type="checkbox" name="atem_can_solo_audio_role"
+                                {% if group_to_atem.get(g.id) and group_to_atem.get(g.id).can_solo %}checked{% endif %}
+                                data-role="atem-audio-field">
+                              <label class="form-check-label">Allow headphone solo</label>
+                            </div>
+                          </div>
+                          {% set selected_atem_sources = (group_to_atem.get(g.id).audio_sources if group_to_atem and group_to_atem.get(g.id) else []) %}
+                          {% for source in atem_audio_sources %}
+                            <div class="col-12 col-md-6">
+                              <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="atem_allowed_audio_sources_role" value="{{ source.id }}"
+                                  {% if selected_atem_sources and (source.id|string in selected_atem_sources) %}checked{% endif %}
+                                  data-role="atem-audio-field">
+                                <label class="form-check-label">{{ source.label }}{% if source.id != 'master' %} <span class="text-muted">({{ source.id }})</span>{% endif %}</label>
+                              </div>
+                            </div>
+                          {% endfor %}
+                          <div class="col-12"><div class="form-text">Controls are enabled only when this group has the Foyer Audio page permission.</div></div>
+                        </div>
                       </form>
                     {% endif %}
                   </div>

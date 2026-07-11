@@ -215,6 +215,9 @@ except Exception:
         "videohub_port": 9990,
         "videohub_timeout": 2,
         "videohub_presets_file": "videohub_presets.json",
+        "atem_ip": "127.0.0.1",
+        "atem_port": 9910,
+        "atem_timeout": 3,
         "webserver_port": 5000,
         "poll_interval": 1,
         "debug": False,
@@ -472,7 +475,9 @@ def _init_auth_db() -> None:
               videohub_allowed_inputs TEXT,
               videohub_allowed_presets TEXT,
               videohub_can_edit_presets INTEGER,
-              companion_click_surfaces TEXT
+              companion_click_surfaces TEXT,
+              atem_allowed_audio_sources TEXT,
+              atem_can_solo_audio INTEGER
             )
             """
         )
@@ -489,6 +494,8 @@ def _init_auth_db() -> None:
             ('videohub_allowed_presets', 'TEXT'),
             ('videohub_can_edit_presets', 'INTEGER'),
             ('companion_click_surfaces', 'TEXT'),
+            ('atem_allowed_audio_sources', 'TEXT'),
+            ('atem_can_solo_audio', 'INTEGER'),
         ):
             if col_name not in group_cols:
                 try:
@@ -837,6 +844,37 @@ def _set_group_companion_click_surfaces(group_id: int, surface_ids) -> None:
         conn.close()
 
 
+def _set_group_atem_audio_sources(group_id: int, source_ids) -> None:
+    source_ids = _coerce_string_allow_list(source_ids)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET atem_allowed_audio_sources=? WHERE id=?',
+            (
+                json.dumps(source_ids),
+                int(group_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _set_group_atem_can_solo_audio(group_id: int, enabled: bool) -> None:
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET atem_can_solo_audio=? WHERE id=?',
+            (
+                1 if bool(enabled) else 0,
+                int(group_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
     group_id = int(group_id)
     keys = [k for k in (page_keys or []) if str(k or '').strip()]
@@ -870,6 +908,8 @@ def _group_settings_snapshot(group_id: int) -> dict:
         'videohub_allowed_presets': _parse_group_allowlist_field(group['videohub_allowed_presets'] if 'videohub_allowed_presets' in group.keys() else None),
         'videohub_can_edit_presets': bool(int(group['videohub_can_edit_presets'] or 0)) if 'videohub_can_edit_presets' in group.keys() and group['videohub_can_edit_presets'] is not None else False,
         'companion_click_surfaces': _coerce_string_allow_list(group['companion_click_surfaces'] if 'companion_click_surfaces' in group.keys() else None),
+        'atem_allowed_audio_sources': _coerce_string_allow_list(group['atem_allowed_audio_sources'] if 'atem_allowed_audio_sources' in group.keys() else None),
+        'atem_can_solo_audio': bool(int(group['atem_can_solo_audio'] or 0)) if 'atem_can_solo_audio' in group.keys() and group['atem_can_solo_audio'] is not None else False,
     }
 
 
@@ -946,6 +986,23 @@ def _log_group_setting_changes(before: dict, after: dict) -> None:
             target_type='group',
             target_id=gid,
             details={'group_id': gid, 'group_name': name, 'old': before.get('companion_click_surfaces'), 'new': after.get('companion_click_surfaces')},
+        )
+    if _changed('atem_allowed_audio_sources') or _changed('atem_can_solo_audio'):
+        log_event(
+            'group.atem_audio.update',
+            f"Updated ATEM audio permissions for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={
+                'group_id': gid,
+                'group_name': name,
+                'old_sources': before.get('atem_allowed_audio_sources'),
+                'new_sources': after.get('atem_allowed_audio_sources'),
+                'old_can_solo': before.get('atem_can_solo_audio'),
+                'new_can_solo': after.get('atem_can_solo_audio'),
+            },
         )
 
 
@@ -1122,6 +1179,36 @@ def _effective_companion_click_surface_ids_for_user(user_id: int | None) -> list
     if user_id is None or _user_is_admin(user_id):
         return []
     return _effective_group_string_allowlist(_get_user_groups(user_id), 'companion_click_surfaces')
+
+
+def _effective_atem_audio_source_ids_for_user(user_id: int | None) -> list[str]:
+    if user_id is None:
+        return []
+    if _user_is_admin(user_id):
+        return []
+    groups = _get_user_groups_for_page(user_id, 'page:atem_audio')
+    merged: set[str] = set()
+    for row in groups:
+        try:
+            merged.update(_coerce_string_allow_list(row['atem_allowed_audio_sources']))
+        except Exception:
+            continue
+    return sorted(merged)
+
+
+def _effective_atem_can_solo_audio_for_user(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    if _user_is_admin(user_id):
+        return True
+    groups = _get_user_groups_for_page(user_id, 'page:atem_audio')
+    for row in groups:
+        try:
+            if bool(int(row['atem_can_solo_audio'] or 0)):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _can_click_companion_surface_for_current_user(surface_id: str) -> bool:
@@ -3053,6 +3140,14 @@ except Exception:
     get_videohub_client_from_config = None  # type: ignore
     VIDEOHUB_DEFAULT_PORT = 9990
 
+# Optional Blackmagic ATEM audio integration
+try:
+    from atem import AtemAudioClient, get_atem_client_from_config, DEFAULT_PORT as ATEM_DEFAULT_PORT
+except Exception:
+    AtemAudioClient = None  # type: ignore
+    get_atem_client_from_config = None  # type: ignore
+    ATEM_DEFAULT_PORT = 9910
+
 
 def _apply_logging_config():
     """Adjust log levels for noisy servers (werkzeug) based on config debug flag.
@@ -3088,6 +3183,34 @@ def _get_videohub_client_from_config():
     except Exception:
         cfg = {}
     return get_videohub_client_from_config(cfg)
+
+
+def _get_atem_client_from_config():
+    if AtemAudioClient is None or get_atem_client_from_config is None:
+        return None
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    return get_atem_client_from_config(cfg)
+
+
+def _get_atem_audio_sources_for_permissions() -> list[dict[str, Any]]:
+    try:
+        atem = _get_atem_client_from_config()
+        if atem is not None:
+            state = atem.get_audio_state()
+            sources = state.get('sources') if isinstance(state, dict) else None
+            if isinstance(sources, list) and sources:
+                return sources
+    except Exception:
+        pass
+    try:
+        if AtemAudioClient is not None:
+            return AtemAudioClient.fallback_sources()
+    except Exception:
+        pass
+    return [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
 
 TEMPLATES_DIR = Path.cwd()
 TRIGGER_TEMPLATES = TEMPLATES_DIR / 'trigger_templates.json'
@@ -3156,6 +3279,7 @@ _server_lock = threading.Lock()
 _companion_status_cache = {'ts': 0.0, 'connected': False}
 _propresenter_status_cache = {'ts': 0.0, 'connected': False}
 _videohub_status_cache = {'ts': 0.0, 'connected': False}
+_atem_status_cache = {'ts': 0.0, 'connected': False}
 _status_snapshot_cache = {'ts': 0.0, 'payload': None}
 _videohub_labels_cache = {'ts': 0.0, 'payload': None}
 _videohub_state_cache = {'ts': 0.0, 'payload': None}
@@ -3173,6 +3297,7 @@ _connectivity_last: dict[str, bool | None] = {
     'companion': None,
     'propresenter': None,
     'videohub': None,
+    'atem': None,
 }
 
 
@@ -3187,6 +3312,7 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
         'companion': 'Companion',
         'propresenter': 'ProPresenter',
         'videohub': 'VideoHub',
+        'atem': 'ATEM',
     }.get(service, service)
 
     should_log = False
@@ -3308,6 +3434,32 @@ def _probe_videohub_status(cfg: dict) -> dict:
     }
 
 
+def _probe_atem_status(cfg: dict) -> dict:
+    connected = False
+    detail = ''
+    try:
+        atem = _get_atem_client_from_config()
+        if atem is None:
+            connected = False
+        else:
+            connected = bool(atem.ping())
+    except Exception:
+        connected = False
+
+    try:
+        ip = str(cfg.get('atem_ip', '')).strip()
+        port = int(cfg.get('atem_port', ATEM_DEFAULT_PORT))
+        detail = f"{ip}:{port}" if ip and port else (ip or '')
+    except Exception:
+        detail = ''
+
+    return {
+        'connected': bool(connected),
+        'detail': detail,
+        'checked_at': time.time(),
+    }
+
+
 def _refresh_status_snapshot() -> dict:
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
@@ -3317,6 +3469,7 @@ def _refresh_status_snapshot() -> dict:
     companion = _probe_companion_status(cfg)
     propresenter = _probe_propresenter_status(cfg)
     videohub = _probe_videohub_status(cfg)
+    atem = _probe_atem_status(cfg)
     now = time.time()
 
     payload = {
@@ -3325,6 +3478,7 @@ def _refresh_status_snapshot() -> dict:
         'companion': companion,
         'propresenter': propresenter,
         'videohub': videohub,
+        'atem': atem,
     }
 
     with _status_cache_lock:
@@ -3336,10 +3490,13 @@ def _refresh_status_snapshot() -> dict:
         _propresenter_status_cache['connected'] = bool(propresenter.get('connected', False))
         _videohub_status_cache['ts'] = videohub.get('checked_at', now)
         _videohub_status_cache['connected'] = bool(videohub.get('connected', False))
+        _atem_status_cache['ts'] = atem.get('checked_at', now)
+        _atem_status_cache['connected'] = bool(atem.get('connected', False))
 
     _log_connectivity_change('companion', bool(companion.get('connected', False)), detail=str(companion.get('detail') or ''))
     _log_connectivity_change('propresenter', bool(propresenter.get('connected', False)), detail=str(propresenter.get('detail') or ''))
     _log_connectivity_change('videohub', bool(videohub.get('connected', False)), detail=str(videohub.get('detail') or ''))
+    _log_connectivity_change('atem', bool(atem.get('connected', False)), detail=str(atem.get('detail') or ''))
 
     return payload
 
@@ -3740,6 +3897,14 @@ def admin_permissions_page():
                         _set_group_companion_click_surfaces(gid, request.form.getlist('companion_click_surfaces_role'))
                     except Exception:
                         pass
+
+                    # Per-group ATEM audio controls (only update if Foyer Audio page is selected).
+                    try:
+                        if 'page:atem_audio' in [str(k) for k in keys]:
+                            _set_group_atem_audio_sources(gid, request.form.getlist('atem_allowed_audio_sources_role'))
+                            _set_group_atem_can_solo_audio(gid, request.form.get('atem_can_solo_audio_role') == 'on')
+                    except Exception:
+                        pass
                     try:
                         _log_group_setting_changes(before_group, _group_settings_snapshot(gid))
                     except Exception:
@@ -3853,7 +4018,7 @@ def admin_permissions_page():
     conn = _db()
     try:
         groups = conn.execute(
-            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces FROM groups ORDER BY is_system DESC, lower(name)'
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,atem_allowed_audio_sources,atem_can_solo_audio FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
         group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
         group_users = conn.execute(
@@ -3899,6 +4064,7 @@ def admin_permissions_page():
 
     group_to_vh: dict[int, dict[str, str]] = {}
     group_to_companion: dict[int, dict[str, list[str]]] = {}
+    group_to_atem: dict[int, dict[str, Any]] = {}
     for g in groups or []:
         try:
             gid = int(g['id'])
@@ -3941,6 +4107,14 @@ def admin_permissions_page():
         group_to_companion[gid] = {
             'click_surfaces': _coerce_string_allow_list(g['companion_click_surfaces']),
         }
+        try:
+            atem_can_solo = bool(int(g['atem_can_solo_audio'] or 0))
+        except Exception:
+            atem_can_solo = False
+        group_to_atem[gid] = {
+            'audio_sources': _coerce_string_allow_list(g['atem_allowed_audio_sources']),
+            'can_solo': bool(atem_can_solo),
+        }
 
     user_to_groups: dict[int, list[sqlite3.Row]] = {}
     user_to_group_ids: dict[int, set[int]] = {}
@@ -3965,6 +4139,8 @@ def admin_permissions_page():
         group_to_pages=group_to_pages,
         group_to_vh=group_to_vh,
         group_to_companion=group_to_companion,
+        group_to_atem=group_to_atem,
+        atem_audio_sources=_get_atem_audio_sources_for_permissions(),
         companion_surfaces=_load_companion_surfaces(),
         group_to_users=group_to_users,
         users=users,
@@ -4052,6 +4228,17 @@ def api_admin_group_update(group_id: int):
         try:
             if 'companion_click_surfaces_role' in data:
                 _set_group_companion_click_surfaces(gid, data.get('companion_click_surfaces_role'))
+        except Exception:
+            pass
+
+        # Per-group ATEM audio controls (only update if Foyer Audio page is selected).
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:atem_audio' in keys_set:
+                _set_group_atem_audio_sources(gid, data.get('atem_allowed_audio_sources_role'))
+                enabled_raw = data.get('atem_can_solo_audio_role')
+                enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
+                _set_group_atem_can_solo_audio(gid, bool(enabled))
         except Exception:
             pass
         try:
@@ -4769,6 +4956,40 @@ def videohub_input_select_page():
 @app.route('/videohub/monitor')
 def videohub_monitor_page():
     return render_template('videohub_monitor.html')
+
+
+@app.route('/foyer-audio')
+@require_page('page:atem_audio', 'Foyer Audio')
+def foyer_audio_page():
+    allowed_source_ids: list[str] = []
+    allow_all = True
+    can_solo = True
+    try:
+        if _auth_enabled():
+            if not getattr(current_user, 'is_authenticated', False):
+                allowed_source_ids = []
+                allow_all = False
+                can_solo = False
+            else:
+                uid = int(current_user.get_id())
+                if _user_is_admin(uid):
+                    allowed_source_ids = []
+                    allow_all = True
+                    can_solo = True
+                else:
+                    allowed_source_ids = _effective_atem_audio_source_ids_for_user(uid)
+                    allow_all = False
+                    can_solo = _effective_atem_can_solo_audio_for_user(uid)
+    except Exception:
+        allowed_source_ids = []
+        allow_all = False
+        can_solo = False
+    return render_template(
+        'foyer_audio.html',
+        allowed_source_ids=allowed_source_ids,
+        atem_allow_all=bool(allow_all),
+        atem_can_solo=bool(can_solo),
+    )
 
 
 @app.route('/routing')
@@ -6307,10 +6528,129 @@ def videohub_status():
     return jsonify({'connected': bool(videohub.get('connected', False))})
 
 
+@app.route('/api/atem_status')
+def atem_status():
+    """Lightweight ATEM connectivity check for the UI indicator."""
+    snapshot = _get_status_snapshot()
+    atem = snapshot.get('atem') if isinstance(snapshot, dict) else {}
+    return jsonify({'connected': bool(atem.get('connected', False))})
+
+
 @app.route('/api/status/summary')
 def api_status_summary():
     """Return a consolidated connectivity snapshot for the top navbar."""
     return jsonify(_get_status_snapshot())
+
+
+@app.route('/api/atem/audio/state')
+def api_atem_audio_state():
+    atem = _get_atem_client_from_config()
+    if atem is None:
+        try:
+            fallback = AtemAudioClient.fallback_sources() if AtemAudioClient is not None else [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
+        except Exception:
+            fallback = [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
+        return jsonify({'ok': False, 'connected': False, 'error': 'ATEM not configured', 'sources': fallback}), 200
+    try:
+        state = atem.get_audio_state()
+        state['ok'] = True
+        return jsonify(state)
+    except Exception as e:
+        try:
+            fallback = AtemAudioClient.fallback_sources() if AtemAudioClient is not None else [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
+        except Exception:
+            fallback = [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
+        return jsonify({'ok': False, 'connected': False, 'error': str(e), 'sources': fallback}), 200
+
+
+@app.route('/api/atem/audio/volume', methods=['POST'])
+def api_atem_audio_volume():
+    atem = _get_atem_client_from_config()
+    if atem is None:
+        return jsonify({'ok': False, 'error': 'ATEM not configured'}), 400
+    body = request.get_json(silent=True) or {}
+    source_id = str(body.get('source_id') or body.get('source') or '').strip()
+    try:
+        db = float(body.get('db'))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'db is required'}), 400
+    if not source_id:
+        return jsonify({'ok': False, 'error': 'source_id is required'}), 400
+    try:
+        atem.set_volume(source_id, db)
+        log_event(
+            'atem.audio.volume',
+            f"Set ATEM audio volume for {source_id} to {db:.1f} dB",
+            source='web',
+            status='success',
+            target_type='atem_audio_source',
+            target_id=source_id,
+            details={'source_id': source_id, 'db': db},
+        )
+        return jsonify({'ok': True, 'source_id': source_id, 'db': db})
+    except Exception as e:
+        log_event(
+            'atem.audio.volume',
+            f"Failed to set ATEM audio volume for {source_id}",
+            source='web',
+            status='failure',
+            target_type='atem_audio_source',
+            target_id=source_id,
+            details={'source_id': source_id, 'db': db, 'error': str(e)},
+        )
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/atem/audio/mute', methods=['POST'])
+def api_atem_audio_mute():
+    atem = _get_atem_client_from_config()
+    if atem is None:
+        return jsonify({'ok': False, 'error': 'ATEM not configured'}), 400
+    body = request.get_json(silent=True) or {}
+    source_id = str(body.get('source_id') or body.get('source') or '').strip()
+    muted = bool(body.get('muted'))
+    if not source_id:
+        return jsonify({'ok': False, 'error': 'source_id is required'}), 400
+    try:
+        atem.set_mute(source_id, muted)
+        log_event(
+            'atem.audio.mute',
+            f"{'Muted' if muted else 'Unmuted'} ATEM audio source {source_id}",
+            source='web',
+            status='success',
+            target_type='atem_audio_source',
+            target_id=source_id,
+            details={'source_id': source_id, 'muted': muted},
+        )
+        return jsonify({'ok': True, 'source_id': source_id, 'muted': muted})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/atem/audio/solo', methods=['POST'])
+def api_atem_audio_solo():
+    atem = _get_atem_client_from_config()
+    if atem is None:
+        return jsonify({'ok': False, 'error': 'ATEM not configured'}), 400
+    body = request.get_json(silent=True) or {}
+    source_id = str(body.get('source_id') or body.get('source') or '').strip()
+    enabled = bool(body.get('enabled'))
+    if not source_id:
+        return jsonify({'ok': False, 'error': 'source_id is required'}), 400
+    try:
+        atem.set_solo(source_id, enabled)
+        log_event(
+            'atem.audio.solo',
+            f"{'Enabled' if enabled else 'Disabled'} ATEM monitor solo for {source_id}",
+            source='web',
+            status='success',
+            target_type='atem_audio_source',
+            target_id=source_id,
+            details={'source_id': source_id, 'enabled': enabled},
+        )
+        return jsonify({'ok': True, 'source_id': source_id, 'enabled': enabled})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/config', methods=['GET'])

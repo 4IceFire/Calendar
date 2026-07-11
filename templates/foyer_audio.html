@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Foyer Audio' %}
+{% set page_subtitle = 'ATEM audio mixer controls' %}
+
+{% block content %}
+  <div id="foyer-audio-page"
+       data-allowed-source-ids="{{ allowed_source_ids|tojson|e }}"
+       data-allow-all="{{ atem_allow_all|tojson|e }}"
+       data-can-solo="{{ atem_can_solo|tojson|e }}">
+    <div id="foyer-audio-status" class="mb-3"></div>
+    <div id="foyer-audio-grid" class="foyer-audio-grid"></div>
+    <div id="foyer-audio-empty" class="alert alert-secondary d-none">
+      No audio channels are available for this account.
+    </div>
+  </div>
+{% endblock %}

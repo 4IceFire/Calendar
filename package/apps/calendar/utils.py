@@ -92,6 +92,11 @@ _defaults = {
     "videohub_timeout": 2,
     "videohub_presets_file": "videohub_presets.json",
 
+    # ATEM audio defaults
+    "atem_ip": "127.0.0.1",
+    "atem_port": 9910,
+    "atem_timeout": 3,
+
 }
 
 

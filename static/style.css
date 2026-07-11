@@ -829,6 +829,73 @@ html[data-bs-theme="dark"] .timer-stage-card{
   white-space: nowrap;
 }
 
+.foyer-audio-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+.foyer-audio-strip{
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border: 1px solid rgba(127, 127, 127, 0.24);
+  border-radius: 0.5rem;
+  background: rgba(127, 127, 127, 0.05);
+  min-width: 0;
+}
+
+.foyer-audio-strip-head{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.foyer-audio-name{
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.foyer-audio-value{
+  font-family: var(--bs-font-monospace);
+  font-size: 0.95rem;
+  color: var(--bs-secondary-color);
+  white-space: nowrap;
+}
+
+.foyer-audio-slider-row{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.25rem;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.foyer-audio-slider{
+  min-height: 2.5rem;
+}
+
+.foyer-audio-percent{
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--bs-secondary-color);
+}
+
+.foyer-audio-actions{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  min-height: 2.5rem;
+}
+
+.foyer-audio-actions .btn{
+  min-height: 2.5rem;
+  font-weight: 600;
+}
+
   .companion-config-row .btn{
     white-space: nowrap;
   }
@@ -880,6 +947,14 @@ html[data-bs-theme="dark"] .timer-stage-card{
     .config-transport-meta{
       grid-column: 2;
       white-space: normal;
+    }
+
+    .foyer-audio-grid{
+      grid-template-columns: 1fr;
+    }
+
+    .foyer-audio-strip{
+      padding: 0.8rem;
     }
   }
 

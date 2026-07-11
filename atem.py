@@ -1,0 +1,275 @@
+"""Blackmagic ATEM audio control client.
+
+This module wraps PyATEMMax in the same lightweight style as the repo's
+`companion.py`, `propresentor.py`, and `videohub.py` integrations.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Any, Optional
+
+try:
+    import PyATEMMax
+except Exception:  # pragma: no cover - optional dependency until installed
+    PyATEMMax = None  # type: ignore
+
+
+DEFAULT_PORT = 9910
+DEFAULT_TIMEOUT = 3.0
+MASTER_SOURCE_ID = "master"
+
+_FALLBACK_AUDIO_SOURCES = [
+    {"id": "1", "source": 1, "label": "Input 1", "kind": "input"},
+    {"id": "2", "source": 2, "label": "Input 2", "kind": "input"},
+    {"id": "3", "source": 3, "label": "Input 3", "kind": "input"},
+    {"id": "4", "source": 4, "label": "Input 4", "kind": "input"},
+    {"id": "5", "source": 5, "label": "Input 5", "kind": "input"},
+    {"id": "6", "source": 6, "label": "Input 6", "kind": "input"},
+    {"id": "7", "source": 7, "label": "Input 7", "kind": "input"},
+    {"id": "8", "source": 8, "label": "Input 8", "kind": "input"},
+    {"id": "9", "source": 9, "label": "Input 9", "kind": "input"},
+    {"id": "10", "source": 10, "label": "Input 10", "kind": "input"},
+    {"id": "11", "source": 11, "label": "Input 11", "kind": "input"},
+    {"id": "12", "source": 12, "label": "Input 12", "kind": "input"},
+    {"id": "13", "source": 13, "label": "Input 13", "kind": "input"},
+    {"id": "14", "source": 14, "label": "Input 14", "kind": "input"},
+    {"id": "15", "source": 15, "label": "Input 15", "kind": "input"},
+    {"id": "16", "source": 16, "label": "Input 16", "kind": "input"},
+    {"id": "17", "source": 17, "label": "Input 17", "kind": "input"},
+    {"id": "18", "source": 18, "label": "Input 18", "kind": "input"},
+    {"id": "19", "source": 19, "label": "Input 19", "kind": "input"},
+    {"id": "20", "source": 20, "label": "Input 20", "kind": "input"},
+    {"id": "1001", "source": 1001, "label": "XLR", "kind": "input"},
+    {"id": "1101", "source": 1101, "label": "AES/EBU", "kind": "input"},
+    {"id": "1201", "source": 1201, "label": "RCA", "kind": "input"},
+    {"id": "2001", "source": 2001, "label": "Media Player 1", "kind": "input"},
+    {"id": "2002", "source": 2002, "label": "Media Player 2", "kind": "input"},
+]
+
+
+@dataclass(frozen=True)
+class AtemConfig:
+    host: str
+    port: int = DEFAULT_PORT
+    timeout: float = DEFAULT_TIMEOUT
+
+
+def get_atem_client_from_config(
+    cfg: dict[str, Any] | None,
+    *,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    timeout: Optional[float] = None,
+    debug: bool = False,
+) -> Optional["AtemAudioClient"]:
+    cfg = cfg or {}
+    host_value = str(host or cfg.get("atem_ip") or cfg.get("atem_host") or "").strip()
+    if not host_value:
+        return None
+
+    try:
+        port_value = int(port or cfg.get("atem_port") or DEFAULT_PORT)
+    except Exception:
+        port_value = DEFAULT_PORT
+    if port_value < 1 or port_value > 65535:
+        port_value = DEFAULT_PORT
+
+    try:
+        timeout_value = float(timeout if timeout is not None else cfg.get("atem_timeout", DEFAULT_TIMEOUT))
+    except Exception:
+        timeout_value = DEFAULT_TIMEOUT
+    timeout_value = max(0.5, min(timeout_value, 15.0))
+
+    return AtemAudioClient(host_value, port_value, timeout=timeout_value, debug=debug)
+
+
+class AtemAudioClient:
+    def __init__(
+        self,
+        host: str,
+        port: int = DEFAULT_PORT,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        debug: bool = False,
+    ) -> None:
+        self.host = str(host or "").strip()
+        self.port = int(port or DEFAULT_PORT)
+        self.timeout = float(timeout or DEFAULT_TIMEOUT)
+        self.debug = bool(debug)
+
+    def _build_switcher(self):
+        if PyATEMMax is None:
+            raise RuntimeError("PyATEMMax is not installed")
+        sw = PyATEMMax.ATEMMax()
+        try:
+            sw.atem.UDPPort = int(self.port)
+        except Exception:
+            pass
+        return sw
+
+    def _with_switcher(self, callback):
+        if not self.host:
+            raise ValueError("ATEM host is required")
+        sw = self._build_switcher()
+        connected = False
+        try:
+            sw.connect(self.host, connTimeout=max(1, int(round(self.timeout))))
+            connected = bool(sw.waitForConnection(infinite=False, timeout=self.timeout))
+            if not connected:
+                raise TimeoutError("ATEM connection timed out")
+            result = callback(sw)
+            time.sleep(0.08)
+            return result
+        finally:
+            try:
+                sw.disconnect()
+            except Exception:
+                pass
+
+    def ping(self) -> bool:
+        try:
+            self._with_switcher(lambda sw: True)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def fallback_sources() -> list[dict[str, Any]]:
+        return [{"id": MASTER_SOURCE_ID, "label": "Master", "kind": "master"}, *_FALLBACK_AUDIO_SOURCES]
+
+    @staticmethod
+    def _constant_name(value: Any) -> str:
+        try:
+            return str(getattr(value, "name", "") or value or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _input_label(sw: Any, source_id: int, fallback: str) -> str:
+        try:
+            props = sw.inputProperties[source_id]
+            label = str(getattr(props, "longName", "") or getattr(props, "shortName", "") or "").strip()
+            if label:
+                return label
+        except Exception:
+            pass
+        return fallback
+
+    @staticmethod
+    def _audio_source_defs(sw: Any) -> list[dict[str, Any]]:
+        values = []
+        try:
+            raw_values = getattr(sw.atem.audioSources, "_values", {}) or {}
+            values = list(raw_values.values())
+        except Exception:
+            values = []
+
+        out: list[dict[str, Any]] = []
+        for item in values:
+            try:
+                source_id = int(getattr(item, "value"))
+                name = str(getattr(item, "name", "") or "").strip()
+            except Exception:
+                continue
+            if source_id <= 0:
+                continue
+            if name.startswith("input"):
+                label = AtemAudioClient._input_label(sw, source_id, f"Input {source_id}")
+            elif name == "xlr":
+                label = "XLR"
+            elif name == "aes_ebu":
+                label = "AES/EBU"
+            elif name == "rca":
+                label = "RCA"
+            elif name.startswith("mp"):
+                label = "Media Player " + name[2:]
+            elif name.startswith("mic"):
+                label = "Mic " + name[3:]
+            else:
+                label = name.replace("_", " ").title()
+            out.append({"id": str(source_id), "source": source_id, "label": label, "kind": "input"})
+        return out or list(_FALLBACK_AUDIO_SOURCES)
+
+    def get_audio_state(self) -> dict[str, Any]:
+        def _read(sw: Any) -> dict[str, Any]:
+            sources = [{"id": MASTER_SOURCE_ID, "label": "Master", "kind": "master"}]
+            for item in self._audio_source_defs(sw):
+                source_id = int(item["source"])
+                try:
+                    inp = sw.audioMixer.input[source_id]
+                    volume = float(getattr(inp, "volume", 0.0) or 0.0)
+                    mix_option = self._constant_name(getattr(inp, "mixOption", ""))
+                except Exception:
+                    volume = 0.0
+                    mix_option = "off"
+                row = dict(item)
+                row.update({
+                    "volume": volume,
+                    "muted": mix_option == "off",
+                    "mixOption": mix_option or "off",
+                })
+                sources.append(row)
+
+            try:
+                master_volume = float(getattr(sw.audioMixer.master, "volume", 0.0) or 0.0)
+            except Exception:
+                master_volume = 0.0
+            sources[0]["volume"] = master_volume
+            sources[0]["muted"] = False
+
+            try:
+                monitor = sw.audioMixer.monitor
+                solo = bool(getattr(monitor, "solo", False))
+                solo_input = getattr(monitor, "soloInput", None)
+                solo_source = str(int(getattr(solo_input, "value"))) if solo_input is not None else ""
+            except Exception:
+                solo = False
+                solo_source = ""
+
+            return {
+                "connected": True,
+                "host": self.host,
+                "port": self.port,
+                "sources": sources,
+                "monitor": {"solo": solo, "soloSource": solo_source},
+            }
+
+        return self._with_switcher(_read)
+
+    def set_volume(self, source_id: str, db: float) -> None:
+        source = str(source_id or "").strip()
+        db = max(-60.0, min(float(db), 6.0))
+
+        def _set(sw: Any) -> None:
+            if source == MASTER_SOURCE_ID:
+                sw.setAudioMixerMasterVolume(db)
+            else:
+                sw.setAudioMixerInputVolume(int(source), db)
+
+        self._with_switcher(_set)
+
+    def set_mute(self, source_id: str, muted: bool) -> None:
+        source = str(source_id or "").strip()
+        if source == MASTER_SOURCE_ID:
+            raise ValueError("Master mute is not supported by this ATEM audio mixer")
+
+        def _set(sw: Any) -> None:
+            sw.setAudioMixerInputMixOption(int(source), "off" if muted else "on")
+
+        self._with_switcher(_set)
+
+    def set_solo(self, source_id: str, enabled: bool) -> None:
+        source = str(source_id or "").strip()
+        if source == MASTER_SOURCE_ID:
+            raise ValueError("Master solo is not supported")
+
+        def _set(sw: Any) -> None:
+            if enabled:
+                sw.setAudioMixerMonitorSoloInput(int(source))
+                sw.setAudioMixerMonitorSolo(True)
+            else:
+                sw.setAudioMixerMonitorSolo(False)
+
+        self._with_switcher(_set)

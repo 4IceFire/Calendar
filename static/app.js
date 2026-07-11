@@ -46,10 +46,12 @@ async function updateStatusIndicators() {
     _applyServiceIndicator('companion', 'Companion', !!(data && data.companion && data.companion.connected));
     _applyServiceIndicator('propresenter', 'ProPresenter', !!(data && data.propresenter && data.propresenter.connected));
     _applyServiceIndicator('videohub', 'VideoHub', !!(data && data.videohub && data.videohub.connected));
+    _applyServiceIndicator('atem', 'ATEM', !!(data && data.atem && data.atem.connected));
   } catch (e) {
     _applyServiceIndicatorUnknown('companion', 'Companion');
     _applyServiceIndicatorUnknown('propresenter', 'ProPresenter');
     _applyServiceIndicatorUnknown('videohub', 'VideoHub');
+    _applyServiceIndicatorUnknown('atem', 'ATEM');
   }
 }
 
@@ -510,6 +512,19 @@ const CONFIG_META = {
     help: 'JSON file where VideoHub routing presets are stored.',
   },
 
+  atem_ip: {
+    label: 'ATEM Host',
+    help: 'Blackmagic ATEM switcher IP or hostname.',
+  },
+  atem_port: {
+    label: 'ATEM Port',
+    help: 'Blackmagic ATEM UDP port. Standard ATEM control uses 9910.',
+  },
+  atem_timeout: {
+    label: 'ATEM Timeout (seconds)',
+    help: 'Connection timeout used for ATEM audio control.',
+  },
+
   EVENTS_FILE: {
     label: 'Events File',
     help: 'JSON file used to store scheduled events.',
@@ -716,6 +731,10 @@ function _renderConfigGroups(cfg) {
     {
       title: 'VideoHub',
       keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
+    },
+    {
+      title: 'ATEM',
+      keys: ['atem_ip', 'atem_port', 'atem_timeout'],
     },
   ];
 
@@ -3488,10 +3507,12 @@ if (document.getElementById('access-levels-page')) {
     if (!form) return;
     const routingCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:routing"]');
     const videohubCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:videohub"]');
+    const atemCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:atem_audio"]');
     const outEl = form.querySelector('[data-role="vh-outputs"]');
     const inEl = form.querySelector('[data-role="vh-inputs"]');
     const presetsEl = form.querySelector('[data-role="vh-presets"]');
     const editPresetsEl = form.querySelector('[data-role="vh-edit-presets"]');
+    const atemFields = Array.from(form.querySelectorAll('[data-role="atem-audio-field"]'));
     if (routingCb && outEl && inEl) {
       const routingEnabled = !!routingCb.checked;
       outEl.disabled = !routingEnabled;
@@ -3501,6 +3522,12 @@ if (document.getElementById('access-levels-page')) {
       const videohubEnabled = !!videohubCb.checked;
       if (presetsEl) presetsEl.disabled = !videohubEnabled;
       if (editPresetsEl) editPresetsEl.disabled = !videohubEnabled;
+    }
+    if (atemCb && atemFields.length) {
+      const atemEnabled = !!atemCb.checked;
+      atemFields.forEach(el => {
+        el.disabled = !atemEnabled;
+      });
     }
   }
 
@@ -3517,6 +3544,8 @@ if (document.getElementById('access-levels-page')) {
     const presetsEl = form.querySelector('input[name="videohub_allowed_presets_role"]');
     const canEditEl = form.querySelector('input[name="videohub_can_edit_presets_role"]');
     const companionClickSurfaceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="companion_click_surfaces_role"]:checked')).map(cb => String(cb.value || ''));
+    const atemAudioSourceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="atem_allowed_audio_sources_role"]:checked')).map(cb => String(cb.value || ''));
+    const atemCanSoloEl = form.querySelector('input[name="atem_can_solo_audio_role"]');
 
     return {
       page_keys: pageKeys,
@@ -3526,6 +3555,8 @@ if (document.getElementById('access-levels-page')) {
       videohub_allowed_presets_role: presetsEl ? String(presetsEl.value || '') : '',
       videohub_can_edit_presets_role: canEditEl ? !!canEditEl.checked : true,
       companion_click_surfaces_role: companionClickSurfaceIds,
+      atem_allowed_audio_sources_role: atemAudioSourceIds,
+      atem_can_solo_audio_role: atemCanSoloEl ? !!atemCanSoloEl.checked : false,
     };
   }
 
@@ -3873,5 +3904,171 @@ if (document.getElementById('companion-surfaces-config-page')) {
   });
 
   _csLoad();
+}
+
+if (document.getElementById('foyer-audio-page')) {
+  const root = document.getElementById('foyer-audio-page');
+  const grid = document.getElementById('foyer-audio-grid');
+  const emptyEl = document.getElementById('foyer-audio-empty');
+  const statusEl = document.getElementById('foyer-audio-status');
+  let stateSources = [];
+  let monitorState = {};
+  const volumeTimers = new Map();
+
+  function _foyerJsonAttr(name, fallback) {
+    try {
+      return JSON.parse(root.getAttribute(name) || JSON.stringify(fallback));
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  const allowAll = !!_foyerJsonAttr('data-allow-all', false);
+  const canSolo = !!_foyerJsonAttr('data-can-solo', false);
+  const allowedIds = new Set((_foyerJsonAttr('data-allowed-source-ids', []) || []).map(v => String(v)));
+
+  function _foyerSetStatus(text, type) {
+    if (!statusEl) return;
+    const msg = String(text || '').trim();
+    if (!msg) {
+      statusEl.innerHTML = '';
+      return;
+    }
+    const cls = type === 'danger' ? 'danger' : (type === 'warning' ? 'warning' : 'info');
+    statusEl.innerHTML = `<div class="alert alert-${cls} py-2 mb-0">${_escapeHtml(msg)}</div>`;
+  }
+
+  function _sourceVisible(source) {
+    if (allowAll) return true;
+    return allowedIds.has(String(source && source.id));
+  }
+
+  function _formatDb(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= -59.9) return '-inf';
+    return `${n >= 0 ? '+' : ''}${n.toFixed(1)} dB`;
+  }
+
+  function _pctFromDb(db) {
+    const n = Math.max(-60, Math.min(Number(db) || 0, 6));
+    return Math.round(((n + 60) / 66) * 100);
+  }
+
+  function _renderSource(source) {
+    const id = String(source.id || '');
+    const volume = Number(source.volume || 0);
+    const muted = !!source.muted;
+    const isMaster = id === 'master';
+    const soloActive = !!monitorState.solo && String(monitorState.soloSource || '') === id;
+    return `
+      <section class="foyer-audio-strip" data-source-id="${_escapeHtml(id)}">
+        <div class="foyer-audio-strip-head">
+          <div class="foyer-audio-name">${_escapeHtml(source.label || id)}</div>
+          <div class="foyer-audio-value" data-volume-readout="${_escapeHtml(id)}">${_escapeHtml(_formatDb(volume))}</div>
+        </div>
+        <div class="foyer-audio-slider-row">
+          <input class="form-range foyer-audio-slider" type="range" min="-60" max="6" step="0.1" value="${String(Math.max(-60, Math.min(volume, 6)))}" data-foyer-volume="${_escapeHtml(id)}" aria-label="${_escapeHtml(source.label || id)} volume">
+          <div class="foyer-audio-percent" data-volume-percent="${_escapeHtml(id)}">${_pctFromDb(volume)}%</div>
+        </div>
+        <div class="foyer-audio-actions">
+          ${isMaster ? '' : `<button class="btn ${muted ? 'btn-danger' : 'btn-outline-secondary'}" type="button" data-foyer-mute="${_escapeHtml(id)}">${muted ? 'Muted' : 'On'}</button>`}
+          ${(!isMaster && canSolo) ? `<button class="btn ${soloActive ? 'btn-warning' : 'btn-outline-secondary'}" type="button" data-foyer-solo="${_escapeHtml(id)}">${soloActive ? 'Solo' : 'Solo'}</button>` : ''}
+        </div>
+      </section>
+    `;
+  }
+
+  function _render() {
+    const visible = stateSources.filter(_sourceVisible);
+    if (grid) grid.innerHTML = visible.map(_renderSource).join('');
+    if (emptyEl) emptyEl.classList.toggle('d-none', visible.length > 0);
+  }
+
+  async function _loadState() {
+    try {
+      const res = await fetch('/api/atem/audio/state?_ts=' + Date.now(), {cache: 'no-store'});
+      const data = await res.json().catch(() => ({}));
+      if (!data || !Array.isArray(data.sources)) throw new Error((data && data.error) || 'Could not load ATEM audio state');
+      stateSources = data.sources;
+      monitorState = data.monitor || {};
+      if (data.ok === false && data.error) _foyerSetStatus(data.error, 'warning');
+      else _foyerSetStatus('', 'info');
+      _render();
+    } catch (e) {
+      _foyerSetStatus(e && e.message ? e.message : 'Could not load ATEM audio state', 'danger');
+    }
+  }
+
+  function _updateLocalVolume(id, db) {
+    const source = stateSources.find(s => String(s.id) === String(id));
+    if (source) source.volume = db;
+    const readout = document.querySelector(`[data-volume-readout="${CSS.escape(String(id))}"]`);
+    const pct = document.querySelector(`[data-volume-percent="${CSS.escape(String(id))}"]`);
+    if (readout) readout.textContent = _formatDb(db);
+    if (pct) pct.textContent = `${_pctFromDb(db)}%`;
+  }
+
+  function _sendVolume(id, db) {
+    clearTimeout(volumeTimers.get(id));
+    volumeTimers.set(id, setTimeout(async () => {
+      try {
+        const res = await fetch('/api/atem/audio/volume', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({source_id: id, db}),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Volume change failed');
+      } catch (e) {
+        _foyerSetStatus(e && e.message ? e.message : 'Volume change failed', 'danger');
+      }
+    }, 180));
+  }
+
+  async function _postAction(url, payload) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Action failed');
+    return data;
+  }
+
+  root.addEventListener('input', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    if (!slider) return;
+    const id = String(slider.getAttribute('data-foyer-volume') || '');
+    const db = Number(slider.value);
+    _updateLocalVolume(id, db);
+    _sendVolume(id, db);
+  });
+
+  root.addEventListener('click', async (e) => {
+    const muteBtn = e.target && e.target.closest ? e.target.closest('[data-foyer-mute]') : null;
+    const soloBtn = e.target && e.target.closest ? e.target.closest('[data-foyer-solo]') : null;
+    try {
+      if (muteBtn) {
+        const id = String(muteBtn.getAttribute('data-foyer-mute') || '');
+        const source = stateSources.find(s => String(s.id) === id);
+        const muted = !(source && source.muted);
+        await _postAction('/api/atem/audio/mute', {source_id: id, muted});
+        if (source) source.muted = muted;
+        _render();
+      } else if (soloBtn) {
+        const id = String(soloBtn.getAttribute('data-foyer-solo') || '');
+        const enabled = !(monitorState.solo && String(monitorState.soloSource || '') === id);
+        await _postAction('/api/atem/audio/solo', {source_id: id, enabled});
+        monitorState = {solo: enabled, soloSource: enabled ? id : ''};
+        _render();
+      }
+    } catch (err) {
+      _foyerSetStatus(err && err.message ? err.message : 'Action failed', 'danger');
+    }
+  });
+
+  _loadState();
+  setInterval(_loadState, 10000);
 }
 
