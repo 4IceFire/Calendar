@@ -4053,6 +4053,9 @@ if (document.getElementById('foyer-audio-page')) {
         _foyerSetStatus(data.error, 'warning');
       } else if (!meterOnly && data.metering && data.metering.enabled === false && data.metering.unavailableReason) {
         _foyerSetStatus(`Audio metering unavailable: ${data.metering.unavailableReason}`, 'warning');
+      } else if (!meterOnly && data.metering && data.metering.enabled && !data.metering.active) {
+        const suffix = data.metering.salnPacketsSent ? 'waiting for AMLv packets from the ATEM' : 'waiting to request levels from the ATEM';
+        _foyerSetStatus(`Audio metering connected, ${suffix}.`, 'warning');
       } else if (!meterOnly) {
         _foyerSetStatus('', 'info');
       }

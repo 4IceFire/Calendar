@@ -156,6 +156,14 @@ class AtemMeterClient:
         self._last_error = ""
         self._running = False
         self._connected = False
+        self._packets_received = 0
+        self._commands_received = 0
+        self._amlv_packets_received = 0
+        self._saln_packets_sent = 0
+        self._last_packet_at: float | None = None
+        self._last_command_at: float | None = None
+        self._last_saln_at: float | None = None
+        self._command_names: list[str] = []
 
     def start(self) -> None:
         if not self.host:
@@ -199,6 +207,14 @@ class AtemMeterClient:
                 "unavailableReason": self._last_error,
                 "updatedAt": self._levels.get("updatedAt") if self._levels else None,
                 "sourceCount": int(self._levels.get("count") or 0) if self._levels else 0,
+                "packetsReceived": int(self._packets_received),
+                "commandsReceived": int(self._commands_received),
+                "amlvPacketsReceived": int(self._amlv_packets_received),
+                "salnPacketsSent": int(self._saln_packets_sent),
+                "lastPacketAt": self._last_packet_at,
+                "lastCommandAt": self._last_command_at,
+                "lastSalnAt": self._last_saln_at,
+                "recentCommandNames": list(self._command_names[-20:]),
             }
 
     def _set_error(self, message: str) -> None:
@@ -238,8 +254,11 @@ class AtemMeterClient:
 
     def _send_audio_levels_enable(self, sock: socket.socket, session_id: int | None, local_sequence: int, enabled: bool) -> int:
         data = _atem_command("SALN", struct.pack(">? 3x", bool(enabled)))
-        packet = _Packet(data=data)
+        packet = _Packet(flags=FLAG_RELIABLE, data=data)
         _, local_sequence = self._send_packet(sock, packet, session_id=session_id, local_sequence=local_sequence)
+        with self._lock:
+            self._saln_packets_sent += 1
+            self._last_saln_at = time.time()
         return local_sequence
 
     def _handle_commands(self, data: bytes) -> None:
@@ -250,7 +269,15 @@ class AtemMeterClient:
                 break
             name = data[offset + 4:offset + 8].decode("ascii", errors="replace")
             payload = data[offset + 8:offset + command_len]
+            with self._lock:
+                self._commands_received += 1
+                self._last_command_at = time.time()
+                self._command_names.append(name)
+                if len(self._command_names) > 60:
+                    self._command_names = self._command_names[-60:]
             if name == "AMLv":
+                with self._lock:
+                    self._amlv_packets_received += 1
                 self._set_levels(_parse_amlv(payload))
             offset += command_len
 
@@ -311,6 +338,9 @@ class AtemMeterClient:
                     continue
 
                 packet = _Packet.from_bytes(raw)
+                with self._lock:
+                    self._packets_received += 1
+                    self._last_packet_at = time.time()
                 remote_sequence = packet.sequence_number
                 if session_id is None:
                     session_id = packet.session
