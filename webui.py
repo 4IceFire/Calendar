@@ -5011,6 +5011,112 @@ def foyer_audio_page():
     )
 
 
+def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
+    if user_id is None:
+        return {
+            'authenticated': False,
+            'is_admin': False,
+            'can_access_page': False,
+            'effective_allowed_source_ids': [],
+            'effective_can_solo': False,
+            'groups': [],
+        }
+    groups = _get_user_groups(user_id)
+    out_groups: list[dict[str, Any]] = []
+    for row in groups:
+        gid = None
+        name = ''
+        try:
+            gid = int(row['id'])
+            name = str(row['name'] or '')
+        except Exception:
+            pass
+        page_keys: list[str] = []
+        if gid is not None:
+            conn = _db()
+            try:
+                page_rows = conn.execute('SELECT page_key FROM group_pages WHERE group_id=? ORDER BY page_key', (gid,)).fetchall()
+                page_keys = [str(r['page_key']) for r in page_rows or []]
+            finally:
+                conn.close()
+        raw_sources = ''
+        raw_can_solo = None
+        try:
+            raw_sources = '' if row['atem_allowed_audio_sources'] is None else str(row['atem_allowed_audio_sources'])
+        except Exception:
+            raw_sources = ''
+        try:
+            raw_can_solo = row['atem_can_solo_audio']
+        except Exception:
+            raw_can_solo = None
+        out_groups.append({
+            'id': gid,
+            'name': name,
+            'is_admin': bool(int(row['is_admin'] or 0)) if 'is_admin' in row.keys() else False,
+            'page_keys': page_keys,
+            'has_foyer_audio_page': 'page:atem_audio' in page_keys,
+            'raw_atem_allowed_audio_sources': raw_sources,
+            'parsed_atem_allowed_audio_sources': _coerce_string_allow_list(raw_sources),
+            'raw_atem_can_solo_audio': raw_can_solo,
+            'atem_can_solo_audio': bool(int(raw_can_solo or 0)) if raw_can_solo is not None else False,
+        })
+
+    source_state: dict[str, Any] = {'ok': False, 'source_ids': [], 'error': ''}
+    try:
+        atem = _get_atem_client_from_config()
+        if atem is not None:
+            state = atem.get_audio_state()
+            sources = state.get('sources') if isinstance(state, dict) else []
+            source_state = {
+                'ok': True,
+                'source_ids': [str(s.get('id')) for s in sources if isinstance(s, dict)],
+                'source_labels': [{'id': str(s.get('id')), 'label': str(s.get('label') or '')} for s in sources if isinstance(s, dict)],
+            }
+    except Exception as e:
+        try:
+            fallback = AtemAudioClient.fallback_sources() if AtemAudioClient is not None else []
+            source_state = {
+                'ok': False,
+                'source_ids': [str(s.get('id')) for s in fallback if isinstance(s, dict)],
+                'source_labels': [{'id': str(s.get('id')), 'label': str(s.get('label') or '')} for s in fallback if isinstance(s, dict)],
+                'error': str(e),
+            }
+        except Exception:
+            source_state = {'ok': False, 'source_ids': [], 'error': str(e)}
+
+    return {
+        'authenticated': True,
+        'user_id': int(user_id),
+        'is_admin': _user_is_admin(user_id),
+        'can_access_page': _user_allows_page(user_id, 'page:atem_audio'),
+        'effective_allowed_source_ids': _effective_atem_audio_source_ids_for_user(user_id),
+        'effective_can_solo': _effective_atem_can_solo_audio_for_user(user_id),
+        'groups': out_groups,
+        'atem_sources_seen_by_tdeck': source_state,
+    }
+
+
+@app.route('/foyer-audio/debug')
+@require_page('page:atem_audio', 'Foyer Audio')
+def foyer_audio_debug_page():
+    try:
+        if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
+            payload = _atem_audio_access_debug_for_user(int(current_user.get_id()))
+        else:
+            payload = {
+                'authenticated': not _auth_enabled(),
+                'auth_enabled': _auth_enabled(),
+                'is_admin': True,
+                'can_access_page': True,
+                'effective_allowed_source_ids': [],
+                'effective_can_solo': True,
+                'groups': [],
+            }
+    except Exception as e:
+        payload = {'ok': False, 'error': str(e)}
+    return jsonify(payload)
+
+
 @app.route('/routing')
 @require_page('page:routing', 'Routing')
 def routing_page():
