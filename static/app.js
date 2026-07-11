@@ -3913,7 +3913,8 @@ if (document.getElementById('foyer-audio-page')) {
   const statusEl = document.getElementById('foyer-audio-status');
   let stateSources = [];
   let monitorState = {};
-  const volumeTimers = new Map();
+  const volumeState = new Map();
+  const VOLUME_SEND_INTERVAL_MS = 60;
 
   function _foyerJsonAttr(name, fallback) {
     try {
@@ -3985,6 +3986,7 @@ if (document.getElementById('foyer-audio-page')) {
   }
 
   async function _loadState() {
+    if (root.hasAttribute('data-volume-dragging')) return;
     try {
       const res = await fetch('/api/atem/audio/state?_ts=' + Date.now(), {cache: 'no-store'});
       const data = await res.json().catch(() => ({}));
@@ -4008,21 +4010,74 @@ if (document.getElementById('foyer-audio-page')) {
     if (pct) pct.textContent = `${_pctFromDb(db)}%`;
   }
 
-  function _sendVolume(id, db) {
-    clearTimeout(volumeTimers.get(id));
-    volumeTimers.set(id, setTimeout(async () => {
-      try {
-        const res = await fetch('/api/atem/audio/volume', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({source_id: id, db}),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) throw new Error(data.error || 'Volume change failed');
-      } catch (e) {
-        _foyerSetStatus(e && e.message ? e.message : 'Volume change failed', 'danger');
+  function _volumeEntry(id) {
+    const key = String(id);
+    let entry = volumeState.get(key);
+    if (!entry) {
+      entry = {lastSent: 0, timer: null, inFlight: false, queued: null};
+      volumeState.set(key, entry);
+    }
+    return entry;
+  }
+
+  async function _sendVolumeNow(id, db) {
+    const key = String(id);
+    const entry = _volumeEntry(key);
+    if (entry.inFlight) {
+      entry.queued = db;
+      return;
+    }
+    entry.inFlight = true;
+    entry.lastSent = Date.now();
+    try {
+      const res = await fetch('/api/atem/audio/volume', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({source_id: key, db}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Volume change failed');
+    } catch (e) {
+      _foyerSetStatus(e && e.message ? e.message : 'Volume change failed', 'danger');
+    } finally {
+      entry.inFlight = false;
+      if (entry.queued !== null) {
+        const queued = entry.queued;
+        entry.queued = null;
+        _sendVolume(key, queued, {force: true});
       }
-    }, 180));
+    }
+  }
+
+  function _sendVolume(id, db, opts) {
+    const key = String(id);
+    const entry = _volumeEntry(key);
+    const force = !!(opts && opts.force);
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    const elapsed = Date.now() - Number(entry.lastSent || 0);
+    const wait = force ? 0 : Math.max(0, VOLUME_SEND_INTERVAL_MS - elapsed);
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      _sendVolumeNow(key, db);
+    }, wait);
+  }
+
+  function _flushVolumeFromSlider(slider) {
+    if (!slider) return;
+    const id = String(slider.getAttribute('data-foyer-volume') || '');
+    if (!id) return;
+    const db = Number(slider.value);
+    _updateLocalVolume(id, db);
+    _sendVolume(id, db, {force: true});
+  }
+
+  function _clearDraggingSoon() {
+    setTimeout(() => {
+      root.removeAttribute('data-volume-dragging');
+    }, 250);
   }
 
   async function _postAction(url, payload) {
@@ -4039,11 +4094,47 @@ if (document.getElementById('foyer-audio-page')) {
   root.addEventListener('input', (e) => {
     const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
     if (!slider) return;
+    root.setAttribute('data-volume-dragging', '1');
     const id = String(slider.getAttribute('data-foyer-volume') || '');
     const db = Number(slider.value);
     _updateLocalVolume(id, db);
     _sendVolume(id, db);
   });
+
+  root.addEventListener('change', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    if (!slider) return;
+    _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  });
+
+  root.addEventListener('pointerup', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    if (!slider) return;
+    _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  });
+
+  root.addEventListener('touchend', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    if (!slider) return;
+    _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  }, {passive: true});
+
+  root.addEventListener('keydown', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    if (!slider) return;
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
+    setTimeout(() => _flushVolumeFromSlider(slider), 0);
+  });
+
+  root.addEventListener('blur', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    if (!slider) return;
+    _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  }, true);
 
   root.addEventListener('click', async (e) => {
     const muteBtn = e.target && e.target.closest ? e.target.closest('[data-foyer-mute]') : null;
