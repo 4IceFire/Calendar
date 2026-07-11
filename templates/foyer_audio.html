@@ -7,8 +7,10 @@
   <div id="foyer-audio-page"
        data-allowed-source-ids='{{ allowed_source_ids|tojson }}'
        data-allow-all='{{ atem_allow_all|tojson }}'
-       data-can-solo='{{ atem_can_solo|tojson }}'>
+       data-can-solo='{{ atem_can_solo|tojson }}'
+       data-can-monitor='{{ atem_can_monitor|tojson }}'>
     <div id="foyer-audio-status" class="mb-3"></div>
+    <div id="foyer-audio-monitor"></div>
     <div id="foyer-audio-grid" class="foyer-audio-grid"></div>
     <div id="foyer-audio-empty" class="alert alert-secondary d-none">
       No audio channels are available for this account.

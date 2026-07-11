@@ -3546,6 +3546,7 @@ if (document.getElementById('access-levels-page')) {
     const companionClickSurfaceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="companion_click_surfaces_role"]:checked')).map(cb => String(cb.value || ''));
     const atemAudioSourceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="atem_allowed_audio_sources_role"]:checked')).map(cb => String(cb.value || ''));
     const atemCanSoloEl = form.querySelector('input[name="atem_can_solo_audio_role"]');
+    const atemCanMonitorEl = form.querySelector('input[name="atem_can_monitor_audio_role"]');
 
     return {
       page_keys: pageKeys,
@@ -3557,6 +3558,7 @@ if (document.getElementById('access-levels-page')) {
       companion_click_surfaces_role: companionClickSurfaceIds,
       atem_allowed_audio_sources_role: atemAudioSourceIds,
       atem_can_solo_audio_role: atemCanSoloEl ? !!atemCanSoloEl.checked : false,
+      atem_can_monitor_audio_role: atemCanMonitorEl ? !!atemCanMonitorEl.checked : false,
     };
   }
 
@@ -3909,6 +3911,7 @@ if (document.getElementById('companion-surfaces-config-page')) {
 if (document.getElementById('foyer-audio-page')) {
   const root = document.getElementById('foyer-audio-page');
   const grid = document.getElementById('foyer-audio-grid');
+  const monitorEl = document.getElementById('foyer-audio-monitor');
   const emptyEl = document.getElementById('foyer-audio-empty');
   const statusEl = document.getElementById('foyer-audio-status');
   let stateSources = [];
@@ -3928,6 +3931,7 @@ if (document.getElementById('foyer-audio-page')) {
 
   const allowAll = !!_foyerJsonAttr('data-allow-all', false);
   const canSolo = !!_foyerJsonAttr('data-can-solo', false);
+  const canMonitor = !!_foyerJsonAttr('data-can-monitor', false);
   const allowedIds = new Set((_foyerJsonAttr('data-allowed-source-ids', []) || []).map(v => String(v)));
 
   function _foyerSetStatus(text, type) {
@@ -4016,8 +4020,39 @@ if (document.getElementById('foyer-audio-page')) {
     `;
   }
 
+  function _renderMonitor() {
+    if (!monitorEl) return;
+    if (!canMonitor) {
+      monitorEl.innerHTML = '';
+      return;
+    }
+    const volume = Number(monitorState.volume || 0);
+    const enabled = !!monitorState.enabled;
+    const dim = !!monitorState.dim;
+    monitorEl.innerHTML = `
+      <section class="foyer-audio-monitor">
+        <div class="foyer-audio-monitor-head">
+          <div>
+            <div class="foyer-audio-monitor-title">Monitor</div>
+            <div class="foyer-audio-monitor-subtitle">Headphone output</div>
+          </div>
+          <div class="foyer-audio-value" data-monitor-volume-readout>${_escapeHtml(_formatDb(volume))}</div>
+        </div>
+        <div class="foyer-audio-monitor-controls">
+          <button class="btn ${enabled ? 'btn-primary' : 'btn-outline-secondary'}" type="button" data-foyer-monitor-toggle="enabled" aria-pressed="${enabled ? 'true' : 'false'}">On</button>
+          <button class="btn ${dim ? 'btn-warning' : 'btn-outline-secondary'}" type="button" data-foyer-monitor-toggle="dim" aria-pressed="${dim ? 'true' : 'false'}">Dim</button>
+          <div class="foyer-audio-monitor-slider">
+            <input class="form-range foyer-audio-slider" type="range" min="-60" max="6" step="0.1" value="${String(Math.max(-60, Math.min(volume, 6)))}" data-foyer-monitor-volume aria-label="Monitor volume">
+            <div class="foyer-audio-percent" data-monitor-volume-percent>${_pctFromDb(volume)}%</div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
   function _render() {
     const visible = stateSources.filter(_sourceVisible);
+    _renderMonitor();
     if (grid) grid.innerHTML = visible.map(_renderSource).join('');
     if (emptyEl) emptyEl.classList.toggle('d-none', visible.length > 0);
     sourceSignature = _sourcesSignature(stateSources);
@@ -4051,6 +4086,8 @@ if (document.getElementById('foyer-audio-page')) {
       monitorState = data.monitor || {};
       if (data.ok === false && data.error) {
         _foyerSetStatus(data.error, 'warning');
+      } else if (data.metering && data.metering.active) {
+        _foyerSetStatus('', 'info');
       } else if (!meterOnly && data.metering && data.metering.enabled === false && data.metering.unavailableReason) {
         _foyerSetStatus(`Audio metering unavailable: ${data.metering.unavailableReason}`, 'warning');
       } else if (!meterOnly && data.metering && data.metering.enabled && !data.metering.active) {
@@ -4078,6 +4115,14 @@ if (document.getElementById('foyer-audio-page')) {
     if (source) source.volume = db;
     const readout = document.querySelector(`[data-volume-readout="${CSS.escape(String(id))}"]`);
     const pct = document.querySelector(`[data-volume-percent="${CSS.escape(String(id))}"]`);
+    if (readout) readout.textContent = _formatDb(db);
+    if (pct) pct.textContent = `${_pctFromDb(db)}%`;
+  }
+
+  function _updateLocalMonitorVolume(db) {
+    monitorState.volume = db;
+    const readout = document.querySelector('[data-monitor-volume-readout]');
+    const pct = document.querySelector('[data-monitor-volume-percent]');
     if (readout) readout.textContent = _formatDb(db);
     if (pct) pct.textContent = `${_pctFromDb(db)}%`;
   }
@@ -4146,6 +4191,15 @@ if (document.getElementById('foyer-audio-page')) {
     _sendVolume(id, db, {force: true});
   }
 
+  function _flushMonitorVolumeFromSlider(slider) {
+    if (!slider || !canMonitor) return;
+    const db = Number(slider.value);
+    _updateLocalMonitorVolume(db);
+    _postAction('/api/atem/audio/monitor', {volume: db}).catch(err => {
+      _foyerSetStatus(err && err.message ? err.message : 'Monitor volume change failed', 'danger');
+    });
+  }
+
   function _clearDraggingSoon() {
     setTimeout(() => {
       root.removeAttribute('data-volume-dragging');
@@ -4165,8 +4219,14 @@ if (document.getElementById('foyer-audio-page')) {
 
   root.addEventListener('input', (e) => {
     const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
-    if (!slider) return;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
     root.setAttribute('data-volume-dragging', '1');
+    if (monitorSlider) {
+      const db = Number(monitorSlider.value);
+      _updateLocalMonitorVolume(db);
+      return;
+    }
     const id = String(slider.getAttribute('data-foyer-volume') || '');
     const db = Number(slider.value);
     _updateLocalVolume(id, db);
@@ -4175,42 +4235,55 @@ if (document.getElementById('foyer-audio-page')) {
 
   root.addEventListener('change', (e) => {
     const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
-    if (!slider) return;
-    _flushVolumeFromSlider(slider);
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
     _clearDraggingSoon();
   });
 
   root.addEventListener('pointerup', (e) => {
     const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
-    if (!slider) return;
-    _flushVolumeFromSlider(slider);
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
     _clearDraggingSoon();
   });
 
   root.addEventListener('touchend', (e) => {
     const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
-    if (!slider) return;
-    _flushVolumeFromSlider(slider);
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
     _clearDraggingSoon();
   }, {passive: true});
 
   root.addEventListener('keydown', (e) => {
     const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
-    if (!slider) return;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
-    setTimeout(() => _flushVolumeFromSlider(slider), 0);
+    setTimeout(() => {
+      if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+      else _flushVolumeFromSlider(slider);
+    }, 0);
   });
 
   root.addEventListener('blur', (e) => {
     const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
-    if (!slider) return;
-    _flushVolumeFromSlider(slider);
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
     _clearDraggingSoon();
   }, true);
 
   root.addEventListener('click', async (e) => {
     const muteBtn = e.target && e.target.closest ? e.target.closest('[data-foyer-mute]') : null;
     const soloBtn = e.target && e.target.closest ? e.target.closest('[data-foyer-solo]') : null;
+    const monitorToggle = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-toggle]') : null;
     try {
       if (muteBtn) {
         const id = String(muteBtn.getAttribute('data-foyer-mute') || '');
@@ -4226,8 +4299,15 @@ if (document.getElementById('foyer-audio-page')) {
         const id = String(soloBtn.getAttribute('data-foyer-solo') || '');
         const enabled = !(monitorState.solo && String(monitorState.soloSource || '') === id);
         await _postAction('/api/atem/audio/solo', {source_id: id, enabled});
-        monitorState = {solo: enabled, soloSource: enabled ? id : ''};
+        monitorState = {...monitorState, solo: enabled, soloSource: enabled ? id : ''};
         _render();
+      } else if (monitorToggle && canMonitor) {
+        const field = String(monitorToggle.getAttribute('data-foyer-monitor-toggle') || '');
+        if (!['enabled', 'dim'].includes(field)) return;
+        const enabled = !monitorState[field];
+        await _postAction('/api/atem/audio/monitor', {[field]: enabled});
+        monitorState[field] = enabled;
+        _renderMonitor();
       }
     } catch (err) {
       _foyerSetStatus(err && err.message ? err.message : 'Action failed', 'danger');

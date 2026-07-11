@@ -393,10 +393,18 @@ class AtemAudioClient:
 
             try:
                 monitor = sw.audioMixer.monitor
+                monitor_audio = bool(getattr(monitor, "monitorAudio", False))
+                monitor_dim = bool(getattr(monitor, "dim", False))
+                monitor_mute = bool(getattr(monitor, "mute", False))
+                monitor_volume = float(getattr(monitor, "volume", 0.0) or 0.0)
                 solo = bool(getattr(monitor, "solo", False))
                 solo_input = getattr(monitor, "soloInput", None)
                 solo_source = str(int(getattr(solo_input, "value"))) if solo_input is not None else ""
             except Exception:
+                monitor_audio = False
+                monitor_dim = False
+                monitor_mute = False
+                monitor_volume = 0.0
                 solo = False
                 solo_source = ""
 
@@ -405,7 +413,14 @@ class AtemAudioClient:
                 "host": self.host,
                 "port": self.port,
                 "sources": sources,
-                "monitor": {"solo": solo, "soloSource": solo_source},
+                "monitor": {
+                    "enabled": monitor_audio,
+                    "dim": monitor_dim,
+                    "muted": monitor_mute,
+                    "volume": monitor_volume,
+                    "solo": solo,
+                    "soloSource": solo_source,
+                },
                 "metering": self._meter_status(),
             }
 
@@ -454,5 +469,17 @@ class AtemAudioClient:
                 sw.setAudioMixerMonitorSolo(True)
             else:
                 sw.setAudioMixerMonitorSolo(False)
+
+        self._with_switcher(_set)
+
+    def set_monitor(self, *, enabled: bool | None = None, dim: bool | None = None, volume: float | None = None) -> None:
+        def _set(sw: Any) -> None:
+            if enabled is not None:
+                sw.setAudioMixerMonitorMonitorAudio(bool(enabled))
+            if dim is not None:
+                sw.setAudioMixerMonitorDim(bool(dim))
+            if volume is not None:
+                db = max(-60.0, min(float(volume), 6.0))
+                sw.setAudioMixerMonitorVolume(db)
 
         self._with_switcher(_set)

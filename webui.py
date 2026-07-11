@@ -477,7 +477,8 @@ def _init_auth_db() -> None:
               videohub_can_edit_presets INTEGER,
               companion_click_surfaces TEXT,
               atem_allowed_audio_sources TEXT,
-              atem_can_solo_audio INTEGER
+              atem_can_solo_audio INTEGER,
+              atem_can_monitor_audio INTEGER
             )
             """
         )
@@ -496,6 +497,7 @@ def _init_auth_db() -> None:
             ('companion_click_surfaces', 'TEXT'),
             ('atem_allowed_audio_sources', 'TEXT'),
             ('atem_can_solo_audio', 'INTEGER'),
+            ('atem_can_monitor_audio', 'INTEGER'),
         ):
             if col_name not in group_cols:
                 try:
@@ -875,6 +877,21 @@ def _set_group_atem_can_solo_audio(group_id: int, enabled: bool) -> None:
         conn.close()
 
 
+def _set_group_atem_can_monitor_audio(group_id: int, enabled: bool) -> None:
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET atem_can_monitor_audio=? WHERE id=?',
+            (
+                1 if bool(enabled) else 0,
+                int(group_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
     group_id = int(group_id)
     keys = [k for k in (page_keys or []) if str(k or '').strip()]
@@ -910,6 +927,7 @@ def _group_settings_snapshot(group_id: int) -> dict:
         'companion_click_surfaces': _coerce_string_allow_list(group['companion_click_surfaces'] if 'companion_click_surfaces' in group.keys() else None),
         'atem_allowed_audio_sources': _coerce_string_allow_list(group['atem_allowed_audio_sources'] if 'atem_allowed_audio_sources' in group.keys() else None),
         'atem_can_solo_audio': bool(int(group['atem_can_solo_audio'] or 0)) if 'atem_can_solo_audio' in group.keys() and group['atem_can_solo_audio'] is not None else False,
+        'atem_can_monitor_audio': bool(int(group['atem_can_monitor_audio'] or 0)) if 'atem_can_monitor_audio' in group.keys() and group['atem_can_monitor_audio'] is not None else False,
     }
 
 
@@ -987,7 +1005,7 @@ def _log_group_setting_changes(before: dict, after: dict) -> None:
             target_id=gid,
             details={'group_id': gid, 'group_name': name, 'old': before.get('companion_click_surfaces'), 'new': after.get('companion_click_surfaces')},
         )
-    if _changed('atem_allowed_audio_sources') or _changed('atem_can_solo_audio'):
+    if _changed('atem_allowed_audio_sources') or _changed('atem_can_solo_audio') or _changed('atem_can_monitor_audio'):
         log_event(
             'group.atem_audio.update',
             f"Updated ATEM audio permissions for group '{name}'",
@@ -1002,6 +1020,8 @@ def _log_group_setting_changes(before: dict, after: dict) -> None:
                 'new_sources': after.get('atem_allowed_audio_sources'),
                 'old_can_solo': before.get('atem_can_solo_audio'),
                 'new_can_solo': after.get('atem_can_solo_audio'),
+                'old_can_monitor': before.get('atem_can_monitor_audio'),
+                'new_can_monitor': after.get('atem_can_monitor_audio'),
             },
         )
 
@@ -1205,6 +1225,21 @@ def _effective_atem_can_solo_audio_for_user(user_id: int | None) -> bool:
     for row in groups:
         try:
             if bool(int(row['atem_can_solo_audio'] or 0)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _effective_atem_can_monitor_audio_for_user(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    if _user_is_admin(user_id):
+        return True
+    groups = _get_user_groups(user_id)
+    for row in groups:
+        try:
+            if bool(int(row['atem_can_monitor_audio'] or 0)):
                 return True
         except Exception:
             continue
@@ -3919,9 +3954,10 @@ def admin_permissions_page():
                     # Per-group ATEM audio controls. Page access and channel
                     # grants are separate so different groups can combine.
                     try:
-                        if 'atem_allowed_audio_sources_role' in request.form or 'atem_can_solo_audio_role' in request.form:
+                        if 'atem_allowed_audio_sources_role' in request.form or 'atem_can_solo_audio_role' in request.form or 'atem_can_monitor_audio_role' in request.form:
                             _set_group_atem_audio_sources(gid, request.form.getlist('atem_allowed_audio_sources_role'))
                             _set_group_atem_can_solo_audio(gid, request.form.get('atem_can_solo_audio_role') == 'on')
+                            _set_group_atem_can_monitor_audio(gid, request.form.get('atem_can_monitor_audio_role') == 'on')
                     except Exception:
                         pass
                     try:
@@ -4037,7 +4073,7 @@ def admin_permissions_page():
     conn = _db()
     try:
         groups = conn.execute(
-            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,atem_allowed_audio_sources,atem_can_solo_audio FROM groups ORDER BY is_system DESC, lower(name)'
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,atem_allowed_audio_sources,atem_can_solo_audio,atem_can_monitor_audio FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
         group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
         group_users = conn.execute(
@@ -4130,9 +4166,14 @@ def admin_permissions_page():
             atem_can_solo = bool(int(g['atem_can_solo_audio'] or 0))
         except Exception:
             atem_can_solo = False
+        try:
+            atem_can_monitor = bool(int(g['atem_can_monitor_audio'] or 0))
+        except Exception:
+            atem_can_monitor = False
         group_to_atem[gid] = {
             'audio_sources': _coerce_string_allow_list(g['atem_allowed_audio_sources']),
             'can_solo': bool(atem_can_solo),
+            'can_monitor': bool(atem_can_monitor),
         }
 
     user_to_groups: dict[int, list[sqlite3.Row]] = {}
@@ -4253,11 +4294,14 @@ def api_admin_group_update(group_id: int):
         # Per-group ATEM audio controls. Page access and channel grants are
         # separate so different groups can combine.
         try:
-            if 'atem_allowed_audio_sources_role' in data or 'atem_can_solo_audio_role' in data:
+            if 'atem_allowed_audio_sources_role' in data or 'atem_can_solo_audio_role' in data or 'atem_can_monitor_audio_role' in data:
                 _set_group_atem_audio_sources(gid, data.get('atem_allowed_audio_sources_role'))
                 enabled_raw = data.get('atem_can_solo_audio_role')
                 enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
                 _set_group_atem_can_solo_audio(gid, bool(enabled))
+                monitor_raw = data.get('atem_can_monitor_audio_role')
+                monitor_enabled = bool(monitor_raw) if isinstance(monitor_raw, bool) else (str(monitor_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
+                _set_group_atem_can_monitor_audio(gid, bool(monitor_enabled))
         except Exception:
             pass
         try:
@@ -4983,31 +5027,37 @@ def foyer_audio_page():
     allowed_source_ids: list[str] = []
     allow_all = True
     can_solo = True
+    can_monitor = True
     try:
         if _auth_enabled():
             if not getattr(current_user, 'is_authenticated', False):
                 allowed_source_ids = []
                 allow_all = False
                 can_solo = False
+                can_monitor = False
             else:
                 uid = int(current_user.get_id())
                 if _user_is_admin(uid):
                     allowed_source_ids = []
                     allow_all = True
                     can_solo = True
+                    can_monitor = True
                 else:
                     allowed_source_ids = _effective_atem_audio_source_ids_for_user(uid)
                     allow_all = False
                     can_solo = _effective_atem_can_solo_audio_for_user(uid)
+                    can_monitor = _effective_atem_can_monitor_audio_for_user(uid)
     except Exception:
         allowed_source_ids = []
         allow_all = False
         can_solo = False
+        can_monitor = False
     return render_template(
         'foyer_audio.html',
         allowed_source_ids=allowed_source_ids,
         atem_allow_all=bool(allow_all),
         atem_can_solo=bool(can_solo),
+        atem_can_monitor=bool(can_monitor),
     )
 
 
@@ -5019,6 +5069,7 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
             'can_access_page': False,
             'effective_allowed_source_ids': [],
             'effective_can_solo': False,
+            'effective_can_monitor': False,
             'groups': [],
         }
     groups = _get_user_groups(user_id)
@@ -5041,6 +5092,7 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
                 conn.close()
         raw_sources = ''
         raw_can_solo = None
+        raw_can_monitor = None
         try:
             raw_sources = '' if row['atem_allowed_audio_sources'] is None else str(row['atem_allowed_audio_sources'])
         except Exception:
@@ -5049,6 +5101,10 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
             raw_can_solo = row['atem_can_solo_audio']
         except Exception:
             raw_can_solo = None
+        try:
+            raw_can_monitor = row['atem_can_monitor_audio']
+        except Exception:
+            raw_can_monitor = None
         out_groups.append({
             'id': gid,
             'name': name,
@@ -5059,6 +5115,8 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
             'parsed_atem_allowed_audio_sources': _coerce_string_allow_list(raw_sources),
             'raw_atem_can_solo_audio': raw_can_solo,
             'atem_can_solo_audio': bool(int(raw_can_solo or 0)) if raw_can_solo is not None else False,
+            'raw_atem_can_monitor_audio': raw_can_monitor,
+            'atem_can_monitor_audio': bool(int(raw_can_monitor or 0)) if raw_can_monitor is not None else False,
         })
 
     source_state: dict[str, Any] = {'ok': False, 'source_ids': [], 'error': ''}
@@ -5102,6 +5160,7 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
         'can_access_page': _user_allows_page(user_id, 'page:atem_audio'),
         'effective_allowed_source_ids': _effective_atem_audio_source_ids_for_user(user_id),
         'effective_can_solo': _effective_atem_can_solo_audio_for_user(user_id),
+        'effective_can_monitor': _effective_atem_can_monitor_audio_for_user(user_id),
         'groups': out_groups,
         'atem_sources_seen_by_tdeck': source_state,
     }
@@ -6791,6 +6850,61 @@ def api_atem_audio_solo():
         )
         return jsonify({'ok': True, 'source_id': source_id, 'enabled': enabled})
     except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/atem/audio/monitor', methods=['POST'])
+def api_atem_audio_monitor():
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        try:
+            if not _effective_atem_can_monitor_audio_for_user(int(current_user.get_id())):
+                return jsonify({'ok': False, 'error': 'forbidden'}), 403
+        except Exception:
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    atem = _get_atem_client_from_config()
+    if atem is None:
+        return jsonify({'ok': False, 'error': 'ATEM not configured'}), 400
+    body = request.get_json(silent=True) or {}
+    changes: dict[str, Any] = {}
+    if 'enabled' in body:
+        changes['enabled'] = bool(body.get('enabled'))
+    if 'dim' in body:
+        changes['dim'] = bool(body.get('dim'))
+    if 'volume' in body:
+        try:
+            changes['volume'] = float(body.get('volume'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'volume must be a number'}), 400
+    if not changes:
+        return jsonify({'ok': False, 'error': 'No monitor changes supplied'}), 400
+    try:
+        atem.set_monitor(
+            enabled=changes.get('enabled') if 'enabled' in changes else None,
+            dim=changes.get('dim') if 'dim' in changes else None,
+            volume=changes.get('volume') if 'volume' in changes else None,
+        )
+        log_event(
+            'atem.audio.monitor',
+            'Updated ATEM monitor controls',
+            source='web',
+            status='success',
+            target_type='atem_audio_monitor',
+            target_id='monitor',
+            details=changes,
+        )
+        return jsonify({'ok': True, 'monitor': changes})
+    except Exception as e:
+        log_event(
+            'atem.audio.monitor',
+            'Failed to update ATEM monitor controls',
+            source='web',
+            status='failure',
+            target_type='atem_audio_monitor',
+            target_id='monitor',
+            details={**changes, 'error': str(e)},
+        )
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 

@@ -269,6 +269,14 @@
                               <label class="form-check-label">Allow headphone solo</label>
                             </div>
                           </div>
+                          <div class="col-12">
+                            <div class="form-check">
+                              <input class="form-check-input" type="checkbox" name="atem_can_monitor_audio_role"
+                                {% if group_to_atem.get(g.id) and group_to_atem.get(g.id).can_monitor %}checked{% endif %}
+                                data-role="atem-audio-field">
+                              <label class="form-check-label">Allow monitor controls</label>
+                            </div>
+                          </div>
                           {% set selected_atem_sources = (group_to_atem.get(g.id).audio_sources if group_to_atem and group_to_atem.get(g.id) else []) %}
                           {% for source in atem_audio_sources %}
                             <div class="col-12 col-md-6">
