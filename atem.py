@@ -170,6 +170,11 @@ class AtemAudioClient:
             except Exception:
                 pass
             raise TimeoutError("ATEM connection timed out")
+        try:
+            sw.setAudioLevelsEnable(True)
+            time.sleep(0.1)
+        except Exception:
+            pass
         self._switcher = sw
         self._connected = True
         return sw
@@ -352,15 +357,25 @@ class AtemAudioClient:
 
         self._with_switcher(_set)
 
-    def set_mute(self, source_id: str, muted: bool) -> None:
+    def set_mix_option(self, source_id: str, mix_option: str) -> None:
         source = str(source_id or "").strip()
         if source == MASTER_SOURCE_ID:
-            raise ValueError("Master mute is not supported by this ATEM audio mixer")
+            raise ValueError("Master mix option is not supported by this ATEM audio mixer")
+        option = str(mix_option or "").strip().lower()
+        if option in ("afv", "audiofollowvideo", "audio_follow_video"):
+            atem_option = "afv"
+        elif option in ("on", "1", "true"):
+            atem_option = "on"
+        else:
+            atem_option = "off"
 
         def _set(sw: Any) -> None:
-            sw.setAudioMixerInputMixOption(int(source), "off" if muted else "on")
+            sw.setAudioMixerInputMixOption(int(source), atem_option)
 
         self._with_switcher(_set)
+
+    def set_mute(self, source_id: str, muted: bool) -> None:
+        self.set_mix_option(source_id, "off" if muted else "on")
 
     def set_solo(self, source_id: str, enabled: bool) -> None:
         source = str(source_id or "").strip()

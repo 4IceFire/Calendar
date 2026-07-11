@@ -5071,6 +5071,15 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
                 'ok': True,
                 'source_ids': [str(s.get('id')) for s in sources if isinstance(s, dict)],
                 'source_labels': [{'id': str(s.get('id')), 'label': str(s.get('label') or '')} for s in sources if isinstance(s, dict)],
+                'levels': [
+                    {
+                        'id': str(s.get('id')),
+                        'label': str(s.get('label') or ''),
+                        'level': s.get('level'),
+                    }
+                    for s in sources
+                    if isinstance(s, dict)
+                ],
             }
     except Exception as e:
         try:
@@ -5079,6 +5088,7 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
                 'ok': False,
                 'source_ids': [str(s.get('id')) for s in fallback if isinstance(s, dict)],
                 'source_labels': [{'id': str(s.get('id')), 'label': str(s.get('label') or '')} for s in fallback if isinstance(s, dict)],
+                'levels': [],
                 'error': str(e),
             }
         except Exception:
@@ -6733,21 +6743,26 @@ def api_atem_audio_mute():
         return jsonify({'ok': False, 'error': 'ATEM not configured'}), 400
     body = request.get_json(silent=True) or {}
     source_id = str(body.get('source_id') or body.get('source') or '').strip()
+    mix_option = str(body.get('mix_option') or body.get('mixOption') or '').strip().lower()
     muted = bool(body.get('muted'))
     if not source_id:
         return jsonify({'ok': False, 'error': 'source_id is required'}), 400
     try:
-        atem.set_mute(source_id, muted)
+        if mix_option:
+            atem.set_mix_option(source_id, mix_option)
+            muted = mix_option == 'off'
+        else:
+            atem.set_mute(source_id, muted)
         log_event(
             'atem.audio.mute',
-            f"{'Muted' if muted else 'Unmuted'} ATEM audio source {source_id}",
+            f"Set ATEM audio source {source_id} to {mix_option or ('off' if muted else 'on')}",
             source='web',
             status='success',
             target_type='atem_audio_source',
             target_id=source_id,
-            details={'source_id': source_id, 'muted': muted},
+            details={'source_id': source_id, 'muted': muted, 'mix_option': mix_option or ('off' if muted else 'on')},
         )
-        return jsonify({'ok': True, 'source_id': source_id, 'muted': muted})
+        return jsonify({'ok': True, 'source_id': source_id, 'muted': muted, 'mix_option': mix_option or ('off' if muted else 'on')})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

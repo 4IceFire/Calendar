@@ -4009,7 +4009,7 @@ if (document.getElementById('foyer-audio-page')) {
           <div class="foyer-audio-percent" data-volume-percent="${_escapeHtml(id)}">${_pctFromDb(volume)}%</div>
         </div>
         <div class="foyer-audio-actions">
-          ${isMaster ? '' : `<button class="btn ${muted ? 'btn-danger' : 'btn-outline-secondary'}" type="button" data-foyer-mute="${_escapeHtml(id)}">${muted ? 'Muted' : 'On'}</button>`}
+          ${isMaster ? '' : `<button class="foyer-audio-on-btn${muted ? '' : ' foyer-audio-on-active'}" type="button" data-foyer-mute="${_escapeHtml(id)}" aria-pressed="${muted ? 'false' : 'true'}">ON</button>`}
           ${(!isMaster && canSolo) ? `<button class="btn ${soloActive ? 'btn-warning' : 'btn-outline-secondary'}" type="button" data-foyer-solo="${_escapeHtml(id)}">${soloActive ? 'Solo' : 'Solo'}</button>` : ''}
         </div>
       </section>
@@ -4208,8 +4208,11 @@ if (document.getElementById('foyer-audio-page')) {
         const id = String(muteBtn.getAttribute('data-foyer-mute') || '');
         const source = stateSources.find(s => String(s.id) === id);
         const muted = !(source && source.muted);
-        await _postAction('/api/atem/audio/mute', {source_id: id, muted});
-        if (source) source.muted = muted;
+        await _postAction('/api/atem/audio/mute', {source_id: id, mix_option: muted ? 'off' : 'on'});
+        if (source) {
+          source.muted = muted;
+          source.mixOption = muted ? 'off' : 'on';
+        }
         _render();
       } else if (soloBtn) {
         const id = String(soloBtn.getAttribute('data-foyer-solo') || '');
