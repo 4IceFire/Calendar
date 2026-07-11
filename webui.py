@@ -1186,7 +1186,7 @@ def _effective_atem_audio_source_ids_for_user(user_id: int | None) -> list[str]:
         return []
     if _user_is_admin(user_id):
         return []
-    groups = _get_user_groups_for_page(user_id, 'page:atem_audio')
+    groups = _get_user_groups(user_id)
     merged: set[str] = set()
     for row in groups:
         try:
@@ -1201,7 +1201,7 @@ def _effective_atem_can_solo_audio_for_user(user_id: int | None) -> bool:
         return False
     if _user_is_admin(user_id):
         return True
-    groups = _get_user_groups_for_page(user_id, 'page:atem_audio')
+    groups = _get_user_groups(user_id)
     for row in groups:
         try:
             if bool(int(row['atem_can_solo_audio'] or 0)):
@@ -3916,9 +3916,10 @@ def admin_permissions_page():
                     except Exception:
                         pass
 
-                    # Per-group ATEM audio controls (only update if Foyer Audio page is selected).
+                    # Per-group ATEM audio controls. Page access and channel
+                    # grants are separate so different groups can combine.
                     try:
-                        if 'page:atem_audio' in [str(k) for k in keys]:
+                        if 'atem_allowed_audio_sources_role' in request.form or 'atem_can_solo_audio_role' in request.form:
                             _set_group_atem_audio_sources(gid, request.form.getlist('atem_allowed_audio_sources_role'))
                             _set_group_atem_can_solo_audio(gid, request.form.get('atem_can_solo_audio_role') == 'on')
                     except Exception:
@@ -4249,10 +4250,10 @@ def api_admin_group_update(group_id: int):
         except Exception:
             pass
 
-        # Per-group ATEM audio controls (only update if Foyer Audio page is selected).
+        # Per-group ATEM audio controls. Page access and channel grants are
+        # separate so different groups can combine.
         try:
-            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
-            if 'page:atem_audio' in keys_set:
+            if 'atem_allowed_audio_sources_role' in data or 'atem_can_solo_audio_role' in data:
                 _set_group_atem_audio_sources(gid, data.get('atem_allowed_audio_sources_role'))
                 enabled_raw = data.get('atem_can_solo_audio_role')
                 enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
