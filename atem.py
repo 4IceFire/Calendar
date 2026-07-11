@@ -253,6 +253,39 @@ class AtemAudioClient:
             out.append({"id": str(source_id), "source": source_id, "label": label, "kind": "input"})
         return out or list(_FALLBACK_AUDIO_SOURCES)
 
+    @staticmethod
+    def _level_db(sw: Any, raw: Any) -> float:
+        try:
+            return float(sw.atem.audioWord2Db(int(raw or 0)))
+        except Exception:
+            return -60.0
+
+    @staticmethod
+    def _level_payload(sw: Any, level_obj: Any) -> dict[str, Any]:
+        left_raw = getattr(level_obj, "left", 0) if level_obj is not None else 0
+        right_raw = getattr(level_obj, "right", 0) if level_obj is not None else 0
+        peak = getattr(level_obj, "peak", None) if level_obj is not None else None
+        peak_left_raw = getattr(peak, "left", 0) if peak is not None else 0
+        peak_right_raw = getattr(peak, "right", 0) if peak is not None else 0
+        left_db = AtemAudioClient._level_db(sw, left_raw)
+        right_db = AtemAudioClient._level_db(sw, right_raw)
+        peak_left_db = AtemAudioClient._level_db(sw, peak_left_raw)
+        peak_right_db = AtemAudioClient._level_db(sw, peak_right_raw)
+        return {
+            "left": left_db,
+            "right": right_db,
+            "peakLeft": peak_left_db,
+            "peakRight": peak_right_db,
+            "max": max(left_db, right_db),
+            "peakMax": max(peak_left_db, peak_right_db),
+            "raw": {
+                "left": int(left_raw or 0),
+                "right": int(right_raw or 0),
+                "peakLeft": int(peak_left_raw or 0),
+                "peakRight": int(peak_right_raw or 0),
+            },
+        }
+
     def get_audio_state(self) -> dict[str, Any]:
         def _read(sw: Any) -> dict[str, Any]:
             sources = [{"id": MASTER_SOURCE_ID, "label": "Master", "kind": "master"}]
@@ -271,6 +304,10 @@ class AtemAudioClient:
                     "muted": mix_option == "off",
                     "mixOption": mix_option or "off",
                 })
+                try:
+                    row["level"] = self._level_payload(sw, sw.audioMixer.levels.sources[source_id])
+                except Exception:
+                    row["level"] = self._level_payload(sw, None)
                 sources.append(row)
 
             try:
@@ -279,6 +316,10 @@ class AtemAudioClient:
                 master_volume = 0.0
             sources[0]["volume"] = master_volume
             sources[0]["muted"] = False
+            try:
+                sources[0]["level"] = self._level_payload(sw, sw.audioMixer.levels.master)
+            except Exception:
+                sources[0]["level"] = self._level_payload(sw, None)
 
             try:
                 monitor = sw.audioMixer.monitor

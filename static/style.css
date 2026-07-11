@@ -874,6 +874,52 @@ html[data-bs-theme="dark"] .timer-stage-card{
   align-items: center;
 }
 
+.foyer-audio-meter{
+  display: grid;
+  gap: 0.28rem;
+}
+
+.foyer-audio-meter-lane{
+  display: grid;
+  grid-template-columns: 1.1rem minmax(0, 1fr);
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.foyer-audio-meter-label{
+  color: var(--bs-secondary-color);
+  font-family: var(--bs-font-monospace);
+  font-size: 0.72rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.foyer-audio-meter-track{
+  position: relative;
+  display: block;
+  height: 0.48rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.18);
+}
+
+.foyer-audio-meter-fill{
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  border-radius: inherit;
+  background: #20c997;
+  transition: width 90ms linear, background-color 90ms linear;
+}
+
+.foyer-audio-meter-warm{
+  background: #ffc107;
+}
+
+.foyer-audio-meter-hot{
+  background: #dc3545;
+}
+
 .foyer-audio-slider{
   min-height: 2.5rem;
 }

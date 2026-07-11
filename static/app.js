@@ -3913,8 +3913,10 @@ if (document.getElementById('foyer-audio-page')) {
   const statusEl = document.getElementById('foyer-audio-status');
   let stateSources = [];
   let monitorState = {};
+  let sourceSignature = '';
   const volumeState = new Map();
   const VOLUME_SEND_INTERVAL_MS = 60;
+  const METER_REFRESH_MS = 350;
 
   function _foyerJsonAttr(name, fallback) {
     try {
@@ -3955,17 +3957,52 @@ if (document.getElementById('foyer-audio-page')) {
     return Math.round(((n + 60) / 66) * 100);
   }
 
+  function _meterPct(db) {
+    const n = Math.max(-60, Math.min(Number(db), 6));
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, ((n + 60) / 66) * 100));
+  }
+
+  function _meterClass(db) {
+    const n = Number(db);
+    if (!Number.isFinite(n)) return '';
+    if (n >= -6) return ' foyer-audio-meter-hot';
+    if (n >= -18) return ' foyer-audio-meter-warm';
+    return '';
+  }
+
+  function _sourcesSignature(sources) {
+    return (sources || []).filter(_sourceVisible).map(s => `${String(s.id)}:${String(s.label || '')}:${String(!!s.muted)}:${String(s.mixOption || '')}`).join('|');
+  }
+
+  function _renderMeterLane(id, side, db) {
+    const pct = _meterPct(db);
+    return `
+      <div class="foyer-audio-meter-lane" aria-hidden="true">
+        <span class="foyer-audio-meter-label">${side}</span>
+        <span class="foyer-audio-meter-track">
+          <span class="foyer-audio-meter-fill${_meterClass(db)}" data-meter-${side.toLowerCase()}="${_escapeHtml(id)}" style="width:${pct.toFixed(1)}%"></span>
+        </span>
+      </div>
+    `;
+  }
+
   function _renderSource(source) {
     const id = String(source.id || '');
     const volume = Number(source.volume || 0);
     const muted = !!source.muted;
     const isMaster = id === 'master';
     const soloActive = !!monitorState.solo && String(monitorState.soloSource || '') === id;
+    const level = source.level || {};
     return `
       <section class="foyer-audio-strip" data-source-id="${_escapeHtml(id)}">
         <div class="foyer-audio-strip-head">
           <div class="foyer-audio-name">${_escapeHtml(source.label || id)}</div>
           <div class="foyer-audio-value" data-volume-readout="${_escapeHtml(id)}">${_escapeHtml(_formatDb(volume))}</div>
+        </div>
+        <div class="foyer-audio-meter" data-meter-source="${_escapeHtml(id)}">
+          ${_renderMeterLane(id, 'L', level.left)}
+          ${_renderMeterLane(id, 'R', level.right)}
         </div>
         <div class="foyer-audio-slider-row">
           <input class="form-range foyer-audio-slider" type="range" min="-60" max="6" step="0.1" value="${String(Math.max(-60, Math.min(volume, 6)))}" data-foyer-volume="${_escapeHtml(id)}" aria-label="${_escapeHtml(source.label || id)} volume">
@@ -3983,19 +4020,46 @@ if (document.getElementById('foyer-audio-page')) {
     const visible = stateSources.filter(_sourceVisible);
     if (grid) grid.innerHTML = visible.map(_renderSource).join('');
     if (emptyEl) emptyEl.classList.toggle('d-none', visible.length > 0);
+    sourceSignature = _sourcesSignature(stateSources);
   }
 
-  async function _loadState() {
-    if (root.hasAttribute('data-volume-dragging')) return;
+  function _updateMeters(sources) {
+    for (const source of (sources || [])) {
+      if (!_sourceVisible(source)) continue;
+      const id = String(source.id || '');
+      const level = source.level || {};
+      const left = document.querySelector(`[data-meter-l="${CSS.escape(id)}"]`);
+      const right = document.querySelector(`[data-meter-r="${CSS.escape(id)}"]`);
+      if (left) {
+        left.style.width = `${_meterPct(level.left).toFixed(1)}%`;
+        left.className = `foyer-audio-meter-fill${_meterClass(level.left)}`;
+      }
+      if (right) {
+        right.style.width = `${_meterPct(level.right).toFixed(1)}%`;
+        right.className = `foyer-audio-meter-fill${_meterClass(level.right)}`;
+      }
+    }
+  }
+
+  async function _loadState(options) {
+    const meterOnly = !!(options && options.meterOnly);
     try {
       const res = await fetch('/api/atem/audio/state?_ts=' + Date.now(), {cache: 'no-store'});
       const data = await res.json().catch(() => ({}));
       if (!data || !Array.isArray(data.sources)) throw new Error((data && data.error) || 'Could not load ATEM audio state');
-      stateSources = data.sources;
+      const nextSources = data.sources;
       monitorState = data.monitor || {};
       if (data.ok === false && data.error) _foyerSetStatus(data.error, 'warning');
       else _foyerSetStatus('', 'info');
-      _render();
+      const nextSignature = _sourcesSignature(nextSources);
+      stateSources = nextSources;
+      if (!meterOnly && !root.hasAttribute('data-volume-dragging')) {
+        _render();
+      } else if (nextSignature !== sourceSignature && !root.hasAttribute('data-volume-dragging')) {
+        _render();
+      } else {
+        _updateMeters(nextSources);
+      }
     } catch (e) {
       _foyerSetStatus(e && e.message ? e.message : 'Could not load ATEM audio state', 'danger');
     }
@@ -4160,6 +4224,6 @@ if (document.getElementById('foyer-audio-page')) {
   });
 
   _loadState();
-  setInterval(_loadState, 10000);
+  setInterval(() => _loadState({meterOnly: true}), METER_REFRESH_MS);
 }
 
