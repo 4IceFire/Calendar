@@ -4019,7 +4019,7 @@ if (document.getElementById('foyer-audio-page')) {
           <div class="foyer-audio-percent" data-volume-percent="${_escapeHtml(id)}">${_pctFromDb(volume)}%</div>
         </div>
         <div class="foyer-audio-actions">
-          ${isMaster ? '' : `<button class="foyer-audio-on-btn${muted ? '' : ' foyer-audio-on-active'}" type="button" data-foyer-mute="${_escapeHtml(id)}" aria-pressed="${muted ? 'false' : 'true'}">ON</button>`}
+          ${isMaster ? '' : `<button class="btn ${muted ? 'btn-outline-secondary' : 'btn-primary'}" type="button" data-foyer-mute="${_escapeHtml(id)}" aria-pressed="${muted ? 'false' : 'true'}">On</button>`}
           ${(!isMaster && canSolo) ? `<button class="btn ${soloActive ? 'btn-warning' : 'btn-outline-secondary'}" type="button" data-foyer-solo="${_escapeHtml(id)}">${soloActive ? 'Solo' : 'Solo'}</button>` : ''}
         </div>
       </section>
@@ -4100,7 +4100,8 @@ if (document.getElementById('foyer-audio-page')) {
       const muteBtn = document.querySelector(`[data-foyer-mute="${CSS.escape(id)}"]`);
       if (muteBtn) {
         const muted = !!source.muted;
-        muteBtn.classList.toggle('foyer-audio-on-active', !muted);
+        muteBtn.classList.toggle('btn-primary', !muted);
+        muteBtn.classList.toggle('btn-outline-secondary', muted);
         muteBtn.setAttribute('aria-pressed', muted ? 'false' : 'true');
       }
 
@@ -4206,6 +4207,17 @@ if (document.getElementById('foyer-audio-page')) {
     return entry;
   }
 
+  async function _sendVolumeRequest(key, db) {
+    const isMonitor = key === 'monitor';
+    const res = await fetch(isMonitor ? '/api/atem/audio/monitor' : '/api/atem/audio/volume', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(isMonitor ? {volume: db} : {source_id: key, db}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || (isMonitor ? 'Monitor volume change failed' : 'Volume change failed'));
+  }
+
   async function _sendVolumeNow(id, db) {
     const key = String(id);
     const entry = _volumeEntry(key);
@@ -4216,15 +4228,9 @@ if (document.getElementById('foyer-audio-page')) {
     entry.inFlight = true;
     entry.lastSent = Date.now();
     try {
-      const res = await fetch('/api/atem/audio/volume', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({source_id: key, db}),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'Volume change failed');
+      await _sendVolumeRequest(key, db);
     } catch (e) {
-      _foyerSetStatus(e && e.message ? e.message : 'Volume change failed', 'danger');
+      _foyerSetStatus(e && e.message ? e.message : (key === 'monitor' ? 'Monitor volume change failed' : 'Volume change failed'), 'danger');
     } finally {
       entry.inFlight = false;
       if (entry.queued !== null) {
@@ -4264,9 +4270,7 @@ if (document.getElementById('foyer-audio-page')) {
     if (!slider || !canMonitor) return;
     const db = Number(slider.value);
     _updateLocalMonitorVolume(db);
-    _postAction('/api/atem/audio/monitor', {volume: db}).catch(err => {
-      _foyerSetStatus(err && err.message ? err.message : 'Monitor volume change failed', 'danger');
-    });
+    _sendVolume('monitor', db, {force: true});
   }
 
   function _clearDraggingSoon() {
@@ -4296,6 +4300,7 @@ if (document.getElementById('foyer-audio-page')) {
       root.setAttribute('data-active-volume', 'monitor');
       const db = Number(monitorSlider.value);
       _updateLocalMonitorVolume(db);
+      _sendVolume('monitor', db);
       return;
     }
     const id = String(slider.getAttribute('data-foyer-volume') || '');

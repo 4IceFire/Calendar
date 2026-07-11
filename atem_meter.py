@@ -23,7 +23,6 @@ FLAG_RETRANSMISSION = 4
 FLAG_REQUEST_RETRANSMISSION = 8
 FLAG_ACK = 16
 
-STATE_CLOSED = 0
 STATE_SYN_SENT = 1
 STATE_ESTABLISHED = 3
 
@@ -234,14 +233,14 @@ class AtemMeterClient:
         *,
         session_id: int | None,
         local_sequence: int,
-    ) -> tuple[int | None, int]:
+    ) -> int:
         packet.session = int(session_id or 0)
         if not packet.flags & FLAG_ACK:
             packet.sequence_number = (local_sequence + 1) % (2**16)
         sock.sendto(packet.to_bytes(), (self.host, self.port))
         if packet.flags & (FLAG_SYN | FLAG_ACK) == 0:
             local_sequence = (local_sequence + 1) % (2**16)
-        return session_id, local_sequence
+        return local_sequence
 
     def _send_ack(self, sock: socket.socket, session_id: int | None, sequence_number: int) -> None:
         ack = _Packet(
@@ -255,7 +254,7 @@ class AtemMeterClient:
     def _send_audio_levels_enable(self, sock: socket.socket, session_id: int | None, local_sequence: int, enabled: bool) -> int:
         data = _atem_command("SALN", struct.pack(">? 3x", bool(enabled)))
         packet = _Packet(flags=FLAG_RELIABLE, data=data)
-        _, local_sequence = self._send_packet(sock, packet, session_id=session_id, local_sequence=local_sequence)
+        local_sequence = self._send_packet(sock, packet, session_id=session_id, local_sequence=local_sequence)
         with self._lock:
             self._saln_packets_sent += 1
             self._last_saln_at = time.time()
@@ -301,9 +300,8 @@ class AtemMeterClient:
 
     def _run_once(self) -> None:
         local_sequence = -1
-        remote_sequence = 0
         session_id: int | None = 0x1337
-        state = STATE_CLOSED
+        state = STATE_SYN_SENT
         enable_ack = False
         sent_enable = False
         last_enable_sent = 0.0
@@ -313,13 +311,12 @@ class AtemMeterClient:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
 
             syn = _Packet(flags=FLAG_SYN, data=bytes([1, 0, 0, 0, 0, 0, 0, 0]))
-            session_id, local_sequence = self._send_packet(
+            local_sequence = self._send_packet(
                 sock,
                 syn,
                 session_id=session_id,
                 local_sequence=local_sequence,
             )
-            state = STATE_SYN_SENT
             started_at = time.time()
 
             while not self._stop.is_set():

@@ -3954,7 +3954,7 @@ def admin_permissions_page():
                     # Per-group ATEM audio controls. Page access and channel
                     # grants are separate so different groups can combine.
                     try:
-                        if 'atem_allowed_audio_sources_role' in request.form or 'atem_can_solo_audio_role' in request.form or 'atem_can_monitor_audio_role' in request.form:
+                        if 'page:atem_audio' in [str(k) for k in keys]:
                             _set_group_atem_audio_sources(gid, request.form.getlist('atem_allowed_audio_sources_role'))
                             _set_group_atem_can_solo_audio(gid, request.form.get('atem_can_solo_audio_role') == 'on')
                             _set_group_atem_can_monitor_audio(gid, request.form.get('atem_can_monitor_audio_role') == 'on')
@@ -4294,7 +4294,8 @@ def api_admin_group_update(group_id: int):
         # Per-group ATEM audio controls. Page access and channel grants are
         # separate so different groups can combine.
         try:
-            if 'atem_allowed_audio_sources_role' in data or 'atem_can_solo_audio_role' in data or 'atem_can_monitor_audio_role' in data:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:atem_audio' in keys_set:
                 _set_group_atem_audio_sources(gid, data.get('atem_allowed_audio_sources_role'))
                 enabled_raw = data.get('atem_can_solo_audio_role')
                 enabled = bool(enabled_raw) if isinstance(enabled_raw, bool) else (str(enabled_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))

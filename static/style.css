@@ -988,31 +988,6 @@ html[data-bs-theme="dark"] .timer-stage-card{
   font-weight: 600;
 }
 
-.foyer-audio-on-btn{
-  min-height: 2.5rem;
-  border: 1px solid rgba(127, 127, 127, 0.28);
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(60, 60, 60, 0.72), rgba(25, 25, 25, 0.88));
-  color: rgba(220, 220, 220, 0.42);
-  font-size: 0.82rem;
-  font-weight: 700;
-  letter-spacing: 0;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -1px 2px rgba(0,0,0,0.45);
-}
-
-.foyer-audio-on-btn:hover,
-.foyer-audio-on-btn:focus-visible{
-  color: rgba(255, 255, 255, 0.72);
-  border-color: rgba(127, 127, 127, 0.42);
-}
-
-.foyer-audio-on-active{
-  color: #ff9f1a;
-  border-color: rgba(255, 159, 26, 0.38);
-  background: linear-gradient(180deg, rgba(48, 48, 48, 0.92), rgba(12, 12, 12, 0.96));
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 0 0 1px rgba(255, 159, 26, 0.09);
-}
-
   .companion-config-row .btn{
     white-space: nowrap;
   }
