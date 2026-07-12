@@ -10267,6 +10267,17 @@ def api_videohub_route():
 
     try:
         vh.route_video_output(output=output_idx, input_=input_idx, monitoring=monitor)
+        if not monitor:
+            verified = False
+            for _ in range(3):
+                time.sleep(0.12)
+                if vh.verify_video_output_route(output=output_idx, input_=input_idx):
+                    verified = True
+                    break
+            if not verified:
+                raise RuntimeError(
+                    f'VideoHub did not confirm output {output_n} was routed to input {input_n}'
+                )
     except Exception as e:
         try:
             log_event(

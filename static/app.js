@@ -46,12 +46,12 @@ async function updateStatusIndicators() {
     _applyServiceIndicator('companion', 'Companion', !!(data && data.companion && data.companion.connected));
     _applyServiceIndicator('propresenter', 'ProPresenter', !!(data && data.propresenter && data.propresenter.connected));
     _applyServiceIndicator('videohub', 'VideoHub', !!(data && data.videohub && data.videohub.connected));
-    _applyServiceIndicator('atem', 'ATEM', !!(data && data.atem && data.atem.connected));
+    _applyServiceIndicator('atem', 'Switcher', !!(data && data.atem && data.atem.connected));
   } catch (e) {
     _applyServiceIndicatorUnknown('companion', 'Companion');
     _applyServiceIndicatorUnknown('propresenter', 'ProPresenter');
     _applyServiceIndicatorUnknown('videohub', 'VideoHub');
-    _applyServiceIndicatorUnknown('atem', 'ATEM');
+    _applyServiceIndicatorUnknown('atem', 'Switcher');
   }
 }
 
@@ -206,11 +206,36 @@ if (document.getElementById('routing-page')) {
   const elOutputs = document.getElementById('routing-outputs');
   const elInputs = document.getElementById('routing-inputs');
   const elCurrent = document.getElementById('routing-current');
+  const inputStep = document.getElementById('routing-input-step');
+  const outputStep = document.getElementById('routing-output-step');
+  const btnChangeOutput = document.getElementById('routing-change-output');
+  const confirmCopy = document.getElementById('routing-confirm-copy');
+  const confirmModalEl = document.getElementById('routing-confirm-modal');
   const btnApply = document.getElementById('routing-apply');
 
   let state = { configured: false, inputs: [], outputs: [], routing: [] };
   let selectedOutput = null;
   let selectedInput = null;
+
+  function _showRoutingStep(step) {
+    if (!step) return;
+    step.classList.remove('d-none', 'routing-step-enter');
+    // Restart the entrance animation when returning to a previously shown step.
+    void step.offsetWidth;
+    step.classList.add('routing-step-enter');
+    step.addEventListener('animationend', () => step.classList.remove('routing-step-enter'), {once: true});
+  }
+
+  async function _switchRoutingStep(fromStep, toStep) {
+    if (fromStep) {
+      fromStep.classList.add('routing-step-exit');
+      await new Promise(resolve => window.setTimeout(resolve, 160));
+      fromStep.classList.add('d-none');
+      fromStep.classList.remove('routing-step-exit');
+    }
+    _showRoutingStep(toStep);
+    if (toStep) toStep.focus({preventScroll: true});
+  }
 
   function _filterList(list, allow) {
     const arr = Array.isArray(list) ? list : [];
@@ -243,13 +268,14 @@ if (document.getElementById('routing-page')) {
       const n = parseInt(o.number, 10);
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'list-group-item list-group-item-action';
+      btn.className = 'btn btn-outline-secondary routing-choice';
       btn.textContent = _routingLabel(o);
       if (selectedOutput === n) btn.classList.add('active');
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         selectedOutput = n;
         const curIn = _getCurrentInputForOutput(n);
         selectedInput = curIn;
+        await _switchRoutingStep(outputStep, inputStep);
         _renderOutputs();
         _renderInputs();
         _renderCurrent();
@@ -260,7 +286,7 @@ if (document.getElementById('routing-page')) {
 
     if (!outputs.length) {
       const div = document.createElement('div');
-      div.className = 'list-group-item text-muted';
+      div.className = 'text-muted p-2';
       div.textContent = 'No outputs configured';
       elOutputs.appendChild(div);
     }
@@ -275,7 +301,7 @@ if (document.getElementById('routing-page')) {
       const n = parseInt(i.number, 10);
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'list-group-item list-group-item-action';
+      btn.className = 'btn btn-outline-secondary routing-choice';
       btn.textContent = _routingLabel(i);
       if (selectedInput === n) btn.classList.add('active');
       btn.addEventListener('click', () => {
@@ -283,13 +309,15 @@ if (document.getElementById('routing-page')) {
         _renderInputs();
         _renderCurrent();
         _setApplyEnabled();
+        if (confirmCopy) confirmCopy.textContent = `Route ${_findLabel(state.outputs, selectedOutput)} to ${_findLabel(state.inputs, selectedInput)}?`;
+        if (confirmModalEl && window.bootstrap) bootstrap.Modal.getOrCreateInstance(confirmModalEl).show();
       });
       elInputs.appendChild(btn);
     });
 
     if (!inputs.length) {
       const div = document.createElement('div');
-      div.className = 'list-group-item text-muted';
+      div.className = 'text-muted p-2';
       div.textContent = 'No inputs configured';
       elInputs.appendChild(div);
     }
@@ -335,6 +363,7 @@ if (document.getElementById('routing-page')) {
         state.routing[idx] = selectedInput;
       }
       _routingSetStatus('Routed successfully.', 'ok');
+      if (confirmModalEl && window.bootstrap) bootstrap.Modal.getOrCreateInstance(confirmModalEl).hide();
       _renderOutputs();
       _renderInputs();
       _renderCurrent();
@@ -348,6 +377,15 @@ if (document.getElementById('routing-page')) {
   if (btnApply) btnApply.addEventListener('click', (ev) => {
     ev.preventDefault();
     _applyRoute();
+  });
+
+  if (btnChangeOutput) btnChangeOutput.addEventListener('click', async () => {
+    selectedOutput = null;
+    selectedInput = null;
+    await _switchRoutingStep(inputStep, outputStep);
+    _renderOutputs();
+    _renderCurrent();
+    _setApplyEnabled();
   });
 
   (async () => {
@@ -2398,6 +2436,8 @@ async function _timersClearStageMessage() {
   return data;
 }
 
+const _timersExpandedPresetRows = new Set();
+
 function _timersRenderPresets(presets) {
   const body = document.getElementById('timers-presets-body');
   if (!body) return;
@@ -2406,6 +2446,7 @@ function _timersRenderPresets(presets) {
   (presets || []).forEach((t, idx) => {
     const tr = document.createElement('tr');
     tr.dataset.index = String(idx);
+    tr.classList.toggle('timer-preset-expanded', _timersExpandedPresetRows.has(idx));
 
     const presetObj = (t && typeof t === 'object') ? t : {time: String(t || ''), name: ''};
 
@@ -2501,12 +2542,34 @@ function _timersRenderPresets(presets) {
     actTd.appendChild(movePresetWrap);
     actTd.appendChild(delBtn);
 
+    const mobileSummaryTd = document.createElement('td');
+    mobileSummaryTd.className = 'timer-mobile-summary';
+    const mobileSummaryText = document.createElement('div');
+    mobileSummaryText.className = 'timer-mobile-summary-text';
+    const mobileName = document.createElement('strong');
+    mobileName.dataset.role = 'mobile-preset-name';
+    mobileName.textContent = nameInput.value || `Preset ${idx + 1}`;
+    const mobileTime = document.createElement('span');
+    mobileTime.dataset.role = 'mobile-preset-time';
+    mobileTime.textContent = normalizedTime;
+    mobileSummaryText.appendChild(mobileName);
+    mobileSummaryText.appendChild(mobileTime);
+    const editToggle = document.createElement('button');
+    editToggle.type = 'button';
+    editToggle.className = 'btn btn-sm btn-outline-secondary';
+    editToggle.dataset.action = 'edit-toggle';
+    editToggle.setAttribute('aria-expanded', _timersExpandedPresetRows.has(idx) ? 'true' : 'false');
+    editToggle.textContent = _timersExpandedPresetRows.has(idx) ? 'Collapse' : 'Expand';
+    mobileSummaryTd.appendChild(mobileSummaryText);
+    mobileSummaryTd.appendChild(editToggle);
+
     tr.appendChild(runTd);
     tr.appendChild(orderTd);
     tr.appendChild(nameTd);
     tr.appendChild(timeTd);
     tr.appendChild(pressesTd);
     tr.appendChild(actTd);
+    tr.appendChild(mobileSummaryTd);
     body.appendChild(tr);
 
     // Render existing presses
@@ -2817,11 +2880,21 @@ if (document.getElementById('timers-page')) {
 
       // Preset-row actions
       const action = btn.dataset.action;
-      if (!action || !['delete', 'up', 'down', 'apply'].includes(action)) return;
+      if (!action || !['delete', 'up', 'down', 'apply', 'edit-toggle'].includes(action)) return;
       const tr = btn.closest('tr');
       if (!tr) return;
       const idx = Number(tr.dataset.index);
       if (!Number.isFinite(idx)) return;
+
+      if (action === 'edit-toggle') {
+        const expanded = !tr.classList.contains('timer-preset-expanded');
+        tr.classList.toggle('timer-preset-expanded', expanded);
+        if (expanded) _timersExpandedPresetRows.add(idx);
+        else _timersExpandedPresetRows.delete(idx);
+        btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        btn.textContent = expanded ? 'Collapse' : 'Expand';
+        return;
+      }
 
       if (action === 'apply') {
         (async () => {
@@ -2870,6 +2943,15 @@ if (document.getElementById('timers-page')) {
       // NOTE: For custom press URLs, do NOT auto-save while typing.
       // Save happens on blur/change instead.
       if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]'))) {
+        const row = el.closest('tr');
+        if (row && el.matches('input[data-role="preset-name"]')) {
+          const summaryName = row.querySelector('[data-role="mobile-preset-name"]');
+          if (summaryName) summaryName.textContent = String(el.value || '').trim() || `Preset ${Number(row.dataset.index || 0) + 1}`;
+        }
+        if (row && el.matches('input[data-role="preset-time"]')) {
+          const summaryTime = row.querySelector('[data-role="mobile-preset-time"]');
+          if (summaryTime && el.value) summaryTime.textContent = el.value;
+        }
         if (el.matches('input[data-role="preset-time"]')) {
           if (!String(el.value || '').trim()) {
             _timersScheduleIncompleteTimeRestore(el);
