@@ -65,6 +65,17 @@ class DigicoWebApiTests(unittest.TestCase):
             setup_page = client.get("/config/digico")
             self.assertEqual(setup_page.status_code, 200)
             self.assertIn(b"iPad / OSC Relay", setup_page.data)
+            self.assertIn(b"Section heading", setup_page.data)
+            setup_script = client.get("/static/digico_setup.js")
+            self.assertEqual(setup_script.status_code, 200)
+            self.assertIn(b"digico-move-up", setup_script.data)
+            self.assertNotIn(b"digico-item-order", setup_script.data)
+            setup_script.close()
+            mixer_script = client.get("/static/digico_mixer.js")
+            self.assertEqual(mixer_script.status_code, 200)
+            self.assertIn(b"headingText", mixer_script.data)
+            self.assertNotIn(b"const grouped = new Map", mixer_script.data)
+            mixer_script.close()
             with tempfile.TemporaryDirectory() as tmp, patch.object(
                 webui, "_AUTH_DB_PATH", Path(tmp) / "auth.db"
             ):

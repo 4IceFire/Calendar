@@ -157,6 +157,10 @@
 .digico-config-number { align-self: center; min-width: 2rem; font-weight: 750; text-align: center; }
 .digico-config-row label { display: block; min-width: 0; font-size: .72rem; color: var(--bs-secondary-color); }
 .digico-config-row .form-control { min-width: 0; }
+.digico-order-controls { display: grid; grid-template-columns: auto auto; align-items: end; gap: .2rem .35rem; min-width: 5.2rem; }
+.digico-order-label { grid-column: 1 / -1; color: var(--bs-secondary-color); font-size: .72rem; }
+.digico-order-controls .btn { min-width: 2rem; font-size: 1rem; font-weight: 750; line-height: 1.15; }
+.digico-order-position { align-self: center; color: var(--bs-secondary-color); font-size: .68rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .digico-device-row { display: grid; grid-template-columns: auto minmax(8rem, 1fr) minmax(8rem, 1fr) 6rem auto auto auto; gap: .6rem; align-items: end; padding: .7rem; border: 1px solid var(--bs-border-color); border-radius: .7rem; }
 .digico-device-check { align-self: center; }
 .digico-diagnostics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .65rem; }

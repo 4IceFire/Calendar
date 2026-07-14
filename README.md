@@ -89,7 +89,7 @@ Setup:
 2. Enable the integration and enter the SD9 IP and OSC port (normally `9000`).
 3. Choose a free local UDP listen port (default `8000`). Allow that UDP port through the TDeck computer's firewall when using native iPad/OSC relay devices.
 4. Wait for discovery to report the input-channel and AUX counts.
-5. Use the **AUXes** and **Channels** tabs to set visibility, labels, colours, icons, order and channel groups.
+5. Use the **AUXes** and **Channels** tabs to set visibility, labels, colours and icons. Arrange items with the arrow buttons. A channel's optional **Section heading** appears immediately above that channel and applies visually until the next heading.
 6. In **Permissions → Groups**, grant **Personal Mixes** and optionally select which AUXes that group may control. No AUX selection means all enabled AUXes.
 7. Team members open `/personal-mixes`, sign in, and choose their assigned mix.
 

@@ -45,8 +45,9 @@ def _get_config():
 
 
 def _save_config(value):
+    replacement = dict(value)
     CONFIG.clear()
-    CONFIG.update(value)
+    CONFIG.update(replacement)
 
 
 if __name__ == "__main__":

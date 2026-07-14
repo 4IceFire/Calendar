@@ -309,45 +309,44 @@
   function buildChannels(channels) {
     state.channelControls.clear();
     channelGroups.replaceChildren();
-    const grouped = new Map();
+    let previousHeading = '';
+    let list = null;
     for (const channel of channels || []) {
-      const group = String(channel.group || 'Channels').trim() || 'Channels';
-      if (!grouped.has(group)) grouped.set(group, []);
-      grouped.get(group).push(channel);
-    }
-    for (const [groupName, groupChannels] of grouped.entries()) {
-      if (grouped.size > 1 || groupName !== 'Channels') {
+      const headingText = String(channel.group || '').trim();
+      if (headingText && headingText !== previousHeading) {
         const heading = document.createElement('h3');
         heading.className = 'digico-channel-group-title';
-        heading.textContent = groupName;
+        heading.textContent = headingText;
         channelGroups.appendChild(heading);
+        list = null;
       }
-      const list = document.createElement('div');
-      list.className = 'digico-channel-list';
-      for (const channel of groupChannels) {
-        const row = document.createElement('div');
-        row.className = `digico-channel ${state.selectedAux && state.selectedAux.stereo ? 'is-stereo' : ''}`;
-        const name = document.createElement('div');
-        name.className = 'digico-channel-name';
-        name.appendChild(createIcon(channel.icon, 'digico-channel-icon'));
-        const nameText = document.createElement('span');
-        nameText.textContent = channel.label || `Channel ${channel.channel}`;
-        name.appendChild(nameText);
-        const identity = document.createElement('div');
-        identity.className = 'digico-channel-identity';
-        const send = buildSendToggle(channel);
-        identity.append(name, send.button);
-        const level = buildControl(channel.channel, 'level', channel.level);
-        row.append(identity, level.element);
-        let pan = null;
-        if (state.selectedAux && state.selectedAux.stereo) {
-          pan = buildControl(channel.channel, 'pan', channel.pan);
-          row.appendChild(pan.element);
-        }
-        state.channelControls.set(Number(channel.channel), {send, level, pan});
-        list.appendChild(row);
+      previousHeading = headingText;
+      if (!list) {
+        list = document.createElement('div');
+        list.className = 'digico-channel-list';
+        channelGroups.appendChild(list);
       }
-      channelGroups.appendChild(list);
+      const row = document.createElement('div');
+      row.className = `digico-channel ${state.selectedAux && state.selectedAux.stereo ? 'is-stereo' : ''}`;
+      const name = document.createElement('div');
+      name.className = 'digico-channel-name';
+      name.appendChild(createIcon(channel.icon, 'digico-channel-icon'));
+      const nameText = document.createElement('span');
+      nameText.textContent = channel.label || `Channel ${channel.channel}`;
+      name.appendChild(nameText);
+      const identity = document.createElement('div');
+      identity.className = 'digico-channel-identity';
+      const send = buildSendToggle(channel);
+      identity.append(name, send.button);
+      const level = buildControl(channel.channel, 'level', channel.level);
+      row.append(identity, level.element);
+      let pan = null;
+      if (state.selectedAux && state.selectedAux.stereo) {
+        pan = buildControl(channel.channel, 'pan', channel.pan);
+        row.appendChild(pan.element);
+      }
+      state.channelControls.set(Number(channel.channel), {send, level, pan});
+      list.appendChild(row);
     }
   }
 

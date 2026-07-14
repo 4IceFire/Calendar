@@ -112,6 +112,11 @@ class DigicoClientIntegrationTests(unittest.TestCase):
                 request_interval=0.025,
                 retry_interval=0.1,
                 stale_after=2.0,
+                auxes=({"order": 2}, {"order": 1}),
+                channels=(
+                    {"order": 2, "group": "Vocals"},
+                    {"order": 1, "group": "Band"},
+                ),
             )
         )
         try:
@@ -125,9 +130,11 @@ class DigicoClientIntegrationTests(unittest.TestCase):
             self.assertEqual(status["auxes"], 2)
 
             config = client.mixer_config()
-            self.assertEqual(config["channels"][0]["label"], "Input 1")
-            self.assertFalse(config["auxes"][0]["stereo"])
-            self.assertTrue(config["auxes"][1]["stereo"])
+            self.assertEqual([item["channel"] for item in config["channels"]], [2, 1])
+            self.assertEqual([item["group"] for item in config["channels"]], ["Band", "Vocals"])
+            self.assertEqual([item["channel"] for item in config["auxes"]], [2, 1])
+            self.assertTrue(config["auxes"][0]["stereo"])
+            self.assertFalse(config["auxes"][1]["stereo"])
 
             state = client.aux_state(2)
             deadline = time.time() + 2

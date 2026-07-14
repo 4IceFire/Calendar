@@ -66,6 +66,24 @@
         order: custom.order == null ? (desk.order == null ? number : desk.order) : custom.order,
       });
     }
+    out.sort((left, right) => {
+      const leftOrder = Number(left.order) || Number(left.channel);
+      const rightOrder = Number(right.order) || Number(right.channel);
+      return leftOrder - rightOrder || Number(left.channel) - Number(right.channel);
+    });
+
+    // Older TDeck configs stored the same group name on every channel in a
+    // group. Section headings now belong only to the first channel beneath
+    // them, so collapse those consecutive legacy values when editing.
+    if (kind === 'channel') {
+      let previousHeading = '';
+      for (const item of out) {
+        const heading = String(item.group || item.title || '').trim();
+        if (heading && heading === previousHeading) item.group = '';
+        else if (heading) item.group = heading;
+        previousHeading = heading;
+      }
+    }
     return out;
   }
 
@@ -79,6 +97,62 @@
     if (input.type === 'number') input.min = '1';
     label.appendChild(input);
     return label;
+  }
+
+  function updateMoveButtons(target) {
+    const rows = Array.from(target.querySelectorAll('.digico-config-row'));
+    rows.forEach((row, index) => {
+      const up = row.querySelector('.digico-move-up');
+      const down = row.querySelector('.digico-move-down');
+      const position = row.querySelector('.digico-order-position');
+      if (up) up.disabled = index === 0;
+      if (down) down.disabled = index === rows.length - 1;
+      if (position) position.textContent = `${index + 1} of ${rows.length}`;
+    });
+  }
+
+  function moveRow(row, direction) {
+    const target = row.parentElement;
+    if (!target) return;
+    const neighbour = direction < 0 ? row.previousElementSibling : row.nextElementSibling;
+    if (!neighbour || !neighbour.classList.contains('digico-config-row')) return;
+    if (direction < 0) target.insertBefore(row, neighbour);
+    else target.insertBefore(neighbour, row);
+    updateMoveButtons(target);
+    state.dirty = true;
+  }
+
+  function moveControls(row, item, kind) {
+    const wrap = document.createElement('div');
+    wrap.className = 'digico-order-controls';
+    const label = document.createElement('span');
+    label.className = 'digico-order-label';
+    label.textContent = 'Move';
+    const buttons = document.createElement('div');
+    buttons.className = 'btn-group btn-group-sm';
+    const itemName = item.label || `${kind === 'aux' ? 'AUX' : 'channel'} ${item.channel}`;
+
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'btn btn-outline-secondary digico-move-up';
+    up.textContent = '↑';
+    up.title = `Move ${itemName} up`;
+    up.setAttribute('aria-label', up.title);
+    up.addEventListener('click', () => moveRow(row, -1));
+
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'btn btn-outline-secondary digico-move-down';
+    down.textContent = '↓';
+    down.title = `Move ${itemName} down`;
+    down.setAttribute('aria-label', down.title);
+    down.addEventListener('click', () => moveRow(row, 1));
+
+    const position = document.createElement('span');
+    position.className = 'digico-order-position';
+    buttons.append(up, down);
+    wrap.append(label, buttons, position);
+    return wrap;
   }
 
   function renderMixerItems(kind, items) {
@@ -112,15 +186,18 @@
       number.title = item.deskLabel || '';
       row.append(enabledWrap, number, labeledInput('Label', 'digico-item-label', item.label));
       if (kind === 'channel') {
-        row.appendChild(labeledInput('Group', 'digico-item-group', item.group || ''));
+        const heading = labeledInput('Section heading', 'digico-item-group', item.group || '');
+        heading.querySelector('input').placeholder = 'Only where a new section starts';
+        row.appendChild(heading);
         row.appendChild(labeledInput('Icon / emoji', 'digico-item-icon', item.icon || ''));
       } else {
         row.appendChild(labeledInput('Colour', 'digico-item-colour', item.colour || '#3478f6', 'color'));
         row.appendChild(labeledInput('Icon / emoji', 'digico-item-icon', item.icon || ''));
       }
-      row.appendChild(labeledInput('Order', 'digico-item-order', item.order || item.channel, 'number'));
+      row.appendChild(moveControls(row, item, kind));
       target.appendChild(row);
     }
+    updateMoveButtons(target);
   }
 
   function renderDevice(raw) {
@@ -241,13 +318,13 @@
 
   function collectMixerItems(kind) {
     const target = kind === 'aux' ? auxTable : channelTable;
-    return Array.from(target.querySelectorAll('.digico-config-row')).map(row => {
+    return Array.from(target.querySelectorAll('.digico-config-row')).map((row, index) => {
       const item = {
         channel: Number(row.dataset.channel),
         enabled: !!row.querySelector('.digico-item-enabled').checked,
         label: row.querySelector('.digico-item-label').value.trim(),
         icon: row.querySelector('.digico-item-icon').value.trim(),
-        order: Number(row.querySelector('.digico-item-order').value) || Number(row.dataset.channel),
+        order: index + 1,
       };
       if (kind === 'channel') item.group = row.querySelector('.digico-item-group').value.trim();
       else item.colour = row.querySelector('.digico-item-colour').value;
@@ -335,11 +412,13 @@
       const target = button.dataset.kind === 'aux' ? auxTable : channelTable;
       for (const row of target.querySelectorAll('.digico-config-row')) {
         row.querySelector('.digico-item-label').value = row.dataset.deskLabel || '';
-        row.querySelector('.digico-item-enabled').checked = true;
-        row.querySelector('.digico-item-order').value = row.dataset.channel;
       }
+      const rows = Array.from(target.querySelectorAll('.digico-config-row'));
+      rows.sort((left, right) => Number(left.dataset.channel) - Number(right.dataset.channel));
+      for (const row of rows) target.appendChild(row);
+      updateMoveButtons(target);
       state.dirty = true;
-      setMessage('Desk labels restored locally. Select Save & Restart to apply them.', 'info');
+      setMessage('Desk labels and physical desk order restored locally. Select Save & Restart to apply them.', 'info');
     });
   }
 
