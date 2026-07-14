@@ -10,30 +10,17 @@
     {% block head_extra %}{% endblock %}
   </head>
   <body>
+    <a class="tdeck-skip-link" href="#main-content">Skip to main content</a>
     <nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom tdeck-navbar">
       <div class="container-fluid">
+        <button class="btn btn-sm btn-outline-secondary tdeck-menu-button" type="button" data-bs-toggle="offcanvas" data-bs-target="#tdeckMenu" aria-controls="tdeckMenu" aria-label="Open menu">
+          <span class="navbar-toggler-icon" aria-hidden="true"></span>
+        </button>
         <a class="navbar-brand d-flex align-items-center gap-2" href="/">
           <img src="/static/tdeck-icon.svg" alt="" width="22" height="22" style="display:block">
           <span class="tdeck-accent">TDeck</span>
         </a>
 
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#tdeckNav" aria-controls="tdeckNav" aria-expanded="false" aria-label="Toggle navigation">
-          <span class="navbar-toggler-icon"></span>
-        </button>
-
-        <div class="collapse navbar-collapse" id="tdeckNav">
-          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-            {% if not auth_enabled or can_access('page:home') %}<li class="nav-item"><a class="nav-link" href="/">Home</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:timers') %}<li class="nav-item"><a class="nav-link" href="/timers">Timers</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:calendar') %}<li class="nav-item"><a class="nav-link" href="/calendar">Schedule</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:videohub') %}<li class="nav-item"><a class="nav-link" href="/videohub">VideoHub</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:routing') %}<li class="nav-item"><a class="nav-link" href="/routing">Routing</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:digico_mixer') %}<li class="nav-item"><a class="nav-link" href="/personal-mixes">Personal Mixes</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:surface_controls') %}<li class="nav-item"><a class="nav-link" href="/surface-controls">Surface Controls</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:templates') %}<li class="nav-item"><a class="nav-link" href="/templates">Templates</a></li>{% endif %}
-            {% if not auth_enabled or can_access('page:api_reference') %}<li class="nav-item"><a class="nav-link" href="/api-reference">API Reference</a></li>{% endif %}
-          </ul>
-        </div>
         <div class="tdeck-nav-right">
           <div class="tdeck-nav-status">
             <div id="companion-indicator" class="me-2">
@@ -52,18 +39,18 @@
               <span id="digico-dot" class="indicator-dot bg-danger"></span>
               <span id="digico-label">DiGiCo: Checking...</span>
             </div>
+            <div id="atem-indicator" class="me-2">
+              <span id="atem-dot" class="indicator-dot bg-danger"></span>
+              <span id="atem-label">Switcher: Checking...</span>
+            </div>
           </div>
 
           <div class="dropdown tdeck-account-dropdown">
             {% if not auth_enabled or can_access('page:console') %}
               <a id="activity-log-alert-badge" class="tdeck-log-alert-badge d-none" href="/console" title="Unseen log warnings/errors">0</a>
             {% endif %}
-            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
-              {% if auth_enabled %}
-                {% if is_authenticated %}{{ current_user.username }}{% else %}Account{% endif %}
-              {% else %}
-                Admin
-              {% endif %}
+            <button class="btn btn-sm btn-outline-secondary dropdown-toggle tdeck-account-button" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Account menu" title="{% if auth_enabled and is_authenticated %}{{ current_user.username }}{% elif auth_enabled %}Account{% else %}Admin{% endif %}">
+              <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"></circle><path d="M4 21a8 8 0 0 1 16 0"></path></svg>
             </button>
             <ul class="dropdown-menu dropdown-menu-end">
               {% if auth_enabled %}
@@ -73,6 +60,9 @@
                   {% endif %}
                   {% if can_access('page:config') %}
                     <li><a class="dropdown-item" href="/config">Config</a></li>
+                  {% endif %}
+                  {% if can_access('page:api_reference') %}
+                    <li><a class="dropdown-item" href="/api-reference">API Reference</a></li>
                   {% endif %}
                   {% if can_access('page:console') %}
                     <li><a id="activity-log-menu-link" class="dropdown-item tdeck-log-menu-link" href="/console"><span>Log</span><span id="activity-log-menu-badge" class="tdeck-log-menu-badge d-none">0</span></a></li>
@@ -90,6 +80,7 @@
                 <li><span class="dropdown-item-text small text-muted">Authentication is disabled</span></li>
                 <li><hr class="dropdown-divider"></li>
                 <li><a class="dropdown-item" href="/config">Config</a></li>
+                <li><a class="dropdown-item" href="/api-reference">API Reference</a></li>
                 <li><a id="activity-log-menu-link" class="dropdown-item tdeck-log-menu-link" href="/console"><span>Log</span><span id="activity-log-menu-badge" class="tdeck-log-menu-badge d-none">0</span></a></li>
                 <li><a class="dropdown-item" href="/admin/permissions">Permissions</a></li>
               {% endif %}
@@ -99,7 +90,28 @@
       </div>
     </nav>
 
-    <div class="container py-4">
+    <div class="offcanvas offcanvas-start tdeck-side-menu" tabindex="-1" id="tdeckMenu" aria-labelledby="tdeckMenuLabel">
+      <div class="offcanvas-header border-bottom">
+        <a class="navbar-brand d-flex align-items-center gap-2 mb-0" href="/">
+          <img src="/static/tdeck-icon.svg" alt="" width="24" height="24"><span id="tdeckMenuLabel" class="tdeck-accent">TDeck</span>
+        </a>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close menu"></button>
+      </div>
+      <div class="offcanvas-body p-2">
+        <nav class="nav nav-pills flex-column" aria-label="Main navigation">
+          {% if not auth_enabled or can_access('page:home') %}<a class="nav-link{% if request.path == '/' %} active{% endif %}" href="/">Home</a>{% endif %}
+          {% if not auth_enabled or can_access('page:timers') %}<a class="nav-link{% if request.path.startswith('/timers') %} active{% endif %}" href="/timers">Timers</a>{% endif %}
+          {% if not auth_enabled or can_access('page:calendar') %}<a class="nav-link{% if request.path.startswith('/calendar') %} active{% endif %}" href="/calendar">Schedule</a>{% endif %}
+          {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub</a>{% endif %}
+          {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Foyer Audio</a>{% endif %}
+          {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
+          {% if not auth_enabled or can_access('page:digico_mixer') %}<a class="nav-link{% if request.path.startswith('/personal-mixes') %} active{% endif %}" href="/personal-mixes">Personal Mixes</a>{% endif %}
+          {% if not auth_enabled or can_access('page:surface_controls') %}<a class="nav-link{% if request.path.startswith('/surface-controls') %} active{% endif %}" href="/surface-controls">Surface Controls</a>{% endif %}
+        </nav>
+      </div>
+    </div>
+
+    <main id="main-content" class="container py-4" tabindex="-1">
       {% if page_title is defined and page_title %}
         <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
           <div>
@@ -115,7 +127,7 @@
       {% endif %}
 
       {% block content %}{% endblock %}
-    </div>
+    </main>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>

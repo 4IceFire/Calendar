@@ -7,7 +7,7 @@
   <button id="refresh-events" class="btn btn-sm btn-outline-secondary">Refresh</button>
   <button id="add-event" class="btn btn-sm btn-primary">Add Event</button>
   <a href="/calendar/triggers" class="btn btn-sm btn-outline-secondary">Upcoming Triggers</a>
-  <a href="/templates" class="btn btn-sm btn-outline-secondary">Templates</a>
+  {% if not auth_enabled or can_access('page:templates') %}<a href="/templates" class="btn btn-sm btn-outline-secondary">Button &amp; Trigger Templates</a>{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -105,7 +105,7 @@
     }
   </style>
 
-  <div class="table-responsive tdeck-table-wrap">
+  <div class="table-responsive tdeck-table-wrap cal-schedule-wrap">
     <table class="table table-sm align-top tdeck-table cal-schedule-table mb-0">
       <thead>
         <tr>

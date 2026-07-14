@@ -185,6 +185,51 @@ class VideohubClient:
         except Exception:
             return ""
 
+    def _send_command_after_initial_state(self, payload: str) -> str:
+        """Consume the device greeting, then send a command on the same TCP session.
+
+        VideoHub sends its protocol preamble and current state immediately after
+        connection. Routing commands sent before that dump is consumed can be
+        ignored even though the TCP write itself succeeds.
+        """
+        if not self.host:
+            raise ValueError("VideoHub host is required")
+
+        data = payload.encode("utf-8", errors="replace")
+        with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
+            # Drain the initial state until the connection has briefly gone quiet.
+            sock.settimeout(max(0.1, min(self.timeout, 0.5)))
+            initial = bytearray()
+            while len(initial) < _STATE_DUMP_HARD_CAP_BYTES:
+                try:
+                    chunk = sock.recv(min(_RECV_CHUNK_BYTES, _STATE_DUMP_HARD_CAP_BYTES - len(initial)))
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                initial.extend(chunk)
+
+            sock.sendall(data)
+            sock.settimeout(self.timeout)
+            response = bytearray()
+            while len(response) < _RESPONSE_DEFAULT_MAX_BYTES:
+                try:
+                    chunk = sock.recv(min(_RECV_CHUNK_BYTES, _RESPONSE_DEFAULT_MAX_BYTES - len(response)))
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                response.extend(chunk)
+                if b"ACK\n\n" in response or b"NAK\n\n" in response:
+                    break
+
+        text = bytes(response).decode("utf-8", errors="replace")
+        if "NAK\n\n" in text:
+            raise RuntimeError("VideoHub rejected the routing command")
+        if "ACK\n\n" not in text:
+            raise RuntimeError("VideoHub did not acknowledge the routing command")
+        return text
+
     @staticmethod
     def _parse_label_block(text: str, header: str) -> dict[int, str]:
         """Parse a label block like INPUT LABELS / OUTPUT LABELS.
@@ -377,7 +422,17 @@ class VideohubClient:
 
         header = "VIDEO MONITORING OUTPUT ROUTING" if monitoring else "VIDEO OUTPUT ROUTING"
         cmd = f"{header}:\n{output} {input_}\n\n"
-        self._send(cmd, read_response=False)
+        self._send_command_after_initial_state(cmd)
+
+    def verify_video_output_route(self, *, output: int, input_: int) -> bool:
+        """Read the device state back and verify a 0-based output/input route."""
+        if output < 0 or input_ < 0:
+            raise ValueError("output and input_ must be >= 0")
+        state = self._recv_initial_state()
+        routing = self._parse_routing_block(state, "VIDEO OUTPUT ROUTING")
+        if not routing:
+            raise RuntimeError("VideoHub did not return routing state for verification")
+        return routing.get(int(output)) == int(input_)
 
     def route_video_outputs(self, *, routes: list[tuple[int, int]], monitoring: bool = False) -> None:
         """Route many outputs in a single request.
@@ -396,5 +451,5 @@ class VideohubClient:
 
         header = "VIDEO MONITORING OUTPUT ROUTING" if monitoring else "VIDEO OUTPUT ROUTING"
         cmd = f"{header}:\n" + "\n".join(lines) + "\n\n"
-        self._send(cmd, read_response=False)
+        self._send_command_after_initial_state(cmd)
 

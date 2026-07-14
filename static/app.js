@@ -50,11 +50,13 @@ async function updateStatusIndicators() {
     const digicoEnabled = !!(data && data.digico && data.digico.enabled);
     if (digicoIndicator) digicoIndicator.classList.toggle('d-none', !digicoEnabled);
     if (digicoEnabled) _applyServiceIndicator('digico', 'DiGiCo', !!data.digico.connected);
+    _applyServiceIndicator('atem', 'Switcher', !!(data && data.atem && data.atem.connected));
   } catch (e) {
     _applyServiceIndicatorUnknown('companion', 'Companion');
     _applyServiceIndicatorUnknown('propresenter', 'ProPresenter');
     _applyServiceIndicatorUnknown('videohub', 'VideoHub');
     _applyServiceIndicatorUnknown('digico', 'DiGiCo');
+    _applyServiceIndicatorUnknown('atem', 'Switcher');
   }
 }
 
@@ -209,11 +211,36 @@ if (document.getElementById('routing-page')) {
   const elOutputs = document.getElementById('routing-outputs');
   const elInputs = document.getElementById('routing-inputs');
   const elCurrent = document.getElementById('routing-current');
+  const inputStep = document.getElementById('routing-input-step');
+  const outputStep = document.getElementById('routing-output-step');
+  const btnChangeOutput = document.getElementById('routing-change-output');
+  const confirmCopy = document.getElementById('routing-confirm-copy');
+  const confirmModalEl = document.getElementById('routing-confirm-modal');
   const btnApply = document.getElementById('routing-apply');
 
   let state = { configured: false, inputs: [], outputs: [], routing: [] };
   let selectedOutput = null;
   let selectedInput = null;
+
+  function _showRoutingStep(step) {
+    if (!step) return;
+    step.classList.remove('d-none', 'routing-step-enter');
+    // Restart the entrance animation when returning to a previously shown step.
+    void step.offsetWidth;
+    step.classList.add('routing-step-enter');
+    step.addEventListener('animationend', () => step.classList.remove('routing-step-enter'), {once: true});
+  }
+
+  async function _switchRoutingStep(fromStep, toStep) {
+    if (fromStep) {
+      fromStep.classList.add('routing-step-exit');
+      await new Promise(resolve => window.setTimeout(resolve, 160));
+      fromStep.classList.add('d-none');
+      fromStep.classList.remove('routing-step-exit');
+    }
+    _showRoutingStep(toStep);
+    if (toStep) toStep.focus({preventScroll: true});
+  }
 
   function _filterList(list, allow) {
     const arr = Array.isArray(list) ? list : [];
@@ -246,13 +273,14 @@ if (document.getElementById('routing-page')) {
       const n = parseInt(o.number, 10);
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'list-group-item list-group-item-action';
+      btn.className = 'btn btn-outline-secondary routing-choice';
       btn.textContent = _routingLabel(o);
       if (selectedOutput === n) btn.classList.add('active');
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         selectedOutput = n;
         const curIn = _getCurrentInputForOutput(n);
         selectedInput = curIn;
+        await _switchRoutingStep(outputStep, inputStep);
         _renderOutputs();
         _renderInputs();
         _renderCurrent();
@@ -263,7 +291,7 @@ if (document.getElementById('routing-page')) {
 
     if (!outputs.length) {
       const div = document.createElement('div');
-      div.className = 'list-group-item text-muted';
+      div.className = 'text-muted p-2';
       div.textContent = 'No outputs configured';
       elOutputs.appendChild(div);
     }
@@ -278,7 +306,7 @@ if (document.getElementById('routing-page')) {
       const n = parseInt(i.number, 10);
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'list-group-item list-group-item-action';
+      btn.className = 'btn btn-outline-secondary routing-choice';
       btn.textContent = _routingLabel(i);
       if (selectedInput === n) btn.classList.add('active');
       btn.addEventListener('click', () => {
@@ -286,13 +314,15 @@ if (document.getElementById('routing-page')) {
         _renderInputs();
         _renderCurrent();
         _setApplyEnabled();
+        if (confirmCopy) confirmCopy.textContent = `Route ${_findLabel(state.outputs, selectedOutput)} to ${_findLabel(state.inputs, selectedInput)}?`;
+        if (confirmModalEl && window.bootstrap) bootstrap.Modal.getOrCreateInstance(confirmModalEl).show();
       });
       elInputs.appendChild(btn);
     });
 
     if (!inputs.length) {
       const div = document.createElement('div');
-      div.className = 'list-group-item text-muted';
+      div.className = 'text-muted p-2';
       div.textContent = 'No inputs configured';
       elInputs.appendChild(div);
     }
@@ -338,6 +368,7 @@ if (document.getElementById('routing-page')) {
         state.routing[idx] = selectedInput;
       }
       _routingSetStatus('Routed successfully.', 'ok');
+      if (confirmModalEl && window.bootstrap) bootstrap.Modal.getOrCreateInstance(confirmModalEl).hide();
       _renderOutputs();
       _renderInputs();
       _renderCurrent();
@@ -351,6 +382,15 @@ if (document.getElementById('routing-page')) {
   if (btnApply) btnApply.addEventListener('click', (ev) => {
     ev.preventDefault();
     _applyRoute();
+  });
+
+  if (btnChangeOutput) btnChangeOutput.addEventListener('click', async () => {
+    selectedOutput = null;
+    selectedInput = null;
+    await _switchRoutingStep(inputStep, outputStep);
+    _renderOutputs();
+    _renderCurrent();
+    _setApplyEnabled();
   });
 
   (async () => {
@@ -513,6 +553,19 @@ const CONFIG_META = {
   videohub_presets_file: {
     label: 'VideoHub Presets File',
     help: 'JSON file where VideoHub routing presets are stored.',
+  },
+
+  atem_ip: {
+    label: 'ATEM Host',
+    help: 'Blackmagic ATEM switcher IP or hostname.',
+  },
+  atem_port: {
+    label: 'ATEM Port',
+    help: 'Blackmagic ATEM UDP port. Standard ATEM control uses 9910.',
+  },
+  atem_timeout: {
+    label: 'ATEM Timeout (seconds)',
+    help: 'Connection timeout used for ATEM audio control.',
   },
 
   EVENTS_FILE: {
@@ -733,6 +786,10 @@ function _renderConfigGroups(cfg) {
     {
       title: 'VideoHub',
       keys: ['videohub_ip', 'videohub_port', 'videohub_timeout', 'videohub_presets_file'],
+    },
+    {
+      title: 'ATEM',
+      keys: ['atem_ip', 'atem_port', 'atem_timeout'],
     },
   ];
 
@@ -2396,6 +2453,8 @@ async function _timersClearStageMessage() {
   return data;
 }
 
+const _timersExpandedPresetRows = new Set();
+
 function _timersRenderPresets(presets) {
   const body = document.getElementById('timers-presets-body');
   if (!body) return;
@@ -2404,6 +2463,7 @@ function _timersRenderPresets(presets) {
   (presets || []).forEach((t, idx) => {
     const tr = document.createElement('tr');
     tr.dataset.index = String(idx);
+    tr.classList.toggle('timer-preset-expanded', _timersExpandedPresetRows.has(idx));
 
     const presetObj = (t && typeof t === 'object') ? t : {time: String(t || ''), name: ''};
 
@@ -2499,12 +2559,34 @@ function _timersRenderPresets(presets) {
     actTd.appendChild(movePresetWrap);
     actTd.appendChild(delBtn);
 
+    const mobileSummaryTd = document.createElement('td');
+    mobileSummaryTd.className = 'timer-mobile-summary';
+    const mobileSummaryText = document.createElement('div');
+    mobileSummaryText.className = 'timer-mobile-summary-text';
+    const mobileName = document.createElement('strong');
+    mobileName.dataset.role = 'mobile-preset-name';
+    mobileName.textContent = nameInput.value || `Preset ${idx + 1}`;
+    const mobileTime = document.createElement('span');
+    mobileTime.dataset.role = 'mobile-preset-time';
+    mobileTime.textContent = normalizedTime;
+    mobileSummaryText.appendChild(mobileName);
+    mobileSummaryText.appendChild(mobileTime);
+    const editToggle = document.createElement('button');
+    editToggle.type = 'button';
+    editToggle.className = 'btn btn-sm btn-outline-secondary';
+    editToggle.dataset.action = 'edit-toggle';
+    editToggle.setAttribute('aria-expanded', _timersExpandedPresetRows.has(idx) ? 'true' : 'false');
+    editToggle.textContent = _timersExpandedPresetRows.has(idx) ? 'Collapse' : 'Expand';
+    mobileSummaryTd.appendChild(mobileSummaryText);
+    mobileSummaryTd.appendChild(editToggle);
+
     tr.appendChild(runTd);
     tr.appendChild(orderTd);
     tr.appendChild(nameTd);
     tr.appendChild(timeTd);
     tr.appendChild(pressesTd);
     tr.appendChild(actTd);
+    tr.appendChild(mobileSummaryTd);
     body.appendChild(tr);
 
     // Render existing presses
@@ -2815,11 +2897,21 @@ if (document.getElementById('timers-page')) {
 
       // Preset-row actions
       const action = btn.dataset.action;
-      if (!action || !['delete', 'up', 'down', 'apply'].includes(action)) return;
+      if (!action || !['delete', 'up', 'down', 'apply', 'edit-toggle'].includes(action)) return;
       const tr = btn.closest('tr');
       if (!tr) return;
       const idx = Number(tr.dataset.index);
       if (!Number.isFinite(idx)) return;
+
+      if (action === 'edit-toggle') {
+        const expanded = !tr.classList.contains('timer-preset-expanded');
+        tr.classList.toggle('timer-preset-expanded', expanded);
+        if (expanded) _timersExpandedPresetRows.add(idx);
+        else _timersExpandedPresetRows.delete(idx);
+        btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        btn.textContent = expanded ? 'Collapse' : 'Expand';
+        return;
+      }
 
       if (action === 'apply') {
         (async () => {
@@ -2868,6 +2960,15 @@ if (document.getElementById('timers-page')) {
       // NOTE: For custom press URLs, do NOT auto-save while typing.
       // Save happens on blur/change instead.
       if (el.matches && (el.matches('input[data-role="preset-time"]') || el.matches('input[data-role="preset-name"]'))) {
+        const row = el.closest('tr');
+        if (row && el.matches('input[data-role="preset-name"]')) {
+          const summaryName = row.querySelector('[data-role="mobile-preset-name"]');
+          if (summaryName) summaryName.textContent = String(el.value || '').trim() || `Preset ${Number(row.dataset.index || 0) + 1}`;
+        }
+        if (row && el.matches('input[data-role="preset-time"]')) {
+          const summaryTime = row.querySelector('[data-role="mobile-preset-time"]');
+          if (summaryTime && el.value) summaryTime.textContent = el.value;
+        }
         if (el.matches('input[data-role="preset-time"]')) {
           if (!String(el.value || '').trim()) {
             _timersScheduleIncompleteTimeRestore(el);
@@ -3506,11 +3607,13 @@ if (document.getElementById('access-levels-page')) {
     const routingCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:routing"]');
     const videohubCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:videohub"]');
     const digicoCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:digico_mixer"]');
+    const atemCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:atem_audio"]');
     const outEl = form.querySelector('[data-role="vh-outputs"]');
     const inEl = form.querySelector('[data-role="vh-inputs"]');
     const presetsEl = form.querySelector('[data-role="vh-presets"]');
     const editPresetsEl = form.querySelector('[data-role="vh-edit-presets"]');
     const digicoAuxEls = Array.from(form.querySelectorAll('[data-role="digico-aux"]'));
+    const atemFields = Array.from(form.querySelectorAll('[data-role="atem-audio-field"]'));
     if (routingCb && outEl && inEl) {
       const routingEnabled = !!routingCb.checked;
       outEl.disabled = !routingEnabled;
@@ -3523,6 +3626,12 @@ if (document.getElementById('access-levels-page')) {
     }
     if (digicoCb) {
       for (const el of digicoAuxEls) el.disabled = !digicoCb.checked;
+    }
+    if (atemCb && atemFields.length) {
+      const atemEnabled = !!atemCb.checked;
+      atemFields.forEach(el => {
+        el.disabled = !atemEnabled;
+      });
     }
   }
 
@@ -3540,6 +3649,9 @@ if (document.getElementById('access-levels-page')) {
     const canEditEl = form.querySelector('input[name="videohub_can_edit_presets_role"]');
     const companionClickSurfaceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="companion_click_surfaces_role"]:checked')).map(cb => String(cb.value || ''));
     const digicoAuxIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="digico_allowed_auxes_role"]:checked')).map(cb => String(cb.value || ''));
+    const atemAudioSourceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="atem_allowed_audio_sources_role"]:checked')).map(cb => String(cb.value || ''));
+    const atemCanSoloEl = form.querySelector('input[name="atem_can_solo_audio_role"]');
+    const atemCanMonitorEl = form.querySelector('input[name="atem_can_monitor_audio_role"]');
 
     return {
       page_keys: pageKeys,
@@ -3550,6 +3662,9 @@ if (document.getElementById('access-levels-page')) {
       videohub_can_edit_presets_role: canEditEl ? !!canEditEl.checked : true,
       companion_click_surfaces_role: companionClickSurfaceIds,
       digico_allowed_auxes_role: digicoAuxIds,
+      atem_allowed_audio_sources_role: atemAudioSourceIds,
+      atem_can_solo_audio_role: atemCanSoloEl ? !!atemCanSoloEl.checked : false,
+      atem_can_monitor_audio_role: atemCanMonitorEl ? !!atemCanMonitorEl.checked : false,
     };
   }
 
@@ -3897,5 +4012,492 @@ if (document.getElementById('companion-surfaces-config-page')) {
   });
 
   _csLoad();
+}
+
+if (document.getElementById('foyer-audio-page')) {
+  const root = document.getElementById('foyer-audio-page');
+  const grid = document.getElementById('foyer-audio-grid');
+  const monitorEl = document.getElementById('foyer-audio-monitor');
+  const emptyEl = document.getElementById('foyer-audio-empty');
+  const statusEl = document.getElementById('foyer-audio-status');
+  let stateSources = [];
+  let monitorState = {};
+  let sourceSignature = '';
+  const volumeState = new Map();
+  const VOLUME_SEND_INTERVAL_MS = 60;
+  const METER_REFRESH_MS = 350;
+
+  function _foyerJsonAttr(name, fallback) {
+    try {
+      return JSON.parse(root.getAttribute(name) || JSON.stringify(fallback));
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  const allowAll = !!_foyerJsonAttr('data-allow-all', false);
+  const canSolo = !!_foyerJsonAttr('data-can-solo', false);
+  const canMonitor = !!_foyerJsonAttr('data-can-monitor', false);
+  const allowedIds = new Set((_foyerJsonAttr('data-allowed-source-ids', []) || []).map(v => String(v)));
+
+  function _foyerSetStatus(text, type) {
+    if (!statusEl) return;
+    const msg = String(text || '').trim();
+    if (!msg) {
+      statusEl.innerHTML = '';
+      return;
+    }
+    const cls = type === 'danger' ? 'danger' : (type === 'warning' ? 'warning' : 'info');
+    statusEl.innerHTML = `<div class="alert alert-${cls} py-2 mb-0">${_escapeHtml(msg)}</div>`;
+  }
+
+  function _sourceVisible(source) {
+    if (allowAll) return true;
+    return allowedIds.has(String(source && source.id));
+  }
+
+  function _formatDb(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= -59.9) return '-inf';
+    return `${n >= 0 ? '+' : ''}${n.toFixed(1)} dB`;
+  }
+
+  function _pctFromDb(db) {
+    const n = Math.max(-60, Math.min(Number(db) || 0, 6));
+    return Math.round(((n + 60) / 66) * 100);
+  }
+
+  function _meterPct(db) {
+    const n = Math.max(-60, Math.min(Number(db), 6));
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, ((n + 60) / 66) * 100));
+  }
+
+  function _meterClass(db) {
+    const n = Number(db);
+    if (!Number.isFinite(n)) return '';
+    if (n >= -6) return ' foyer-audio-meter-hot';
+    if (n >= -18) return ' foyer-audio-meter-warm';
+    return '';
+  }
+
+  function _sourcesSignature(sources) {
+    return (sources || []).filter(_sourceVisible).map(s => `${String(s.id)}:${String(s.label || '')}:${String(!!s.muted)}:${String(s.mixOption || '')}`).join('|');
+  }
+
+  function _clampedVolume(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(-60, Math.min(n, 6));
+  }
+
+  function _renderMeterLane(id, side, db) {
+    const pct = _meterPct(db);
+    return `
+      <div class="foyer-audio-meter-lane" aria-hidden="true">
+        <span class="foyer-audio-meter-label">${side}</span>
+        <span class="foyer-audio-meter-track">
+          <span class="foyer-audio-meter-fill${_meterClass(db)}" data-meter-${side.toLowerCase()}="${_escapeHtml(id)}" style="width:${pct.toFixed(1)}%"></span>
+        </span>
+      </div>
+    `;
+  }
+
+  function _renderSource(source) {
+    const id = String(source.id || '');
+    const volume = Number(source.volume || 0);
+    const muted = !!source.muted;
+    const isMaster = id === 'master';
+    const soloActive = !!monitorState.solo && String(monitorState.soloSource || '') === id;
+    const level = source.level || {};
+    return `
+      <section class="foyer-audio-strip" data-source-id="${_escapeHtml(id)}">
+        <div class="foyer-audio-strip-head">
+          <div class="foyer-audio-name">${_escapeHtml(source.label || id)}</div>
+          <div class="foyer-audio-value" data-volume-readout="${_escapeHtml(id)}">${_escapeHtml(_formatDb(volume))}</div>
+        </div>
+        <div class="foyer-audio-meter" data-meter-source="${_escapeHtml(id)}">
+          ${_renderMeterLane(id, 'L', level.left)}
+          ${_renderMeterLane(id, 'R', level.right)}
+        </div>
+        <div class="foyer-audio-slider-row">
+          <input class="form-range foyer-audio-slider" type="range" min="-60" max="6" step="0.1" value="${String(Math.max(-60, Math.min(volume, 6)))}" data-foyer-volume="${_escapeHtml(id)}" aria-label="${_escapeHtml(source.label || id)} volume">
+          <div class="foyer-audio-percent" data-volume-percent="${_escapeHtml(id)}">${_pctFromDb(volume)}%</div>
+        </div>
+        <div class="foyer-audio-actions">
+          ${isMaster ? '' : `<button class="btn ${muted ? 'btn-outline-secondary' : 'btn-primary'}" type="button" data-foyer-mute="${_escapeHtml(id)}" aria-pressed="${muted ? 'false' : 'true'}">On</button>`}
+          ${(!isMaster && canSolo) ? `<button class="btn ${soloActive ? 'btn-warning' : 'btn-outline-secondary'}" type="button" data-foyer-solo="${_escapeHtml(id)}">${soloActive ? 'Solo' : 'Solo'}</button>` : ''}
+        </div>
+      </section>
+    `;
+  }
+
+  function _renderMonitor() {
+    if (!monitorEl) return;
+    if (!canMonitor) {
+      monitorEl.innerHTML = '';
+      return;
+    }
+    const volume = Number(monitorState.volume || 0);
+    const enabled = !!monitorState.enabled;
+    const dim = !!monitorState.dim;
+    monitorEl.innerHTML = `
+      <section class="foyer-audio-monitor">
+        <div class="foyer-audio-monitor-head">
+          <div>
+            <div class="foyer-audio-monitor-title">Monitor</div>
+            <div class="foyer-audio-monitor-subtitle">Headphone output</div>
+          </div>
+          <div class="foyer-audio-value" data-monitor-volume-readout>${_escapeHtml(_formatDb(volume))}</div>
+        </div>
+        <div class="foyer-audio-monitor-controls">
+          <button class="btn ${enabled ? 'btn-primary' : 'btn-outline-secondary'}" type="button" data-foyer-monitor-toggle="enabled" aria-pressed="${enabled ? 'true' : 'false'}">On</button>
+          <button class="btn ${dim ? 'btn-warning' : 'btn-outline-secondary'}" type="button" data-foyer-monitor-toggle="dim" aria-pressed="${dim ? 'true' : 'false'}">Dim</button>
+          <div class="foyer-audio-monitor-slider">
+            <input class="form-range foyer-audio-slider" type="range" min="-60" max="6" step="0.1" value="${String(Math.max(-60, Math.min(volume, 6)))}" data-foyer-monitor-volume aria-label="Monitor volume">
+            <div class="foyer-audio-percent" data-monitor-volume-percent>${_pctFromDb(volume)}%</div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  function _render() {
+    const visible = stateSources.filter(_sourceVisible);
+    _renderMonitor();
+    if (grid) grid.innerHTML = visible.map(_renderSource).join('');
+    if (emptyEl) emptyEl.classList.toggle('d-none', visible.length > 0);
+    sourceSignature = _sourcesSignature(stateSources);
+  }
+
+  function _updateMeters(sources) {
+    for (const source of (sources || [])) {
+      if (!_sourceVisible(source)) continue;
+      const id = String(source.id || '');
+      const level = source.level || {};
+      const left = document.querySelector(`[data-meter-l="${CSS.escape(id)}"]`);
+      const right = document.querySelector(`[data-meter-r="${CSS.escape(id)}"]`);
+      if (left) {
+        left.style.width = `${_meterPct(level.left).toFixed(1)}%`;
+        left.className = `foyer-audio-meter-fill${_meterClass(level.left)}`;
+      }
+      if (right) {
+        right.style.width = `${_meterPct(level.right).toFixed(1)}%`;
+        right.className = `foyer-audio-meter-fill${_meterClass(level.right)}`;
+      }
+    }
+  }
+
+  function _syncSourceControls(sources) {
+    for (const source of (sources || [])) {
+      if (!_sourceVisible(source)) continue;
+      const id = String(source.id || '');
+      const volume = _clampedVolume(source.volume);
+      const activeVolumeId = String(root.getAttribute('data-active-volume') || '');
+      const slider = document.querySelector(`[data-foyer-volume="${CSS.escape(id)}"]`);
+      if (slider && activeVolumeId !== id) slider.value = String(volume);
+      if (activeVolumeId !== id) {
+        const readout = document.querySelector(`[data-volume-readout="${CSS.escape(id)}"]`);
+        const pct = document.querySelector(`[data-volume-percent="${CSS.escape(id)}"]`);
+        if (readout) readout.textContent = _formatDb(volume);
+        if (pct) pct.textContent = `${_pctFromDb(volume)}%`;
+      }
+
+      const muteBtn = document.querySelector(`[data-foyer-mute="${CSS.escape(id)}"]`);
+      if (muteBtn) {
+        const muted = !!source.muted;
+        muteBtn.classList.toggle('btn-primary', !muted);
+        muteBtn.classList.toggle('btn-outline-secondary', muted);
+        muteBtn.setAttribute('aria-pressed', muted ? 'false' : 'true');
+      }
+
+      const soloBtn = document.querySelector(`[data-foyer-solo="${CSS.escape(id)}"]`);
+      if (soloBtn) {
+        const soloActive = !!monitorState.solo && String(monitorState.soloSource || '') === id;
+        soloBtn.classList.toggle('btn-warning', soloActive);
+        soloBtn.classList.toggle('btn-outline-secondary', !soloActive);
+      }
+    }
+  }
+
+  function _syncMonitorControls() {
+    if (!canMonitor) return;
+    const activeVolumeId = String(root.getAttribute('data-active-volume') || '');
+    const volume = _clampedVolume(monitorState.volume);
+    const slider = document.querySelector('[data-foyer-monitor-volume]');
+    if (slider && activeVolumeId !== 'monitor') slider.value = String(volume);
+    if (activeVolumeId !== 'monitor') {
+      const readout = document.querySelector('[data-monitor-volume-readout]');
+      const pct = document.querySelector('[data-monitor-volume-percent]');
+      if (readout) readout.textContent = _formatDb(volume);
+      if (pct) pct.textContent = `${_pctFromDb(volume)}%`;
+    }
+
+    const onBtn = document.querySelector('[data-foyer-monitor-toggle="enabled"]');
+    if (onBtn) {
+      const enabled = !!monitorState.enabled;
+      onBtn.classList.toggle('btn-primary', enabled);
+      onBtn.classList.toggle('btn-outline-secondary', !enabled);
+      onBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    }
+
+    const dimBtn = document.querySelector('[data-foyer-monitor-toggle="dim"]');
+    if (dimBtn) {
+      const dim = !!monitorState.dim;
+      dimBtn.classList.toggle('btn-warning', dim);
+      dimBtn.classList.toggle('btn-outline-secondary', !dim);
+      dimBtn.setAttribute('aria-pressed', dim ? 'true' : 'false');
+    }
+  }
+
+  async function _loadState(options) {
+    const meterOnly = !!(options && options.meterOnly);
+    try {
+      const res = await fetch('/api/atem/audio/state?_ts=' + Date.now(), {cache: 'no-store'});
+      const data = await res.json().catch(() => ({}));
+      if (!data || !Array.isArray(data.sources)) throw new Error((data && data.error) || 'Could not load ATEM audio state');
+      const nextSources = data.sources;
+      monitorState = data.monitor || {};
+      if (data.ok === false && data.error) {
+        _foyerSetStatus(data.error, 'warning');
+      } else if (data.metering && data.metering.active) {
+        _foyerSetStatus('', 'info');
+      } else if (!meterOnly && data.metering && data.metering.enabled === false && data.metering.unavailableReason) {
+        _foyerSetStatus(`Audio metering unavailable: ${data.metering.unavailableReason}`, 'warning');
+      } else if (!meterOnly && data.metering && data.metering.enabled && !data.metering.active) {
+        const suffix = data.metering.salnPacketsSent ? 'waiting for AMLv packets from the ATEM' : 'waiting to request levels from the ATEM';
+        _foyerSetStatus(`Audio metering connected, ${suffix}.`, 'warning');
+      } else if (!meterOnly) {
+        _foyerSetStatus('', 'info');
+      }
+      const nextSignature = _sourcesSignature(nextSources);
+      stateSources = nextSources;
+      if (!meterOnly && !root.hasAttribute('data-volume-dragging')) {
+        _render();
+      } else if (nextSignature !== sourceSignature && !root.hasAttribute('data-volume-dragging')) {
+        _render();
+      } else {
+        _updateMeters(nextSources);
+        _syncSourceControls(nextSources);
+        _syncMonitorControls();
+      }
+    } catch (e) {
+      _foyerSetStatus(e && e.message ? e.message : 'Could not load ATEM audio state', 'danger');
+    }
+  }
+
+  function _updateLocalVolume(id, db) {
+    const source = stateSources.find(s => String(s.id) === String(id));
+    if (source) source.volume = db;
+    const readout = document.querySelector(`[data-volume-readout="${CSS.escape(String(id))}"]`);
+    const pct = document.querySelector(`[data-volume-percent="${CSS.escape(String(id))}"]`);
+    if (readout) readout.textContent = _formatDb(db);
+    if (pct) pct.textContent = `${_pctFromDb(db)}%`;
+  }
+
+  function _updateLocalMonitorVolume(db) {
+    monitorState.volume = db;
+    const readout = document.querySelector('[data-monitor-volume-readout]');
+    const pct = document.querySelector('[data-monitor-volume-percent]');
+    if (readout) readout.textContent = _formatDb(db);
+    if (pct) pct.textContent = `${_pctFromDb(db)}%`;
+  }
+
+  function _volumeEntry(id) {
+    const key = String(id);
+    let entry = volumeState.get(key);
+    if (!entry) {
+      entry = {lastSent: 0, timer: null, inFlight: false, queued: null};
+      volumeState.set(key, entry);
+    }
+    return entry;
+  }
+
+  async function _sendVolumeRequest(key, db) {
+    const isMonitor = key === 'monitor';
+    const res = await fetch(isMonitor ? '/api/atem/audio/monitor' : '/api/atem/audio/volume', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(isMonitor ? {volume: db} : {source_id: key, db}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || (isMonitor ? 'Monitor volume change failed' : 'Volume change failed'));
+  }
+
+  async function _sendVolumeNow(id, db) {
+    const key = String(id);
+    const entry = _volumeEntry(key);
+    if (entry.inFlight) {
+      entry.queued = db;
+      return;
+    }
+    entry.inFlight = true;
+    entry.lastSent = Date.now();
+    try {
+      await _sendVolumeRequest(key, db);
+    } catch (e) {
+      _foyerSetStatus(e && e.message ? e.message : (key === 'monitor' ? 'Monitor volume change failed' : 'Volume change failed'), 'danger');
+    } finally {
+      entry.inFlight = false;
+      if (entry.queued !== null) {
+        const queued = entry.queued;
+        entry.queued = null;
+        _sendVolume(key, queued, {force: true});
+      }
+    }
+  }
+
+  function _sendVolume(id, db, opts) {
+    const key = String(id);
+    const entry = _volumeEntry(key);
+    const force = !!(opts && opts.force);
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    const elapsed = Date.now() - Number(entry.lastSent || 0);
+    const wait = force ? 0 : Math.max(0, VOLUME_SEND_INTERVAL_MS - elapsed);
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      _sendVolumeNow(key, db);
+    }, wait);
+  }
+
+  function _flushVolumeFromSlider(slider) {
+    if (!slider) return;
+    const id = String(slider.getAttribute('data-foyer-volume') || '');
+    if (!id) return;
+    const db = Number(slider.value);
+    _updateLocalVolume(id, db);
+    _sendVolume(id, db, {force: true});
+  }
+
+  function _flushMonitorVolumeFromSlider(slider) {
+    if (!slider || !canMonitor) return;
+    const db = Number(slider.value);
+    _updateLocalMonitorVolume(db);
+    _sendVolume('monitor', db, {force: true});
+  }
+
+  function _clearDraggingSoon() {
+    setTimeout(() => {
+      root.removeAttribute('data-volume-dragging');
+      root.removeAttribute('data-active-volume');
+    }, 250);
+  }
+
+  async function _postAction(url, payload) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Action failed');
+    return data;
+  }
+
+  root.addEventListener('input', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    root.setAttribute('data-volume-dragging', '1');
+    if (monitorSlider) {
+      root.setAttribute('data-active-volume', 'monitor');
+      const db = Number(monitorSlider.value);
+      _updateLocalMonitorVolume(db);
+      _sendVolume('monitor', db);
+      return;
+    }
+    const id = String(slider.getAttribute('data-foyer-volume') || '');
+    root.setAttribute('data-active-volume', id);
+    const db = Number(slider.value);
+    _updateLocalVolume(id, db);
+    _sendVolume(id, db);
+  });
+
+  root.addEventListener('change', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  });
+
+  root.addEventListener('pointerup', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  });
+
+  root.addEventListener('touchend', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  }, {passive: true});
+
+  root.addEventListener('keydown', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
+    setTimeout(() => {
+      if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+      else _flushVolumeFromSlider(slider);
+    }, 0);
+  });
+
+  root.addEventListener('blur', (e) => {
+    const slider = e.target && e.target.closest ? e.target.closest('[data-foyer-volume]') : null;
+    const monitorSlider = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-volume]') : null;
+    if (!slider && !monitorSlider) return;
+    if (monitorSlider) _flushMonitorVolumeFromSlider(monitorSlider);
+    else _flushVolumeFromSlider(slider);
+    _clearDraggingSoon();
+  }, true);
+
+  root.addEventListener('click', async (e) => {
+    const muteBtn = e.target && e.target.closest ? e.target.closest('[data-foyer-mute]') : null;
+    const soloBtn = e.target && e.target.closest ? e.target.closest('[data-foyer-solo]') : null;
+    const monitorToggle = e.target && e.target.closest ? e.target.closest('[data-foyer-monitor-toggle]') : null;
+    try {
+      if (muteBtn) {
+        const id = String(muteBtn.getAttribute('data-foyer-mute') || '');
+        const source = stateSources.find(s => String(s.id) === id);
+        const muted = !(source && source.muted);
+        await _postAction('/api/atem/audio/mute', {source_id: id, mix_option: muted ? 'off' : 'on'});
+        if (source) {
+          source.muted = muted;
+          source.mixOption = muted ? 'off' : 'on';
+        }
+        _render();
+      } else if (soloBtn) {
+        const id = String(soloBtn.getAttribute('data-foyer-solo') || '');
+        const enabled = !(monitorState.solo && String(monitorState.soloSource || '') === id);
+        await _postAction('/api/atem/audio/solo', {source_id: id, enabled});
+        monitorState = {...monitorState, solo: enabled, soloSource: enabled ? id : ''};
+        _render();
+      } else if (monitorToggle && canMonitor) {
+        const field = String(monitorToggle.getAttribute('data-foyer-monitor-toggle') || '');
+        if (!['enabled', 'dim'].includes(field)) return;
+        const enabled = !monitorState[field];
+        await _postAction('/api/atem/audio/monitor', {[field]: enabled});
+        monitorState[field] = enabled;
+        _renderMonitor();
+      }
+    } catch (err) {
+      _foyerSetStatus(err && err.message ? err.message : 'Action failed', 'danger');
+    }
+  });
+
+  _loadState();
+  setInterval(() => _loadState({meterOnly: true}), METER_REFRESH_MS);
 }
 

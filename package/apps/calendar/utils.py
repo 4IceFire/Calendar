@@ -105,6 +105,11 @@ _defaults = {
     "digico_channels": [],
     "digico_external_devices": [],
 
+    # ATEM audio defaults
+    "atem_ip": "127.0.0.1",
+    "atem_port": 9910,
+    "atem_timeout": 3,
+
 }
 
 
