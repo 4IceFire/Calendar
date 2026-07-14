@@ -101,10 +101,12 @@ Operational notes:
 - A low-rate heartbeat keeps desk status accurate while nobody is moving a fader.
 - Personal-mix faders stream coalesced updates while they move and send a final value when released.
 - Every channel has a send on/off control that reads its initial state from the selected AUX before it can be changed.
+- Personal Mix polling uses revision-only responses while a mix is unchanged, and hidden browser tabs stop polling. Fader writes remain immediate and do not wait for the read poll.
 - Set request spacing to `0.025` for the fastest initial AUX-value loading. Higher values reduce desk query traffic but take proportionally longer to populate uncached mixes.
 - Mixer writes and AUX permissions are enforced by the server API, not only by the browser UI.
 - Diagnostics show binding errors, discovery progress, last desk packet age, packet counts, relay traffic and OSC parse errors.
 - If a phone cannot load, verify it can open another TDeck page first, then check the DiGiCo diagnostics. A phone loading the page does not consume extra SD9 bandwidth; the backend shares one desk cache and UDP socket.
+- Permissions and Routing render from cached/fallback hardware metadata while slow ATEM or VideoHub refreshes run in background threads, preventing hardware timeouts from holding a page request open.
 
 Relevant configuration keys:
 

@@ -254,6 +254,7 @@ Timer selection is either:
 ```
 - **Notes:**
   - `routing` is a 1-based list where index 0 corresponds to output #1.
+  - Hardware refreshes run in the background. A cold or expired cache can return `refreshing: true` with cached/fallback data; clients may retry until it becomes false.
   - Best-effort. If routing can’t be fetched, returns an identity-style routing (1..40).
 
 ### Presets: list
@@ -342,6 +343,7 @@ Unlike legacy Companion-facing APIs, every DiGiCo endpoint enforces login and pa
 
 - **GET** `/api/digico/aux/<aux>/state`
 - Queues desk queries and returns the currently cached channel send on/off states, levels and pans for the AUX.
+- An optional `?revision=<number>` returns a compact `unchanged: true` response when the desk cache has not changed, avoiding repeated full channel payloads.
 
 ### Change a channel send
 

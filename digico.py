@@ -735,6 +735,24 @@ class DigicoMixerClient:
         if channel_number < 1 or channel_number > channel_count:
             raise ValueError("Channel number is outside the discovered desk range")
 
+    def route_enabled(self, aux_number: int, channel_number: int | None = None) -> bool:
+        """Check a configured route without rebuilding the browser layout."""
+        with self._lock:
+            aux_number = int(aux_number)
+            modes = self._aux_modes_locked()
+            if aux_number < 1 or aux_number > len(modes):
+                return False
+            aux_config = self._config_item(self.config.auxes, aux_number)
+            if aux_config and not bool(aux_config.get("enabled", True)):
+                return False
+            if channel_number is None:
+                return True
+            channel_number = int(channel_number)
+            if channel_number < 1 or channel_number > self._channel_count_locked():
+                return False
+            channel_config = self._config_item(self.config.channels, channel_number)
+            return not channel_config or bool(channel_config.get("enabled", True))
+
     def set_level(self, aux_number: int, channel_number: int, db: float) -> float:
         self._validate_route(aux_number, channel_number)
         value = max(-150.0, min(10.0, float(db)))

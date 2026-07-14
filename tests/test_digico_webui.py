@@ -81,6 +81,20 @@ class DigicoWebApiTests(unittest.TestCase):
             state = client.get("/api/digico/aux/2/state")
             self.assertEqual(state.status_code, 200)
             self.assertEqual(state.get_json()["aux"]["label"], "Band")
+            state_payload = state.get_json()
+            deadline = time.time() + 2
+            while time.time() < deadline and any(
+                item.get("sendOn") is None or item.get("level") is None or item.get("pan") is None
+                for item in state_payload.get("channels", [])
+            ):
+                time.sleep(0.05)
+                state_payload = client.get("/api/digico/aux/2/state").get_json()
+            unchanged = client.get(
+                f"/api/digico/aux/2/state?revision={state_payload['revision']}"
+            )
+            self.assertEqual(unchanged.status_code, 200)
+            self.assertTrue(unchanged.get_json()["unchanged"])
+            self.assertNotIn("channels", unchanged.get_json())
 
             changed = client.post(
                 "/api/digico/aux/2/channel/1/level",

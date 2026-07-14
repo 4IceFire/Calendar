@@ -393,23 +393,34 @@ if (document.getElementById('routing-page')) {
     _setApplyEnabled();
   });
 
-  (async () => {
+  async function _loadRoutingState(attempt = 0) {
     try {
       const res = await fetch('/api/videohub/state', {cache: 'no-store'});
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Unable to load VideoHub state');
       state = data;
-      if (!data.configured) {
+      if (data.refreshing) {
+        _routingSetStatus('Loading the latest VideoHub state…', 'warn');
+      } else if (!data.configured) {
         _routingSetStatus('VideoHub not configured (set videohub_ip). Showing fallback ports.', 'warn');
+      } else if (data.error) {
+        _routingSetStatus(`Could not refresh VideoHub: ${data.error}`, 'warn');
+      } else {
+        _routingSetStatus('', '');
       }
       _renderOutputs();
       _renderInputs();
       _renderCurrent();
       _setApplyEnabled();
+      if (data.refreshing && attempt < 8) {
+        window.setTimeout(() => _loadRoutingState(attempt + 1), 750);
+      }
     } catch (e) {
       _routingSetStatus(String(e.message || e), 'error');
     }
-  })();
+  }
+
+  _loadRoutingState();
 }
 
 // --- Config page ---

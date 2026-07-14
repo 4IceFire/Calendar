@@ -1083,6 +1083,40 @@ def _get_user_groups(user_id: int | None) -> list[sqlite3.Row]:
         conn.close()
 
 
+def _get_user_access_snapshot(user_id: int | None) -> tuple[list[sqlite3.Row], dict[int, set[str]]]:
+    """Load group settings and page grants in one database round trip."""
+    if user_id is None:
+        return [], {}
+    conn = _db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT g.*,gp.page_key AS granted_page_key
+            FROM groups g
+            JOIN user_groups ug ON ug.group_id=g.id
+            LEFT JOIN group_pages gp ON gp.group_id=g.id
+            WHERE ug.user_id=?
+            ORDER BY lower(g.name),gp.page_key
+            """,
+            (int(user_id),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    groups_by_id: dict[int, sqlite3.Row] = {}
+    pages_by_group: dict[int, set[str]] = {}
+    for row in rows or []:
+        try:
+            group_id = int(row['id'])
+        except Exception:
+            continue
+        groups_by_id.setdefault(group_id, row)
+        page_key = str(row['granted_page_key'] or '').strip()
+        if page_key:
+            pages_by_group.setdefault(group_id, set()).add(page_key)
+    return list(groups_by_id.values()), pages_by_group
+
+
 def _get_user_groups_for_page(user_id: int | None, page_key: str) -> list[sqlite3.Row]:
     if user_id is None or not page_key:
         return []
@@ -1198,6 +1232,19 @@ def _effective_group_string_allowlist(rows: list[sqlite3.Row], column: str) -> l
 
 
 def _effective_videohub_allowlists_for_user(user_id: int | None) -> tuple[list[int], list[int]]:
+    try:
+        if (
+            has_request_context()
+            and getattr(current_user, 'is_authenticated', False)
+            and int(current_user.get_id()) == int(user_id)
+            and hasattr(current_user, 'videohub_allowed_outputs')
+        ):
+            return (
+                list(current_user.videohub_allowed_outputs),
+                list(current_user.videohub_allowed_inputs),
+            )
+    except Exception:
+        pass
     if user_id is None or _user_is_admin(user_id):
         return ([], [])
     groups = _get_user_groups_for_page(user_id, 'page:routing')
@@ -1240,6 +1287,16 @@ def _effective_companion_click_surface_ids_for_user(user_id: int | None) -> list
 
 
 def _effective_digico_aux_ids_for_user(user_id: int | None) -> list[str]:
+    try:
+        if (
+            has_request_context()
+            and getattr(current_user, 'is_authenticated', False)
+            and int(current_user.get_id()) == int(user_id)
+            and hasattr(current_user, 'digico_allowed_auxes')
+        ):
+            return list(current_user.digico_allowed_auxes)
+    except Exception:
+        pass
     if user_id is None or _user_is_admin(user_id):
         return []
     return _effective_group_string_allowlist(
@@ -2441,10 +2498,12 @@ def _effective_idle_timeout_minutes_for_current_user() -> int | None:
         global_minutes = 2
 
     try:
-        uid = int(current_user.get_id())
+        if hasattr(current_user, 'idle_timeout_override'):
+            group_minutes = current_user.idle_timeout_override
+        else:
+            group_minutes = _effective_idle_timeout_override_minutes_for_user(int(current_user.get_id()))
     except Exception:
-        uid = None
-    group_minutes = _effective_idle_timeout_override_minutes_for_user(uid)
+        group_minutes = None
     if group_minutes is None:
         return global_minutes
     if group_minutes <= 0:
@@ -2460,12 +2519,52 @@ class _User(UserMixin):
         self.is_locked = bool(int(row['is_locked'] or 0)) if 'is_locked' in row.keys() else False
         self.force_password_change = bool(int(row['force_password_change'] or 0)) if 'force_password_change' in row.keys() else False
         try:
-            groups = _get_user_groups(self.id)
+            groups, pages_by_group = _get_user_access_snapshot(self.id)
         except Exception:
-            groups = []
+            groups, pages_by_group = [], {}
         self.group_ids = [int(g['id']) for g in groups]
         self.group_names = [str(g['name'] or '') for g in groups]
         self.is_admin_group = any(bool(int(g['is_admin'] or 0)) for g in groups)
+        self.page_keys = {
+            page_key
+            for group_pages in pages_by_group.values()
+            for page_key in group_pages
+        }
+
+        routing_groups = [
+            group for group in groups
+            if 'page:routing' in pages_by_group.get(int(group['id']), set())
+        ]
+        digico_groups = [
+            group for group in groups
+            if 'page:digico_mixer' in pages_by_group.get(int(group['id']), set())
+        ]
+        self.videohub_allowed_outputs = [] if self.is_admin_group else _effective_group_allowlist(
+            routing_groups, 'videohub_allowed_outputs'
+        )
+        self.videohub_allowed_inputs = [] if self.is_admin_group else _effective_group_allowlist(
+            routing_groups, 'videohub_allowed_inputs'
+        )
+        self.digico_allowed_auxes = [] if self.is_admin_group else _effective_group_string_allowlist(
+            digico_groups, 'digico_allowed_auxes'
+        )
+        self.idle_timeout_override = None
+        for group in groups:
+            value = group['auth_idle_timeout_minutes_override']
+            if value is None:
+                continue
+            try:
+                minutes = int(value)
+            except Exception:
+                continue
+            if minutes <= 0:
+                self.idle_timeout_override = 0
+                break
+            if self.idle_timeout_override is None or minutes > self.idle_timeout_override:
+                self.idle_timeout_override = minutes
+
+    def allows_page(self, page_key: str) -> bool:
+        return bool(self.is_admin_group or str(page_key) in self.page_keys)
 
     def is_active(self) -> bool:
         return bool(self._active) and not bool(self.is_locked)
@@ -2491,6 +2590,9 @@ def can_access(page_key: str) -> bool:
     if not getattr(current_user, 'is_authenticated', False):
         return False
     try:
+        allows_page = getattr(current_user, 'allows_page', None)
+        if callable(allows_page):
+            return bool(allows_page(page_key))
         return _user_allows_page(int(current_user.get_id()), page_key)
     except Exception:
         return False
@@ -3327,22 +3429,63 @@ def _get_atem_client_from_config():
     return get_atem_client_from_config(cfg)
 
 
-def _get_atem_audio_sources_for_permissions() -> list[dict[str, Any]]:
-    try:
-        atem = _get_atem_client_from_config()
-        if atem is not None:
-            state = atem.get_audio_state()
-            sources = state.get('sources') if isinstance(state, dict) else None
-            if isinstance(sources, list) and sources:
-                return sources
-    except Exception:
-        pass
+_atem_permission_sources_lock = threading.Lock()
+_atem_permission_sources_cache: dict[str, Any] = {
+    'ts': 0.0,
+    'payload': None,
+    'refreshing': False,
+}
+_ATEM_PERMISSION_SOURCES_TTL_SECONDS = 30.0
+
+
+def _fallback_atem_permission_sources() -> list[dict[str, Any]]:
     try:
         if AtemAudioClient is not None:
             return AtemAudioClient.fallback_sources()
     except Exception:
         pass
     return [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
+
+
+def _refresh_atem_permission_sources() -> None:
+    sources: list[dict[str, Any]] = []
+    try:
+        atem = _get_atem_client_from_config()
+        if atem is not None:
+            state = atem.get_audio_state()
+            raw_sources = state.get('sources') if isinstance(state, dict) else None
+            if isinstance(raw_sources, list):
+                sources = [item for item in raw_sources if isinstance(item, dict)]
+    except Exception:
+        sources = []
+    if not sources:
+        sources = _fallback_atem_permission_sources()
+    with _atem_permission_sources_lock:
+        _atem_permission_sources_cache['ts'] = time.time()
+        _atem_permission_sources_cache['payload'] = sources
+        _atem_permission_sources_cache['refreshing'] = False
+
+
+def _get_atem_audio_sources_for_permissions() -> list[dict[str, Any]]:
+    """Return cached labels immediately; hardware refresh happens off-request."""
+    now = time.time()
+    start_refresh = False
+    with _atem_permission_sources_lock:
+        cached = _atem_permission_sources_cache.get('payload')
+        age = now - float(_atem_permission_sources_cache.get('ts', 0.0) or 0.0)
+        if age > _ATEM_PERMISSION_SOURCES_TTL_SECONDS and not bool(
+            _atem_permission_sources_cache.get('refreshing', False)
+        ):
+            _atem_permission_sources_cache['refreshing'] = True
+            start_refresh = True
+        result = [dict(item) for item in cached] if isinstance(cached, list) and cached else None
+    if start_refresh:
+        threading.Thread(
+            target=_refresh_atem_permission_sources,
+            name='tdeck-atem-permission-refresh',
+            daemon=True,
+        ).start()
+    return result or _fallback_atem_permission_sources()
 
 TEMPLATES_DIR = Path.cwd()
 TRIGGER_TEMPLATES = TEMPLATES_DIR / 'trigger_templates.json'
@@ -3416,6 +3559,8 @@ _atem_status_cache = {'ts': 0.0, 'connected': False}
 _status_snapshot_cache = {'ts': 0.0, 'payload': None}
 _videohub_labels_cache = {'ts': 0.0, 'payload': None}
 _videohub_state_cache = {'ts': 0.0, 'payload': None}
+_videohub_state_refresh_lock = threading.Lock()
+_videohub_state_refreshing = False
 _status_cache_lock = threading.Lock()
 _status_refresher_lock = threading.Lock()
 _status_refresher_started = False
@@ -6922,6 +7067,12 @@ def _digico_filtered_mixer_config(client) -> dict:
 
 
 def _digico_route_is_enabled(client, aux_number: int, channel_number: int | None = None) -> bool:
+    route_enabled = getattr(client, 'route_enabled', None)
+    if callable(route_enabled):
+        try:
+            return bool(route_enabled(aux_number, channel_number))
+        except Exception:
+            return False
     cfg = _digico_filtered_mixer_config(client)
     if not any(int(item.get('channel', 0)) == int(aux_number) for item in cfg.get('auxes', [])):
         return False
@@ -7098,6 +7249,21 @@ def api_digico_aux_state(aux_number: int):
     if not _digico_route_is_enabled(client, aux_number):
         return jsonify({'ok': False, 'error': 'AUX not found'}), 404
     try:
+        client.request_aux_state(aux_number)
+        status = client.status()
+        known_revision = request.args.get('revision')
+        try:
+            known_revision_number = int(known_revision) if known_revision is not None else None
+        except Exception:
+            known_revision_number = None
+        current_revision = int(status.get('revision', 0) or 0)
+        if known_revision_number is not None and known_revision_number == current_revision:
+            return jsonify({
+                'ok': True,
+                'unchanged': True,
+                'revision': current_revision,
+                'status': status,
+            })
         payload = client.aux_state(aux_number)
         payload['channels'] = [item for item in payload.get('channels', []) if bool(item.get('enabled', True))]
         return jsonify({'ok': True, **payload, 'status': client.status()})
@@ -7984,73 +8150,93 @@ def api_videohub_labels():
     return jsonify(payload)
 
 
+def _videohub_state_fallback(*, configured: bool, refreshing: bool = False) -> dict[str, Any]:
+    fallback_count = 40
+    nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
+    return {
+        'ok': True,
+        'configured': bool(configured),
+        'refreshing': bool(refreshing),
+        'inputs': nums,
+        'outputs': nums,
+        'routing': [i for i in range(1, fallback_count + 1)],
+    }
+
+
+def _refresh_videohub_state_cache() -> None:
+    global _videohub_state_refreshing
+    fallback_count = 40
+    try:
+        vh = _get_videohub_client_from_config()
+        if vh is None:
+            payload = _videohub_state_fallback(configured=False)
+        else:
+            if hasattr(vh, 'get_state'):
+                state = vh.get_state(fallback_count=fallback_count)
+                inputs = state.get('inputs') or []
+                outputs = state.get('outputs') or []
+                routing = state.get('routing') or []
+            else:
+                labels = vh.get_labels(fallback_count=fallback_count)
+                inputs = labels.get('inputs', [])
+                outputs = labels.get('outputs', [])
+                count = max(fallback_count, len(inputs), len(outputs))
+                routing = [i for i in range(1, count + 1)]
+            payload = {
+                'ok': True,
+                'configured': True,
+                'inputs': inputs,
+                'outputs': outputs,
+                'routing': routing,
+            }
+    except Exception as exc:
+        payload = _videohub_state_fallback(configured=True)
+        payload['error'] = str(exc)
+    finally:
+        with _status_cache_lock:
+            _videohub_state_cache['ts'] = time.time()
+            _videohub_state_cache['payload'] = payload
+        with _videohub_state_refresh_lock:
+            _videohub_state_refreshing = False
+
+
+def _start_videohub_state_refresh() -> bool:
+    global _videohub_state_refreshing
+    with _videohub_state_refresh_lock:
+        if _videohub_state_refreshing:
+            return False
+        _videohub_state_refreshing = True
+    threading.Thread(
+        target=_refresh_videohub_state_cache,
+        name='tdeck-videohub-state-refresh',
+        daemon=True,
+    ).start()
+    return True
+
+
 @app.route('/api/videohub/state', methods=['GET'])
 def api_videohub_state():
-    """Return VideoHub labels + current routing snapshot.
-
-    Best-effort: if the router isn't reachable, returns a numeric fallback list
-    and an identity-style routing mapping.
-    """
-
-    fallback_count = 40
-
+    """Return cached routing immediately and refresh hardware off-request."""
     now = time.time()
     force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
     with _status_cache_lock:
-        if not force and (now - float(_videohub_state_cache.get('ts', 0.0))) < _VIDEOHUB_STATE_CACHE_TTL_SECONDS:
-            cached = _videohub_state_cache.get('payload')
-            if isinstance(cached, dict):
-                return jsonify(cached)
+        cached = _videohub_state_cache.get('payload')
+        age = now - float(_videohub_state_cache.get('ts', 0.0) or 0.0)
+        if not force and age < _VIDEOHUB_STATE_CACHE_TTL_SECONDS and isinstance(cached, dict):
+            return jsonify(cached)
 
-    vh = _get_videohub_client_from_config()
-    if vh is None:
-        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        payload = {
-            'ok': True,
-            'configured': False,
-            'inputs': nums,
-            'outputs': nums,
-            'routing': [i for i in range(1, fallback_count + 1)],
-        }
-        with _status_cache_lock:
-            _videohub_state_cache['ts'] = now
-            _videohub_state_cache['payload'] = payload
-        return jsonify(payload)
+    started = _start_videohub_state_refresh()
+    with _videohub_state_refresh_lock:
+        refreshing = bool(started or _videohub_state_refreshing)
+    if isinstance(cached, dict):
+        return jsonify({**cached, 'stale': True, 'refreshing': refreshing})
 
     try:
-        if hasattr(vh, 'get_state'):
-            st = vh.get_state(fallback_count=fallback_count)
-            inputs = st.get('inputs') or []
-            outputs = st.get('outputs') or []
-            routing = st.get('routing') or []
-        else:
-            labels = vh.get_labels(fallback_count=fallback_count)
-            inputs = labels.get('inputs', [])
-            outputs = labels.get('outputs', [])
-            n = max(fallback_count, len(inputs), len(outputs))
-            routing = [i for i in range(1, n + 1)]
-        payload = {
-            'ok': True,
-            'configured': True,
-            'inputs': inputs,
-            'outputs': outputs,
-            'routing': routing,
-        }
-    except Exception as e:
-        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        payload = {
-            'ok': True,
-            'configured': True,
-            'error': str(e),
-            'inputs': nums,
-            'outputs': nums,
-            'routing': [i for i in range(1, fallback_count + 1)],
-        }
-
-    with _status_cache_lock:
-        _videohub_state_cache['ts'] = now
-        _videohub_state_cache['payload'] = payload
-    return jsonify(payload)
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        configured = bool(str(cfg.get('videohub_ip') or cfg.get('videohub_host') or '').strip())
+    except Exception:
+        configured = False
+    return jsonify(_videohub_state_fallback(configured=configured, refreshing=refreshing))
 
 
 @app.route('/media/videohub_room_images/<path:filename>', methods=['GET'])

@@ -25,6 +25,7 @@
     channelControls: new Map(),
     activeControls: new Set(),
     controlSends: new Map(),
+    lastRevision: null,
     errorSince: 0,
   };
 
@@ -79,6 +80,7 @@
 
   function showPicker() {
     state.selectedAux = null;
+    state.lastRevision = null;
     auxChange.classList.add('d-none');
     channelSection.classList.add('d-none');
     picker.classList.remove('d-none');
@@ -87,6 +89,7 @@
 
   function chooseAux(aux) {
     state.selectedAux = aux;
+    state.lastRevision = null;
     try { window.localStorage.setItem('tdeck.digico.aux', String(aux.channel)); } catch (e) { /* ignore */ }
     root.style.setProperty('--digico-tint', aux.colour || '#3478f6');
     auxLabel.textContent = aux.label || `Aux ${aux.channel}`;
@@ -349,6 +352,7 @@
   }
 
   function applyAuxState(payload) {
+    if (Number.isFinite(Number(payload.revision))) state.lastRevision = Number(payload.revision);
     setConnection(payload.status || {});
     snapshot.textContent = payload.snapshot ? `Snapshot: ${payload.snapshot}` : '';
     for (const channel of payload.channels || []) {
@@ -378,9 +382,16 @@
 
   async function pollAuxState() {
     if (state.pollBusy || !state.selectedAux || document.hidden) return;
+    const selectedAux = Number(state.selectedAux.channel);
     state.pollBusy = true;
     try {
-      const payload = await getJson(`/api/digico/aux/${state.selectedAux.channel}/state`);
+      const revisionQuery = Number.isFinite(state.lastRevision) ? `?revision=${encodeURIComponent(state.lastRevision)}` : '';
+      const payload = await getJson(`/api/digico/aux/${selectedAux}/state${revisionQuery}`);
+      if (!state.selectedAux || Number(state.selectedAux.channel) !== selectedAux) return;
+      if (payload.unchanged) {
+        setConnection(payload.status || {});
+        return;
+      }
       applyAuxState(payload);
     } catch (error) {
       setConnection({running: false, connected: false});
@@ -430,6 +441,6 @@
   });
 
   loadConfig(false);
-  window.setInterval(pollAuxState, 450);
-  window.setInterval(() => loadConfig(false), 10000);
+  window.setInterval(pollAuxState, 750);
+  window.setInterval(() => loadConfig(false), 30000);
 })();
