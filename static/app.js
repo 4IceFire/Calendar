@@ -46,10 +46,15 @@ async function updateStatusIndicators() {
     _applyServiceIndicator('companion', 'Companion', !!(data && data.companion && data.companion.connected));
     _applyServiceIndicator('propresenter', 'ProPresenter', !!(data && data.propresenter && data.propresenter.connected));
     _applyServiceIndicator('videohub', 'VideoHub', !!(data && data.videohub && data.videohub.connected));
+    const digicoIndicator = document.getElementById('digico-indicator');
+    const digicoEnabled = !!(data && data.digico && data.digico.enabled);
+    if (digicoIndicator) digicoIndicator.classList.toggle('d-none', !digicoEnabled);
+    if (digicoEnabled) _applyServiceIndicator('digico', 'DiGiCo', !!data.digico.connected);
   } catch (e) {
     _applyServiceIndicatorUnknown('companion', 'Companion');
     _applyServiceIndicatorUnknown('propresenter', 'ProPresenter');
     _applyServiceIndicatorUnknown('videohub', 'VideoHub');
+    _applyServiceIndicatorUnknown('digico', 'DiGiCo');
   }
 }
 
@@ -683,6 +688,18 @@ function _renderConfigGroups(cfg) {
   const hiddenKeys = new Set([
     'videohub_allowed_outputs',
     'videohub_allowed_inputs',
+    // Managed by the dedicated DiGiCo Mixer setup page.
+    'digico_enabled',
+    'digico_ip',
+    'digico_port',
+    'digico_listen_address',
+    'digico_listen_port',
+    'digico_request_interval',
+    'digico_retry_interval',
+    'digico_stale_after',
+    'digico_auxes',
+    'digico_channels',
+    'digico_external_devices',
   ]);
   const schedulingKeys = ['EVENTS_FILE'];
   const authKeys = [
@@ -3488,10 +3505,12 @@ if (document.getElementById('access-levels-page')) {
     if (!form) return;
     const routingCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:routing"]');
     const videohubCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:videohub"]');
+    const digicoCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:digico_mixer"]');
     const outEl = form.querySelector('[data-role="vh-outputs"]');
     const inEl = form.querySelector('[data-role="vh-inputs"]');
     const presetsEl = form.querySelector('[data-role="vh-presets"]');
     const editPresetsEl = form.querySelector('[data-role="vh-edit-presets"]');
+    const digicoAuxEls = Array.from(form.querySelectorAll('[data-role="digico-aux"]'));
     if (routingCb && outEl && inEl) {
       const routingEnabled = !!routingCb.checked;
       outEl.disabled = !routingEnabled;
@@ -3501,6 +3520,9 @@ if (document.getElementById('access-levels-page')) {
       const videohubEnabled = !!videohubCb.checked;
       if (presetsEl) presetsEl.disabled = !videohubEnabled;
       if (editPresetsEl) editPresetsEl.disabled = !videohubEnabled;
+    }
+    if (digicoCb) {
+      for (const el of digicoAuxEls) el.disabled = !digicoCb.checked;
     }
   }
 
@@ -3517,6 +3539,7 @@ if (document.getElementById('access-levels-page')) {
     const presetsEl = form.querySelector('input[name="videohub_allowed_presets_role"]');
     const canEditEl = form.querySelector('input[name="videohub_can_edit_presets_role"]');
     const companionClickSurfaceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="companion_click_surfaces_role"]:checked')).map(cb => String(cb.value || ''));
+    const digicoAuxIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="digico_allowed_auxes_role"]:checked')).map(cb => String(cb.value || ''));
 
     return {
       page_keys: pageKeys,
@@ -3526,6 +3549,7 @@ if (document.getElementById('access-levels-page')) {
       videohub_allowed_presets_role: presetsEl ? String(presetsEl.value || '') : '',
       videohub_can_edit_presets_role: canEditEl ? !!canEditEl.checked : true,
       companion_click_surfaces_role: companionClickSurfaceIds,
+      digico_allowed_auxes_role: digicoAuxIds,
     };
   }
 

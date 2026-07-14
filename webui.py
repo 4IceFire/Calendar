@@ -215,6 +215,17 @@ except Exception:
         "videohub_port": 9990,
         "videohub_timeout": 2,
         "videohub_presets_file": "videohub_presets.json",
+        "digico_enabled": False,
+        "digico_ip": "",
+        "digico_port": 9000,
+        "digico_listen_address": "0.0.0.0",
+        "digico_listen_port": 8000,
+        "digico_request_interval": 0.1,
+        "digico_retry_interval": 1.0,
+        "digico_stale_after": 10.0,
+        "digico_auxes": [],
+        "digico_channels": [],
+        "digico_external_devices": [],
         "webserver_port": 5000,
         "poll_interval": 1,
         "debug": False,
@@ -472,7 +483,8 @@ def _init_auth_db() -> None:
               videohub_allowed_inputs TEXT,
               videohub_allowed_presets TEXT,
               videohub_can_edit_presets INTEGER,
-              companion_click_surfaces TEXT
+              companion_click_surfaces TEXT,
+              digico_allowed_auxes TEXT
             )
             """
         )
@@ -489,6 +501,7 @@ def _init_auth_db() -> None:
             ('videohub_allowed_presets', 'TEXT'),
             ('videohub_can_edit_presets', 'INTEGER'),
             ('companion_click_surfaces', 'TEXT'),
+            ('digico_allowed_auxes', 'TEXT'),
         ):
             if col_name not in group_cols:
                 try:
@@ -837,6 +850,20 @@ def _set_group_companion_click_surfaces(group_id: int, surface_ids) -> None:
         conn.close()
 
 
+def _set_group_digico_allowed_auxes(group_id: int, aux_ids) -> None:
+    """Store a group's Personal Mix AUX allow-list; blank means all AUXes."""
+    aux_ids = _coerce_string_allow_list(aux_ids)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET digico_allowed_auxes=? WHERE id=?',
+            (json.dumps(aux_ids), int(group_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
     group_id = int(group_id)
     keys = [k for k in (page_keys or []) if str(k or '').strip()]
@@ -870,6 +897,7 @@ def _group_settings_snapshot(group_id: int) -> dict:
         'videohub_allowed_presets': _parse_group_allowlist_field(group['videohub_allowed_presets'] if 'videohub_allowed_presets' in group.keys() else None),
         'videohub_can_edit_presets': bool(int(group['videohub_can_edit_presets'] or 0)) if 'videohub_can_edit_presets' in group.keys() and group['videohub_can_edit_presets'] is not None else False,
         'companion_click_surfaces': _coerce_string_allow_list(group['companion_click_surfaces'] if 'companion_click_surfaces' in group.keys() else None),
+        'digico_allowed_auxes': _coerce_string_allow_list(group['digico_allowed_auxes'] if 'digico_allowed_auxes' in group.keys() else None),
     }
 
 
@@ -946,6 +974,16 @@ def _log_group_setting_changes(before: dict, after: dict) -> None:
             target_type='group',
             target_id=gid,
             details={'group_id': gid, 'group_name': name, 'old': before.get('companion_click_surfaces'), 'new': after.get('companion_click_surfaces')},
+        )
+    if _changed('digico_allowed_auxes'):
+        log_event(
+            'group.digico.aux_allowlist.update',
+            f"Updated Personal Mix AUX access for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={'group_id': gid, 'group_name': name, 'old': before.get('digico_allowed_auxes'), 'new': after.get('digico_allowed_auxes')},
         )
 
 
@@ -1122,6 +1160,15 @@ def _effective_companion_click_surface_ids_for_user(user_id: int | None) -> list
     if user_id is None or _user_is_admin(user_id):
         return []
     return _effective_group_string_allowlist(_get_user_groups(user_id), 'companion_click_surfaces')
+
+
+def _effective_digico_aux_ids_for_user(user_id: int | None) -> list[str]:
+    if user_id is None or _user_is_admin(user_id):
+        return []
+    return _effective_group_string_allowlist(
+        _get_user_groups_for_page(user_id, 'page:digico_mixer'),
+        'digico_allowed_auxes',
+    )
 
 
 def _can_click_companion_surface_for_current_user(surface_id: str) -> bool:
@@ -3053,6 +3100,16 @@ except Exception:
     get_videohub_client_from_config = None  # type: ignore
     VIDEOHUB_DEFAULT_PORT = 9990
 
+# Optional DiGiCo OSC / Personal Mixes integration
+try:
+    from digico import (
+        close_digico_client as _close_digico_client,
+        get_digico_client_from_config as _digico_client_factory,
+    )
+except Exception:
+    _close_digico_client = None  # type: ignore
+    _digico_client_factory = None  # type: ignore
+
 
 def _apply_logging_config():
     """Adjust log levels for noisy servers (werkzeug) based on config debug flag.
@@ -3088,6 +3145,46 @@ def _get_videohub_client_from_config():
     except Exception:
         cfg = {}
     return get_videohub_client_from_config(cfg)
+
+
+def _get_digico_client_from_config():
+    if _digico_client_factory is None:
+        return None
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        return _digico_client_factory(cfg)
+    except Exception:
+        return None
+
+
+def _digico_aux_options() -> list[dict]:
+    """Return discovered/configured AUX choices without failing the admin UI."""
+    try:
+        client = _get_digico_client_from_config()
+        if client is not None:
+            auxes = client.mixer_config().get('auxes', [])
+            if isinstance(auxes, list) and auxes:
+                return auxes
+    except Exception:
+        pass
+    try:
+        cfg = utils.get_config()
+        configured = cfg.get('digico_auxes', [])
+    except Exception:
+        configured = []
+    out = []
+    for index, item in enumerate(configured if isinstance(configured, list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            'channel': index,
+            'label': str(item.get('label') or f'Aux {index}'),
+            'enabled': bool(item.get('enabled', True)),
+        })
+    return out
 
 TEMPLATES_DIR = Path.cwd()
 TRIGGER_TEMPLATES = TEMPLATES_DIR / 'trigger_templates.json'
@@ -3156,6 +3253,7 @@ _server_lock = threading.Lock()
 _companion_status_cache = {'ts': 0.0, 'connected': False}
 _propresenter_status_cache = {'ts': 0.0, 'connected': False}
 _videohub_status_cache = {'ts': 0.0, 'connected': False}
+_digico_status_cache = {'ts': 0.0, 'connected': False}
 _status_snapshot_cache = {'ts': 0.0, 'payload': None}
 _videohub_labels_cache = {'ts': 0.0, 'payload': None}
 _videohub_state_cache = {'ts': 0.0, 'payload': None}
@@ -3173,6 +3271,7 @@ _connectivity_last: dict[str, bool | None] = {
     'companion': None,
     'propresenter': None,
     'videohub': None,
+    'digico': None,
 }
 
 
@@ -3187,6 +3286,7 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
         'companion': 'Companion',
         'propresenter': 'ProPresenter',
         'videohub': 'VideoHub',
+        'digico': 'DiGiCo',
     }.get(service, service)
 
     should_log = False
@@ -3308,6 +3408,25 @@ def _probe_videohub_status(cfg: dict) -> dict:
     }
 
 
+def _probe_digico_status(cfg: dict) -> dict:
+    enabled = bool(cfg.get('digico_enabled', False))
+    host = str(cfg.get('digico_ip') or '').strip()
+    try:
+        port = int(cfg.get('digico_port', 9000))
+    except Exception:
+        port = 9000
+    detail = f"{host}:{port}" if host else ('disabled' if not enabled else 'not configured')
+    client = _get_digico_client_from_config()
+    status = client.status() if client is not None else {}
+    return {
+        'connected': bool(status.get('connected', False)),
+        'enabled': enabled,
+        'detail': detail,
+        'checked_at': time.time(),
+        'last_error': str(status.get('lastError') or ''),
+    }
+
+
 def _refresh_status_snapshot() -> dict:
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
@@ -3317,6 +3436,7 @@ def _refresh_status_snapshot() -> dict:
     companion = _probe_companion_status(cfg)
     propresenter = _probe_propresenter_status(cfg)
     videohub = _probe_videohub_status(cfg)
+    digico = _probe_digico_status(cfg)
     now = time.time()
 
     payload = {
@@ -3325,6 +3445,7 @@ def _refresh_status_snapshot() -> dict:
         'companion': companion,
         'propresenter': propresenter,
         'videohub': videohub,
+        'digico': digico,
     }
 
     with _status_cache_lock:
@@ -3336,10 +3457,14 @@ def _refresh_status_snapshot() -> dict:
         _propresenter_status_cache['connected'] = bool(propresenter.get('connected', False))
         _videohub_status_cache['ts'] = videohub.get('checked_at', now)
         _videohub_status_cache['connected'] = bool(videohub.get('connected', False))
+        _digico_status_cache['ts'] = digico.get('checked_at', now)
+        _digico_status_cache['connected'] = bool(digico.get('connected', False))
 
     _log_connectivity_change('companion', bool(companion.get('connected', False)), detail=str(companion.get('detail') or ''))
     _log_connectivity_change('propresenter', bool(propresenter.get('connected', False)), detail=str(propresenter.get('detail') or ''))
     _log_connectivity_change('videohub', bool(videohub.get('connected', False)), detail=str(videohub.get('detail') or ''))
+    if bool(digico.get('enabled', False)):
+        _log_connectivity_change('digico', bool(digico.get('connected', False)), detail=str(digico.get('detail') or ''))
 
     return payload
 
@@ -3398,6 +3523,10 @@ def start_http_server(host: str, port: int) -> None:
         except Exception:
             pass
         try:
+            _get_digico_client_from_config()
+        except Exception:
+            pass
+        try:
             _refresh_status_snapshot()
         except Exception:
             pass
@@ -3414,6 +3543,11 @@ def stop_http_server() -> None:
             return
         try:
             _http_server.shutdown()
+        except Exception:
+            pass
+        try:
+            if _close_digico_client is not None:
+                _close_digico_client()
         except Exception:
             pass
         _http_server = None
@@ -3740,6 +3874,12 @@ def admin_permissions_page():
                         _set_group_companion_click_surfaces(gid, request.form.getlist('companion_click_surfaces_role'))
                     except Exception:
                         pass
+                    # Per-group Personal Mix AUX allow-list.
+                    try:
+                        if 'page:digico_mixer' in [str(k) for k in keys]:
+                            _set_group_digico_allowed_auxes(gid, request.form.getlist('digico_allowed_auxes_role'))
+                    except Exception:
+                        pass
                     try:
                         _log_group_setting_changes(before_group, _group_settings_snapshot(gid))
                     except Exception:
@@ -3853,7 +3993,7 @@ def admin_permissions_page():
     conn = _db()
     try:
         groups = conn.execute(
-            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces FROM groups ORDER BY is_system DESC, lower(name)'
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,digico_allowed_auxes FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
         group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
         group_users = conn.execute(
@@ -3899,6 +4039,7 @@ def admin_permissions_page():
 
     group_to_vh: dict[int, dict[str, str]] = {}
     group_to_companion: dict[int, dict[str, list[str]]] = {}
+    group_to_digico: dict[int, dict[str, list[str]]] = {}
     for g in groups or []:
         try:
             gid = int(g['id'])
@@ -3941,6 +4082,9 @@ def admin_permissions_page():
         group_to_companion[gid] = {
             'click_surfaces': _coerce_string_allow_list(g['companion_click_surfaces']),
         }
+        group_to_digico[gid] = {
+            'allowed_auxes': _coerce_string_allow_list(g['digico_allowed_auxes']),
+        }
 
     user_to_groups: dict[int, list[sqlite3.Row]] = {}
     user_to_group_ids: dict[int, set[int]] = {}
@@ -3965,6 +4109,8 @@ def admin_permissions_page():
         group_to_pages=group_to_pages,
         group_to_vh=group_to_vh,
         group_to_companion=group_to_companion,
+        group_to_digico=group_to_digico,
+        digico_auxes=_digico_aux_options(),
         companion_surfaces=_load_companion_surfaces(),
         group_to_users=group_to_users,
         users=users,
@@ -4052,6 +4198,13 @@ def api_admin_group_update(group_id: int):
         try:
             if 'companion_click_surfaces_role' in data:
                 _set_group_companion_click_surfaces(gid, data.get('companion_click_surfaces_role'))
+        except Exception:
+            pass
+        # Per-group Personal Mix AUX allow-list (only meaningful with page access).
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:digico_mixer' in keys_set and 'digico_allowed_auxes_role' in data:
+                _set_group_digico_allowed_auxes(gid, data.get('digico_allowed_auxes_role'))
         except Exception:
             pass
         try:
@@ -4794,10 +4947,22 @@ def routing_page():
 def timers_page():
     return render_template('timers.html')
 
+
+@app.route('/personal-mixes')
+@require_page('page:digico_mixer', 'Personal Mixes')
+def personal_mixes_page():
+    return render_template('personal_mixes.html')
+
 @app.route('/config')
 @require_page('page:config', 'Config')
 def config_page():
     return render_template('config.html')
+
+
+@app.route('/config/digico')
+@require_page('page:config', 'Config')
+def digico_config_page():
+    return render_template('digico_setup.html')
 
 
 @app.route('/config/export', methods=['GET', 'POST'])
@@ -6284,6 +6449,278 @@ def api_ui_events():
         return jsonify([])
 
 
+_DIGICO_CONFIG_KEYS = (
+    'digico_enabled',
+    'digico_ip',
+    'digico_port',
+    'digico_listen_address',
+    'digico_listen_port',
+    'digico_request_interval',
+    'digico_retry_interval',
+    'digico_stale_after',
+    'digico_auxes',
+    'digico_channels',
+    'digico_external_devices',
+)
+
+
+def _digico_api_guard(*, aux_number: int | None = None, config_only: bool = False):
+    """Enforce login, page access and AUX scope on every DiGiCo API call."""
+    if not _auth_enabled():
+        return None
+    if not getattr(current_user, 'is_authenticated', False):
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+    page_key = 'page:config' if config_only else 'page:digico_mixer'
+    if not can_access(page_key):
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    if aux_number is None or config_only:
+        return None
+    try:
+        allowed = _effective_digico_aux_ids_for_user(int(current_user.get_id()))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    if allowed and str(int(aux_number)) not in set(allowed):
+        return jsonify({'ok': False, 'error': 'This AUX is not assigned to your group.'}), 403
+    return None
+
+
+def _digico_allowed_aux_ids_current_user() -> list[str]:
+    if not _auth_enabled():
+        return []
+    try:
+        return _effective_digico_aux_ids_for_user(int(current_user.get_id()))
+    except Exception:
+        return []
+
+
+def _digico_filtered_mixer_config(client) -> dict:
+    cfg = client.mixer_config() if client is not None else {'auxes': [], 'channels': [], 'snapshot': '', 'revision': 0}
+    allowed = set(_digico_allowed_aux_ids_current_user())
+    auxes = [
+        item for item in (cfg.get('auxes') or [])
+        if bool(item.get('enabled', True)) and (not allowed or str(item.get('channel')) in allowed)
+    ]
+    channels = [item for item in (cfg.get('channels') or []) if bool(item.get('enabled', True))]
+    return {**cfg, 'auxes': auxes, 'channels': channels}
+
+
+def _digico_route_is_enabled(client, aux_number: int, channel_number: int | None = None) -> bool:
+    cfg = _digico_filtered_mixer_config(client)
+    if not any(int(item.get('channel', 0)) == int(aux_number) for item in cfg.get('auxes', [])):
+        return False
+    if channel_number is not None and not any(
+        int(item.get('channel', 0)) == int(channel_number) for item in cfg.get('channels', [])
+    ):
+        return False
+    return True
+
+
+def _digico_clean_number(value, default, low, high, *, integer=False):
+    try:
+        number = int(value) if integer else float(value)
+    except Exception:
+        number = default
+    number = max(low, min(high, number))
+    return int(number) if integer else float(number)
+
+
+def _digico_clean_indexed_items(value, *, kind: str) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    by_number: dict[int, dict] = {}
+    limit = 512 if kind == 'channel' else 128
+    for position, raw in enumerate(value, start=1):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            number = int(raw.get('channel', position))
+        except Exception:
+            number = position
+        if number < 1 or number > limit:
+            continue
+        item = {
+            'enabled': bool(raw.get('enabled', True)),
+            'label': str(raw.get('label') or '').strip()[:80],
+            'icon': str(raw.get('icon') or '').strip()[:250],
+            'order': int(_digico_clean_number(raw.get('order', number), number, 1, limit, integer=True)),
+        }
+        if kind == 'channel':
+            item['group'] = str(raw.get('group') or '').strip()[:80]
+        else:
+            colour = str(raw.get('colour') or '').strip()
+            item['colour'] = colour[:32]
+        by_number[number] = item
+    if not by_number:
+        return []
+    return [by_number.get(number, {}) for number in range(1, max(by_number) + 1)]
+
+
+def _digico_clean_external_devices(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    out = []
+    for raw in value[:64]:
+        if not isinstance(raw, dict):
+            continue
+        ip = str(raw.get('ip') or '').strip()[:253]
+        if not ip:
+            continue
+        out.append({
+            'name': str(raw.get('name') or '').strip()[:80],
+            'ip': ip,
+            'port': int(_digico_clean_number(raw.get('port', 8000), 8000, 1, 65535, integer=True)),
+            'enabled': bool(raw.get('enabled', True)),
+            'broadcast': bool(raw.get('broadcast', True)),
+            'loopback': bool(raw.get('loopback', False)),
+        })
+    return out
+
+
+@app.route('/api/digico/setup', methods=['GET', 'POST'])
+def api_digico_setup():
+    denied = _digico_api_guard(config_only=True)
+    if denied is not None:
+        return denied
+    if request.method == 'POST':
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({'ok': False, 'error': 'invalid json'}), 400
+        try:
+            cfg = utils.get_config()
+            old_cfg = copy.deepcopy(cfg)
+            cfg['digico_enabled'] = bool(data.get('digico_enabled', cfg.get('digico_enabled', False)))
+            cfg['digico_ip'] = str(data.get('digico_ip', cfg.get('digico_ip', '')) or '').strip()[:253]
+            cfg['digico_port'] = int(_digico_clean_number(data.get('digico_port', cfg.get('digico_port', 9000)), 9000, 1, 65535, integer=True))
+            cfg['digico_listen_address'] = str(data.get('digico_listen_address', cfg.get('digico_listen_address', '0.0.0.0')) or '0.0.0.0').strip()[:253]
+            cfg['digico_listen_port'] = int(_digico_clean_number(data.get('digico_listen_port', cfg.get('digico_listen_port', 8000)), 8000, 1, 65535, integer=True))
+            cfg['digico_request_interval'] = _digico_clean_number(data.get('digico_request_interval', cfg.get('digico_request_interval', 0.1)), 0.1, 0.025, 5.0)
+            cfg['digico_retry_interval'] = _digico_clean_number(data.get('digico_retry_interval', cfg.get('digico_retry_interval', 1.0)), 1.0, 0.1, 30.0)
+            cfg['digico_stale_after'] = _digico_clean_number(data.get('digico_stale_after', cfg.get('digico_stale_after', 10.0)), 10.0, 1.0, 300.0)
+            if 'digico_auxes' in data:
+                cfg['digico_auxes'] = _digico_clean_indexed_items(data.get('digico_auxes'), kind='aux')
+            if 'digico_channels' in data:
+                cfg['digico_channels'] = _digico_clean_indexed_items(data.get('digico_channels'), kind='channel')
+            if 'digico_external_devices' in data:
+                cfg['digico_external_devices'] = _digico_clean_external_devices(data.get('digico_external_devices'))
+            utils.save_config(cfg)
+            utils.reload_config(force=True)
+            if _close_digico_client is not None:
+                _close_digico_client()
+            client = _get_digico_client_from_config()
+            changed = sorted(k for k in _DIGICO_CONFIG_KEYS if old_cfg.get(k) != cfg.get(k))
+            log_event(
+                'digico.config.update',
+                f"Updated DiGiCo mixer setup ({len(changed)} setting{'s' if len(changed) != 1 else ''})",
+                source='web', status='success', target_type='integration', target_id='digico',
+                details={'changed_keys': changed},
+            )
+            return jsonify({'ok': True, 'status': client.status() if client is not None else {}})
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 500
+
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+    client = _get_digico_client_from_config()
+    return jsonify({
+        'ok': True,
+        'config': {key: cfg.get(key) for key in _DIGICO_CONFIG_KEYS},
+        'discovered': client.mixer_config() if client is not None else {'auxes': [], 'channels': []},
+        'status': client.status() if client is not None else {},
+    })
+
+
+@app.route('/api/digico/restart', methods=['POST'])
+def api_digico_restart():
+    denied = _digico_api_guard(config_only=True)
+    if denied is not None:
+        return denied
+    try:
+        if _close_digico_client is not None:
+            _close_digico_client()
+        client = _get_digico_client_from_config()
+        log_event('digico.restart', 'Restarted the DiGiCo mixer connection', source='web', status='success', target_type='integration', target_id='digico')
+        return jsonify({'ok': True, 'status': client.status() if client is not None else {}})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/digico/discover', methods=['POST'])
+def api_digico_discover():
+    denied = _digico_api_guard(config_only=True)
+    if denied is not None:
+        return denied
+    client = _get_digico_client_from_config()
+    if client is None:
+        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+    client.restart_discovery()
+    log_event('digico.discovery.restart', 'Restarted DiGiCo desk discovery', source='web', status='success', target_type='integration', target_id='digico')
+    return jsonify({'ok': True, 'status': client.status()})
+
+
+@app.route('/api/digico/mixer/config')
+def api_digico_mixer_config():
+    denied = _digico_api_guard()
+    if denied is not None:
+        return denied
+    client = _get_digico_client_from_config()
+    if client is None:
+        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+    return jsonify({'ok': True, **_digico_filtered_mixer_config(client), 'status': client.status()})
+
+
+@app.route('/api/digico/aux/<int:aux_number>/state')
+def api_digico_aux_state(aux_number: int):
+    denied = _digico_api_guard(aux_number=aux_number)
+    if denied is not None:
+        return denied
+    client = _get_digico_client_from_config()
+    if client is None:
+        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+    if not _digico_route_is_enabled(client, aux_number):
+        return jsonify({'ok': False, 'error': 'AUX not found'}), 404
+    try:
+        payload = client.aux_state(aux_number)
+        payload['channels'] = [item for item in payload.get('channels', []) if bool(item.get('enabled', True))]
+        return jsonify({'ok': True, **payload, 'status': client.status()})
+    except KeyError:
+        return jsonify({'ok': False, 'error': 'AUX not found'}), 404
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 503
+
+
+@app.route('/api/digico/aux/<int:aux_number>/channel/<int:channel_number>/<field>', methods=['POST'])
+def api_digico_channel_control(aux_number: int, channel_number: int, field: str):
+    denied = _digico_api_guard(aux_number=aux_number)
+    if denied is not None:
+        return denied
+    if field not in ('level', 'pan'):
+        return jsonify({'ok': False, 'error': 'Unknown control'}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'value' not in data:
+        return jsonify({'ok': False, 'error': 'A numeric value is required'}), 400
+    client = _get_digico_client_from_config()
+    if client is None:
+        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+    if not _digico_route_is_enabled(client, aux_number, channel_number):
+        return jsonify({'ok': False, 'error': 'Mixer route not found'}), 404
+    try:
+        value = client.set_level(aux_number, channel_number, float(data['value'])) if field == 'level' else client.set_pan(aux_number, channel_number, float(data['value']))
+        if bool(data.get('final', False)):
+            log_event(
+                f'digico.mix.{field}',
+                f"Changed AUX {aux_number} channel {channel_number} {field}",
+                source='web', status='success', target_type='digico_aux', target_id=str(aux_number),
+                details={'aux': aux_number, 'channel': channel_number, 'field': field, 'value': value},
+            )
+        return jsonify({'ok': True, 'value': value})
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 503
+
+
 @app.route('/api/companion_status')
 def companion_status():
     snapshot = _get_status_snapshot()
@@ -6305,6 +6742,14 @@ def videohub_status():
     snapshot = _get_status_snapshot()
     videohub = snapshot.get('videohub') if isinstance(snapshot, dict) else {}
     return jsonify({'connected': bool(videohub.get('connected', False))})
+
+
+@app.route('/api/digico_status')
+def digico_status():
+    """Lightweight DiGiCo connectivity check for the UI indicator."""
+    snapshot = _get_status_snapshot()
+    digico = snapshot.get('digico') if isinstance(snapshot, dict) else {}
+    return jsonify({'connected': bool(digico.get('connected', False)), 'enabled': bool(digico.get('enabled', False))})
 
 
 @app.route('/api/status/summary')

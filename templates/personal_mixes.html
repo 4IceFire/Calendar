@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% set page_title = 'Personal Mixes' %}
+{% set page_subtitle = 'Your DiGiCo in-ear mix' %}
+
+{% block head_extra %}
+  <link rel="stylesheet" href="/static/digico.css">
+{% endblock %}
+
+{% block page_actions %}
+  {% if not auth_enabled or can_access('page:config') %}
+    <a class="btn btn-sm btn-outline-secondary" href="/config/digico">Setup</a>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<div id="digico-mixer" class="digico-mixer-shell">
+  <div class="digico-mixer-topbar">
+    <button id="digico-aux-change" class="digico-aux-current d-none" type="button" aria-label="Choose another AUX">
+      <span id="digico-aux-current-icon" class="digico-current-icon"></span>
+      <span>
+        <span class="digico-eyebrow">Mixing</span>
+        <strong id="digico-aux-current-label">Choose an AUX</strong>
+      </span>
+      <span aria-hidden="true">⌄</span>
+    </button>
+    <div class="digico-mixer-meta">
+      <span id="digico-mixer-connection" class="digico-connection is-waiting"><span></span> Connecting</span>
+      <span id="digico-snapshot" class="digico-snapshot"></span>
+    </div>
+  </div>
+
+  <div id="digico-mixer-notice" class="alert alert-secondary" role="status">
+    Loading desk configuration…
+  </div>
+
+  <section id="digico-aux-picker" class="digico-picker d-none" aria-labelledby="digico-picker-title">
+    <div class="digico-picker-heading">
+      <div>
+        <div class="digico-eyebrow">Personal Mixes</div>
+        <h2 id="digico-picker-title" class="h4 mb-1">Which mix is yours?</h2>
+        <p class="text-muted mb-0">Only AUXes assigned to your TDeck group are shown.</p>
+      </div>
+      <button id="digico-mixer-retry" class="btn btn-outline-light" type="button">Retry</button>
+    </div>
+    <div id="digico-aux-grid" class="digico-aux-grid"></div>
+  </section>
+
+  <section id="digico-channel-section" class="d-none" aria-live="polite">
+    <div id="digico-channel-groups" class="digico-channel-groups"></div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/static/digico_mixer.js"></script>
+{% endblock %}

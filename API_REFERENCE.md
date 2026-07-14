@@ -329,6 +329,34 @@ Timer selection is either:
 
 ---
 
+## DiGiCo Personal Mixes
+
+Unlike legacy Companion-facing APIs, every DiGiCo endpoint enforces login and page access when authentication is enabled. Mixer endpoints also enforce the current user's group AUX allow-list.
+
+### Mixer layout and status
+
+- **GET** `/api/digico/mixer/config`
+- Returns enabled/allowed AUXes, enabled channels, snapshot, cache revision and connection status.
+
+### Read an AUX mix
+
+- **GET** `/api/digico/aux/<aux>/state`
+- Queues desk queries and returns the currently cached channel levels/pans for the AUX.
+
+### Change a channel send
+
+- **POST** `/api/digico/aux/<aux>/channel/<channel>/level`
+- **POST** `/api/digico/aux/<aux>/channel/<channel>/pan`
+- Body: `{ "value": -12.5, "final": true }` for level, or `{ "value": 0.5, "final": true }` for pan.
+- Level is clamped to `-150..10` dB; pan is clamped to `0..1`. The browser uses `final` to avoid logging every intermediate drag event.
+
+### Setup and diagnostics
+
+- **GET / POST** `/api/digico/setup` (Config page permission)
+- **POST** `/api/digico/restart` (Config page permission)
+- **POST** `/api/digico/discover` (Config page permission)
+- **GET** `/api/digico_status`
+
 ## System / Status
 
 ### Config
@@ -339,6 +367,7 @@ Timer selection is either:
 - **GET** `/api/companion_status`
 - **GET** `/api/propresenter_status`
 - **GET** `/api/videohub_status`
+- **GET** `/api/digico_status`
 
 ---
 

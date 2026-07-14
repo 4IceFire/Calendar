@@ -1,0 +1,350 @@
+(function () {
+  'use strict';
+
+  const root = document.getElementById('digico-setup');
+  if (!root) return;
+
+  const message = document.getElementById('digico-setup-message');
+  const auxTable = document.getElementById('digico-aux-table');
+  const channelTable = document.getElementById('digico-channel-table');
+  const deviceList = document.getElementById('digico-device-list');
+  const state = {payload: null, dirty: false, busy: false, initialized: false};
+
+  function setMessage(text, kind) {
+    message.className = text ? `alert alert-${kind || 'secondary'} mb-3` : 'mb-3';
+    message.textContent = text || '';
+  }
+
+  async function requestJson(url, options) {
+    const response = await fetch(url, {cache: 'no-store', ...(options || {})});
+    let payload = {};
+    try { payload = await response.json(); } catch (e) { /* handled below */ }
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || `Request failed (${response.status})`);
+    return payload;
+  }
+
+  function field(id) { return document.getElementById(id); }
+  function value(id) { return field(id) ? field(id).value : ''; }
+  function numberValue(id, fallback) {
+    const number = Number(value(id));
+    return Number.isFinite(number) ? number : fallback;
+  }
+
+  function setConnectionFields(config) {
+    field('digico-enabled').checked = !!config.digico_enabled;
+    field('digico-ip').value = config.digico_ip || '';
+    field('digico-port').value = config.digico_port == null ? 9000 : config.digico_port;
+    field('digico-listen-address').value = config.digico_listen_address || '0.0.0.0';
+    field('digico-listen-port').value = config.digico_listen_port == null ? 8000 : config.digico_listen_port;
+    field('digico-request-interval').value = config.digico_request_interval == null ? .1 : config.digico_request_interval;
+    field('digico-retry-interval').value = config.digico_retry_interval == null ? 1 : config.digico_retry_interval;
+    field('digico-stale-after').value = config.digico_stale_after == null ? 10 : config.digico_stale_after;
+  }
+
+  function configForNumber(items, number) {
+    return Array.isArray(items) && items[number - 1] && typeof items[number - 1] === 'object' ? items[number - 1] : {};
+  }
+
+  function combinedItems(discovered, configured, kind) {
+    const byNumber = new Map();
+    for (const item of Array.isArray(discovered) ? discovered : []) {
+      const number = Number(item.channel);
+      if (number > 0) byNumber.set(number, {...item});
+    }
+    const maximum = Math.max(byNumber.size ? Math.max(...byNumber.keys()) : 0, Array.isArray(configured) ? configured.length : 0);
+    const out = [];
+    for (let number = 1; number <= maximum; number += 1) {
+      const desk = byNumber.get(number) || {channel: number, deskLabel: `${kind === 'aux' ? 'Aux' : 'Channel'} ${number}`};
+      const custom = configForNumber(configured, number);
+      out.push({
+        ...desk,
+        ...custom,
+        channel: number,
+        deskLabel: desk.deskLabel || desk.label || `${kind === 'aux' ? 'Aux' : 'Channel'} ${number}`,
+        label: custom.label || desk.label || desk.deskLabel || '',
+        enabled: custom.enabled == null ? (desk.enabled == null ? true : !!desk.enabled) : !!custom.enabled,
+        order: custom.order == null ? (desk.order == null ? number : desk.order) : custom.order,
+      });
+    }
+    return out;
+  }
+
+  function labeledInput(labelText, className, valueText, type) {
+    const label = document.createElement('label');
+    label.textContent = labelText;
+    const input = document.createElement('input');
+    input.className = `form-control form-control-sm ${className}`;
+    input.type = type || 'text';
+    input.value = valueText == null ? '' : String(valueText);
+    if (input.type === 'number') input.min = '1';
+    label.appendChild(input);
+    return label;
+  }
+
+  function renderMixerItems(kind, items) {
+    const target = kind === 'aux' ? auxTable : channelTable;
+    target.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'digico-config-empty';
+      empty.textContent = 'Nothing discovered yet. Enable the integration, verify the desk IP and ports, then select Rediscover Desk.';
+      target.appendChild(empty);
+      return;
+    }
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = `digico-config-row ${kind === 'channel' ? 'is-channel' : 'is-aux'}`;
+      row.dataset.channel = String(item.channel);
+      row.dataset.deskLabel = item.deskLabel || '';
+
+      const enabledWrap = document.createElement('div');
+      enabledWrap.className = 'form-check form-switch';
+      const enabled = document.createElement('input');
+      enabled.className = 'form-check-input digico-item-enabled';
+      enabled.type = 'checkbox';
+      enabled.checked = !!item.enabled;
+      enabled.title = 'Show in Personal Mixes';
+      enabledWrap.appendChild(enabled);
+
+      const number = document.createElement('div');
+      number.className = 'digico-config-number';
+      number.textContent = String(item.channel);
+      number.title = item.deskLabel || '';
+      row.append(enabledWrap, number, labeledInput('Label', 'digico-item-label', item.label));
+      if (kind === 'channel') {
+        row.appendChild(labeledInput('Group', 'digico-item-group', item.group || ''));
+        row.appendChild(labeledInput('Icon / emoji', 'digico-item-icon', item.icon || ''));
+      } else {
+        row.appendChild(labeledInput('Colour', 'digico-item-colour', item.colour || '#3478f6', 'color'));
+        row.appendChild(labeledInput('Icon / emoji', 'digico-item-icon', item.icon || ''));
+      }
+      row.appendChild(labeledInput('Order', 'digico-item-order', item.order || item.channel, 'number'));
+      target.appendChild(row);
+    }
+  }
+
+  function renderDevice(raw) {
+    const device = raw || {};
+    const row = document.createElement('div');
+    row.className = 'digico-device-row';
+
+    function check(labelText, className, checked, title) {
+      const wrap = document.createElement('div');
+      wrap.className = 'form-check digico-device-check';
+      const input = document.createElement('input');
+      input.className = `form-check-input ${className}`;
+      input.type = 'checkbox';
+      input.checked = !!checked;
+      const label = document.createElement('label');
+      label.className = 'form-check-label small';
+      label.textContent = labelText;
+      if (title) wrap.title = title;
+      wrap.append(input, label);
+      return wrap;
+    }
+
+    row.appendChild(check('Enabled', 'digico-device-enabled', device.enabled == null ? true : device.enabled));
+    row.appendChild(labeledInput('Name', 'digico-device-name', device.name || ''));
+    row.appendChild(labeledInput('IP / hostname', 'digico-device-ip', device.ip || ''));
+    const port = labeledInput('Receive port', 'digico-device-port', device.port == null ? 8000 : device.port, 'number');
+    port.querySelector('input').max = '65535';
+    row.appendChild(port);
+    row.appendChild(check('Receive desk updates', 'digico-device-broadcast', device.broadcast == null ? true : device.broadcast, 'Forwards desk and other configured device packets to this device.'));
+    row.appendChild(check('Echo own packets', 'digico-device-loopback', !!device.loopback, 'Usually leave off to prevent duplicate updates.'));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-sm btn-outline-danger digico-device-remove';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', () => { row.remove(); state.dirty = true; });
+    row.appendChild(remove);
+    deviceList.appendChild(row);
+  }
+
+  function renderDevices(devices) {
+    deviceList.replaceChildren();
+    for (const device of Array.isArray(devices) ? devices : []) renderDevice(device);
+    if (!deviceList.children.length) {
+      const empty = document.createElement('div');
+      empty.className = 'digico-config-empty digico-device-empty';
+      empty.textContent = 'No external OSC devices configured. Web mixer users do not need an entry here.';
+      deviceList.appendChild(empty);
+    }
+  }
+
+  function renderStatus(status) {
+    const data = status || {};
+    field('digico-status-desk').textContent = data.desk || 'Not configured';
+    field('digico-status-connection').textContent = data.connected ? 'Online' : (data.running ? 'Waiting for replies' : (data.enabled ? 'Stopped' : 'Disabled'));
+    field('digico-status-discovery').textContent = data.ready ? `${data.channels || 0} channels / ${data.auxes || 0} AUXes` : (data.missingDiscoveryRequest || 'Waiting');
+    field('digico-status-snapshot').textContent = data.snapshot || '—';
+    field('digico-aux-count').textContent = String(data.auxes || 0);
+    field('digico-channel-count').textContent = String(data.channels || 0);
+
+    const diagnostics = document.getElementById('digico-diagnostics');
+    diagnostics.replaceChildren();
+    const fields = [
+      ['Running', data.running ? 'Yes' : 'No'],
+      ['Connected', data.connected ? 'Yes' : 'No'],
+      ['Ready', data.ready ? 'Yes' : 'No'],
+      ['Listening', data.listen || '—'],
+      ['Last desk packet', data.lastDeskPacketAge == null ? 'Never' : `${Number(data.lastDeskPacketAge).toFixed(1)}s ago`],
+      ['Packets received', data.packetsReceived == null ? 0 : data.packetsReceived],
+      ['Packets sent', data.packetsSent == null ? 0 : data.packetsSent],
+      ['Unknown packets ignored', data.ignoredPackets == null ? 0 : data.ignoredPackets],
+      ['Relay packets', data.relayPackets == null ? 0 : data.relayPackets],
+      ['Pending requests', data.pendingRequests == null ? 0 : data.pendingRequests],
+      ['Cached addresses', data.cacheEntries == null ? 0 : data.cacheEntries],
+      ['OSC parse errors', data.parseErrors == null ? 0 : data.parseErrors],
+      ['Last error', data.lastError || 'None'],
+    ];
+    for (const [label, val] of fields) {
+      const card = document.createElement('div');
+      card.className = 'digico-diagnostic';
+      const small = document.createElement('span');
+      small.textContent = label;
+      const strong = document.createElement('strong');
+      strong.textContent = String(val);
+      card.append(small, strong);
+      diagnostics.appendChild(card);
+    }
+    field('digico-raw-status').textContent = JSON.stringify(data, null, 2);
+  }
+
+  function renderPayload(payload, full) {
+    state.payload = payload;
+    renderStatus(payload.status || {});
+    if (!full) return;
+    const config = payload.config || {};
+    setConnectionFields(config);
+    renderMixerItems('aux', combinedItems((payload.discovered || {}).auxes, config.digico_auxes, 'aux'));
+    renderMixerItems('channel', combinedItems((payload.discovered || {}).channels, config.digico_channels, 'channel'));
+    renderDevices(config.digico_external_devices);
+    state.initialized = true;
+    state.dirty = false;
+  }
+
+  async function loadSetup(forceFull) {
+    if (state.busy) return;
+    state.busy = true;
+    try {
+      const payload = await requestJson('/api/digico/setup');
+      const discoveredChanged = !state.payload ||
+        Number((state.payload.status || {}).channels || 0) !== Number((payload.status || {}).channels || 0) ||
+        Number((state.payload.status || {}).auxes || 0) !== Number((payload.status || {}).auxes || 0);
+      renderPayload(payload, !!forceFull || !state.initialized || (!state.dirty && discoveredChanged));
+    } catch (error) {
+      setMessage(error.message || 'Could not load DiGiCo setup.', 'danger');
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  function collectMixerItems(kind) {
+    const target = kind === 'aux' ? auxTable : channelTable;
+    return Array.from(target.querySelectorAll('.digico-config-row')).map(row => {
+      const item = {
+        channel: Number(row.dataset.channel),
+        enabled: !!row.querySelector('.digico-item-enabled').checked,
+        label: row.querySelector('.digico-item-label').value.trim(),
+        icon: row.querySelector('.digico-item-icon').value.trim(),
+        order: Number(row.querySelector('.digico-item-order').value) || Number(row.dataset.channel),
+      };
+      if (kind === 'channel') item.group = row.querySelector('.digico-item-group').value.trim();
+      else item.colour = row.querySelector('.digico-item-colour').value;
+      return item;
+    });
+  }
+
+  function collectDevices() {
+    return Array.from(deviceList.querySelectorAll('.digico-device-row')).map(row => ({
+      enabled: !!row.querySelector('.digico-device-enabled').checked,
+      name: row.querySelector('.digico-device-name').value.trim(),
+      ip: row.querySelector('.digico-device-ip').value.trim(),
+      port: Number(row.querySelector('.digico-device-port').value) || 8000,
+      broadcast: !!row.querySelector('.digico-device-broadcast').checked,
+      loopback: !!row.querySelector('.digico-device-loopback').checked,
+    })).filter(item => item.ip);
+  }
+
+  function collectConfig() {
+    return {
+      digico_enabled: !!field('digico-enabled').checked,
+      digico_ip: value('digico-ip').trim(),
+      digico_port: numberValue('digico-port', 9000),
+      digico_listen_address: value('digico-listen-address').trim() || '0.0.0.0',
+      digico_listen_port: numberValue('digico-listen-port', 8000),
+      digico_request_interval: numberValue('digico-request-interval', .1),
+      digico_retry_interval: numberValue('digico-retry-interval', 1),
+      digico_stale_after: numberValue('digico-stale-after', 10),
+      digico_auxes: collectMixerItems('aux'),
+      digico_channels: collectMixerItems('channel'),
+      digico_external_devices: collectDevices(),
+    };
+  }
+
+  async function saveSetup() {
+    const button = field('digico-setup-save');
+    button.disabled = true;
+    setMessage('Saving configuration and restarting the DiGiCo connection…', 'info');
+    try {
+      await requestJson('/api/digico/setup', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(collectConfig()),
+      });
+      state.dirty = false;
+      setMessage('DiGiCo setup saved. Desk discovery has restarted.', 'success');
+      await loadSetup(true);
+    } catch (error) {
+      setMessage(error.message || 'Could not save DiGiCo setup.', 'danger');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function action(url, workingMessage, successMessage) {
+    setMessage(workingMessage, 'info');
+    try {
+      const payload = await requestJson(url, {method: 'POST'});
+      renderStatus(payload.status || {});
+      setMessage(successMessage, 'success');
+      window.setTimeout(() => loadSetup(false), 500);
+    } catch (error) {
+      setMessage(error.message || 'The action failed.', 'danger');
+    }
+  }
+
+  root.addEventListener('input', event => {
+    if (event.target && event.target.matches('input, select, textarea')) state.dirty = true;
+  });
+  root.addEventListener('change', event => {
+    if (event.target && event.target.matches('input, select, textarea')) state.dirty = true;
+  });
+  field('digico-setup-save').addEventListener('click', saveSetup);
+  field('digico-restart').addEventListener('click', () => action('/api/digico/restart', 'Restarting the UDP connection…', 'Connection restarted.'));
+  field('digico-discover').addEventListener('click', () => action('/api/digico/discover', 'Clearing cached desk data and restarting discovery…', 'Desk discovery restarted.'));
+  field('digico-refresh').addEventListener('click', () => loadSetup(false));
+  field('digico-add-device').addEventListener('click', () => {
+    const empty = deviceList.querySelector('.digico-device-empty');
+    if (empty) empty.remove();
+    renderDevice({enabled: true, port: 8000, broadcast: true, loopback: false});
+    state.dirty = true;
+  });
+  for (const button of root.querySelectorAll('.digico-reset-discovered')) {
+    button.addEventListener('click', () => {
+      const target = button.dataset.kind === 'aux' ? auxTable : channelTable;
+      for (const row of target.querySelectorAll('.digico-config-row')) {
+        row.querySelector('.digico-item-label').value = row.dataset.deskLabel || '';
+        row.querySelector('.digico-item-enabled').checked = true;
+        row.querySelector('.digico-item-order').value = row.dataset.channel;
+      }
+      state.dirty = true;
+      setMessage('Desk labels restored locally. Select Save & Restart to apply them.', 'info');
+    });
+  }
+
+  loadSetup(true);
+  window.setInterval(() => {
+    if (!document.hidden) loadSetup(false);
+  }, 3000);
+})();

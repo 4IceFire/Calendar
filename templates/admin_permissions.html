@@ -184,6 +184,32 @@
                         <hr class="my-3">
                         <div class="row g-3">
                           <div class="col-12">
+                            <div class="fw-semibold">Personal Mix AUX access (DiGiCo)</div>
+                            <div class="small text-muted">No selected AUXes means this group can mix every enabled AUX. Access is enforced by the TDeck API.</div>
+                          </div>
+                          {% if digico_auxes %}
+                            {% set selected_auxes = (group_to_digico.get(g.id).allowed_auxes if group_to_digico and group_to_digico.get(g.id) else []) %}
+                            {% for aux in digico_auxes %}
+                              {% set aux_id = aux.channel|string %}
+                              <div class="col-12 col-md-6">
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="digico_allowed_auxes_role" value="{{ aux_id }}" data-role="digico-aux"
+                                    {% if selected_auxes and (aux_id in selected_auxes) %}checked{% endif %}>
+                                  <label class="form-check-label">{{ aux.label }} <span class="text-muted">(AUX {{ aux.channel }})</span></label>
+                                </div>
+                              </div>
+                            {% endfor %}
+                          {% else %}
+                            <div class="col-12">
+                              <div class="text-muted small">No AUXes have been discovered yet. Configure and connect the desk from DiGiCo Setup, then return here.</div>
+                            </div>
+                          {% endif %}
+                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the Personal Mixes page permission.</div></div>
+                        </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
                             <div class="fw-semibold">Idle logout timeout override</div>
                             <div class="small text-muted">Blank inherits global timeout. Use <code>0</code> to disable idle logout for this group.</div>
                           </div>
