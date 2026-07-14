@@ -15,6 +15,7 @@
   const connection = document.getElementById('digico-mixer-connection');
   const snapshot = document.getElementById('digico-snapshot');
   const retry = document.getElementById('digico-mixer-retry');
+  const CONTROL_SEND_INTERVAL_MS = 40;
 
   const state = {
     config: null,
@@ -23,7 +24,7 @@
     configBusy: false,
     channelControls: new Map(),
     activeControls: new Set(),
-    sendTimers: new Map(),
+    controlSends: new Map(),
     errorSince: 0,
   };
 
@@ -151,28 +152,70 @@
     valueLabel.textContent = field === 'level' ? formatDb(sliderToDb(input.value)) : formatPan(input.value);
   }
 
-  async function sendControl(channel, field, rawValue, final) {
-    if (!state.selectedAux) return;
-    const value = field === 'level' ? sliderToDb(rawValue) : Number(rawValue);
-    const key = `${channel}:${field}`;
-    if (state.sendTimers.has(key)) {
-      window.clearTimeout(state.sendTimers.get(key));
-      state.sendTimers.delete(key);
+  function controlSendState(key) {
+    if (!state.controlSends.has(key)) {
+      state.controlSends.set(key, {
+        inFlight: false,
+        queued: null,
+        timer: null,
+        lastSentAt: 0,
+      });
     }
-    const send = async () => {
-      state.sendTimers.delete(key);
-      try {
-        await getJson(`/api/digico/aux/${state.selectedAux.channel}/channel/${channel}/${field}`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({value, final: !!final}),
-        });
-      } catch (error) {
-        showNotice(error.message || 'Could not send the mix change.', 'danger');
-      }
+    return state.controlSends.get(key);
+  }
+
+  function scheduleControlSend(key, immediate) {
+    const entry = controlSendState(key);
+    if (entry.inFlight || entry.timer || !entry.queued) return;
+    const elapsed = Date.now() - Number(entry.lastSentAt || 0);
+    const delay = immediate ? 0 : Math.max(0, CONTROL_SEND_INTERVAL_MS - elapsed);
+    if (delay <= 0) {
+      flushControlSend(key);
+      return;
+    }
+    entry.timer = window.setTimeout(() => {
+      entry.timer = null;
+      flushControlSend(key);
+    }, delay);
+  }
+
+  async function flushControlSend(key) {
+    const entry = controlSendState(key);
+    if (entry.inFlight || !entry.queued) return;
+    const change = entry.queued;
+    entry.queued = null;
+    entry.inFlight = true;
+    entry.lastSentAt = Date.now();
+    try {
+      await getJson(`/api/digico/aux/${change.aux}/channel/${change.channel}/${change.field}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({value: change.value, final: change.final}),
+      });
+    } catch (error) {
+      showNotice(error.message || 'Could not send the mix change.', 'danger');
+    } finally {
+      entry.inFlight = false;
+      if (entry.queued) scheduleControlSend(key, !!entry.queued.final);
+    }
+  }
+
+  function sendControl(channel, field, rawValue, final) {
+    if (!state.selectedAux) return;
+    const key = `${state.selectedAux.channel}:${channel}:${field}`;
+    const entry = controlSendState(key);
+    entry.queued = {
+      aux: Number(state.selectedAux.channel),
+      channel: Number(channel),
+      field,
+      value: field === 'level' ? sliderToDb(rawValue) : Number(rawValue),
+      final: !!final,
     };
-    if (final) await send();
-    else state.sendTimers.set(key, window.setTimeout(send, 65));
+    if (final && entry.timer) {
+      window.clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    scheduleControlSend(key, !!final);
   }
 
   function buildControl(channel, field, initialValue) {

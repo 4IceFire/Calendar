@@ -30,6 +30,7 @@ class _DeskSimulator:
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.controls: list[tuple[str, list]] = []
+        self.queries: list[str] = []
 
     def start(self) -> None:
         self.thread.start()
@@ -55,6 +56,8 @@ class _DeskSimulator:
             except OSError:
                 return
             for address, args in decode_osc_packet(packet):
+                if address.endswith("/?"):
+                    self.queries.append(address)
                 if address == "/Console/Channels/?":
                     self._reply(source, "/Console/Input_Channels", [2])
                 elif address == "/Console/Aux_Outputs/modes/?":
@@ -133,6 +136,26 @@ class DigicoClientIntegrationTests(unittest.TestCase):
                 state = client.aux_state(2)
             self.assertTrue(all(c["level"] == -20.0 for c in state["channels"]))
             self.assertTrue(all(c["pan"] == 0.5 for c in state["channels"]))
+
+            # Mono AUXes only need levels. Once received, browser polling uses
+            # the cache instead of continuously re-querying the desk.
+            mono_state = client.aux_state(1)
+            deadline = time.time() + 2
+            while time.time() < deadline and any(c["level"] is None for c in mono_state["channels"]):
+                time.sleep(0.05)
+                mono_state = client.aux_state(1)
+            mono_level_query = "/Aux_Send/1/send_level/?"
+            mono_pan_query = "/Aux_Send/1/send_pan/?"
+            level_query_count = sum(mono_level_query in address for address in desk.queries)
+            self.assertEqual(level_query_count, 2)
+            self.assertFalse(any(mono_pan_query in address for address in desk.queries))
+            for _ in range(4):
+                client.aux_state(1)
+            time.sleep(0.15)
+            self.assertEqual(
+                sum(mono_level_query in address for address in desk.queries),
+                level_query_count,
+            )
 
             unknown = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:

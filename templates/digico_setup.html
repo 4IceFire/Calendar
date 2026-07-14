@@ -50,7 +50,7 @@
         <hr>
         <h3 class="h6">Polling and failure detection</h3>
         <div class="row g-3">
-          <div class="col-md-4"><label class="form-label" for="digico-request-interval">Request spacing (seconds)</label><input id="digico-request-interval" class="form-control" type="number" min="0.025" max="5" step="0.025"><div class="form-text">Delay between OSC queries. 0.1 is a conservative default.</div></div>
+          <div class="col-md-4"><label class="form-label" for="digico-request-interval">Request spacing (seconds)</label><input id="digico-request-interval" class="form-control" type="number" min="0.025" max="5" step="0.025"><div class="form-text">Use 0.025 for the fastest AUX loading; 0.1 is a conservative setting.</div></div>
           <div class="col-md-4"><label class="form-label" for="digico-retry-interval">Discovery retry (seconds)</label><input id="digico-retry-interval" class="form-control" type="number" min="0.1" max="30" step="0.1"><div class="form-text">Retry unanswered discovery requests.</div></div>
           <div class="col-md-4"><label class="form-label" for="digico-stale-after">Offline after (seconds)</label><input id="digico-stale-after" class="form-control" type="number" min="1" max="300" step="1"><div class="form-text">Marks the desk offline when replies stop.</div></div>
         </div>

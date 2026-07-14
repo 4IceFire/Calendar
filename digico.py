@@ -254,6 +254,7 @@ class DigicoMixerClient:
         self._cache: dict[str, dict[str, Any]] = {}
         self._pending: deque[str] = deque()
         self._pending_set: set[str] = set()
+        self._request_sent_at: dict[str, float] = {}
         self._last_query_address = ""
         self._last_query_at = 0.0
         self._last_heartbeat_at = 0.0
@@ -332,6 +333,7 @@ class DigicoMixerClient:
             self._cache.clear()
             self._pending.clear()
             self._pending_set.clear()
+            self._request_sent_at.clear()
             self._last_query_address = ""
             self._last_query_at = 0.0
             self._last_heartbeat_at = 0.0
@@ -445,6 +447,7 @@ class DigicoMixerClient:
             changed = prior is None or prior.get("args") != args
             if address.startswith(self.CACHE_PREFIXES):
                 self._cache[address] = {"address": address, "args": list(args), "ts": now}
+            self._request_sent_at.pop(address + "/?", None)
             if changed:
                 self._revision += 1
 
@@ -452,6 +455,7 @@ class DigicoMixerClient:
                 self._cache.clear()
                 self._pending.clear()
                 self._pending_set.clear()
+                self._request_sent_at.clear()
                 self._last_query_address = ""
                 self._current_snapshot = -1
                 self._current_snapshot_name = ""
@@ -544,6 +548,7 @@ class DigicoMixerClient:
                 if query:
                     self._last_query_address = query
                     self._last_query_at = now
+                    self._request_sent_at[query] = now
             if query:
                 try:
                     self.send(query)
@@ -570,19 +575,34 @@ class DigicoMixerClient:
     def _enqueue_locked(self, address: str) -> None:
         if address in self._pending_set:
             return
+        sent_at = self._request_sent_at.get(address, 0.0)
+        if sent_at and (time.time() - sent_at) < self.config.retry_interval:
+            return
         self._pending.append(address)
         self._pending_set.add(address)
 
     def request_aux_state(self, aux_number: int) -> None:
         with self._lock:
             channel_count = self._channel_count_locked()
+            modes = self._aux_modes_locked()
+            stereo = 0 < int(aux_number) <= len(modes) and self._mode_is_stereo(modes[int(aux_number) - 1])
+            level_queries: list[str] = []
+            pan_queries: list[str] = []
             for channel in range(1, channel_count + 1):
-                self._enqueue_locked(
-                    f"/Input_Channels/{channel}/Aux_Send/{aux_number}/send_level/?"
-                )
-                self._enqueue_locked(
-                    f"/Input_Channels/{channel}/Aux_Send/{aux_number}/send_pan/?"
-                )
+                custom = self._config_item(self.config.channels, channel)
+                if custom and not bool(custom.get("enabled", True)):
+                    continue
+                level_address = f"/Input_Channels/{channel}/Aux_Send/{aux_number}/send_level"
+                if level_address not in self._cache:
+                    level_queries.append(level_address + "/?")
+                if stereo:
+                    pan_address = f"/Input_Channels/{channel}/Aux_Send/{aux_number}/send_pan"
+                    if pan_address not in self._cache:
+                        pan_queries.append(pan_address + "/?")
+            # Get every visible fader on screen first. Stereo pan values can
+            # populate after the levels without holding up the main mix.
+            for address in level_queries + pan_queries:
+                self._enqueue_locked(address)
 
     @staticmethod
     def _colour(number: int, total: int) -> str:

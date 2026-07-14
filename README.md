@@ -99,6 +99,8 @@ Operational notes:
 
 - Run only one TDeck/OSCWebMixer instance on the configured local UDP port.
 - A low-rate heartbeat keeps desk status accurate while nobody is moving a fader.
+- Personal-mix faders stream coalesced updates while they move and send a final value when released.
+- Set request spacing to `0.025` for the fastest initial AUX-value loading. Higher values reduce desk query traffic but take proportionally longer to populate uncached mixes.
 - Mixer writes and AUX permissions are enforced by the server API, not only by the browser UI.
 - Diagnostics show binding errors, discovery progress, last desk packet age, packet counts, relay traffic and OSC parse errors.
 - If a phone cannot load, verify it can open another TDeck page first, then check the DiGiCo diagnostics. A phone loading the page does not consume extra SD9 bandwidth; the backend shares one desk cache and UDP socket.
