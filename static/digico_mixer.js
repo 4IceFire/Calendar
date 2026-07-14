@@ -260,6 +260,49 @@
     return {element: control, input, value};
   }
 
+  function updateSendToggle(control, sendOn) {
+    const known = typeof sendOn === 'boolean';
+    if (known) control.sendOn = sendOn;
+    control.button.disabled = !known || control.busy;
+    control.button.classList.toggle('is-on', known && sendOn);
+    control.button.classList.toggle('is-off', known && !sendOn);
+    control.button.classList.toggle('is-loading', !known);
+    control.button.textContent = known ? (sendOn ? 'Send On' : 'Send Off') : 'Loading…';
+    control.button.setAttribute('aria-pressed', known && sendOn ? 'true' : 'false');
+  }
+
+  function buildSendToggle(channel) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'digico-send-toggle is-loading';
+    button.setAttribute('aria-label', `${channel.label || `Channel ${channel.channel}`} AUX send`);
+    const control = {button, sendOn: null, busy: false, holdUntil: 0};
+    updateSendToggle(control, channel.sendOn);
+    button.addEventListener('click', async () => {
+      if (!state.selectedAux || control.busy || typeof control.sendOn !== 'boolean') return;
+      const previous = control.sendOn;
+      const next = !previous;
+      const aux = Number(state.selectedAux.channel);
+      control.busy = true;
+      control.holdUntil = Date.now() + 750;
+      updateSendToggle(control, next);
+      try {
+        const payload = await getJson(`/api/digico/aux/${aux}/channel/${channel.channel}/on`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({value: next, final: true}),
+        });
+        control.busy = false;
+        updateSendToggle(control, !!payload.value);
+      } catch (error) {
+        control.busy = false;
+        updateSendToggle(control, previous);
+        showNotice(error.message || 'Could not change the channel send.', 'danger');
+      }
+    });
+    return control;
+  }
+
   function buildChannels(channels) {
     state.channelControls.clear();
     channelGroups.replaceChildren();
@@ -287,14 +330,18 @@
         const nameText = document.createElement('span');
         nameText.textContent = channel.label || `Channel ${channel.channel}`;
         name.appendChild(nameText);
+        const identity = document.createElement('div');
+        identity.className = 'digico-channel-identity';
+        const send = buildSendToggle(channel);
+        identity.append(name, send.button);
         const level = buildControl(channel.channel, 'level', channel.level);
-        row.append(name, level.element);
+        row.append(identity, level.element);
         let pan = null;
         if (state.selectedAux && state.selectedAux.stereo) {
           pan = buildControl(channel.channel, 'pan', channel.pan);
           row.appendChild(pan.element);
         }
-        state.channelControls.set(Number(channel.channel), {level, pan});
+        state.channelControls.set(Number(channel.channel), {send, level, pan});
         list.appendChild(row);
       }
       channelGroups.appendChild(list);
@@ -307,6 +354,9 @@
     for (const channel of payload.channels || []) {
       const controls = state.channelControls.get(Number(channel.channel));
       if (!controls) continue;
+      if (typeof channel.sendOn === 'boolean' && !controls.send.busy && Date.now() >= controls.send.holdUntil) {
+        updateSendToggle(controls.send, channel.sendOn);
+      }
       if (channel.level !== null && !state.activeControls.has(`${channel.channel}:level`)) {
         controls.level.input.value = dbToSlider(channel.level);
         updateSliderVisual(controls.level.input, controls.level.value, 'level');

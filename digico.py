@@ -587,11 +587,15 @@ class DigicoMixerClient:
             modes = self._aux_modes_locked()
             stereo = 0 < int(aux_number) <= len(modes) and self._mode_is_stereo(modes[int(aux_number) - 1])
             level_queries: list[str] = []
+            on_queries: list[str] = []
             pan_queries: list[str] = []
             for channel in range(1, channel_count + 1):
                 custom = self._config_item(self.config.channels, channel)
                 if custom and not bool(custom.get("enabled", True)):
                     continue
+                on_address = f"/Input_Channels/{channel}/Aux_Send/{aux_number}/send_on"
+                if on_address not in self._cache:
+                    on_queries.append(on_address + "/?")
                 level_address = f"/Input_Channels/{channel}/Aux_Send/{aux_number}/send_level"
                 if level_address not in self._cache:
                     level_queries.append(level_address + "/?")
@@ -599,9 +603,10 @@ class DigicoMixerClient:
                     pan_address = f"/Input_Channels/{channel}/Aux_Send/{aux_number}/send_pan"
                     if pan_address not in self._cache:
                         pan_queries.append(pan_address + "/?")
-            # Get every visible fader on screen first. Stereo pan values can
-            # populate after the levels without holding up the main mix.
-            for address in level_queries + pan_queries:
+            # Preserve fast fader loading: levels populate first, followed by
+            # send states, then stereo pans. Toggles remain disabled until
+            # their own desk values arrive, so an unknown state cannot be sent.
+            for address in level_queries + on_queries + pan_queries:
                 self._enqueue_locked(address)
 
     @staticmethod
@@ -620,6 +625,23 @@ class DigicoMixerClient:
         if isinstance(mode, (int, float)):
             return int(mode) == 2
         return str(mode or "").strip().lower() in {"2", "stereo", "st"}
+
+    @staticmethod
+    def _value_is_on(value: Any) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "on", "yes"}:
+                return True
+            if normalized in {"false", "off", "no", ""}:
+                return False
+            try:
+                return float(normalized) != 0.0
+            except Exception:
+                return False
+        try:
+            return float(value) != 0.0
+        except Exception:
+            return bool(value)
 
     def mixer_config(self) -> dict[str, Any]:
         with self._lock:
@@ -683,12 +705,16 @@ class DigicoMixerClient:
                 level_args = self._cache_args_locked(
                     f"/Input_Channels/{number}/Aux_Send/{aux_number}/send_level"
                 ) or []
+                on_args = self._cache_args_locked(
+                    f"/Input_Channels/{number}/Aux_Send/{aux_number}/send_on"
+                ) or []
                 pan_args = self._cache_args_locked(
                     f"/Input_Channels/{number}/Aux_Send/{aux_number}/send_pan"
                 ) or []
                 values.append(
                     {
                         **channel,
+                        "sendOn": self._value_is_on(on_args[0]) if on_args else None,
                         "level": float(level_args[0]) if level_args else None,
                         "pan": float(pan_args[0]) if pan_args else None,
                     }
@@ -723,6 +749,14 @@ class DigicoMixerClient:
         address = f"/Input_Channels/{channel_number}/Aux_Send/{aux_number}/send_pan"
         self.send(address, [value])
         self._optimistic_cache(address, [value])
+        return value
+
+    def set_send_on(self, aux_number: int, channel_number: int, enabled: bool) -> bool:
+        self._validate_route(aux_number, channel_number)
+        value = bool(enabled)
+        address = f"/Input_Channels/{channel_number}/Aux_Send/{aux_number}/send_on"
+        self.send(address, [1 if value else 0])
+        self._optimistic_cache(address, [1 if value else 0])
         return value
 
     def _optimistic_cache(self, address: str, args: list[Any]) -> None:

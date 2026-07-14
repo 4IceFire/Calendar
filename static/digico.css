@@ -102,8 +102,30 @@
 }
 
 .digico-channel:not(.is-stereo) { grid-template-columns: minmax(8rem, 11rem) minmax(10rem, 1fr); }
+.digico-channel-identity { display: grid; gap: .5rem; min-width: 0; }
 .digico-channel-name { display: flex; align-items: center; gap: .55rem; min-width: 0; font-weight: 700; }
 .digico-channel-name > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.digico-send-toggle {
+  justify-self: start;
+  min-width: 6.75rem;
+  min-height: 2.75rem;
+  padding: .45rem .75rem;
+  color: #c7ccd5;
+  background: rgba(255, 255, 255, .04);
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: .55rem;
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  transition: background-color .12s ease, border-color .12s ease, color .12s ease, transform .08s ease;
+}
+.digico-send-toggle.is-on { color: #fff; background: var(--digico-tint); border-color: color-mix(in srgb, var(--digico-tint), white 30%); }
+.digico-send-toggle.is-off { color: #ffb6b6; background: rgba(222, 62, 62, .12); border-color: rgba(239, 86, 86, .75); }
+.digico-send-toggle.is-loading { color: #9da3ad; background: rgba(255, 255, 255, .035); border-color: rgba(255, 255, 255, .12); }
+.digico-send-toggle:not(:disabled):active { transform: translateY(1px); }
+.digico-send-toggle:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.digico-send-toggle:disabled { cursor: wait; opacity: .72; }
 .digico-control { min-width: 0; }
 .digico-control-label { display: flex; justify-content: space-between; gap: .5rem; margin-bottom: .2rem; color: #aeb4c0; font-size: .7rem; text-transform: uppercase; }
 .digico-value { color: #fff; font-variant-numeric: tabular-nums; }
@@ -161,7 +183,7 @@
   .digico-channel-groups { padding-inline: .55rem; }
   .digico-channel, .digico-channel:not(.is-stereo) { grid-template-columns: minmax(0, 1fr); gap: .35rem; }
   .digico-channel.is-stereo .digico-pan-control { grid-column: auto; }
-  .digico-channel-name { margin-bottom: .25rem; }
+  .digico-channel-identity { grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin-bottom: .25rem; }
   .digico-status-strip { grid-template-columns: 1fr; }
   .digico-config-row, .digico-config-row.is-channel, .digico-device-row { grid-template-columns: auto minmax(0, 1fr); }
   .digico-config-row > *, .digico-device-row > * { grid-column: 2; }

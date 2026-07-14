@@ -341,14 +341,15 @@ Unlike legacy Companion-facing APIs, every DiGiCo endpoint enforces login and pa
 ### Read an AUX mix
 
 - **GET** `/api/digico/aux/<aux>/state`
-- Queues desk queries and returns the currently cached channel levels/pans for the AUX.
+- Queues desk queries and returns the currently cached channel send on/off states, levels and pans for the AUX.
 
 ### Change a channel send
 
 - **POST** `/api/digico/aux/<aux>/channel/<channel>/level`
 - **POST** `/api/digico/aux/<aux>/channel/<channel>/pan`
-- Body: `{ "value": -12.5, "final": true }` for level, or `{ "value": 0.5, "final": true }` for pan.
-- Level is clamped to `-150..10` dB; pan is clamped to `0..1`. The browser uses `final` to avoid logging every intermediate drag event.
+- **POST** `/api/digico/aux/<aux>/channel/<channel>/on`
+- Body: `{ "value": -12.5, "final": true }` for level, `{ "value": 0.5, "final": true }` for pan, or `{ "value": false, "final": true }` for send on/off.
+- Level is clamped to `-150..10` dB; pan is clamped to `0..1`; on/off accepts a boolean or an equivalent `0`/`1` value. The browser uses `final` to avoid logging every intermediate fader event.
 
 ### Setup and diagnostics
 

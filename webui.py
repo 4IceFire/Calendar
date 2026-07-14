@@ -7112,18 +7112,32 @@ def api_digico_channel_control(aux_number: int, channel_number: int, field: str)
     denied = _digico_api_guard(aux_number=aux_number)
     if denied is not None:
         return denied
-    if field not in ('level', 'pan'):
+    if field not in ('level', 'pan', 'on'):
         return jsonify({'ok': False, 'error': 'Unknown control'}), 404
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or 'value' not in data:
-        return jsonify({'ok': False, 'error': 'A numeric value is required'}), 400
+        return jsonify({'ok': False, 'error': 'A value is required'}), 400
     client = _get_digico_client_from_config()
     if client is None:
         return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
     if not _digico_route_is_enabled(client, aux_number, channel_number):
         return jsonify({'ok': False, 'error': 'Mixer route not found'}), 404
     try:
-        value = client.set_level(aux_number, channel_number, float(data['value'])) if field == 'level' else client.set_pan(aux_number, channel_number, float(data['value']))
+        if field == 'level':
+            value = client.set_level(aux_number, channel_number, float(data['value']))
+        elif field == 'pan':
+            value = client.set_pan(aux_number, channel_number, float(data['value']))
+        else:
+            raw = data['value']
+            if isinstance(raw, bool):
+                enabled = raw
+            elif isinstance(raw, (int, float)) and raw in (0, 1):
+                enabled = bool(raw)
+            elif isinstance(raw, str) and raw.strip().lower() in ('0', '1', 'false', 'true', 'off', 'on'):
+                enabled = raw.strip().lower() in ('1', 'true', 'on')
+            else:
+                return jsonify({'ok': False, 'error': 'On/off value must be boolean'}), 400
+            value = client.set_send_on(aux_number, channel_number, enabled)
         if bool(data.get('final', False)):
             log_event(
                 f'digico.mix.{field}',

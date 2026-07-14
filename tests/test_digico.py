@@ -72,9 +72,11 @@ class _DeskSimulator:
                     self._reply(source, "/Snapshots/Current_Snapshot", [-1])
                 elif address.endswith("/send_level/?"):
                     self._reply(source, address[:-2], [-20.0])
+                elif address.endswith("/send_on/?"):
+                    self._reply(source, address[:-2], [1])
                 elif address.endswith("/send_pan/?"):
                     self._reply(source, address[:-2], [0.5])
-                elif address.endswith("/send_level") or address.endswith("/send_pan"):
+                elif address.endswith(("/send_level", "/send_on", "/send_pan")):
                     self.controls.append((address, list(args)))
                     self._reply(source, address, list(args))
 
@@ -130,24 +132,38 @@ class DigicoClientIntegrationTests(unittest.TestCase):
             state = client.aux_state(2)
             deadline = time.time() + 2
             while time.time() < deadline and any(
-                c["level"] is None or c["pan"] is None for c in state["channels"]
+                c["sendOn"] is None or c["level"] is None or c["pan"] is None
+                for c in state["channels"]
             ):
                 time.sleep(0.05)
                 state = client.aux_state(2)
             self.assertTrue(all(c["level"] == -20.0 for c in state["channels"]))
             self.assertTrue(all(c["pan"] == 0.5 for c in state["channels"]))
+            self.assertTrue(all(c["sendOn"] is True for c in state["channels"]))
+            aux_two_queries = [address for address in desk.queries if "/Aux_Send/2/" in address]
+            last_level = max(i for i, address in enumerate(aux_two_queries) if "/send_level/" in address)
+            first_on = min(i for i, address in enumerate(aux_two_queries) if "/send_on/" in address)
+            last_on = max(i for i, address in enumerate(aux_two_queries) if "/send_on/" in address)
+            first_pan = min(i for i, address in enumerate(aux_two_queries) if "/send_pan/" in address)
+            self.assertLess(last_level, first_on)
+            self.assertLess(last_on, first_pan)
 
             # Mono AUXes only need levels. Once received, browser polling uses
             # the cache instead of continuously re-querying the desk.
             mono_state = client.aux_state(1)
             deadline = time.time() + 2
-            while time.time() < deadline and any(c["level"] is None for c in mono_state["channels"]):
+            while time.time() < deadline and any(
+                c["sendOn"] is None or c["level"] is None for c in mono_state["channels"]
+            ):
                 time.sleep(0.05)
                 mono_state = client.aux_state(1)
             mono_level_query = "/Aux_Send/1/send_level/?"
+            mono_on_query = "/Aux_Send/1/send_on/?"
             mono_pan_query = "/Aux_Send/1/send_pan/?"
             level_query_count = sum(mono_level_query in address for address in desk.queries)
+            on_query_count = sum(mono_on_query in address for address in desk.queries)
             self.assertEqual(level_query_count, 2)
+            self.assertEqual(on_query_count, 2)
             self.assertFalse(any(mono_pan_query in address for address in desk.queries))
             for _ in range(4):
                 client.aux_state(1)
@@ -155,6 +171,10 @@ class DigicoClientIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 sum(mono_level_query in address for address in desk.queries),
                 level_query_count,
+            )
+            self.assertEqual(
+                sum(mono_on_query in address for address in desk.queries),
+                on_query_count,
             )
 
             unknown = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -172,10 +192,13 @@ class DigicoClientIntegrationTests(unittest.TestCase):
 
             self.assertEqual(client.set_level(2, 1, -12.5), -12.5)
             self.assertEqual(client.set_pan(2, 1, 0.25), 0.25)
+            self.assertFalse(client.set_send_on(2, 1, False))
             deadline = time.time() + 1
-            while time.time() < deadline and len(desk.controls) < 2:
+            while time.time() < deadline and len(desk.controls) < 3:
                 time.sleep(0.025)
-            self.assertEqual(len(desk.controls), 2)
+            self.assertEqual(len(desk.controls), 3)
+            self.assertEqual(desk.controls[-1][0], "/Input_Channels/1/Aux_Send/2/send_on")
+            self.assertEqual(desk.controls[-1][1], [0])
 
             # The idle heartbeat keeps the desk online after discovery even
             # when no browser is actively polling an AUX.

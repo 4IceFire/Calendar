@@ -100,6 +100,7 @@ Operational notes:
 - Run only one TDeck/OSCWebMixer instance on the configured local UDP port.
 - A low-rate heartbeat keeps desk status accurate while nobody is moving a fader.
 - Personal-mix faders stream coalesced updates while they move and send a final value when released.
+- Every channel has a send on/off control that reads its initial state from the selected AUX before it can be changed.
 - Set request spacing to `0.025` for the fastest initial AUX-value loading. Higher values reduce desk query traffic but take proportionally longer to populate uncached mixes.
 - Mixer writes and AUX permissions are enforced by the server API, not only by the browser UI.
 - Diagnostics show binding errors, discovery progress, last desk packet age, packet counts, relay traffic and OSC parse errors.

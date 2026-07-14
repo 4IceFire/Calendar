@@ -89,6 +89,19 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertEqual(changed.status_code, 200)
             self.assertEqual(changed.get_json()["value"], -12.5)
 
+            toggled = client.post(
+                "/api/digico/aux/2/channel/1/on",
+                json={"value": False, "final": True},
+            )
+            self.assertEqual(toggled.status_code, 200)
+            self.assertIs(toggled.get_json()["value"], False)
+
+            invalid_toggle = client.post(
+                "/api/digico/aux/2/channel/1/on",
+                json={"value": "maybe"},
+            )
+            self.assertEqual(invalid_toggle.status_code, 400)
+
     def test_aux_scope_is_enforced_by_server(self):
         with (
             patch.object(webui, "_auth_enabled", return_value=True),
