@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% set page_title = 'DiGiCo Mixer Setup' %}
 {% set page_subtitle = 'Connection, Personal Mix layout, permissions and native OSC relay' %}
+{% set config_active_tab = 'digico' %}
 
 {% block head_extra %}
   <link rel="stylesheet" href="/static/digico.css">
@@ -12,6 +13,7 @@
 {% endblock %}
 
 {% block content %}
+{% include '_config_tabs.html' %}
 <div id="digico-setup" class="digico-setup-shell">
   <div id="digico-setup-message" class="mb-3" role="status"></div>
 

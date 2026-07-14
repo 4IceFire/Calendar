@@ -1,0 +1,37 @@
+{% set active = config_active_tab|default('web-ui') %}
+<nav class="config-section-tabs mb-4" aria-label="Configuration sections">
+  <div class="config-section-tabs-scroll">
+    <ul id="config-nav" class="nav nav-tabs config-section-tabs-list">
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'web-ui' %} active{% endif %}" href="/config#cfg-web-ui" data-group-id="web-ui"{% if active == 'web-ui' %} aria-current="page"{% endif %}>General</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'companion' %} active{% endif %}" href="/config#cfg-companion" data-group-id="companion"{% if active == 'companion' %} aria-current="page"{% endif %}>Companion</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'propresenter' %} active{% endif %}" href="/config#cfg-propresenter" data-group-id="propresenter"{% if active == 'propresenter' %} aria-current="page"{% endif %}>ProPresenter</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'videohub' %} active{% endif %}" href="/config#cfg-videohub" data-group-id="videohub"{% if active == 'videohub' %} aria-current="page"{% endif %}>VideoHub</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'atem' %} active{% endif %}" href="/config#cfg-atem" data-group-id="atem"{% if active == 'atem' %} aria-current="page"{% endif %}>ATEM</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'advanced' %} active{% endif %}" href="/config#cfg-advanced" data-group-id="advanced"{% if active == 'advanced' %} aria-current="page"{% endif %}>Advanced</a>
+      </li>
+      <li class="nav-item config-section-tabs-divider">
+        <a class="nav-link{% if active == 'digico' %} active{% endif %}" href="/config/digico"{% if active == 'digico' %} aria-current="page"{% endif %}>DiGiCo</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'surfaces' %} active{% endif %}" href="/config/companion-surfaces"{% if active == 'surfaces' %} aria-current="page"{% endif %}>Surfaces</a>
+      </li>
+      <li class="nav-item config-section-tabs-divider">
+        <a class="nav-link{% if active == 'export' %} active{% endif %}" href="/config/export"{% if active == 'export' %} aria-current="page"{% endif %}>Export</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'import' %} active{% endif %}" href="/config/import"{% if active == 'import' %} aria-current="page"{% endif %}>Import</a>
+      </li>
+    </ul>
+  </div>
+</nav>

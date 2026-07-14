@@ -1,13 +1,15 @@
 {% extends 'base.html' %}
 
 {% set page_title = 'Companion Surfaces' %}
+{% set page_subtitle = 'Reusable Companion surfaces and Surface Controls assignments' %}
+{% set config_active_tab = 'surfaces' %}
 
 {% block page_actions %}
-  <a class="btn btn-outline-secondary" href="/config">Config</a>
   <a class="btn btn-outline-secondary" href="/surface-controls">View Surfaces</a>
 {% endblock %}
 
 {% block content %}
+  {% include '_config_tabs.html' %}
   <div id="companion-surfaces-config-page">
     <div id="companion-surfaces-status" class="mb-3"></div>
 

@@ -678,6 +678,24 @@ function _renderConfigField(key, value) {
   return wrap;
 }
 
+function _revealActiveConfigTab(nav) {
+  if (!nav) return;
+  const scroller = nav.closest('.config-section-tabs-scroll');
+  const activeTab = nav.querySelector('.nav-link.active');
+  if (!scroller || !activeTab) return;
+  window.requestAnimationFrame(() => {
+    const left = activeTab.offsetLeft;
+    const right = left + activeTab.offsetWidth;
+    const visibleLeft = scroller.scrollLeft;
+    const visibleRight = visibleLeft + scroller.clientWidth;
+    if (left >= visibleLeft && right <= visibleRight) return;
+    scroller.scrollLeft = Math.max(0, left - ((scroller.clientWidth - activeTab.offsetWidth) / 2));
+  });
+}
+
+const _configSectionNav = document.getElementById('config-nav');
+if (_configSectionNav) _revealActiveConfigTab(_configSectionNav);
+
 function _renderConfigGroups(cfg) {
   const nav = document.getElementById('config-nav');
   const panels = document.getElementById('config-panels');
@@ -687,8 +705,13 @@ function _renderConfigGroups(cfg) {
     if (legacyContainer) legacyContainer.innerHTML = '';
     return;
   }
-  nav.innerHTML = '';
   panels.innerHTML = '';
+  for (const tab of Array.from(nav.querySelectorAll('[data-group-id]'))) {
+    tab.classList.remove('active');
+    tab.removeAttribute('aria-current');
+    const item = tab.closest('.nav-item');
+    if (item) item.classList.add('d-none');
+  }
 
   const NAV_STORAGE_KEY = 'tdeck.config.activeGroup';
 
@@ -720,11 +743,15 @@ function _renderConfigGroups(cfg) {
     const groupId = String(id || '').trim();
     if (!groupId) return;
     for (const btn of Array.from(nav.querySelectorAll('[data-group-id]'))) {
-      btn.classList.toggle('active', String(btn.dataset.groupId) === groupId);
+      const active = String(btn.dataset.groupId) === groupId;
+      btn.classList.toggle('active', active);
+      if (active) btn.setAttribute('aria-current', 'page');
+      else btn.removeAttribute('aria-current');
     }
     for (const panel of Array.from(panels.querySelectorAll('[data-group-id]'))) {
       panel.style.display = (String(panel.dataset.groupId) === groupId) ? '' : 'none';
     }
+    _revealActiveConfigTab(nav);
     try {
       window.localStorage.setItem(NAV_STORAGE_KEY, groupId);
     } catch (e) {
@@ -772,7 +799,8 @@ function _renderConfigGroups(cfg) {
 
   const baseGroups = [
     {
-      title: 'Web UI',
+      id: 'web-ui',
+      title: 'General',
       keys: ['webserver_port', 'server_port'],
     },
     {
@@ -799,13 +827,11 @@ function _renderConfigGroups(cfg) {
   }
 
   const renderedGroups = [];
-  let webUiBody = null;
-
-  function _addGroupPanel({title, keys, postRender}) {
+  function _addGroupPanel({id: requestedId, title, keys, postRender}) {
     const presentKeys = (keys || []).filter(k => Object.prototype.hasOwnProperty.call(cfg, k) && !hiddenKeys.has(k));
     if (!presentKeys.length) return;
 
-    const id = _groupIdFromTitle(title);
+    const id = requestedId || _groupIdFromTitle(title);
     for (const k of presentKeys) used.add(k);
 
     const panel = document.createElement('div');
@@ -833,24 +859,40 @@ function _renderConfigGroups(cfg) {
     panel.appendChild(card);
     panels.appendChild(panel);
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'list-group-item list-group-item-action';
-    btn.textContent = title;
-    btn.dataset.groupId = id;
-    btn.addEventListener('click', () => _setActiveGroupId(id));
-    nav.appendChild(btn);
+    let btn = Array.from(nav.querySelectorAll('[data-group-id]'))
+      .find(tab => String(tab.dataset.groupId) === id);
+    if (!btn) {
+      const item = document.createElement('li');
+      item.className = 'nav-item';
+      btn = document.createElement('a');
+      btn.className = 'nav-link';
+      btn.href = `/config#cfg-${id}`;
+      btn.textContent = title;
+      btn.dataset.groupId = id;
+      item.appendChild(btn);
+      const divider = nav.querySelector('.config-section-tabs-divider');
+      nav.insertBefore(item, divider || null);
+    }
+    const navItem = btn.closest('.nav-item');
+    if (navItem) navItem.classList.remove('d-none');
+    if (!btn.dataset.configTabBound) {
+      btn.dataset.configTabBound = '1';
+      btn.addEventListener('click', (event) => {
+        event.preventDefault();
+        _setActiveGroupId(id);
+      });
+    }
 
     renderedGroups.push(id);
-    if (title === 'Web UI') webUiBody = body;
   }
 
   for (const g of baseGroups) {
     _addGroupPanel({
       title: g.title,
+      id: g.id,
       keys: g.keys,
       postRender: (body) => {
-        if (g.title !== 'Web UI') return;
+        if (g.id !== 'web-ui') return;
 
         const presentSchedulingKeys = schedulingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
         if (presentSchedulingKeys.length) {
@@ -906,10 +948,11 @@ function _renderConfigGroups(cfg) {
     }
   }
 
-  // Everything else (sorted) gets its own section so it's easy to find.
+  // Everything else (sorted) lives under Advanced so the common integrations
+  // remain easy to scan in the primary tabs.
   const otherKeys = Object.keys(cfg || {}).filter(k => !used.has(k) && !hiddenKeys.has(k)).sort();
   if (otherKeys.length) {
-    _addGroupPanel({title: 'Other', keys: otherKeys});
+    _addGroupPanel({title: 'Advanced', keys: otherKeys});
   }
 
   // Activate a section.
