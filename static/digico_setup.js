@@ -8,7 +8,10 @@
   const auxTable = document.getElementById('digico-aux-table');
   const channelTable = document.getElementById('digico-channel-table');
   const deviceList = document.getElementById('digico-device-list');
+  const iconSystem = window.TDeckDigicoIcons;
   const state = {payload: null, dirty: false, busy: false, initialized: false};
+  let iconDialog = null;
+  let iconTarget = null;
 
   function setMessage(text, kind) {
     message.className = text ? `alert alert-${kind || 'secondary'} mb-3` : 'mb-3';
@@ -97,6 +100,98 @@
     if (input.type === 'number') input.min = '1';
     label.appendChild(input);
     return label;
+  }
+
+  function updateIconButton(button, input, valueText, kind) {
+    const icon = iconSystem.normalize(valueText);
+    input.value = icon;
+    button.replaceChildren();
+    button.appendChild(iconSystem.create(icon, 'digico-icon-select-preview'));
+    const text = document.createElement('span');
+    text.textContent = iconSystem.find(icon).label;
+    button.appendChild(text);
+    const subject = kind === 'channel' ? 'channel' : 'AUX';
+    button.setAttribute('aria-label', `Choose ${subject} icon. Current selection: ${text.textContent}`);
+  }
+
+  function ensureIconDialog() {
+    if (iconDialog) return iconDialog;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'digico-icon-dialog';
+    dialog.setAttribute('aria-labelledby', 'digico-icon-dialog-title');
+
+    const header = document.createElement('div');
+    header.className = 'digico-icon-dialog-header';
+    const heading = document.createElement('h2');
+    heading.id = 'digico-icon-dialog-title';
+    heading.className = 'h5 mb-0';
+    heading.textContent = 'Choose an icon';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'btn-close';
+    close.setAttribute('aria-label', 'Close icon picker');
+    close.addEventListener('click', () => dialog.close());
+    header.append(heading, close);
+
+    const help = document.createElement('p');
+    help.className = 'text-muted small mb-3';
+    help.textContent = 'AUXes and input channels use the same line style throughout Personal Mixes.';
+    const grid = document.createElement('div');
+    grid.className = 'digico-icon-grid';
+    for (const item of iconSystem.items) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'digico-icon-option';
+      option.dataset.icon = item.id;
+      option.appendChild(iconSystem.create(item.id, 'digico-icon-option-image'));
+      const label = document.createElement('span');
+      label.textContent = item.label;
+      option.appendChild(label);
+      option.addEventListener('click', () => {
+        if (!iconTarget) return;
+        updateIconButton(iconTarget.button, iconTarget.input, item.id, iconTarget.kind);
+        state.dirty = true;
+        dialog.close();
+      });
+      grid.appendChild(option);
+    }
+    dialog.append(header, help, grid);
+    dialog.addEventListener('click', event => {
+      if (event.target === dialog) dialog.close();
+    });
+    dialog.addEventListener('close', () => { iconTarget = null; });
+    document.body.appendChild(dialog);
+    iconDialog = dialog;
+    return dialog;
+  }
+
+  function iconControl(item, kind) {
+    const wrap = document.createElement('div');
+    wrap.className = 'digico-icon-select-wrap';
+    const label = document.createElement('span');
+    label.className = 'digico-icon-select-label';
+    label.textContent = 'Icon';
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.className = 'digico-item-icon';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'digico-icon-select';
+    button.setAttribute('aria-haspopup', 'dialog');
+    updateIconButton(button, input, item.icon || '', kind);
+    button.addEventListener('click', () => {
+      const dialog = ensureIconDialog();
+      iconTarget = {button, input, kind};
+      const selected = input.value;
+      for (const option of dialog.querySelectorAll('.digico-icon-option')) {
+        const active = option.dataset.icon === selected;
+        option.classList.toggle('is-selected', active);
+        option.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }
+      dialog.showModal();
+    });
+    wrap.append(label, button, input);
+    return wrap;
   }
 
   function updateMoveButtons(target) {
@@ -189,10 +284,10 @@
         const heading = labeledInput('Section heading', 'digico-item-group', item.group || '');
         heading.querySelector('input').placeholder = 'Only where a new section starts';
         row.appendChild(heading);
-        row.appendChild(labeledInput('Icon / emoji', 'digico-item-icon', item.icon || ''));
+        row.appendChild(iconControl(item, kind));
       } else {
         row.appendChild(labeledInput('Colour', 'digico-item-colour', item.colour || '#3478f6', 'color'));
-        row.appendChild(labeledInput('Icon / emoji', 'digico-item-icon', item.icon || ''));
+        row.appendChild(iconControl(item, kind));
       }
       row.appendChild(moveControls(row, item, kind));
       target.appendChild(row);
@@ -323,7 +418,7 @@
         channel: Number(row.dataset.channel),
         enabled: !!row.querySelector('.digico-item-enabled').checked,
         label: row.querySelector('.digico-item-label').value.trim(),
-        icon: row.querySelector('.digico-item-icon').value.trim(),
+        icon: row.querySelector('.digico-item-icon').value,
         order: index + 1,
       };
       if (kind === 'channel') item.group = row.querySelector('.digico-item-group').value.trim();

@@ -112,10 +112,13 @@ class DigicoClientIntegrationTests(unittest.TestCase):
                 request_interval=0.025,
                 retry_interval=0.1,
                 stale_after=2.0,
-                auxes=({"order": 2}, {"order": 1}),
+                auxes=(
+                    {"order": 2, "icon": "vocals"},
+                    {"order": 1, "icon": "drums"},
+                ),
                 channels=(
-                    {"order": 2, "group": "Vocals"},
-                    {"order": 1, "group": "Band"},
+                    {"order": 2, "group": "Vocals", "icon": "vocals"},
+                    {"order": 1, "group": "Band", "icon": "keyboard"},
                 ),
             )
         )
@@ -132,7 +135,9 @@ class DigicoClientIntegrationTests(unittest.TestCase):
             config = client.mixer_config()
             self.assertEqual([item["channel"] for item in config["channels"]], [2, 1])
             self.assertEqual([item["group"] for item in config["channels"]], ["Band", "Vocals"])
+            self.assertEqual([item["icon"] for item in config["channels"]], ["keyboard", "vocals"])
             self.assertEqual([item["channel"] for item in config["auxes"]], [2, 1])
+            self.assertEqual([item["icon"] for item in config["auxes"]], ["drums", "vocals"])
             self.assertTrue(config["auxes"][0]["stereo"])
             self.assertFalse(config["auxes"][1]["stereo"])
 

@@ -70,7 +70,7 @@
 
     <section id="digico-tab-channels" class="tab-pane fade">
       <div class="card tdeck-soft"><div class="card-body">
-        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Input channels</h2><p class="text-muted">Use the arrows to arrange channels. Add a Section heading only to the first channel in a section; that heading appears above it and continues to describe the channels below until the next heading.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="channel" type="button">Reset labels &amp; order</button></div>
+        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Input channels</h2><p class="text-muted">Choose a label and icon, then use the arrows to arrange channels. Add a Section heading only to the first channel in a section; that heading appears above it and continues until the next heading.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="channel" type="button">Reset labels &amp; order</button></div>
         <div id="digico-channel-table" class="digico-config-list"></div>
       </div></div>
     </section>
@@ -97,5 +97,6 @@
 {% endblock %}
 
 {% block scripts %}
+  <script src="/static/digico_icons.js"></script>
   <script src="/static/digico_setup.js"></script>
 {% endblock %}

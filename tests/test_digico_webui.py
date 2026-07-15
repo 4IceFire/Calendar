@@ -34,12 +34,12 @@ class DigicoWebApiTests(unittest.TestCase):
                 retry_interval=0.1,
                 stale_after=2.0,
                 auxes=(
-                    {"enabled": True, "label": "Vocals"},
-                    {"enabled": True, "label": "Band"},
+                    {"enabled": True, "label": "Vocals", "icon": "vocals"},
+                    {"enabled": True, "label": "Band", "icon": "keyboard"},
                 ),
                 channels=(
-                    {"enabled": True, "label": "Lead Vocal"},
-                    {"enabled": True, "label": "Keys"},
+                    {"enabled": True, "label": "Lead Vocal", "icon": "vocals"},
+                    {"enabled": True, "label": "Keys", "icon": "keyboard"},
                 ),
             )
         )
@@ -62,15 +62,27 @@ class DigicoWebApiTests(unittest.TestCase):
             mixer_page = client.get("/personal-mixes")
             self.assertEqual(mixer_page.status_code, 200)
             self.assertIn(b"digico_mixer.js", mixer_page.data)
+            self.assertIn(b"digico_icons.js", mixer_page.data)
             setup_page = client.get("/config/digico")
             self.assertEqual(setup_page.status_code, 200)
             self.assertIn(b"iPad / OSC Relay", setup_page.data)
             self.assertIn(b"Section heading", setup_page.data)
+            self.assertIn(b"digico_icons.js", setup_page.data)
             setup_script = client.get("/static/digico_setup.js")
             self.assertEqual(setup_script.status_code, 200)
             self.assertIn(b"digico-move-up", setup_script.data)
+            self.assertIn(b"iconControl", setup_script.data)
+            self.assertNotIn(b"Icon / emoji", setup_script.data)
             self.assertNotIn(b"digico-item-order", setup_script.data)
             setup_script.close()
+            icon_script = client.get("/static/digico_icons.js")
+            self.assertEqual(icon_script.status_code, 200)
+            for label in (
+                b"Vocals", b"Drums", b"Keyboard", b"Acoustic", b"Electric",
+                b"Bass", b"Speaker", b"Headset mic", b"Tracks", b"FX",
+            ):
+                self.assertIn(label, icon_script.data)
+            icon_script.close()
             mixer_script = client.get("/static/digico_mixer.js")
             self.assertEqual(mixer_script.status_code, 200)
             self.assertIn(b"headingText", mixer_script.data)
@@ -87,7 +99,9 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertEqual(config.status_code, 200)
             payload = config.get_json()
             self.assertEqual([item["label"] for item in payload["auxes"]], ["Vocals", "Band"])
+            self.assertEqual([item["icon"] for item in payload["auxes"]], ["vocals", "keyboard"])
             self.assertEqual([item["label"] for item in payload["channels"]], ["Lead Vocal", "Keys"])
+            self.assertEqual([item["icon"] for item in payload["channels"]], ["vocals", "keyboard"])
 
             state = client.get("/api/digico/aux/2/state")
             self.assertEqual(state.status_code, 200)
@@ -140,6 +154,23 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertEqual(forbidden.status_code, 403)
             allowed = client.get("/api/digico/aux/2/state")
             self.assertEqual(allowed.status_code, 200)
+
+    def test_config_cleaner_only_keeps_supported_picker_icons(self):
+        channels = webui._digico_clean_indexed_items(
+            [{"channel": 1, "label": "Vocal", "icon": "vocals"}],
+            kind="channel",
+        )
+        self.assertEqual(channels[0]["icon"], "vocals")
+
+        auxes = webui._digico_clean_indexed_items(
+            [
+                {"channel": 1, "icon": "fx"},
+                {"channel": 2, "icon": "https://example.test/icon.svg"},
+            ],
+            kind="aux",
+        )
+        self.assertEqual(auxes[0]["icon"], "fx")
+        self.assertEqual(auxes[1]["icon"], "")
 
 
 if __name__ == "__main__":

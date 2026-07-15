@@ -15,6 +15,7 @@
   const connection = document.getElementById('digico-mixer-connection');
   const snapshot = document.getElementById('digico-snapshot');
   const retry = document.getElementById('digico-mixer-retry');
+  const iconSystem = window.TDeckDigicoIcons;
   const CONTROL_SEND_INTERVAL_MS = 40;
 
   const state = {
@@ -57,21 +58,6 @@
     return payload;
   }
 
-  function createIcon(value, className) {
-    const wrap = document.createElement('span');
-    wrap.className = className;
-    const icon = String(value || '').trim();
-    if (/^(https?:\/\/|\/)/i.test(icon)) {
-      const img = document.createElement('img');
-      img.src = icon;
-      img.alt = '';
-      wrap.appendChild(img);
-    } else {
-      wrap.textContent = icon || '♪';
-    }
-    return wrap;
-  }
-
   function selectedAuxFromStorage(auxes) {
     let saved = '';
     try { saved = window.localStorage.getItem('tdeck.digico.aux') || ''; } catch (e) { /* ignore */ }
@@ -93,7 +79,10 @@
     try { window.localStorage.setItem('tdeck.digico.aux', String(aux.channel)); } catch (e) { /* ignore */ }
     root.style.setProperty('--digico-tint', aux.colour || '#3478f6');
     auxLabel.textContent = aux.label || `Aux ${aux.channel}`;
-    auxIcon.replaceChildren(createIcon(aux.icon, 'digico-current-icon'));
+    const icon = iconSystem.normalize(aux.icon);
+    auxIcon.replaceChildren();
+    auxIcon.classList.toggle('d-none', !icon);
+    if (icon) auxIcon.appendChild(iconSystem.create(icon, 'digico-current-icon-image'));
     auxChange.classList.remove('d-none');
     picker.classList.add('d-none');
     channelSection.classList.remove('d-none');
@@ -116,7 +105,8 @@
       button.type = 'button';
       button.className = 'digico-aux-tile';
       button.style.setProperty('--tile-tint', aux.colour || '#3478f6');
-      button.appendChild(createIcon(aux.icon, 'digico-aux-icon'));
+      const icon = iconSystem.normalize(aux.icon);
+      if (icon) button.appendChild(iconSystem.create(icon, 'digico-aux-icon'));
       const text = document.createElement('span');
       text.textContent = aux.label || `Aux ${aux.channel}`;
       button.appendChild(text);
@@ -330,7 +320,8 @@
       row.className = `digico-channel ${state.selectedAux && state.selectedAux.stereo ? 'is-stereo' : ''}`;
       const name = document.createElement('div');
       name.className = 'digico-channel-name';
-      name.appendChild(createIcon(channel.icon, 'digico-channel-icon'));
+      const icon = iconSystem.normalize(channel.icon);
+      if (icon) name.appendChild(iconSystem.create(icon, 'digico-channel-icon'));
       const nameText = document.createElement('span');
       nameText.textContent = channel.label || `Channel ${channel.channel}`;
       name.appendChild(nameText);

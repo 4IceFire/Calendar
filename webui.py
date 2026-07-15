@@ -7092,6 +7092,12 @@ def _digico_clean_number(value, default, low, high, *, integer=False):
     return int(number) if integer else float(number)
 
 
+_DIGICO_ICON_IDS = frozenset({
+    'vocals', 'drums', 'keyboard', 'acoustic', 'electric',
+    'bass', 'speaker', 'headset', 'tracks', 'fx',
+})
+
+
 def _digico_clean_indexed_items(value, *, kind: str) -> list[dict]:
     if not isinstance(value, list):
         return []
@@ -7109,9 +7115,11 @@ def _digico_clean_indexed_items(value, *, kind: str) -> list[dict]:
         item = {
             'enabled': bool(raw.get('enabled', True)),
             'label': str(raw.get('label') or '').strip()[:80],
-            'icon': str(raw.get('icon') or '').strip()[:250],
+            'icon': '',
             'order': int(_digico_clean_number(raw.get('order', number), number, 1, limit, integer=True)),
         }
+        icon = str(raw.get('icon') or '').strip()
+        item['icon'] = icon if icon in _DIGICO_ICON_IDS else ''
         if kind == 'channel':
             item['group'] = str(raw.get('group') or '').strip()[:80]
         else:

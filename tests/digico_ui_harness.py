@@ -29,12 +29,12 @@ CONFIG = {
     "digico_retry_interval": 0.1,
     "digico_stale_after": 2.0,
     "digico_auxes": [
-        {"enabled": True, "label": "Vocals", "colour": "#b449d8", "icon": "🎤", "order": 1},
-        {"enabled": True, "label": "Band", "colour": "#2878e4", "icon": "🎧", "order": 2},
+        {"enabled": True, "label": "Vocals", "colour": "#b449d8", "icon": "vocals", "order": 1},
+        {"enabled": True, "label": "Band", "colour": "#2878e4", "icon": "headset", "order": 2},
     ],
     "digico_channels": [
-        {"enabled": True, "label": "Lead Vocal", "group": "Vocals", "icon": "🎤", "order": 1},
-        {"enabled": True, "label": "Keys", "group": "Band", "icon": "🎹", "order": 2},
+        {"enabled": True, "label": "Lead Vocal", "icon": "vocals", "group": "Vocals", "order": 1},
+        {"enabled": True, "label": "Keys", "icon": "keyboard", "group": "Band", "order": 2},
     ],
     "digico_external_devices": [],
 }
