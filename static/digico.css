@@ -8,6 +8,8 @@
   text-transform: uppercase;
 }
 
+.tdeck-mixer-page { padding-inline: clamp(.75rem, 1.5vw, 1.75rem); }
+
 .digico-mixer-shell {
   --digico-tint: #3478f6;
   overflow: hidden;
@@ -213,12 +215,13 @@
 }
 
 @media (max-width: 575.98px) {
+  .tdeck-mixer-page { padding: 1rem .75rem calc(1rem + env(safe-area-inset-bottom)) !important; }
   .digico-mixer-shell { margin-inline: -.55rem; border-radius: .8rem; }
   .digico-mixer-topbar { align-items: flex-start; }
   .digico-mixer-meta { display: grid; justify-items: end; }
   .digico-picker-heading { align-items: flex-start; }
-  .digico-aux-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .digico-aux-tile { min-height: 5.8rem; padding: .7rem; flex-direction: column; align-items: flex-start; }
+  .digico-aux-grid { grid-template-columns: 1fr; gap: .65rem; }
+  .digico-aux-tile { min-height: 4.5rem; padding: .75rem .9rem; flex-direction: row; align-items: center; }
   .digico-channel-groups { padding-inline: .55rem; }
   .digico-channel, .digico-channel:not(.is-stereo) { grid-template-columns: minmax(0, 1fr); gap: .35rem; }
   .digico-channel.is-stereo .digico-pan-control { grid-column: auto; }

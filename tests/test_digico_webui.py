@@ -63,6 +63,7 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertEqual(mixer_page.status_code, 200)
             self.assertIn(b"digico_mixer.js", mixer_page.data)
             self.assertIn(b"digico_icons.js", mixer_page.data)
+            self.assertIn(b"container-fluid tdeck-mixer-page", mixer_page.data)
             setup_page = client.get("/config/digico")
             self.assertEqual(setup_page.status_code, 200)
             self.assertIn(b"iPad / OSC Relay", setup_page.data)
@@ -92,6 +93,11 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertNotIn(b"Send Off", mixer_script.data)
             self.assertNotIn(b"const grouped = new Map", mixer_script.data)
             mixer_script.close()
+            mixer_styles = client.get("/static/digico.css")
+            self.assertEqual(mixer_styles.status_code, 200)
+            self.assertIn(b".tdeck-mixer-page", mixer_styles.data)
+            self.assertIn(b".digico-aux-grid { grid-template-columns: 1fr;", mixer_styles.data)
+            mixer_styles.close()
             with tempfile.TemporaryDirectory() as tmp, patch.object(
                 webui, "_AUTH_DB_PATH", Path(tmp) / "auth.db"
             ):

@@ -111,7 +111,7 @@
       </div>
     </div>
 
-    <main id="main-content" class="container py-4" tabindex="-1">
+    <main id="main-content" class="{{ page_container_class|default('container') }} py-4" tabindex="-1">
       {% if page_title is defined and page_title %}
         <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
           <div>
