@@ -86,6 +86,10 @@ class DigicoWebApiTests(unittest.TestCase):
             mixer_script = client.get("/static/digico_mixer.js")
             self.assertEqual(mixer_script.status_code, 200)
             self.assertIn(b"headingText", mixer_script.data)
+            self.assertIn(b"Unmuted", mixer_script.data)
+            self.assertIn(b"Muted", mixer_script.data)
+            self.assertNotIn(b"Send On", mixer_script.data)
+            self.assertNotIn(b"Send Off", mixer_script.data)
             self.assertNotIn(b"const grouped = new Map", mixer_script.data)
             mixer_script.close()
             with tempfile.TemporaryDirectory() as tmp, patch.object(

@@ -260,7 +260,14 @@
     control.button.classList.toggle('is-on', known && sendOn);
     control.button.classList.toggle('is-off', known && !sendOn);
     control.button.classList.toggle('is-loading', !known);
-    control.button.textContent = known ? (sendOn ? 'Send On' : 'Send Off') : 'Loading…';
+    control.button.textContent = known ? (sendOn ? 'Unmuted' : 'Muted') : 'Loading…';
+    const channelName = control.channel.label || `Channel ${control.channel.channel}`;
+    control.button.setAttribute(
+      'aria-label',
+      known
+        ? `${channelName}: ${sendOn ? 'unmuted' : 'muted'}. Select to ${sendOn ? 'mute' : 'unmute'}.`
+        : `${channelName}: loading mute state.`,
+    );
     control.button.setAttribute('aria-pressed', known && sendOn ? 'true' : 'false');
   }
 
@@ -268,8 +275,7 @@
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'digico-send-toggle is-loading';
-    button.setAttribute('aria-label', `${channel.label || `Channel ${channel.channel}`} AUX send`);
-    const control = {button, sendOn: null, busy: false, holdUntil: 0};
+    const control = {button, channel, sendOn: null, busy: false, holdUntil: 0};
     updateSendToggle(control, channel.sendOn);
     button.addEventListener('click', async () => {
       if (!state.selectedAux || control.busy || typeof control.sendOn !== 'boolean') return;
@@ -290,7 +296,7 @@
       } catch (error) {
         control.busy = false;
         updateSendToggle(control, previous);
-        showNotice(error.message || 'Could not change the channel send.', 'danger');
+        showNotice(error.message || 'Could not change the channel mute state.', 'danger');
       }
     });
     return control;

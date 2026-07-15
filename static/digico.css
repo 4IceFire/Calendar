@@ -90,7 +90,25 @@
 .digico-channel-icon svg { display: block; width: 100%; height: 100%; }
 
 .digico-channel-groups { padding: .75rem 1rem 1.25rem; }
-.digico-channel-group-title { margin: 1rem .25rem .45rem; color: #aeb4c0; font-size: .72rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.digico-channel-group-title {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  margin: 1.5rem 0 .65rem;
+  padding: .6rem .8rem;
+  color: #fff;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--digico-tint) 28%, #1b1d22), rgba(255, 255, 255, .035));
+  border: 1px solid color-mix(in srgb, var(--digico-tint) 55%, #4b4f59);
+  border-left: .3rem solid var(--digico-tint);
+  border-radius: .6rem;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .06);
+  font-size: .86rem;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.digico-channel-group-title:first-child { margin-top: .25rem; }
+.digico-channel-group-title::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--digico-tint) 60%, transparent); }
 .digico-channel-list { display: grid; gap: .55rem; }
 .digico-channel {
   display: grid;
