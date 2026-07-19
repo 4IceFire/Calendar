@@ -8,11 +8,13 @@ __pycache__/
 # Runtime artifacts
 calendar.log
 realtimestt.log
+hisense-native-test.*.log
 calendar.pid
 calendar_triggers.json
 transcription_sender_ui.pid
 config_import_backups/
 videohub_room_images/
+hisense_certs/
 
 # Local Config/Event Files
 *.json

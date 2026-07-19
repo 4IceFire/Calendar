@@ -25,6 +25,24 @@ When configuring a scheduled **API Call** trigger in the UI, you can enter paths
 
 ---
 
+## Hisense / VIDAA TVs
+
+TV control is intended for a trusted production LAN. Pairing and configuration are restricted to users who can access **Config**; normal control endpoints remain available to the TDeck Companion module.
+
+- **GET** `/api/tvs` — list configured TVs and cached connection, power, volume, mute, source, source-list, model, and error state.
+- **GET** `/api/tvs/<tv_id>/state` — get one TV's cached state.
+- **POST** `/api/tvs/<tv_id>/power` with `{ "state": "on" | "off" | "toggle" }`.
+- **POST** `/api/tvs/<tv_id>/volume` with `{ "level": 20 }` for absolute volume, or `{ "action": "up" | "down" | "mute" }`.
+- **POST** `/api/tvs/<tv_id>/source` with `{ "source": "HDMI1" }`. Discovered display names such as `HDMI 1` are also accepted.
+- **POST** `/api/tvs/<tv_id>/reconnect` — discard the current TV connection and reconnect it.
+- **GET/PUT** `/api/hisense/config` — protected TV configuration API used by **Config → TVs**.
+- **POST** `/api/tvs/<tv_id>/pair/request` — protected; show a new PIN on the TV.
+- **POST** `/api/tvs/<tv_id>/pair/submit` with `{ "pin": "1234" }` — protected; approve TDeck on the TV.
+
+Power-on sends Wake-on-LAN using the configured MAC address. Commands are serialized per TV and each TV reconnects independently in the background.
+
+---
+
 ## Calendar
 
 ### List events (for UI)

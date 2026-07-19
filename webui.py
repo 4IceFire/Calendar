@@ -226,6 +226,12 @@ except Exception:
         "digico_auxes": [],
         "digico_channels": [],
         "digico_external_devices": [],
+        "hisense_enabled": False,
+        "hisense_cert_path": "hisense_certs/vidaa_client.pem",
+        "hisense_key_path": "hisense_certs/vidaa_client.key",
+        "hisense_poll_interval": 10,
+        "hisense_reconnect_interval": 15,
+        "hisense_tvs": [],
         "atem_ip": "127.0.0.1",
         "atem_port": 9910,
         "atem_timeout": 3,
@@ -3365,6 +3371,16 @@ except Exception:
     _close_digico_client = None  # type: ignore
     _digico_client_factory = None  # type: ignore
 
+# Optional native Hisense / VIDAA TV integration
+try:
+    from hisense import (
+        close_hisense_manager as _close_hisense_manager,
+        get_hisense_manager_from_config as _hisense_manager_factory,
+    )
+except Exception:
+    _close_hisense_manager = None  # type: ignore
+    _hisense_manager_factory = None  # type: ignore
+
 # Optional Blackmagic ATEM audio integration
 try:
     from atem import AtemAudioClient, get_atem_client_from_config, DEFAULT_PORT as ATEM_DEFAULT_PORT
@@ -3419,6 +3435,19 @@ def _get_digico_client_from_config():
         cfg = {}
     try:
         return _digico_client_factory(cfg)
+    except Exception:
+        return None
+
+
+def _get_hisense_manager_from_config():
+    if _hisense_manager_factory is None:
+        return None
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        return _hisense_manager_factory(cfg, base_dir=Path.cwd())
     except Exception:
         return None
 
@@ -3587,6 +3616,7 @@ _propresenter_status_cache = {'ts': 0.0, 'connected': False}
 _videohub_status_cache = {'ts': 0.0, 'connected': False}
 _digico_status_cache = {'ts': 0.0, 'connected': False}
 _atem_status_cache = {'ts': 0.0, 'connected': False}
+_hisense_status_cache = {'ts': 0.0, 'connected': False}
 _status_snapshot_cache = {'ts': 0.0, 'payload': None}
 _videohub_labels_cache = {'ts': 0.0, 'payload': None}
 _videohub_state_cache = {'ts': 0.0, 'payload': None}
@@ -3610,6 +3640,7 @@ _connectivity_last: dict[str, bool | None] = {
     'videohub': None,
     'digico': None,
     'atem': None,
+    'hisense': None,
 }
 
 
@@ -3626,6 +3657,7 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
         'videohub': 'VideoHub',
         'digico': 'DiGiCo',
         'atem': 'ATEM',
+        'hisense': 'Hisense TVs',
     }.get(service, service)
 
     should_log = False
@@ -3808,6 +3840,24 @@ def _probe_atem_status(cfg: dict) -> dict:
     }
 
 
+def _probe_hisense_status(cfg: dict) -> dict:
+    enabled = bool(cfg.get('hisense_enabled', False))
+    manager = _get_hisense_manager_from_config()
+    status = manager.status() if manager is not None else {}
+    online = int(status.get('online', 0) or 0)
+    total = int(status.get('total', 0) or 0)
+    return {
+        'connected': bool(status.get('connected', False)),
+        'enabled': enabled,
+        'configured': bool(status.get('configured', False)),
+        'available': bool(status.get('available', False)),
+        'online': online,
+        'total': total,
+        'detail': f'{online}/{total} online' if enabled and total else ('disabled' if not enabled else 'not configured'),
+        'checked_at': time.time(),
+    }
+
+
 def _refresh_status_snapshot() -> dict:
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
@@ -3819,6 +3869,7 @@ def _refresh_status_snapshot() -> dict:
     videohub = _probe_videohub_status(cfg)
     digico = _probe_digico_status(cfg)
     atem = _probe_atem_status(cfg)
+    hisense = _probe_hisense_status(cfg)
     now = time.time()
 
     payload = {
@@ -3829,6 +3880,7 @@ def _refresh_status_snapshot() -> dict:
         'videohub': videohub,
         'digico': digico,
         'atem': atem,
+        'hisense': hisense,
     }
 
     with _status_cache_lock:
@@ -3844,6 +3896,8 @@ def _refresh_status_snapshot() -> dict:
         _digico_status_cache['connected'] = bool(digico.get('connected', False))
         _atem_status_cache['ts'] = atem.get('checked_at', now)
         _atem_status_cache['connected'] = bool(atem.get('connected', False))
+        _hisense_status_cache['ts'] = hisense.get('checked_at', now)
+        _hisense_status_cache['connected'] = bool(hisense.get('connected', False))
 
     _log_connectivity_change('companion', bool(companion.get('connected', False)), detail=str(companion.get('detail') or ''))
     _log_connectivity_change('propresenter', bool(propresenter.get('connected', False)), detail=str(propresenter.get('detail') or ''))
@@ -3851,6 +3905,8 @@ def _refresh_status_snapshot() -> dict:
     if bool(digico.get('enabled', False)):
         _log_connectivity_change('digico', bool(digico.get('connected', False)), detail=str(digico.get('detail') or ''))
     _log_connectivity_change('atem', bool(atem.get('connected', False)), detail=str(atem.get('detail') or ''))
+    if bool(hisense.get('enabled', False)):
+        _log_connectivity_change('hisense', bool(hisense.get('connected', False)), detail=str(hisense.get('detail') or ''))
 
     return payload
 
@@ -3913,6 +3969,10 @@ def start_http_server(host: str, port: int) -> None:
         except Exception:
             pass
         try:
+            _get_hisense_manager_from_config()
+        except Exception:
+            pass
+        try:
             _refresh_status_snapshot()
         except Exception:
             pass
@@ -3934,6 +3994,11 @@ def stop_http_server() -> None:
         try:
             if _close_digico_client is not None:
                 _close_digico_client()
+        except Exception:
+            pass
+        try:
+            if _close_hisense_manager is not None:
+                _close_hisense_manager()
         except Exception:
             pass
         _http_server = None
@@ -5561,6 +5626,12 @@ def config_page():
 @require_page('page:config', 'Config')
 def digico_config_page():
     return render_template('digico_setup.html')
+
+
+@app.route('/config/tvs')
+@require_page('page:config', 'Config')
+def hisense_config_page():
+    return render_template('hisense_setup.html')
 
 
 @app.route('/config/export', methods=['GET', 'POST'])
@@ -7405,6 +7476,182 @@ def atem_status():
 def api_status_summary():
     """Return a consolidated connectivity snapshot for the top navbar."""
     return jsonify(_get_status_snapshot())
+
+
+def _hisense_manager_or_error():
+    manager = _get_hisense_manager_from_config()
+    if manager is None:
+        return None, (jsonify({'ok': False, 'error': 'Hisense support is unavailable; install the Python requirements'}), 503)
+    return manager, None
+
+
+def _hisense_log(action: str, tv_id: str, *, value: Any = None, result: dict | None = None) -> None:
+    ok = bool((result or {}).get('ok', False))
+    try:
+        log_event(
+            f'hisense.{action}',
+            f"TV {tv_id}: {action.replace('_', ' ')}{' ' + str(value) if value not in (None, '') else ''}",
+            source='api',
+            status='success' if ok else 'failure',
+            target_type='hisense_tv',
+            target_id=tv_id,
+            details={'action': action, 'value': value, 'result': result or {}},
+        )
+    except Exception:
+        pass
+
+
+@app.get('/api/tvs')
+def api_hisense_tvs():
+    manager, error = _hisense_manager_or_error()
+    if error:
+        return error
+    return jsonify(manager.status())
+
+
+@app.get('/api/tvs/<tv_id>/state')
+def api_hisense_tv_state(tv_id: str):
+    manager, error = _hisense_manager_or_error()
+    if error:
+        return error
+    try:
+        return jsonify({'ok': True, 'tv': manager.get(tv_id).status()})
+    except KeyError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+
+
+def _hisense_submit(tv_id: str, action: str, value: Any = None, *, wait: float = 4.0):
+    manager, error = _hisense_manager_or_error()
+    if error:
+        return error
+    try:
+        result = manager.get(tv_id).submit(action, value, wait=wait)
+        _hisense_log(action, tv_id, value=value, result=result)
+        return jsonify(result), (200 if result.get('ok') else 502)
+    except KeyError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+    except (TypeError, ValueError) as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        result = {'ok': False, 'error': str(exc)}
+        _hisense_log(action, tv_id, value=value, result=result)
+        return jsonify(result), 500
+
+
+@app.post('/api/tvs/<tv_id>/power')
+def api_hisense_tv_power(tv_id: str):
+    body = request.get_json(silent=True) or {}
+    state = str(body.get('state') or '').strip().lower()
+    actions = {'on': 'power_on', 'off': 'power_off', 'toggle': 'power_toggle'}
+    if state not in actions:
+        return jsonify({'ok': False, 'error': 'state must be on, off, or toggle'}), 400
+    # Wake-on-LAN returns immediately; the TV's controller reconnects in the background.
+    return _hisense_submit(tv_id, actions[state], wait=4.0)
+
+
+@app.post('/api/tvs/<tv_id>/volume')
+def api_hisense_tv_volume(tv_id: str):
+    body = request.get_json(silent=True) or {}
+    if body.get('level') is not None:
+        try:
+            level = int(body.get('level'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'level must be a number from 0 to 100'}), 400
+        if level < 0 or level > 100:
+            return jsonify({'ok': False, 'error': 'level must be from 0 to 100'}), 400
+        return _hisense_submit(tv_id, 'volume_set', level)
+    action = str(body.get('action') or '').strip().lower()
+    actions = {'up': 'volume_up', 'down': 'volume_down', 'mute': 'mute'}
+    if action not in actions:
+        return jsonify({'ok': False, 'error': 'provide level, or action up, down, or mute'}), 400
+    return _hisense_submit(tv_id, actions[action])
+
+
+@app.post('/api/tvs/<tv_id>/source')
+def api_hisense_tv_source(tv_id: str):
+    body = request.get_json(silent=True) or {}
+    source = str(body.get('source') or '').strip()
+    if not source:
+        return jsonify({'ok': False, 'error': 'source is required'}), 400
+    return _hisense_submit(tv_id, 'source', source)
+
+
+@app.post('/api/tvs/<tv_id>/reconnect')
+def api_hisense_tv_reconnect(tv_id: str):
+    return _hisense_submit(tv_id, 'reconnect', wait=5.0)
+
+
+@app.get('/api/hisense/config')
+def api_hisense_config_get():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+    cfg = utils.get_config()
+    keys = ('hisense_enabled', 'hisense_cert_path', 'hisense_key_path', 'hisense_poll_interval', 'hisense_reconnect_interval', 'hisense_tvs')
+    return jsonify({'ok': True, 'config': {key: cfg.get(key) for key in keys}})
+
+
+@app.put('/api/hisense/config')
+def api_hisense_config_put():
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
+    tvs = body.get('hisense_tvs')
+    if not isinstance(tvs, list):
+        return jsonify({'ok': False, 'error': 'hisense_tvs must be a list'}), 400
+    seen: set[str] = set()
+    normalized = []
+    for index, tv in enumerate(tvs):
+        if not isinstance(tv, dict):
+            return jsonify({'ok': False, 'error': f'TV {index + 1} is invalid'}), 400
+        ident = re.sub(r'[^a-z0-9_-]+', '-', str(tv.get('id') or '').strip().lower()).strip('-')
+        if not ident or ident in seen:
+            return jsonify({'ok': False, 'error': f'TV {index + 1} needs a unique ID'}), 400
+        seen.add(ident)
+        host = str(tv.get('host') or '').strip()
+        mac = str(tv.get('mac') or '').strip().lower().replace('-', ':')
+        if bool(tv.get('enabled', True)) and (not host or not re.fullmatch(r'[0-9A-Za-z.-]+', host)):
+            return jsonify({'ok': False, 'error': f'{ident} needs a valid IP address or hostname'}), 400
+        if mac and not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac):
+            return jsonify({'ok': False, 'error': f'{ident} has an invalid MAC address'}), 400
+        normalized.append({'id': ident, 'name': str(tv.get('name') or ident).strip(), 'host': host, 'mac': mac, 'enabled': bool(tv.get('enabled', True))})
+    updates = {
+        'hisense_enabled': bool(body.get('hisense_enabled', False)),
+        'hisense_cert_path': str(body.get('hisense_cert_path') or 'hisense_certs/vidaa_client.pem').strip(),
+        'hisense_key_path': str(body.get('hisense_key_path') or 'hisense_certs/vidaa_client.key').strip(),
+        'hisense_poll_interval': max(2, int(body.get('hisense_poll_interval') or 10)),
+        'hisense_reconnect_interval': max(2, int(body.get('hisense_reconnect_interval') or 15)),
+        'hisense_tvs': normalized,
+    }
+    cfg = utils.get_config()
+    cfg.update(updates)
+    utils.save_config(cfg)
+    utils.reload_config(force=True)
+    if _close_hisense_manager is not None:
+        _close_hisense_manager()
+    manager = _get_hisense_manager_from_config()
+    log_event('hisense.config.update', f'Updated Hisense TV configuration ({len(normalized)} TVs)', source='web', status='success', target_type='config', target_id='hisense', details={'tv_ids': sorted(seen), 'enabled': updates['hisense_enabled']})
+    return jsonify({'ok': True, 'config': updates, 'status': manager.status() if manager else {}})
+
+
+@app.post('/api/tvs/<tv_id>/pair/request')
+def api_hisense_tv_pair_request(tv_id: str):
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+    return _hisense_submit(tv_id, 'pair_request', wait=5.0)
+
+
+@app.post('/api/tvs/<tv_id>/pair/submit')
+def api_hisense_tv_pair_submit(tv_id: str):
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+    body = request.get_json(silent=True) or {}
+    return _hisense_submit(tv_id, 'pair_submit', str(body.get('pin') or '').strip(), wait=7.0)
 
 
 @app.route('/api/atem/audio/state')
