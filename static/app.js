@@ -1318,8 +1318,10 @@ function _activityLogSetStatus(msg, kind) {
   });
 }
 
-if (document.getElementById('activity-log-page')) {
+function _initActivityLogPage() {
   const bodyEl = document.getElementById('activity-log-body');
+  if (!bodyEl || bodyEl.dataset.activityLogInitialized === '1') return;
+  bodyEl.dataset.activityLogInitialized = '1';
   const searchEl = document.getElementById('activity-log-search');
   const sourceEl = document.getElementById('activity-log-source');
   const statusEl = document.getElementById('activity-log-status-filter');
@@ -1345,6 +1347,7 @@ if (document.getElementById('activity-log-page')) {
   let loading = false;
   let pollInFlight = false;
   let searchTimer = null;
+  let loadGeneration = 0;
 
   function _activityStatusClass(status) {
     const s = String(status || '').toLowerCase();
@@ -1615,7 +1618,7 @@ if (document.getElementById('activity-log-page')) {
   }
 
   async function _activityLoad({reset = false} = {}) {
-    if (loading) return;
+    const generation = ++loadGeneration;
     loading = true;
     _activityUpdatePager();
     if (reset) {
@@ -1629,6 +1632,7 @@ if (document.getElementById('activity-log-page')) {
       const res = await fetch(`/api/activity-log?${params.toString()}`, {cache: 'no-store'});
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to load activity log');
+      if (generation !== loadGeneration) return;
       (data.events || []).forEach((ev) => {
         if (ev && ev.id != null) eventsById.set(Number(ev.id), ev);
       });
@@ -1640,10 +1644,14 @@ if (document.getElementById('activity-log-page')) {
       _activityRender();
       _activityLogSetStatus('', 'ok');
     } catch (e) {
-      _activityLogSetStatus(String(e.message || e), 'error');
+      if (generation === loadGeneration) {
+        _activityLogSetStatus(String(e.message || e), 'error');
+      }
     } finally {
-      loading = false;
-      _activityUpdatePager();
+      if (generation === loadGeneration) {
+        loading = false;
+        _activityUpdatePager();
+      }
     }
   }
 
@@ -1721,6 +1729,12 @@ if (document.getElementById('activity-log-page')) {
   _activityLoad({reset: true});
   setInterval(_activityPoll, 2000);
   setInterval(_activityRefreshAlerts, 15000);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _initActivityLogPage, {once: true});
+} else {
+  _initActivityLogPage();
 }
 
 // --- Timers page ---
