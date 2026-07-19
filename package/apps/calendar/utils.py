@@ -92,6 +92,19 @@ _defaults = {
     "videohub_timeout": 2,
     "videohub_presets_file": "videohub_presets.json",
 
+    # DiGiCo Personal Mixes (OSC / native iPad protocol)
+    "digico_enabled": False,
+    "digico_ip": "",
+    "digico_port": 9000,
+    "digico_listen_address": "0.0.0.0",
+    "digico_listen_port": 8000,
+    "digico_request_interval": 0.1,
+    "digico_retry_interval": 1.0,
+    "digico_stale_after": 10.0,
+    "digico_auxes": [],
+    "digico_channels": [],
+    "digico_external_devices": [],
+
     # ATEM audio defaults
     "atem_ip": "127.0.0.1",
     "atem_port": 9910,

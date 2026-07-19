@@ -1,13 +1,11 @@
 {% extends 'base.html' %}
 
 {% set page_title = 'Export Config' %}
-
-{% block page_actions %}
-  <a class="btn btn-outline-secondary" href="/config/import">Import Config</a>
-  <a class="btn btn-outline-secondary" href="/config">Config</a>
-{% endblock %}
+{% set page_subtitle = 'Download selected TDeck configuration and data as one package' %}
+{% set config_active_tab = 'export' %}
 
 {% block content %}
+{% include '_config_tabs.html' %}
 <div class="config-transport-page">
   {% if error %}
     <div class="alert alert-danger">{{ error }}</div>

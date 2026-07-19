@@ -7,6 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="/static/tdeck-icon.svg">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
+    {% block head_extra %}{% endblock %}
   </head>
   <body>
     <a class="tdeck-skip-link" href="#main-content">Skip to main content</a>
@@ -33,6 +34,10 @@
             <div id="videohub-indicator" class="me-2">
               <span id="videohub-dot" class="indicator-dot bg-danger"></span>
               <span id="videohub-label">VideoHub: Checking...</span>
+            </div>
+            <div id="digico-indicator" class="me-2 d-none">
+              <span id="digico-dot" class="indicator-dot bg-danger"></span>
+              <span id="digico-label">DiGiCo: Checking...</span>
             </div>
             <div id="atem-indicator" class="me-2">
               <span id="atem-dot" class="indicator-dot bg-danger"></span>
@@ -100,12 +105,13 @@
           {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub</a>{% endif %}
           {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Foyer Audio</a>{% endif %}
           {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
+          {% if not auth_enabled or can_access('page:digico_mixer') %}<a class="nav-link{% if request.path.startswith('/personal-mixes') %} active{% endif %}" href="/personal-mixes">Personal Mixes</a>{% endif %}
           {% if not auth_enabled or can_access('page:surface_controls') %}<a class="nav-link{% if request.path.startswith('/surface-controls') %} active{% endif %}" href="/surface-controls">Surface Controls</a>{% endif %}
         </nav>
       </div>
     </div>
 
-    <main id="main-content" class="container py-4" tabindex="-1">
+    <main id="main-content" class="{{ page_container_class|default('container') }} py-4" tabindex="-1">
       {% if page_title is defined and page_title %}
         <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-3">
           <div>
@@ -196,5 +202,6 @@
       })();
     </script>
     <script src="/static/app.js"></script>
+    {% block scripts %}{% endblock %}
   </body>
 </html>

@@ -254,6 +254,7 @@ Timer selection is either:
 ```
 - **Notes:**
   - `routing` is a 1-based list where index 0 corresponds to output #1.
+  - Hardware refreshes run in the background. A cold or expired cache can return `refreshing: true` with cached/fallback data; clients may retry until it becomes false.
   - Best-effort. If routing can’t be fetched, returns an identity-style routing (1..40).
 
 ### Presets: list
@@ -329,6 +330,36 @@ Timer selection is either:
 
 ---
 
+## DiGiCo Personal Mixes
+
+Unlike legacy Companion-facing APIs, every DiGiCo endpoint enforces login and page access when authentication is enabled. Mixer endpoints also enforce the current user's group AUX allow-list.
+
+### Mixer layout and status
+
+- **GET** `/api/digico/mixer/config`
+- Returns enabled/allowed AUXes, enabled channels, snapshot, cache revision and connection status.
+
+### Read an AUX mix
+
+- **GET** `/api/digico/aux/<aux>/state`
+- Queues desk queries and returns the currently cached channel send on/off states, levels and pans for the AUX.
+- An optional `?revision=<number>` returns a compact `unchanged: true` response when the desk cache has not changed, avoiding repeated full channel payloads.
+
+### Change a channel send
+
+- **POST** `/api/digico/aux/<aux>/channel/<channel>/level`
+- **POST** `/api/digico/aux/<aux>/channel/<channel>/pan`
+- **POST** `/api/digico/aux/<aux>/channel/<channel>/on`
+- Body: `{ "value": -12.5, "final": true }` for level, `{ "value": 0.5, "final": true }` for pan, or `{ "value": false, "final": true }` for send on/off.
+- Level is clamped to `-150..10` dB; pan is clamped to `0..1`; on/off accepts a boolean or an equivalent `0`/`1` value. The browser uses `final` to avoid logging every intermediate fader event.
+
+### Setup and diagnostics
+
+- **GET / POST** `/api/digico/setup` (Config page permission)
+- **POST** `/api/digico/restart` (Config page permission)
+- **POST** `/api/digico/discover` (Config page permission)
+- **GET** `/api/digico_status`
+
 ## System / Status
 
 ### Config
@@ -339,6 +370,7 @@ Timer selection is either:
 - **GET** `/api/companion_status`
 - **GET** `/api/propresenter_status`
 - **GET** `/api/videohub_status`
+- **GET** `/api/digico_status`
 
 ---
 

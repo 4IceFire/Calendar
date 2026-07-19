@@ -8,6 +8,7 @@ It supports:
 - A **scheduler** that watches an events JSON file and executes triggers.
 - A **CLI** (`cli.py`) for starting/stopping the scheduler and managing events.
 - A **Web UI** (`webui.py`) for editing events and templates in a browser.
+- A **DiGiCo Personal Mixes** web app that lets multiple phones mix permitted AUXes through one shared SD9 OSC connection.
 
 ## What this app does
 
@@ -64,6 +65,8 @@ Common keys:
 - `poll_interval`: seconds between file-change checks (default: `1.0`)
 - `debug`: enables more verbose logging/output
 
+DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
+
 ## Run (Web UI)
 
 Start the Web UI server:
@@ -75,6 +78,42 @@ python webui.py
 It reads `webserver_port` from `config.json` and prints the URL at startup.
 
 The Web UI also has controls to start/stop registered apps (including the calendar scheduler) from the browser.
+
+## DiGiCo Personal Mixes
+
+TDeck can act as the one remote device connected to a DiGiCo console while serving a separate browser mixer to multiple worship-team devices. The desk-side connection is standard OSC over UDP; browsers use TDeck's normal HTTP server and do not open their own desk sockets.
+
+Setup:
+
+1. Open **Config → DiGiCo Mixer**.
+2. Enable the integration and enter the SD9 IP and OSC port (normally `9000`).
+3. Choose a free local UDP listen port (default `8000`). Allow that UDP port through the TDeck computer's firewall when using native iPad/OSC relay devices.
+4. Wait for discovery to report the input-channel and AUX counts.
+5. Use the **AUXes** and **Channels** tabs to set visibility and labels, choose a unified icon for each AUX and input (plus a colour for each AUX), and arrange items with the arrow buttons. A channel's optional **Section heading** appears immediately above that channel and applies visually until the next heading.
+6. In **Permissions → Groups**, grant **Personal Mixes** and optionally select which AUXes that group may control. No AUX selection means all enabled AUXes.
+7. Team members open `/personal-mixes`, sign in, and choose their assigned mix.
+
+The optional **iPad / OSC Relay** tab recreates WebMixer's native OSC proxy behavior. Only explicitly configured device IPs can send packets through TDeck to the desk. Leave the device list empty when everyone uses the web page.
+
+Operational notes:
+
+- Run only one TDeck/OSCWebMixer instance on the configured local UDP port.
+- A low-rate heartbeat keeps desk status accurate while nobody is moving a fader.
+- Personal-mix faders stream coalesced updates while they move and send a final value when released.
+- Every channel has a mute/unmute control that reads its initial state from the selected AUX before it can be changed.
+- Personal Mix polling uses revision-only responses while a mix is unchanged, and hidden browser tabs stop polling. Fader writes remain immediate and do not wait for the read poll.
+- Set request spacing to `0.025` for the fastest initial AUX-value loading. Higher values reduce desk query traffic but take proportionally longer to populate uncached mixes.
+- Mixer writes and AUX permissions are enforced by the server API, not only by the browser UI.
+- Diagnostics show binding errors, discovery progress, last desk packet age, packet counts, relay traffic and OSC parse errors.
+- If a phone cannot load, verify it can open another TDeck page first, then check the DiGiCo diagnostics. A phone loading the page does not consume extra SD9 bandwidth; the backend shares one desk cache and UDP socket.
+- Permissions and Routing render from cached/fallback hardware metadata while slow ATEM or VideoHub refreshes run in background threads, preventing hardware timeouts from holding a page request open.
+
+Relevant configuration keys:
+
+- `digico_enabled`, `digico_ip`, `digico_port`
+- `digico_listen_address`, `digico_listen_port`
+- `digico_request_interval`, `digico_retry_interval`, `digico_stale_after`
+- `digico_auxes`, `digico_channels`, `digico_external_devices`
 
 ## Run (CLI)
 
@@ -178,6 +217,22 @@ Notes:
   - verify `companion_ip` and `companion_port` in `config.json`
   - ensure Companion’s HTTP API is enabled/reachable
   - check `calendar.log` for POST results
+
+- If Personal Mixes shows **Waiting for desk**:
+  - confirm the SD9 remote-control IP and OSC port on both the console and TDeck
+  - confirm no other process is using `digico_listen_port`
+  - check Windows Firewall for the configured UDP listen port
+  - use **Config → DiGiCo Mixer → Diagnostics** to identify the missing discovery request and last socket error
+
+## Tests
+
+Run the OSC codec, desk-simulator integration and protected web API tests with:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+`tests/digico_ui_harness.py` starts a self-contained simulated desk and TDeck site on `http://127.0.0.1:5057` for local browser checks. It does not write its changes to the production `config.json`.
 
 ## ProPresenter timers (optional)
 

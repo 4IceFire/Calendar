@@ -1,10 +1,10 @@
 # Repository Guidelines
 
-This repo contains TDeck, a Python app for scheduling service cues and firing Bitfocus Companion button presses. Keep changes focused on the scheduler, CLI, Web UI, and VideoHub flow described in `README.md`.
+This repo contains TDeck, a Python app for scheduling service cues, controlling production integrations, and serving operator/personal-control pages. Keep changes focused on the scheduler, CLI, Web UI, VideoHub and DiGiCo flows described in `README.md`.
 
 ## Project Structure & Module Organization
 - `package/`: Python package code. `package/apps/calendar/` contains scheduler, storage, and utilities.
-- Entry points: `webui.py` (Flask Web UI), `cli.py` (CLI), `companion.py`/`propresentor.py` (external integrations).
+- Entry points: `webui.py` (Flask Web UI), `cli.py` (CLI), `companion.py`/`propresentor.py` (external integrations), and `digico.py` (DiGiCo OSC transport/cache/relay).
 - `static/`: front-end JS/CSS assets. `templates/`: HTML templates.
 - Data/config: `config.json`, `events.json`, `timer_presets.json`, `videohub_presets.json`, `videohub_rooms.json`, `auth.db`.
 - VideoHub room images: local uploads live in `videohub_room_images/` and should remain ignored by Git.
@@ -30,9 +30,10 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - No formatter or linter is enforced in-repo; keep changes consistent with surrounding files.
 
 ## Testing Guidelines
-- No automated test framework is configured in this repo.
+- Tests use the standard-library `unittest` runner: `python -m unittest discover -s tests -p "test_*.py" -v`.
+- DiGiCo tests include an in-process UDP desk simulator and Flask API/page coverage; keep tests independent of real church hardware and production config.
 - For manual checks: start `python webui.py`, load the UI, and run a CLI command like `python cli.py list`.
-- If you add tests, place them under `tests/` with `test_*.py` and document the runner in `README.md`.
+- Place new tests under `tests/` with `test_*.py` and document any additional runner in `README.md`.
 
 ## Commit & Pull Request Guidelines
 - Existing commits use short, sentence-case summaries (e.g., `Updated UI`, `Added authentication to app`). Follow the same style.
@@ -75,6 +76,7 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
 - Account security state lives on the `users` table: email/full name, active/locked status, failed login count, force-password-change flag, password timestamps, and session version.
 - Logged-in sessions are tracked in `user_sessions`; revoking sessions or forcing password changes should use that table/session-version flow.
 - API endpoints are intentionally callable without login unless an endpoint is explicitly marked otherwise.
+- DiGiCo mixer/setup APIs are an explicit exception: they control live audio and must enforce login, the relevant page permission, enabled routes, and the per-group AUX allow-list on the server.
 - For VideoHub preset visibility, enforce group restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
 - VideoHub room metadata is global for all presets and users. Access control applies to who can manage the room layout UI, not to the room data itself.
 
@@ -165,3 +167,14 @@ This repo contains TDeck, a Python app for scheduling service cues and firing Bi
   - Admin can always click every surface.
   - These permissions only block pointer/touch/keyboard interaction in TDeck's iframe UI. They do not secure Companion directly if a user opens Companion outside TDeck.
 - Viewing a surface is controlled by the containing page's normal page permission. The surface click check should not be used as a view permission.
+
+## DiGiCo Personal Mixes
+- `digico.py` owns the one process-wide UDP socket, OSC codec, desk discovery/cache, heartbeat and optional external-device relay.
+- DiGiCo can send address-only OSC packets without a type-tag string; the decoder must continue accepting these packets.
+- `/personal-mixes` uses the `page:digico_mixer` page permission; `/config/digico` uses the normal Config permission.
+- `groups.digico_allowed_auxes` stores JSON string IDs. Blank/NULL/`[]` means all enabled AUXes; otherwise multiple group lists are unioned, with any unrestricted applicable group granting all.
+- Never rely on hidden browser controls for AUX authorization. Enforce the scope on all read and write mixer endpoints.
+- Config lives in the main `config.json`: connection/listen/timing scalar keys plus `digico_auxes`, `digico_channels`, and `digico_external_devices` arrays. It is already included in normal config transport.
+- Native relay input is accepted only from configured external device IPs. Disabled devices must not relay; loopback is off by default.
+- Keep browser polling non-blocking and bounded. The threaded Flask server plus one backend cache is intentional so many phones do not multiply desk traffic.
+- Log setup, restart, discovery, permission and final mixer changes with `log_event(...)`; do not log every intermediate fader drag.

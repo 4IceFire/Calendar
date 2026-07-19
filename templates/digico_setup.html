@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% set page_title = 'DiGiCo Mixer Setup' %}
+{% set page_subtitle = 'Connection, Personal Mix layout, permissions and native OSC relay' %}
+{% set config_active_tab = 'digico' %}
+
+{% block head_extra %}
+  <link rel="stylesheet" href="/static/digico.css">
+{% endblock %}
+
+{% block page_actions %}
+  <a class="btn btn-outline-secondary" href="/personal-mixes">Open Mixer</a>
+  <button id="digico-setup-save" class="btn btn-primary" type="button">Save &amp; Restart</button>
+{% endblock %}
+
+{% block content %}
+{% include '_config_tabs.html' %}
+<div id="digico-setup" class="digico-setup-shell">
+  <div id="digico-setup-message" class="mb-3" role="status"></div>
+
+  <div class="digico-status-strip mb-3">
+    <div><span class="digico-eyebrow">Desk</span><strong id="digico-status-desk">Not configured</strong></div>
+    <div><span class="digico-eyebrow">Connection</span><strong id="digico-status-connection">Loading…</strong></div>
+    <div><span class="digico-eyebrow">Discovery</span><strong id="digico-status-discovery">—</strong></div>
+    <div><span class="digico-eyebrow">Snapshot</span><strong id="digico-status-snapshot">—</strong></div>
+  </div>
+
+  <ul class="nav nav-pills digico-setup-tabs mb-3" role="tablist">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#digico-tab-connection" type="button">Connection</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#digico-tab-auxes" type="button">AUXes <span id="digico-aux-count" class="badge text-bg-secondary">0</span></button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#digico-tab-channels" type="button">Channels <span id="digico-channel-count" class="badge text-bg-secondary">0</span></button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#digico-tab-devices" type="button">iPad / OSC Relay</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#digico-tab-diagnostics" type="button">Diagnostics</button></li>
+  </ul>
+
+  <div class="tab-content">
+    <section id="digico-tab-connection" class="tab-pane fade show active">
+      <div class="card tdeck-soft"><div class="card-body">
+        <h2 class="h5">Desk connection</h2>
+        <p class="text-muted">TDeck uses one shared UDP socket for the SD9. Browsers communicate with TDeck over HTTP, so additional phones do not consume DiGiCo device connections.</p>
+        <div class="form-check form-switch mb-3">
+          <input id="digico-enabled" class="form-check-input" type="checkbox">
+          <label class="form-check-label" for="digico-enabled">Enable DiGiCo Personal Mixes</label>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-8"><label class="form-label" for="digico-ip">Desk IP or hostname</label><input id="digico-ip" class="form-control" autocomplete="off" placeholder="192.168.1.50"><div class="form-text">Use the address configured for the SD9 remote-control network.</div></div>
+          <div class="col-md-4"><label class="form-label" for="digico-port">Desk OSC port</label><input id="digico-port" class="form-control" type="number" min="1" max="65535" value="9000"><div class="form-text">WebMixer default: 9000.</div></div>
+          <div class="col-md-8"><label class="form-label" for="digico-listen-address">Local listen address</label><input id="digico-listen-address" class="form-control" value="0.0.0.0"><div class="form-text"><code>0.0.0.0</code> listens on every network adapter.</div></div>
+          <div class="col-md-4"><label class="form-label" for="digico-listen-port">Local OSC port</label><input id="digico-listen-port" class="form-control" type="number" min="1" max="65535" value="8000"><div class="form-text">Must be free on the TDeck computer.</div></div>
+        </div>
+        <hr>
+        <h3 class="h6">Polling and failure detection</h3>
+        <div class="row g-3">
+          <div class="col-md-4"><label class="form-label" for="digico-request-interval">Request spacing (seconds)</label><input id="digico-request-interval" class="form-control" type="number" min="0.025" max="5" step="0.025"><div class="form-text">Use 0.025 for the fastest AUX loading; 0.1 is a conservative setting.</div></div>
+          <div class="col-md-4"><label class="form-label" for="digico-retry-interval">Discovery retry (seconds)</label><input id="digico-retry-interval" class="form-control" type="number" min="0.1" max="30" step="0.1"><div class="form-text">Retry unanswered discovery requests.</div></div>
+          <div class="col-md-4"><label class="form-label" for="digico-stale-after">Offline after (seconds)</label><input id="digico-stale-after" class="form-control" type="number" min="1" max="300" step="1"><div class="form-text">Marks the desk offline when replies stop.</div></div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 mt-4">
+          <button id="digico-restart" class="btn btn-outline-secondary" type="button">Restart Connection</button>
+          <button id="digico-discover" class="btn btn-outline-secondary" type="button">Rediscover Desk</button>
+        </div>
+      </div></div>
+    </section>
+
+    <section id="digico-tab-auxes" class="tab-pane fade">
+      <div class="card tdeck-soft"><div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Personal Mix AUXes</h2><p class="text-muted">Choose which desk AUXes appear, give each one a friendly label, colour and optional icon, then use the arrow buttons to arrange them.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="aux" type="button">Reset labels &amp; order</button></div>
+        <div id="digico-aux-table" class="digico-config-list"></div>
+      </div></div>
+    </section>
+
+    <section id="digico-tab-channels" class="tab-pane fade">
+      <div class="card tdeck-soft"><div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Input channels</h2><p class="text-muted">Choose a label and icon, then use the arrows to arrange channels. Add a Section heading only to the first channel in a section; that heading appears above it and continues until the next heading.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="channel" type="button">Reset labels &amp; order</button></div>
+        <div id="digico-channel-table" class="digico-config-list"></div>
+      </div></div>
+    </section>
+
+    <section id="digico-tab-devices" class="tab-pane fade">
+      <div class="card tdeck-soft"><div class="card-body">
+        <h2 class="h5">Native iPad / OSC relay</h2>
+        <p class="text-muted">Optional. TDeck can forward desk packets to configured external OSC devices and accept OSC only from their listed IP addresses. Leave this empty if everyone uses the web mixer.</p>
+        <div class="alert alert-warning">Every external device must have a unique IP. Only enable broadcast when that device should receive all desk updates; enabling it increases network traffic.</div>
+        <div id="digico-device-list" class="digico-config-list"></div>
+        <button id="digico-add-device" class="btn btn-outline-secondary mt-3" type="button">Add external device</button>
+      </div></div>
+    </section>
+
+    <section id="digico-tab-diagnostics" class="tab-pane fade">
+      <div class="card tdeck-soft"><div class="card-body">
+        <div class="d-flex justify-content-between gap-2"><div><h2 class="h5 mb-1">Live diagnostics</h2><p class="text-muted">Useful on the production computer when a desk or device will not connect.</p></div><button id="digico-refresh" class="btn btn-sm btn-outline-secondary" type="button">Refresh</button></div>
+        <div id="digico-diagnostics" class="digico-diagnostics-grid"></div>
+        <details class="mt-3"><summary>Raw status</summary><pre id="digico-raw-status" class="mt-2 mb-0"></pre></details>
+      </div></div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/static/digico_icons.js"></script>
+  <script src="/static/digico_setup.js"></script>
+{% endblock %}
