@@ -80,8 +80,8 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - For VideoHub preset visibility, enforce group restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
 - VideoHub room metadata is global for all presets and users. Access control applies to who can manage the room layout UI, not to the room data itself.
 
-## ATEM Foyer Audio Controls
-- The Foyer Audio page controls a Blackmagic ATEM 4 M/E Broadcast Studio 4K used as an audio switcher. The page route is `/foyer-audio` and the nav label is `Foyer Audio`.
+## ATEM Record Audio Controls
+- The Record Audio page controls a Blackmagic ATEM 4 M/E Broadcast Studio 4K used as an audio switcher. The page route remains `/foyer-audio` and the nav label is `Record Audio`.
 - Keep ATEM code in separate integration files, matching the repo's external-integration style:
   - `atem.py`: PyATEMMax-backed control/state wrapper for volume, ON/mix option, solo, monitor dim/mute/volume, labels, and source discovery.
   - `atem_meter.py`: independent legacy UDP metering client for `SALN`/`AMLv`; do not enable PyATEMMax audio level streaming for this switcher.
@@ -95,12 +95,12 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
   - `atem_allowed_audio_sources`: JSON list of allowed source IDs; `master` is the master volume ID. Empty list/no checked channels means no audio strips for non-admin users.
   - `atem_can_solo_audio`: allows headphone solo buttons.
   - `atem_can_monitor_audio`: allows monitor On/Dim/Volume controls.
-- A user in any admin group (`groups.is_admin=1`, normally the protected `Admin` group) can always access Foyer Audio and see/control every source, solo, and monitor control. This is group-based, not tied to the username `admin`.
+- A user in any admin group (`groups.is_admin=1`, normally the protected `Admin` group) can always access Record Audio and see/control every source, solo, and monitor control. This is group-based, not tied to the username `admin`.
 - Non-admin users only see the union of source IDs granted by their groups. Solo and monitor permissions also union across groups.
 - Monitor On/Off in TDeck must use `setAudioMixerMonitorMute(...)`, inverted so On means `mute=False` and Off means `mute=True`. Do not use `setAudioMixerMonitorMonitorAudio(...)` for the TDeck On button, because that disables the monitor path and can break solo / route normal audio through headphones loudly on this switcher.
 - The monitor controls are intentionally styled like TDeck controls, not like the ATEM Software Control panel.
-- The Foyer Audio UI polls `/api/atem/audio/state` frequently so hardware/ATEM Software Control changes update TDeck live. Keep slider updates responsive but throttled to avoid flooding the switcher.
-- `/foyer-audio/debug` is intentionally kept for production diagnosis. It reports effective permissions, ATEM sources, metering status, packet counters, and current levels. It is protected by Foyer Audio page access.
+- The Record Audio UI polls `/api/atem/audio/state` frequently so hardware/ATEM Software Control changes update TDeck live. Keep slider updates responsive but throttled to avoid flooding the switcher.
+- `/foyer-audio/debug` is intentionally kept for production diagnosis. It reports effective permissions, ATEM sources, metering status, packet counters, and current levels. It is protected by Record Audio page access.
 - API auth in this repo is intentionally light unless explicitly guarded. The monitor control endpoint has a server-side permission guard; source visibility/solo permissions are primarily enforced in the UI.
 
 ## VideoHub Group Controls (Where To Look)

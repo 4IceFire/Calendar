@@ -23,6 +23,10 @@
 
         <div class="tdeck-nav-right">
           <div class="tdeck-nav-status">
+            <div id="mobile-connection-indicator" class="tdeck-mobile-connection-status">
+              <span id="mobile-connection-dot" class="indicator-dot bg-danger"></span>
+              <span id="mobile-connection-label">Checking connections...</span>
+            </div>
             <div id="companion-indicator" class="me-2">
               <span id="companion-dot" class="indicator-dot bg-danger"></span>
               <span id="companion-label">Checking...</span>
@@ -103,7 +107,7 @@
           {% if not auth_enabled or can_access('page:timers') %}<a class="nav-link{% if request.path.startswith('/timers') %} active{% endif %}" href="/timers">Timers</a>{% endif %}
           {% if not auth_enabled or can_access('page:calendar') %}<a class="nav-link{% if request.path.startswith('/calendar') %} active{% endif %}" href="/calendar">Schedule</a>{% endif %}
           {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub</a>{% endif %}
-          {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Foyer Audio</a>{% endif %}
+          {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Record Audio</a>{% endif %}
           {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
           {% if not auth_enabled or can_access('page:digico_mixer') %}<a class="nav-link{% if request.path.startswith('/personal-mixes') %} active{% endif %}" href="/personal-mixes">Personal Mixes</a>{% endif %}
           {% if not auth_enabled or can_access('page:surface_controls') %}<a class="nav-link{% if request.path.startswith('/surface-controls') %} active{% endif %}" href="/surface-controls">Surface Controls</a>{% endif %}

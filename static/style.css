@@ -141,6 +141,10 @@ html[data-bs-theme="dark"]{
   pointer-events: none;
 }
 
+.tdeck-mobile-connection-status{
+  display: none;
+}
+
 .tdeck-account-dropdown{
   position: relative;
   z-index: 1035;
@@ -1046,7 +1050,7 @@ html[data-bs-theme="dark"] .timer-stage-card{
   .tdeck-nav-right{ width:auto; margin-top:0; flex-wrap:nowrap; gap:.35rem; }
   .tdeck-nav-status{ flex-wrap:nowrap; gap:.2rem; overflow:hidden; }
   .tdeck-nav-status > div{ display:none; margin-right:0!important; white-space:nowrap; font-size:.72rem; }
-  .tdeck-nav-status #companion-indicator{ display:flex; align-items:center; }
+  .tdeck-nav-status #mobile-connection-indicator{ display:flex; align-items:center; }
   .tdeck-nav-status .indicator-dot{ width:10px; height:10px; margin-right:4px; }
   .tdeck-account-dropdown .dropdown-menu{ position:fixed; top:3.5rem; right:.5rem; left:auto; }
   main.container{ padding:1rem .75rem calc(1rem + env(safe-area-inset-bottom))!important; }

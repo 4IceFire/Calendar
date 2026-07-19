@@ -14,6 +14,81 @@ function _applyServiceIndicator(serviceKey, label, connected) {
   });
 }
 
+const _MOBILE_CONNECTION_CYCLE_MS = 2000;
+let _mobileConnectionCycleTimer = null;
+let _mobileConnectionCycleIndex = 0;
+let _mobileOfflineConnections = [];
+
+function _stopMobileConnectionCycle() {
+  if (_mobileConnectionCycleTimer !== null) {
+    clearInterval(_mobileConnectionCycleTimer);
+    _mobileConnectionCycleTimer = null;
+  }
+}
+
+function _renderMobileConnectionSummary() {
+  const indicator = document.getElementById('mobile-connection-indicator');
+  const dot = document.getElementById('mobile-connection-dot');
+  const label = document.getElementById('mobile-connection-label');
+  if (!indicator || !dot || !label) return;
+
+  dot.classList.remove('bg-success', 'bg-danger');
+  if (_mobileOfflineConnections.length === 0) {
+    dot.classList.add('bg-success');
+    label.textContent = 'All connections are online';
+    indicator.setAttribute('aria-label', 'All connections are online');
+    return;
+  }
+
+  dot.classList.add('bg-danger');
+  const offlineLabel = _mobileOfflineConnections[
+    _mobileConnectionCycleIndex % _mobileOfflineConnections.length
+  ];
+  label.textContent = `${offlineLabel} is offline`;
+  indicator.setAttribute(
+    'aria-label',
+    `Offline connections: ${_mobileOfflineConnections.join(', ')}`,
+  );
+}
+
+function _applyMobileConnectionSummary(services) {
+  if (!Array.isArray(services)) {
+    _stopMobileConnectionCycle();
+    _mobileOfflineConnections = [];
+    _mobileConnectionCycleIndex = 0;
+    const indicator = document.getElementById('mobile-connection-indicator');
+    const dot = document.getElementById('mobile-connection-dot');
+    const label = document.getElementById('mobile-connection-label');
+    if (dot) {
+      dot.classList.remove('bg-success');
+      dot.classList.add('bg-danger');
+    }
+    if (label) label.textContent = 'Connection status unavailable';
+    if (indicator) indicator.setAttribute('aria-label', 'Connection status unavailable');
+    return;
+  }
+
+  const offline = services
+    .filter((service) => !service.connected)
+    .map((service) => service.label);
+  if (offline.join('\n') !== _mobileOfflineConnections.join('\n')) {
+    _mobileConnectionCycleIndex = 0;
+  }
+  _mobileOfflineConnections = offline;
+  _renderMobileConnectionSummary();
+
+  if (offline.length > 1 && _mobileConnectionCycleTimer === null) {
+    _mobileConnectionCycleTimer = setInterval(() => {
+      _mobileConnectionCycleIndex = (
+        _mobileConnectionCycleIndex + 1
+      ) % _mobileOfflineConnections.length;
+      _renderMobileConnectionSummary();
+    }, _MOBILE_CONNECTION_CYCLE_MS);
+  } else if (offline.length <= 1) {
+    _stopMobileConnectionCycle();
+  }
+}
+
 function _escapeHtml(value) {
   return String(value == null ? '' : value)
     .replace(/&/g, '&amp;')
@@ -51,12 +126,23 @@ async function updateStatusIndicators() {
     if (digicoIndicator) digicoIndicator.classList.toggle('d-none', !digicoEnabled);
     if (digicoEnabled) _applyServiceIndicator('digico', 'DiGiCo', !!data.digico.connected);
     _applyServiceIndicator('atem', 'Switcher', !!(data && data.atem && data.atem.connected));
+    const services = [
+      {label: 'Companion', connected: !!(data && data.companion && data.companion.connected)},
+      {label: 'ProPresenter', connected: !!(data && data.propresenter && data.propresenter.connected)},
+      {label: 'VideoHub', connected: !!(data && data.videohub && data.videohub.connected)},
+      {label: 'Switcher', connected: !!(data && data.atem && data.atem.connected)},
+    ];
+    if (digicoEnabled) {
+      services.push({label: 'DiGiCo', connected: !!data.digico.connected});
+    }
+    _applyMobileConnectionSummary(services);
   } catch (e) {
     _applyServiceIndicatorUnknown('companion', 'Companion');
     _applyServiceIndicatorUnknown('propresenter', 'ProPresenter');
     _applyServiceIndicatorUnknown('videohub', 'VideoHub');
     _applyServiceIndicatorUnknown('digico', 'DiGiCo');
     _applyServiceIndicatorUnknown('atem', 'Switcher');
+    _applyMobileConnectionSummary(null);
   }
 }
 

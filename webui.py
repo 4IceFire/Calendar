@@ -2570,6 +2570,37 @@ class _User(UserMixin):
         return bool(self._active) and not bool(self.is_locked)
 
 
+_PAGE_LANDING_PATHS = (
+    ('page:home', '/'),
+    ('page:timers', '/timers'),
+    ('page:calendar', '/calendar'),
+    ('page:videohub', '/videohub'),
+    ('page:atem_audio', '/foyer-audio'),
+    ('page:routing', '/routing'),
+    ('page:digico_mixer', '/personal-mixes'),
+    ('page:surface_controls', '/surface-controls'),
+    ('page:templates', '/templates'),
+    ('page:api_reference', '/api-reference'),
+    ('page:config', '/config'),
+    ('page:console', '/console'),
+    ('page:admin', '/admin/permissions'),
+    ('page:account', '/account/password'),
+)
+
+
+def _landing_page_for_user(user: _User) -> str:
+    """Return the first normal UI page available to a logged-in user."""
+    for page_key, path in _PAGE_LANDING_PATHS:
+        try:
+            if user.allows_page(page_key):
+                return path
+        except Exception:
+            continue
+    # Password management is intentionally available to every authenticated
+    # user, even when their group has no page permissions yet.
+    return '/account/password'
+
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login_page'
@@ -4025,7 +4056,12 @@ def login_page():
         if bool(int(refreshed['force_password_change'] or 0)):
             return redirect(url_for('account_password_page', force=1))
 
-        return redirect(next_url or '/')
+        redirect_target = next_url or '/'
+        requested_path = redirect_target.split('?', 1)[0].split('#', 1)[0]
+        if requested_path in ('', '/') and not user.allows_page('page:home'):
+            redirect_target = _landing_page_for_user(user)
+
+        return redirect(redirect_target)
 
     timeout = request.args.get('timeout')
     msg = 'You have been logged out due to inactivity.' if timeout else None
@@ -5321,7 +5357,7 @@ def videohub_monitor_page():
 
 
 @app.route('/foyer-audio')
-@require_page('page:atem_audio', 'Foyer Audio')
+@require_page('page:atem_audio', 'Record Audio')
 def foyer_audio_page():
     allowed_source_ids: list[str] = []
     allow_all = True
@@ -5466,7 +5502,7 @@ def _atem_audio_access_debug_for_user(user_id: int | None) -> dict[str, Any]:
 
 
 @app.route('/foyer-audio/debug')
-@require_page('page:atem_audio', 'Foyer Audio')
+@require_page('page:atem_audio', 'Record Audio')
 def foyer_audio_debug_page():
     try:
         if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
