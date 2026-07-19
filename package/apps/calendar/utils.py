@@ -105,6 +105,14 @@ _defaults = {
     "digico_channels": [],
     "digico_external_devices": [],
 
+    # Hisense / VIDAA TVs (native control; no external MQTT broker required)
+    "hisense_enabled": False,
+    "hisense_cert_path": "hisense_certs/vidaa_client.pem",
+    "hisense_key_path": "hisense_certs/vidaa_client.key",
+    "hisense_poll_interval": 10,
+    "hisense_reconnect_interval": 15,
+    "hisense_tvs": [],
+
     # ATEM audio defaults
     "atem_ip": "127.0.0.1",
     "atem_port": 9910,

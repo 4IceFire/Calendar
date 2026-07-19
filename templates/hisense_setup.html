@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'TV Setup' %}
+{% set page_subtitle = 'Hisense / VIDAA control, pairing and connection status' %}
+{% set config_active_tab = 'tvs' %}
+
+{% block content %}
+<div id="hisense-setup">
+  {% include '_config_tabs.html' %}
+
+  <div id="hisense-alert"></div>
+  <div class="card mb-4">
+    <div class="card-body">
+      <div class="form-check form-switch mb-3">
+        <input class="form-check-input" type="checkbox" id="hisense-enabled">
+        <label class="form-check-label" for="hisense-enabled">Enable native Hisense TV control</label>
+      </div>
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label" for="hisense-cert">Client certificate path</label>
+          <input class="form-control" id="hisense-cert" value="hisense_certs/vidaa_client.pem">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="hisense-key">Client key path</label>
+          <input class="form-control" id="hisense-key" value="hisense_certs/vidaa_client.key">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="hisense-poll">State poll (seconds)</label>
+          <input class="form-control" type="number" id="hisense-poll" min="2" value="10">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="hisense-reconnect">Reconnect (seconds)</label>
+          <input class="form-control" type="number" id="hisense-reconnect" min="2" value="15">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="h5 mb-0">Configured TVs</h2>
+    <button type="button" class="btn btn-outline-primary" id="hisense-add">Add TV</button>
+  </div>
+  <div id="hisense-tvs"></div>
+
+  <div class="d-flex gap-2 mt-4">
+    <button type="button" class="btn btn-primary" id="hisense-save">Save and restart TV service</button>
+    <button type="button" class="btn btn-outline-secondary" id="hisense-refresh">Refresh status</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='hisense_setup.js') }}"></script>
+{% endblock %}

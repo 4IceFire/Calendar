@@ -9,6 +9,7 @@ It supports:
 - A **CLI** (`cli.py`) for starting/stopping the scheduler and managing events.
 - A **Web UI** (`webui.py`) for editing events and templates in a browser.
 - A **DiGiCo Personal Mixes** web app that lets multiple phones mix permitted AUXes through one shared SD9 OSC connection.
+- A native **Hisense / VIDAA TV service** for power, absolute volume, source selection, pairing, and automatic reconnect.
 
 ## What this app does
 
@@ -66,6 +67,8 @@ Common keys:
 - `debug`: enables more verbose logging/output
 
 DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
+
+Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Put the VIDAA client certificate and private key at the paths shown on that page, add each TV's stable IP and MAC address, save, then pair once using the PIN shown on the TV. The service retries disconnected TVs automatically.
 
 ## Run (Web UI)
 
