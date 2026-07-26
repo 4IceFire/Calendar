@@ -90,6 +90,7 @@ class HisenseWebApiTests(unittest.TestCase):
             self.assertEqual(script.status_code, 200)
             self.assertIn(b"tv-group-select", script.data)
             self.assertIn(b"Advanced identity", script.data)
+            self.assertIn(b"Paired device UUID", script.data)
             self.assertIn(b"Required for Wake-on-LAN power-on", script.data)
         finally:
             script.close()
@@ -134,6 +135,7 @@ class HisenseWebApiTests(unittest.TestCase):
                 "name": "Foyer TV",
                 "host": "10.5.10.175",
                 "mac": "e4:8a:93:f1:da:22",
+                "uuid": "56:b8:88:4e:f7:19",
                 "auth_mode": "auto",
                 "certificate_profile": "current",
                 "enabled": True,
@@ -162,6 +164,7 @@ class HisenseWebApiTests(unittest.TestCase):
         self.assertEqual(saved["hisense_tv_groups"][0]["tv_ids"], ["foyer"])
         self.assertEqual(saved["hisense_tv_groups"][1]["tv_ids"], [])
         self.assertEqual(saved["hisense_tvs"][0]["certificate_profile"], "current")
+        self.assertEqual(saved["hisense_tvs"][0]["uuid"], "56:b8:88:4e:f7:19")
         self.assertEqual(saved["hisense_cert_path"], "hisense_certs/current.pem")
 
 

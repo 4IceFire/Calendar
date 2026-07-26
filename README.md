@@ -70,7 +70,9 @@ DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in
 
 Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Add each TV's stable IP and MAC address, configure at least one local certificate compatibility profile, save, then pair once using the PIN shown on the TV. The service detects the TV's advertised transport protocol and selects the legacy, middle, or modern authentication generation automatically while preserving the proven static fallback for A7G models.
 
-TV and group order are explicit. The setup page uses a collapsible tree: each TV belongs to one group or the Ungrouped root, its group dropdown moves it between branches, and arrow buttons order siblings. The visible TV name is used throughout TDeck and Companion. A slug-style internal ID is generated from that name for new TVs and retained as an advanced stable key so renaming a TV does not break saved Companion buttons. MAC addresses remain required for Wake-on-LAN power-on and newer VIDAA credential generation.
+TV and group order are explicit. The setup page uses a collapsible tree: each TV belongs to one group or the Ungrouped root, its group dropdown moves it between branches, and arrow buttons order siblings. The visible TV name is used throughout TDeck and Companion. A slug-style internal ID is generated from that name for new TVs and retained as an advanced stable key so renaming a TV does not break saved Companion buttons.
+
+Keep the TV's own MAC address for Wake-on-LAN. Newer VIDAA authentication also requires a separate, case-sensitive paired-device UUID: the Bluetooth/Wi-Fi MAC or UUID of a phone/device paired with that TV through the official VIDAA app. The paired-device UUID is not the TV MAC. Protocol generation is detected automatically, but TDeck cannot derive this UUID or redistribute the official app's private client key.
 
 The TDeck Companion module exposes both group and individual targets for power, volume, source, reconnect, feedbacks, and variables.
 

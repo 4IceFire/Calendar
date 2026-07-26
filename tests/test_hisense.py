@@ -204,6 +204,7 @@ class HisenseManagerTests(unittest.TestCase):
                 "name": "Modern TV",
                 "host": "10.5.10.175",
                 "mac": "e4:8a:93:f1:da:22",
+                "uuid": "56:b8:88:4e:f7:19",
                 "auth_mode": "auto",
             }],
         }, base_dir=root)
@@ -221,7 +222,42 @@ class HisenseManagerTests(unittest.TestCase):
             tv = manager.status()["tvs"][0]
             self.assertEqual(tv["protocolVersion"], 3290)
             self.assertEqual(tv["authMethod"], "dynamic-modern")
+            self.assertTrue(tv["uuidConfigured"])
             self.assertTrue(_FakeVidaa.instances[-1].kwargs["use_dynamic_auth"])
+            self.assertEqual(_FakeVidaa.instances[-1].kwargs["mac_address"], "56:b8:88:4e:f7:19")
+        finally:
+            manager.close()
+
+    def test_dynamic_auth_requires_a_separate_paired_device_uuid(self):
+        root = Path(self.temp.name)
+        cfg = HisenseConfig.from_mapping({
+            "hisense_enabled": True,
+            "hisense_cert_path": "client.pem",
+            "hisense_key_path": "client.key",
+            "hisense_tvs": [{
+                "id": "modern",
+                "host": "10.5.10.175",
+                "mac": "e4:8a:93:f1:da:22",
+                "auth_mode": "dynamic-modern",
+            }],
+        }, base_dir=root)
+        manager = HisenseManager(
+            cfg,
+            client_factory=_FakeVidaa,
+            wake_function=lambda _mac, _subnet: True,
+            protocol_detector=lambda *_args, **_kwargs: 3290,
+        )
+        initial_client_count = len(_FakeVidaa.instances)
+        try:
+            manager.start()
+            deadline = time.time() + 1
+            while time.time() < deadline and not manager.status()["tvs"][0]["lastError"]:
+                time.sleep(0.01)
+            tv = manager.status()["tvs"][0]
+            self.assertFalse(tv["connected"])
+            self.assertFalse(tv["uuidConfigured"])
+            self.assertIn("paired device UUID is required", tv["lastError"])
+            self.assertEqual(len(_FakeVidaa.instances), initial_client_count)
         finally:
             manager.close()
 

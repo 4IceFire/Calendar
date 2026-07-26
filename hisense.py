@@ -66,6 +66,7 @@ class HisenseTvConfig:
     name: str
     host: str
     mac: str
+    uuid: str = ""
     enabled: bool = True
     port: int = 36669
     auth_mode: str = "auto"
@@ -80,6 +81,10 @@ class HisenseTvConfig:
             name=str(value.get("name") or ident).strip(),
             host=str(value.get("host") or value.get("ip") or "").strip(),
             mac=str(value.get("mac") or "").strip().lower().replace("-", ":"),
+            # Modern VIDAA authentication uses the UUID/MAC of a client device
+            # paired through the official app. It is not the TV's own MAC and
+            # its letter case is significant to the credential hash.
+            uuid=str(value.get("uuid") or value.get("paired_uuid") or "").strip().replace("-", ":"),
             enabled=_bool(value.get("enabled"), True),
             port=max(1, min(65535, int(value.get("port") or 36669))),
             auth_mode=str(value.get("auth_mode") or "auto").strip().lower(),
@@ -285,6 +290,7 @@ class HisenseTvController:
             "name": self.config.name,
             "host": self.config.host,
             "mac": self.config.mac,
+            "uuidConfigured": bool(self.config.uuid),
             "enabled": self.config.enabled,
             "authMode": self.config.auth_mode,
             "configuredCertificateProfile": self.config.certificate_profile,
@@ -401,7 +407,9 @@ class HisenseTvController:
             use_dynamic_auth=use_dynamic_auth,
             auth_method=auth_method,
             auto_detect_protocol=False,
-            mac_address=self.config.mac or None,
+            # pyvidaa historically calls this parameter mac_address, but it is
+            # the case-sensitive paired-client UUID for dynamic auth.
+            mac_address=self.config.uuid or None,
             on_state_change=self._on_state_change,
         )
 
@@ -416,6 +424,12 @@ class HisenseTvController:
         errors: list[str] = []
         for profile in profiles:
             for dynamic, method, label in self._auth_candidates(protocol_version):
+                if dynamic and not self.config.uuid:
+                    errors.append(
+                        f"{profile.name} / {label}: a paired device UUID is required "
+                        "(this is not the TV MAC address)"
+                    )
+                    continue
                 client = None
                 try:
                     client = self._make_client(profile, use_dynamic_auth=dynamic, auth_method=method)

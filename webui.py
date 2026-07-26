@@ -7731,10 +7731,13 @@ def api_hisense_config_put():
         seen.add(ident)
         host = str(tv.get('host') or '').strip()
         mac = str(tv.get('mac') or '').strip().lower().replace('-', ':')
+        uuid = str(tv.get('uuid') or '').strip().replace('-', ':')
         if bool(tv.get('enabled', True)) and (not host or not re.fullmatch(r'[0-9A-Za-z.-]+', host)):
             return jsonify({'ok': False, 'error': f'{ident} needs a valid IP address or hostname'}), 400
         if mac and not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac):
             return jsonify({'ok': False, 'error': f'{ident} has an invalid MAC address'}), 400
+        if uuid and not re.fullmatch(r'(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}', uuid):
+            return jsonify({'ok': False, 'error': f'{ident} has an invalid paired device UUID'}), 400
         auth_mode = str(tv.get('auth_mode') or 'auto').strip().lower()
         if auth_mode not in auth_modes:
             return jsonify({'ok': False, 'error': f'{ident} has an invalid authentication mode'}), 400
@@ -7746,6 +7749,7 @@ def api_hisense_config_put():
             'name': str(tv.get('name') or ident).strip(),
             'host': host,
             'mac': mac,
+            'uuid': uuid,
             'enabled': bool(tv.get('enabled', True)),
             'auth_mode': auth_mode,
             'certificate_profile': certificate_profile,

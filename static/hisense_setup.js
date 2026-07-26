@@ -156,7 +156,12 @@
           <div class="col-md-4">
             <label class="form-label">MAC address</label>
             <input class="form-control tv-mac" value="${escapeHtml(tv.mac || '')}" placeholder="e4:8a:93:f1:da:22">
-            <div class="form-text">Required for Wake-on-LAN power-on and newer VIDAA authentication.</div>
+            <div class="form-text">The TV's own MAC address. Required for Wake-on-LAN power-on.</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Paired device UUID</label>
+            <input class="form-control tv-uuid" value="${escapeHtml(tv.uuid || '')}" placeholder="56:b8:88:4e:f7:19">
+            <div class="form-text">Required for newer VIDAA authentication. Use the case-sensitive Bluetooth/Wi-Fi MAC or UUID of the phone/device paired through the official VIDAA app—not the TV MAC.</div>
           </div>
           <div class="col-md-4">
             <label class="form-label">Protocol / authentication</label>
@@ -251,6 +256,7 @@
     name: row.querySelector('.tv-name').value.trim() || `TV ${index + 1}`,
     host: row.querySelector('.tv-host').value.trim(),
     mac: row.querySelector('.tv-mac').value.trim(),
+    uuid: row.querySelector('.tv-uuid').value.trim(),
     enabled: row.querySelector('.tv-enabled').checked,
     auth_mode: row.querySelector('.tv-auth-mode').value,
     certificate_profile: row.querySelector('.tv-profile').value,
