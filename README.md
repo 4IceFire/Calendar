@@ -70,7 +70,9 @@ DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in
 
 Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Add each TV's stable IP and MAC address, configure at least one local certificate compatibility profile, save, then pair once using the PIN shown on the TV. The service detects the TV's advertised transport protocol and selects the legacy, middle, or modern authentication generation automatically while preserving the proven static fallback for A7G models.
 
-TV and group order are explicit. Groups may contain any ordered subset of TVs, and a TV may appear in more than one group. The TDeck Companion module exposes both group and individual targets for power, volume, source, reconnect, feedbacks, and variables.
+TV and group order are explicit. The setup page uses a collapsible tree: each TV belongs to one group or the Ungrouped root, its group dropdown moves it between branches, and arrow buttons order siblings. The visible TV name is used throughout TDeck and Companion. A slug-style internal ID is generated from that name for new TVs and retained as an advanced stable key so renaming a TV does not break saved Companion buttons. MAC addresses remain required for Wake-on-LAN power-on and newer VIDAA credential generation.
+
+The TDeck Companion module exposes both group and individual targets for power, volume, source, reconnect, feedbacks, and variables.
 
 Some newer VIDAA firmware accepts an MQTT connection but rejects pairing requests made with certificates from an older RemoteNOW/VIDAA app generation, displaying a “TV model is no longer compatible” message on the screen. That condition is not returned to TDeck over MQTT, so it cannot be inferred from the IP address or software version alone. Add a current certificate/key pair as another local compatibility profile, select it for that TV (or move it earlier in automatic profile order), save, reconnect, and pair again. Certificate/private-key files remain local and must not be committed.
 

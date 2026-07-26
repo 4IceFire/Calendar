@@ -43,6 +43,8 @@ TV control is intended for a trusted production LAN. Pairing and configuration a
 
 Power-on sends Wake-on-LAN using each configured MAC address. Commands are serialized per TV and each TV reconnects independently in the background. Group `connected` means every enabled member is connected; power/source/volume report a shared value only when members agree and otherwise report mixed state.
 
+Group membership is exclusive: a TV can belong to one ordered group or remain ungrouped. If a raw config/API payload assigns a TV to more than one group, the first group in configured order wins.
+
 ---
 
 ## Calendar

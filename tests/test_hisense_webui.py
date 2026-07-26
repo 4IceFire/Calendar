@@ -81,8 +81,18 @@ class HisenseWebApiTests(unittest.TestCase):
         self.assertIn(b"Hisense / VIDAA", page.data)
         self.assertIn(b"hisense_setup.js", page.data)
         self.assertIn(b"hisense-profiles", page.data)
-        self.assertIn(b"hisense-groups", page.data)
+        self.assertIn(b"hisense-tree", page.data)
+        self.assertIn(b"hisense-expand-all", page.data)
+        self.assertIn(b"hisense-collapse-all", page.data)
         self.assertIn(b"hisense-compatible-models", page.data)
+        script = self.client.get("/static/hisense_setup.js")
+        try:
+            self.assertEqual(script.status_code, 200)
+            self.assertIn(b"tv-group-select", script.data)
+            self.assertIn(b"Advanced identity", script.data)
+            self.assertIn(b"Required for Wake-on-LAN power-on", script.data)
+        finally:
+            script.close()
 
         listing = self.client.get("/api/tvs")
         self.assertEqual(listing.status_code, 200)
@@ -133,6 +143,11 @@ class HisenseWebApiTests(unittest.TestCase):
                 "name": "Public Spaces",
                 "tv_ids": ["foyer"],
                 "enabled": True,
+            }, {
+                "id": "duplicate-membership",
+                "name": "Duplicate Membership",
+                "tv_ids": ["foyer"],
+                "enabled": True,
             }],
         }
         with (
@@ -145,6 +160,7 @@ class HisenseWebApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         saved = save_config.call_args.args[0]
         self.assertEqual(saved["hisense_tv_groups"][0]["tv_ids"], ["foyer"])
+        self.assertEqual(saved["hisense_tv_groups"][1]["tv_ids"], [])
         self.assertEqual(saved["hisense_tvs"][0]["certificate_profile"], "current")
         self.assertEqual(saved["hisense_cert_path"], "hisense_certs/current.pem")
 

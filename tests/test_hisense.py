@@ -260,6 +260,17 @@ class HisenseManagerTests(unittest.TestCase):
         finally:
             manager.close()
 
+    def test_a_tv_can_only_belong_to_the_first_configured_group(self):
+        cfg = HisenseConfig.from_mapping({
+            "hisense_tvs": [{"id": "foyer", "host": "10.5.10.175"}],
+            "hisense_tv_groups": [
+                {"id": "first", "tv_ids": ["foyer"]},
+                {"id": "second", "tv_ids": ["foyer"]},
+            ],
+        }, base_dir=Path(self.temp.name))
+        self.assertEqual(cfg.groups[0].tv_ids, ("foyer",))
+        self.assertEqual(cfg.groups[1].tv_ids, ())
+
 
 if __name__ == "__main__":
     unittest.main()

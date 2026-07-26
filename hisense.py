@@ -178,7 +178,18 @@ class HisenseConfig:
             if isinstance(v, dict)
         )
         raw_groups = cfg.get("hisense_tv_groups") if isinstance(cfg.get("hisense_tv_groups"), list) else []
-        groups = tuple(HisenseTvGroup.from_mapping(v, i) for i, v in enumerate(raw_groups) if isinstance(v, dict))
+        parsed_groups = [
+            HisenseTvGroup.from_mapping(v, i)
+            for i, v in enumerate(raw_groups)
+            if isinstance(v, dict)
+        ]
+        assigned_tv_ids: set[str] = set()
+        groups_list: list[HisenseTvGroup] = []
+        for group in parsed_groups:
+            tv_ids = tuple(tv_id for tv_id in group.tv_ids if tv_id not in assigned_tv_ids)
+            assigned_tv_ids.update(tv_ids)
+            groups_list.append(HisenseTvGroup(group.id, group.name, tv_ids, group.enabled))
+        groups = tuple(groups_list)
         return cls(
             enabled=_bool(cfg.get("hisense_enabled"), False),
             certfile=_resolve_path(cfg.get("hisense_cert_path") or "hisense_certs/vidaa_client.pem", root),

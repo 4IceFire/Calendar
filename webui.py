@@ -7756,6 +7756,7 @@ def api_hisense_config_put():
     if not isinstance(raw_groups, list):
         return jsonify({'ok': False, 'error': 'hisense_tv_groups must be a list'}), 400
     group_ids: set[str] = set()
+    assigned_group_tv_ids: set[str] = set()
     groups = []
     for index, group in enumerate(raw_groups):
         if not isinstance(group, dict):
@@ -7768,8 +7769,9 @@ def api_hisense_config_put():
         members_seen: set[str] = set()
         for raw_tv_id in group.get('tv_ids') if isinstance(group.get('tv_ids'), list) else []:
             tv_id = re.sub(r'[^a-z0-9_-]+', '-', str(raw_tv_id or '').strip().lower()).strip('-')
-            if tv_id in seen and tv_id not in members_seen:
+            if tv_id in seen and tv_id not in members_seen and tv_id not in assigned_group_tv_ids:
                 members_seen.add(tv_id)
+                assigned_group_tv_ids.add(tv_id)
                 member_ids.append(tv_id)
         groups.append({
             'id': ident,

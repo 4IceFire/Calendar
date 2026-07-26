@@ -42,23 +42,21 @@
   </div>
   <div id="hisense-profiles" class="mb-4"></div>
 
-  <div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
     <div>
-      <h2 class="h5 mb-1">Configured TVs</h2>
-      <div class="small text-muted">TV order is used throughout the setup page and Companion.</div>
+      <h2 class="h5 mb-1">TV groups and order</h2>
+      <div class="small text-muted">Each TV belongs to one group or Ungrouped. Use its dropdown to move it, and the arrow buttons to set its order inside that group.</div>
     </div>
-    <button type="button" class="btn btn-outline-primary" id="hisense-add">Add TV</button>
-  </div>
-  <div id="hisense-tvs"></div>
-
-  <div class="d-flex justify-content-between align-items-center mt-4 mb-3">
-    <div>
-      <h2 class="h5 mb-1">TV groups</h2>
-      <div class="small text-muted">Groups and their members are ordered. A TV may be included in more than one group.</div>
+    <div class="d-flex flex-wrap gap-2">
+      <button type="button" class="btn btn-outline-primary" id="hisense-add-group">New group</button>
+      <button type="button" class="btn btn-primary" id="hisense-add">Add TV</button>
+      <button type="button" class="btn btn-outline-secondary" id="hisense-expand-all">Expand all</button>
+      <button type="button" class="btn btn-outline-secondary" id="hisense-collapse-all">Collapse all</button>
     </div>
-    <button type="button" class="btn btn-outline-primary" id="hisense-add-group">Add group</button>
   </div>
-  <div id="hisense-groups"></div>
+  <div class="tdeck-soft rounded-3 overflow-hidden" style="background: transparent; border-color: rgba(127,127,127,0.20)">
+    <div id="hisense-tree" class="list-group list-group-flush">Loading…</div>
+  </div>
 
   <div class="d-flex gap-2 mt-4">
     <button type="button" class="btn btn-primary" id="hisense-save">Save and restart TV service</button>
