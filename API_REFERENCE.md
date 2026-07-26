@@ -29,17 +29,19 @@ When configuring a scheduled **API Call** trigger in the UI, you can enter paths
 
 TV control is intended for a trusted production LAN. Pairing and configuration are restricted to users who can access **Config**; normal control endpoints remain available to the TDeck Companion module.
 
-- **GET** `/api/tvs` — list configured TVs and cached connection, power, volume, mute, source, source-list, model, and error state.
+- **GET** `/api/tvs` — list ordered TVs, ordered groups, Companion target IDs, compatible-model notes, and cached connection, power, volume, mute, source, model, protocol, authentication, certificate-profile, and error state.
 - **GET** `/api/tvs/<tv_id>/state` — get one TV's cached state.
 - **POST** `/api/tvs/<tv_id>/power` with `{ "state": "on" | "off" | "toggle" }`.
 - **POST** `/api/tvs/<tv_id>/volume` with `{ "level": 20 }` for absolute volume, or `{ "action": "up" | "down" | "mute" }`.
 - **POST** `/api/tvs/<tv_id>/source` with `{ "source": "HDMI1" }`. Discovered display names such as `HDMI 1` are also accepted.
 - **POST** `/api/tvs/<tv_id>/reconnect` — discard the current TV connection and reconnect it.
+- **GET** `/api/tv-targets/<target_id>/state` — get aggregate state for `tv:<tv_id>` or `group:<group_id>`. A legacy unprefixed TV ID is also accepted.
+- **POST** `/api/tv-targets/<target_id>/power|volume|source|reconnect` — use the individual-route payloads; group commands fan out in configured member order.
 - **GET/PUT** `/api/hisense/config` — protected TV configuration API used by **Config → TVs**.
 - **POST** `/api/tvs/<tv_id>/pair/request` — protected; show a new PIN on the TV.
 - **POST** `/api/tvs/<tv_id>/pair/submit` with `{ "pin": "1234" }` — protected; approve TDeck on the TV.
 
-Power-on sends Wake-on-LAN using the configured MAC address. Commands are serialized per TV and each TV reconnects independently in the background.
+Power-on sends Wake-on-LAN using each configured MAC address. Commands are serialized per TV and each TV reconnects independently in the background. Group `connected` means every enabled member is connected; power/source/volume report a shared value only when members agree and otherwise report mixed state.
 
 ---
 

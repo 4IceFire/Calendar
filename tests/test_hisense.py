@@ -13,6 +13,7 @@ class _FakeVidaa:
 
     def __init__(self, **kwargs):
         self.__class__.instances.append(self)
+        self.kwargs = kwargs
         self.client_id = kwargs["client_id"]
         self.connected = False
         self.volume = 18
@@ -100,6 +101,13 @@ class _FakeVidaa:
         return True
 
 
+class _ProfileAwareVidaa(_FakeVidaa):
+    def connect(self, **_kwargs):
+        if Path(self.kwargs["certfile"]).name == "old.pem":
+            return False
+        return super().connect(**_kwargs)
+
+
 class HisenseManagerTests(unittest.TestCase):
     def setUp(self):
         _FakeVidaa.instances.clear()
@@ -118,6 +126,11 @@ class HisenseManagerTests(unittest.TestCase):
                 "name": "Foyer TV",
                 "host": "10.5.10.140",
                 "mac": "a0:62:fb:84:ed:28",
+            }],
+            "hisense_tv_groups": [{
+                "id": "foyer-group",
+                "name": "Foyer TVs",
+                "tv_ids": ["foyer"],
             }],
         }, base_dir=root)
         self.wakes = []
@@ -166,6 +179,86 @@ class HisenseManagerTests(unittest.TestCase):
         result = self.manager.get("foyer").submit("volume_up", wait=1)
         self.assertTrue(result["ok"], result)
         self.assertGreaterEqual(len(_FakeVidaa.instances), 2)
+
+    def test_ordered_group_status_and_control(self):
+        status = self.manager.status()
+        self.assertEqual(status["groups"][0]["tvIds"], ["foyer"])
+        self.assertEqual(status["groups"][0]["targetId"], "group:foyer-group")
+        self.assertEqual(status["targets"][0]["targetId"], "group:foyer-group")
+
+        result = self.manager.submit_target("group:foyer-group", "volume_set", 31)
+        self.assertTrue(result["ok"], result)
+        deadline = time.time() + 1
+        while time.time() < deadline and self.manager.get("foyer").status()["volume"] != 31:
+            time.sleep(0.01)
+        self.assertEqual(self.manager.target_status("group:foyer-group")["volume"], 31)
+
+    def test_newer_protocol_uses_detected_dynamic_auth(self):
+        root = Path(self.temp.name)
+        cfg = HisenseConfig.from_mapping({
+            "hisense_enabled": True,
+            "hisense_cert_path": "client.pem",
+            "hisense_key_path": "client.key",
+            "hisense_tvs": [{
+                "id": "modern",
+                "name": "Modern TV",
+                "host": "10.5.10.175",
+                "mac": "e4:8a:93:f1:da:22",
+                "auth_mode": "auto",
+            }],
+        }, base_dir=root)
+        manager = HisenseManager(
+            cfg,
+            client_factory=_FakeVidaa,
+            wake_function=lambda _mac, _subnet: True,
+            protocol_detector=lambda *_args, **_kwargs: 3290,
+        )
+        try:
+            manager.start()
+            deadline = time.time() + 1
+            while time.time() < deadline and not manager.status()["connected"]:
+                time.sleep(0.01)
+            tv = manager.status()["tvs"][0]
+            self.assertEqual(tv["protocolVersion"], 3290)
+            self.assertEqual(tv["authMethod"], "dynamic-modern")
+            self.assertTrue(_FakeVidaa.instances[-1].kwargs["use_dynamic_auth"])
+        finally:
+            manager.close()
+
+    def test_automatic_certificate_profile_fallback_uses_configured_order(self):
+        root = Path(self.temp.name)
+        (root / "old.pem").write_text("old cert", encoding="utf-8")
+        (root / "old.key").write_text("old key", encoding="utf-8")
+        (root / "current.pem").write_text("current cert", encoding="utf-8")
+        (root / "current.key").write_text("current key", encoding="utf-8")
+        cfg = HisenseConfig.from_mapping({
+            "hisense_enabled": True,
+            "hisense_certificate_profiles": [
+                {"id": "old", "cert_path": "old.pem", "key_path": "old.key"},
+                {"id": "current", "cert_path": "current.pem", "key_path": "current.key"},
+            ],
+            "hisense_tvs": [{
+                "id": "profile-test",
+                "host": "10.5.10.175",
+                "mac": "e4:8a:93:f1:da:22",
+                "certificate_profile": "auto",
+            }],
+        }, base_dir=root)
+        manager = HisenseManager(
+            cfg,
+            client_factory=_ProfileAwareVidaa,
+            wake_function=lambda _mac, _subnet: True,
+        )
+        try:
+            manager.start()
+            deadline = time.time() + 1
+            while time.time() < deadline and not manager.status()["connected"]:
+                time.sleep(0.01)
+            tv = manager.status()["tvs"][0]
+            self.assertTrue(tv["connected"], tv)
+            self.assertEqual(tv["certificateProfile"], "current")
+        finally:
+            manager.close()
 
 
 if __name__ == "__main__":

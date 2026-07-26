@@ -9,7 +9,7 @@ It supports:
 - A **CLI** (`cli.py`) for starting/stopping the scheduler and managing events.
 - A **Web UI** (`webui.py`) for editing events and templates in a browser.
 - A **DiGiCo Personal Mixes** web app that lets multiple phones mix permitted AUXes through one shared SD9 OSC connection.
-- A native **Hisense / VIDAA TV service** for power, absolute volume, source selection, pairing, and automatic reconnect.
+- A native **Hisense / VIDAA TV service** for individual and ordered-group power, absolute volume, source selection, pairing, protocol detection, and automatic reconnect.
 
 ## What this app does
 
@@ -68,7 +68,11 @@ Common keys:
 
 DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
 
-Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Put the VIDAA client certificate and private key at the paths shown on that page, add each TV's stable IP and MAC address, save, then pair once using the PIN shown on the TV. The service retries disconnected TVs automatically.
+Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Add each TV's stable IP and MAC address, configure at least one local certificate compatibility profile, save, then pair once using the PIN shown on the TV. The service detects the TV's advertised transport protocol and selects the legacy, middle, or modern authentication generation automatically while preserving the proven static fallback for A7G models.
+
+TV and group order are explicit. Groups may contain any ordered subset of TVs, and a TV may appear in more than one group. The TDeck Companion module exposes both group and individual targets for power, volume, source, reconnect, feedbacks, and variables.
+
+Some newer VIDAA firmware accepts an MQTT connection but rejects pairing requests made with certificates from an older RemoteNOW/VIDAA app generation, displaying a “TV model is no longer compatible” message on the screen. That condition is not returned to TDeck over MQTT, so it cannot be inferred from the IP address or software version alone. Add a current certificate/key pair as another local compatibility profile, select it for that TV (or move it earlier in automatic profile order), save, reconnect, and pair again. Certificate/private-key files remain local and must not be committed.
 
 ## Run (Web UI)
 

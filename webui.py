@@ -231,6 +231,9 @@ except Exception:
         "hisense_key_path": "hisense_certs/vidaa_client.key",
         "hisense_poll_interval": 10,
         "hisense_reconnect_interval": 15,
+        "hisense_compatible_models": "Confirmed: 55A7G, 65A7G",
+        "hisense_certificate_profiles": [],
+        "hisense_tv_groups": [],
         "hisense_tvs": [],
         "atem_ip": "127.0.0.1",
         "atem_port": 9910,
@@ -7487,13 +7490,15 @@ def _hisense_manager_or_error():
 
 def _hisense_log(action: str, tv_id: str, *, value: Any = None, result: dict | None = None) -> None:
     ok = bool((result or {}).get('ok', False))
+    is_group = str(tv_id).startswith('group:')
+    target_label = 'TV group' if is_group else 'TV'
     try:
         log_event(
             f'hisense.{action}',
-            f"TV {tv_id}: {action.replace('_', ' ')}{' ' + str(value) if value not in (None, '') else ''}",
+            f"{target_label} {tv_id}: {action.replace('_', ' ')}{' ' + str(value) if value not in (None, '') else ''}",
             source='api',
             status='success' if ok else 'failure',
-            target_type='hisense_tv',
+            target_type='hisense_tv_group' if is_group else 'hisense_tv',
             target_id=tv_id,
             details={'action': action, 'value': value, 'result': result or {}},
         )
@@ -7535,6 +7540,24 @@ def _hisense_submit(tv_id: str, action: str, value: Any = None, *, wait: float =
     except Exception as exc:
         result = {'ok': False, 'error': str(exc)}
         _hisense_log(action, tv_id, value=value, result=result)
+        return jsonify(result), 500
+
+
+def _hisense_submit_target(target_id: str, action: str, value: Any = None, *, wait: float = 4.0):
+    manager, error = _hisense_manager_or_error()
+    if error:
+        return error
+    try:
+        result = manager.submit_target(target_id, action, value, wait=wait)
+        _hisense_log(action, target_id, value=value, result=result)
+        return jsonify(result), (200 if result.get('ok') else 502)
+    except KeyError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+    except (TypeError, ValueError) as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        result = {'ok': False, 'error': str(exc)}
+        _hisense_log(action, target_id, value=value, result=result)
         return jsonify(result), 500
 
 
@@ -7581,14 +7604,84 @@ def api_hisense_tv_reconnect(tv_id: str):
     return _hisense_submit(tv_id, 'reconnect', wait=5.0)
 
 
+@app.get('/api/tv-targets/<target_id>/state')
+def api_hisense_target_state(target_id: str):
+    manager, error = _hisense_manager_or_error()
+    if error:
+        return error
+    try:
+        return jsonify({'ok': True, 'target': manager.target_status(target_id)})
+    except KeyError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+
+
+@app.post('/api/tv-targets/<target_id>/power')
+def api_hisense_target_power(target_id: str):
+    body = request.get_json(silent=True) or {}
+    state = str(body.get('state') or '').strip().lower()
+    actions = {'on': 'power_on', 'off': 'power_off', 'toggle': 'power_toggle'}
+    if state not in actions:
+        return jsonify({'ok': False, 'error': 'state must be on, off, or toggle'}), 400
+    return _hisense_submit_target(target_id, actions[state], wait=4.0)
+
+
+@app.post('/api/tv-targets/<target_id>/volume')
+def api_hisense_target_volume(target_id: str):
+    body = request.get_json(silent=True) or {}
+    if body.get('level') is not None:
+        try:
+            level = int(body.get('level'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'level must be a number from 0 to 100'}), 400
+        if level < 0 or level > 100:
+            return jsonify({'ok': False, 'error': 'level must be from 0 to 100'}), 400
+        return _hisense_submit_target(target_id, 'volume_set', level)
+    action = str(body.get('action') or '').strip().lower()
+    actions = {'up': 'volume_up', 'down': 'volume_down', 'mute': 'mute'}
+    if action not in actions:
+        return jsonify({'ok': False, 'error': 'provide level, or action up, down, or mute'}), 400
+    return _hisense_submit_target(target_id, actions[action])
+
+
+@app.post('/api/tv-targets/<target_id>/source')
+def api_hisense_target_source(target_id: str):
+    body = request.get_json(silent=True) or {}
+    source = str(body.get('source') or '').strip()
+    if not source:
+        return jsonify({'ok': False, 'error': 'source is required'}), 400
+    return _hisense_submit_target(target_id, 'source', source)
+
+
+@app.post('/api/tv-targets/<target_id>/reconnect')
+def api_hisense_target_reconnect(target_id: str):
+    return _hisense_submit_target(target_id, 'reconnect', wait=5.0)
+
+
 @app.get('/api/hisense/config')
 def api_hisense_config_get():
     access_error = _config_access_error_json()
     if access_error:
         return access_error
     cfg = utils.get_config()
-    keys = ('hisense_enabled', 'hisense_cert_path', 'hisense_key_path', 'hisense_poll_interval', 'hisense_reconnect_interval', 'hisense_tvs')
-    return jsonify({'ok': True, 'config': {key: cfg.get(key) for key in keys}})
+    keys = (
+        'hisense_enabled', 'hisense_cert_path', 'hisense_key_path',
+        'hisense_poll_interval', 'hisense_reconnect_interval',
+        'hisense_compatible_models', 'hisense_certificate_profiles',
+        'hisense_tv_groups', 'hisense_tvs',
+    )
+    result = {key: cfg.get(key) for key in keys}
+    if not isinstance(result.get('hisense_certificate_profiles'), list) or not result['hisense_certificate_profiles']:
+        result['hisense_certificate_profiles'] = [{
+            'id': 'default',
+            'name': 'Default / legacy',
+            'cert_path': result.get('hisense_cert_path') or 'hisense_certs/vidaa_client.pem',
+            'key_path': result.get('hisense_key_path') or 'hisense_certs/vidaa_client.key',
+            'compatible_models': '55A7G, 65A7G',
+            'enabled': True,
+        }]
+    if not isinstance(result.get('hisense_tv_groups'), list):
+        result['hisense_tv_groups'] = []
+    return jsonify({'ok': True, 'config': result})
 
 
 @app.put('/api/hisense/config')
@@ -7602,8 +7695,33 @@ def api_hisense_config_put():
     tvs = body.get('hisense_tvs')
     if not isinstance(tvs, list):
         return jsonify({'ok': False, 'error': 'hisense_tvs must be a list'}), 400
+    raw_profiles = body.get('hisense_certificate_profiles')
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        return jsonify({'ok': False, 'error': 'at least one certificate profile is required'}), 400
+    profile_ids: set[str] = set()
+    profiles = []
+    for index, profile in enumerate(raw_profiles):
+        if not isinstance(profile, dict):
+            return jsonify({'ok': False, 'error': f'Certificate profile {index + 1} is invalid'}), 400
+        ident = re.sub(r'[^a-z0-9_-]+', '-', str(profile.get('id') or '').strip().lower()).strip('-')
+        if not ident or ident in profile_ids:
+            return jsonify({'ok': False, 'error': f'Certificate profile {index + 1} needs a unique ID'}), 400
+        profile_ids.add(ident)
+        cert_path = str(profile.get('cert_path') or '').strip()
+        key_path = str(profile.get('key_path') or '').strip()
+        if not cert_path or not key_path:
+            return jsonify({'ok': False, 'error': f'{ident} needs both a certificate and key path'}), 400
+        profiles.append({
+            'id': ident,
+            'name': str(profile.get('name') or ident).strip(),
+            'cert_path': cert_path,
+            'key_path': key_path,
+            'compatible_models': str(profile.get('compatible_models') or '').strip(),
+            'enabled': bool(profile.get('enabled', True)),
+        })
     seen: set[str] = set()
     normalized = []
+    auth_modes = {'auto', 'static-legacy', 'dynamic-legacy', 'dynamic-middle', 'dynamic-modern'}
     for index, tv in enumerate(tvs):
         if not isinstance(tv, dict):
             return jsonify({'ok': False, 'error': f'TV {index + 1} is invalid'}), 400
@@ -7617,13 +7735,60 @@ def api_hisense_config_put():
             return jsonify({'ok': False, 'error': f'{ident} needs a valid IP address or hostname'}), 400
         if mac and not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac):
             return jsonify({'ok': False, 'error': f'{ident} has an invalid MAC address'}), 400
-        normalized.append({'id': ident, 'name': str(tv.get('name') or ident).strip(), 'host': host, 'mac': mac, 'enabled': bool(tv.get('enabled', True))})
+        auth_mode = str(tv.get('auth_mode') or 'auto').strip().lower()
+        if auth_mode not in auth_modes:
+            return jsonify({'ok': False, 'error': f'{ident} has an invalid authentication mode'}), 400
+        certificate_profile = str(tv.get('certificate_profile') or 'auto').strip().lower()
+        if certificate_profile != 'auto' and certificate_profile not in profile_ids:
+            certificate_profile = 'auto'
+        normalized.append({
+            'id': ident,
+            'name': str(tv.get('name') or ident).strip(),
+            'host': host,
+            'mac': mac,
+            'enabled': bool(tv.get('enabled', True)),
+            'auth_mode': auth_mode,
+            'certificate_profile': certificate_profile,
+        })
+    raw_groups = body.get('hisense_tv_groups')
+    if raw_groups is None:
+        raw_groups = []
+    if not isinstance(raw_groups, list):
+        return jsonify({'ok': False, 'error': 'hisense_tv_groups must be a list'}), 400
+    group_ids: set[str] = set()
+    groups = []
+    for index, group in enumerate(raw_groups):
+        if not isinstance(group, dict):
+            return jsonify({'ok': False, 'error': f'TV group {index + 1} is invalid'}), 400
+        ident = re.sub(r'[^a-z0-9_-]+', '-', str(group.get('id') or '').strip().lower()).strip('-')
+        if not ident or ident in group_ids:
+            return jsonify({'ok': False, 'error': f'TV group {index + 1} needs a unique ID'}), 400
+        group_ids.add(ident)
+        member_ids = []
+        members_seen: set[str] = set()
+        for raw_tv_id in group.get('tv_ids') if isinstance(group.get('tv_ids'), list) else []:
+            tv_id = re.sub(r'[^a-z0-9_-]+', '-', str(raw_tv_id or '').strip().lower()).strip('-')
+            if tv_id in seen and tv_id not in members_seen:
+                members_seen.add(tv_id)
+                member_ids.append(tv_id)
+        groups.append({
+            'id': ident,
+            'name': str(group.get('name') or ident).strip(),
+            'enabled': bool(group.get('enabled', True)),
+            'tv_ids': member_ids,
+        })
+    primary_profile = profiles[0]
     updates = {
         'hisense_enabled': bool(body.get('hisense_enabled', False)),
-        'hisense_cert_path': str(body.get('hisense_cert_path') or 'hisense_certs/vidaa_client.pem').strip(),
-        'hisense_key_path': str(body.get('hisense_key_path') or 'hisense_certs/vidaa_client.key').strip(),
+        # Keep the original keys synchronized for compatibility with older
+        # TDeck builds and config exports.
+        'hisense_cert_path': primary_profile['cert_path'],
+        'hisense_key_path': primary_profile['key_path'],
         'hisense_poll_interval': max(2, int(body.get('hisense_poll_interval') or 10)),
         'hisense_reconnect_interval': max(2, int(body.get('hisense_reconnect_interval') or 15)),
+        'hisense_compatible_models': str(body.get('hisense_compatible_models') or '').strip(),
+        'hisense_certificate_profiles': profiles,
+        'hisense_tv_groups': groups,
         'hisense_tvs': normalized,
     }
     cfg = utils.get_config()
@@ -7633,7 +7798,20 @@ def api_hisense_config_put():
     if _close_hisense_manager is not None:
         _close_hisense_manager()
     manager = _get_hisense_manager_from_config()
-    log_event('hisense.config.update', f'Updated Hisense TV configuration ({len(normalized)} TVs)', source='web', status='success', target_type='config', target_id='hisense', details={'tv_ids': sorted(seen), 'enabled': updates['hisense_enabled']})
+    log_event(
+        'hisense.config.update',
+        f'Updated Hisense TV configuration ({len(normalized)} TVs, {len(groups)} groups)',
+        source='web',
+        status='success',
+        target_type='config',
+        target_id='hisense',
+        details={
+            'tv_ids': sorted(seen),
+            'group_ids': [group['id'] for group in groups],
+            'certificate_profiles': [profile['id'] for profile in profiles],
+            'enabled': updates['hisense_enabled'],
+        },
+    )
     return jsonify({'ok': True, 'config': updates, 'status': manager.status() if manager else {}})
 
 
