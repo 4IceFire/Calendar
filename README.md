@@ -344,3 +344,18 @@ pp.reset_timer("Countdown Timer")
 # Read current timer values/states
 current = pp.get_current_timer_times()
 ```
+# CCB / ChurchStaq Service Access
+
+TDeck can pull upcoming ChurchStaq/CCB v2 scheduling services, normalize volunteer assignments, cache service-plan item timing, and apply reviewed roles through the existing TDeck permission groups.
+
+Setup is split across three places:
+
+1. **Config → CCB** — enter the OAuth application details, connect the church, select scheduling categories, and maintain `CCB position → TDeck role` mappings.
+2. **Permissions → Groups** — associate one or more TDeck roles with each permission group. Broad practice groups can be marked **Suspend while CCB service access is active**.
+3. **Service Access** — select a service, choose roster/runsheet source services, pull branches, link unmatched identities, review allocations, and apply or clear access.
+
+CCB credentials and OAuth tokens live in the ignored `ccb_secrets.json` file, not `config.json` or normal TDeck config transport. They can instead be provided with `TDECK_CCB_CLIENT_ID`, `TDECK_CCB_CLIENT_SECRET`, `TDECK_CCB_SUBDOMAIN`, and `TDECK_CCB_COMPANION_TOKEN` environment variables.
+
+The current Pushpay v2 documentation requires `read:scheduling` and `read:individuals`; its service-plan GET operation is presently documented with `write:scheduling`. Confirm the registered OAuth redirect URI exactly, including scheme and port. A local-IP HTTP callback may require a stable HTTPS front end accepted by Pushpay.
+
+Applying service access never rewrites manual `user_groups` memberships. CCB-managed memberships are stored separately and replaced atomically. Clearing them restores any suspended practice groups. Runsheet items are cached with raw payload, duration, calculated start, and calculated end for later timer automation; this release does not change timers from CCB data.

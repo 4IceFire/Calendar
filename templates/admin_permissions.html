@@ -184,6 +184,38 @@
                         <hr class="my-3">
                         <div class="row g-3">
                           <div class="col-12">
+                            <div class="fw-semibold">CCB service roles</div>
+                            <div class="small text-muted">When a reviewed service is applied, people allocated to these TDeck roles receive this group. A group can serve more than one role.</div>
+                          </div>
+                          {% for category in ['Singers', 'Band', 'Production'] %}
+                            <div class="col-12">
+                              <div class="small text-uppercase text-muted fw-semibold mb-1">{{ category }}</div>
+                              <div class="row">
+                                {% for role in ccb_roles if role.display_category == category %}
+                                  <div class="col-12 col-md-6">
+                                    <div class="form-check">
+                                      <input class="form-check-input" type="checkbox" name="ccb_role_keys" value="{{ role.role_key }}"
+                                        {% if role.role_key in group_to_ccb_roles.get(g.id, []) %}checked{% endif %}>
+                                      <label class="form-check-label">{{ role.name }}</label>
+                                    </div>
+                                  </div>
+                                {% endfor %}
+                              </div>
+                            </div>
+                          {% endfor %}
+                          <div class="col-12">
+                            <div class="form-check form-switch">
+                              <input class="form-check-input" type="checkbox" name="suspend_while_ccb_active" id="ccb-fallback-{{ g.id }}"
+                                {% if g.suspend_while_ccb_active %}checked{% endif %}>
+                              <label class="form-check-label" for="ccb-fallback-{{ g.id }}">Suspend this group while CCB service access is active</label>
+                            </div>
+                            <div class="form-text">Use this for broad Band, Singers, or Production practice groups. Manual groups without this option remain active during services.</div>
+                          </div>
+                        </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
                             <div class="fw-semibold">Personal Mix AUX access (DiGiCo)</div>
                             <div class="small text-muted">No selected AUXes means this group can mix every enabled AUX. Access is enforced by the TDeck API.</div>
                           </div>

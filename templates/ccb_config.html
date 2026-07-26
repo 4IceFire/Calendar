@@ -1,0 +1,121 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'CCB Configuration' %}
+{% set page_subtitle = 'Connection, service sources, CCB position mapping, and reusable TDeck roles.' %}
+
+{% block content %}
+  {% include '_config_tabs.html' %}
+  <div id="ccb-config-page" data-connect-url="{{ url_for('ccb_oauth_start') }}">
+    <div id="ccb-config-status" class="mb-3" aria-live="polite"></div>
+
+    <div class="card tdeck-soft mb-4">
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+          <div>
+            <h2 class="h5 mb-1">CCB API connection</h2>
+            <div class="small text-muted">Credentials and OAuth tokens are stored in a separate local secret file and are not included in TDeck config export.</div>
+          </div>
+          <span id="ccb-connection-badge" class="badge text-bg-secondary">Loading</span>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label" for="ccb-client-id">Client ID</label>
+            <input id="ccb-client-id" class="form-control" autocomplete="off">
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="ccb-client-secret">Client secret</label>
+            <input id="ccb-client-secret" class="form-control" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing">
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="ccb-subdomain">Church subdomain</label>
+            <input id="ccb-subdomain" class="form-control" autocomplete="off">
+          </div>
+          <div class="col-md-7">
+            <label class="form-label" for="ccb-redirect-uri">OAuth redirect URI</label>
+            <input id="ccb-redirect-uri" class="form-control" placeholder="Use the callback shown below">
+            <div class="form-text">Registered callback: <code id="ccb-default-callback"></code>. Pushpay must accept this exact URL, including HTTP/HTTPS.</div>
+          </div>
+          <div class="col-md-5">
+            <label class="form-label" for="ccb-scopes">OAuth scopes</label>
+            <input id="ccb-scopes" class="form-control">
+            <div class="form-text">Runsheet retrieval is currently documented by Pushpay as requiring <code>write:scheduling</code>.</div>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label" for="ccb-upcoming-days">Upcoming days</label>
+            <input id="ccb-upcoming-days" class="form-control" type="number" min="1" max="366">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label" for="ccb-past-days">Past days shown</label>
+            <input id="ccb-past-days" class="form-control" type="number" min="0" max="30">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="ccb-companion-token">Companion API token</label>
+            <div class="input-group">
+              <input id="ccb-companion-token" class="form-control" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing">
+              <button id="ccb-generate-token" class="btn btn-outline-secondary" type="button">Generate</button>
+            </div>
+            <div class="form-text">Copy the generated token into the TDeck Companion connection. It is shown only when generated.</div>
+          </div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 mt-3">
+          <button id="ccb-config-save" class="btn btn-primary" type="button">Save Configuration</button>
+          <button id="ccb-connect" class="btn btn-outline-primary" type="button">Connect with CCB</button>
+          <button id="ccb-test" class="btn btn-outline-secondary" type="button">Test Connection</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card tdeck-soft mb-4">
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+          <div>
+            <h2 class="h5 mb-1">Scheduling categories</h2>
+            <div class="small text-muted">Only selected categories are searched for upcoming services.</div>
+          </div>
+          <button id="ccb-refresh-categories" class="btn btn-sm btn-outline-secondary" type="button">Refresh From CCB</button>
+        </div>
+        <div id="ccb-category-list" class="row g-2"></div>
+      </div>
+    </div>
+
+    <div class="card tdeck-soft mb-4">
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+          <div>
+            <h2 class="h5 mb-1">TDeck roles</h2>
+            <div class="small text-muted">These are individual authorization slots. Singers, Band, and Production are display headings only.</div>
+          </div>
+          <button id="ccb-add-role" class="btn btn-sm btn-outline-primary" type="button">Add Role</button>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead><tr><th>Name</th><th>Display heading</th><th>Allocation pool</th><th>Order</th><th>Active</th></tr></thead>
+            <tbody id="ccb-role-rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card tdeck-soft">
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+          <div>
+            <h2 class="h5 mb-1">CCB position mapping</h2>
+            <div class="small text-muted">Direct positions fill a TDeck role automatically. Pool positions supply candidates for manual slots. Display-only positions remain visible but grant nothing.</div>
+          </div>
+          <button id="ccb-add-position" class="btn btn-sm btn-outline-primary" type="button">Add Position</button>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead><tr><th>CCB position</th><th>Mode</th><th>TDeck role / pool</th><th>Last seen</th></tr></thead>
+            <tbody id="ccb-position-rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/static/ccb_config.js"></script>
+{% endblock %}

@@ -399,3 +399,18 @@ Unlike legacy Companion-facing APIs, every DiGiCo endpoint enforces login and pa
 
 ### Fetch live activity
 - **GET** `/api/activity-log/live`
+# CCB / ChurchStaq workflow API
+
+CCB endpoints accept an authenticated TDeck browser session with the relevant page permission. Companion calls must send `Authorization: Bearer <token>` using the dedicated token generated at **Config → CCB**.
+
+- `GET /api/ccb/status` — connection and active-service summary.
+- `GET /api/ccb/services/upcoming` — cached service choices.
+- `POST /api/ccb/services/refresh` — refresh upcoming services from configured categories.
+- `POST /api/ccb/services/:event_id/pull` — run selected branches; body: `{"branches":["roster","runsheet"],"sources":{"roster":801,"runsheet":802}}`.
+- `GET|PUT /api/ccb/services/:event_id/assignments` — read or replace reviewed TDeck role allocations.
+- `POST /api/ccb/services/:event_id/apply` — atomically apply the reviewed access draft.
+- `POST /api/ccb/services/:event_id/pull-and-apply` — refresh requested branches and apply when the roster branch succeeds.
+- `POST /api/ccb/access/clear` — remove CCB-managed memberships and restore fallback groups.
+- `GET /api/ccb/services/:event_id/runsheet` — normalized cached runsheet items and calculated times.
+
+Configuration and identity endpoints are used by the protected TDeck UI. CCB config endpoints do not accept the Companion token.

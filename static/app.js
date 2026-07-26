@@ -3806,6 +3806,8 @@ if (document.getElementById('access-levels-page')) {
     const atemAudioSourceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="atem_allowed_audio_sources_role"]:checked')).map(cb => String(cb.value || ''));
     const atemCanSoloEl = form.querySelector('input[name="atem_can_solo_audio_role"]');
     const atemCanMonitorEl = form.querySelector('input[name="atem_can_monitor_audio_role"]');
+    const ccbRoleKeys = Array.from(form.querySelectorAll('input[type="checkbox"][name="ccb_role_keys"]:checked')).map(cb => String(cb.value || ''));
+    const ccbFallbackEl = form.querySelector('input[name="suspend_while_ccb_active"]');
 
     return {
       page_keys: pageKeys,
@@ -3819,6 +3821,8 @@ if (document.getElementById('access-levels-page')) {
       atem_allowed_audio_sources_role: atemAudioSourceIds,
       atem_can_solo_audio_role: atemCanSoloEl ? !!atemCanSoloEl.checked : false,
       atem_can_monitor_audio_role: atemCanMonitorEl ? !!atemCanMonitorEl.checked : false,
+      ccb_role_keys: ccbRoleKeys,
+      suspend_while_ccb_active: ccbFallbackEl ? !!ccbFallbackEl.checked : false,
     };
   }
 

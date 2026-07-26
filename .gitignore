@@ -21,4 +21,5 @@ hisense_certs/
 !companion_surfaces.json
 
 auth.db
+ccb_secrets.json
 .DS_Store

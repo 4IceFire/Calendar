@@ -23,6 +23,16 @@ from datetime import datetime, timedelta
 from tempfile import NamedTemporaryFile
 
 from package.json_cache import read_json, write_json
+from ccb import (
+    CCBClient,
+    CCBError,
+    CCBSecretStore,
+    CCBWorkflow,
+    DEFAULT_SCOPES as CCB_DEFAULT_SCOPES,
+    GRANTING_STATUSES as CCB_GRANTING_STATUSES,
+    discover_services as ccb_discover_services,
+)
+from ccb_store import CCBStoreError, CCBTDeckStore
 
 from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -364,6 +374,7 @@ app.config.update(
 # --- Auth DB (SQLite) ---
 _AUTH_DB_PATH = (Path(__file__).resolve().parent / 'auth.db')
 _APP_ROOT = Path(__file__).resolve().parent
+_CCB_SECRETS_PATH = _APP_ROOT / 'ccb_secrets.json'
 _COMPANION_SURFACES_PATH = _APP_ROOT / 'companion_surfaces.json'
 _COMPANION_SURFACE_LAYOUTS: dict[str, tuple[int, int]] = {
     '2x5': (2, 5),
@@ -377,6 +388,82 @@ _COMPANION_SURFACE_LAYOUTS: dict[str, tuple[int, int]] = {
 _COMPANION_SURFACE_DEFAULT_LAYOUT = '3x5'
 _COMPANION_SURFACE_CELL_PX = 110
 _COMPANION_SURFACE_GUTTER_PX = 10
+
+_CCB_DEFAULT_ROLES = (
+    ('vox-1', 'Vox 1', 'Singers', 10),
+    ('vox-2', 'Vox 2', 'Singers', 20),
+    ('vox-3', 'Vox 3', 'Singers', 30),
+    ('vox-4', 'Vox 4', 'Singers', 40),
+    ('vox-5', 'Vox 5', 'Singers', 50),
+    ('vox-6', 'Vox 6', 'Singers', 60),
+    ('choir-director', 'Choir Director', 'Singers', 70),
+    ('md', 'MD', 'Band', 110),
+    ('drums', 'Drums', 'Band', 120),
+    ('bass', 'Bass', 'Band', 130),
+    ('keys', 'Keys', 'Band', 140),
+    ('electric-1', 'Electric 1', 'Band', 150),
+    ('electric-2', 'Electric 2', 'Band', 160),
+    ('electric-3', 'Electric 3', 'Band', 170),
+    ('acoustic', 'Acoustic', 'Band', 180),
+    ('sound', 'Sound', 'Production', 210),
+    ('lighting', 'Lighting', 'Production', 220),
+    ('playbacks', 'Playbacks', 'Production', 230),
+    ('td', 'TD', 'Production', 240),
+    ('service-producer', 'Service Producer', 'Production', 250),
+    ('stage-manager', 'Stage Manager', 'Production', 260),
+)
+
+_CCB_DEFAULT_POSITIONS = (
+    ('Worship Leader', 'pool', None, 'vocals'),
+    ('Co-lead', 'pool', None, 'vocals'),
+    ('Frontline', 'pool', None, 'vocals'),
+    ('Choir', 'display', None, None),
+    ('Music Director', 'direct', 'md', None),
+    ('Bass', 'direct', 'bass', None),
+    ('Keyboard', 'direct', 'keys', None),
+    ('Acoustic', 'direct', 'acoustic', None),
+    ('Lead Electric', 'direct', 'electric-1', None),
+    ('Rhythm Electric', 'direct', 'electric-2', None),
+    ('Drums', 'direct', 'drums', None),
+    ('Service Producer', 'direct', 'service-producer', None),
+    ('Stage Manager', 'direct', 'stage-manager', None),
+    ('Sound Tech', 'direct', 'sound', None),
+    ('Media Operator', 'direct', 'playbacks', None),
+    ('Lighting Tech', 'direct', 'lighting', None),
+    ('Tech Director', 'direct', 'td', None),
+)
+
+
+def _seed_ccb_defaults(conn: sqlite3.Connection) -> None:
+    for role_key, name, category, sort_order in _CCB_DEFAULT_ROLES:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ccb_roles(role_key,name,display_category,sort_order,allocation_pool,is_active)
+            VALUES (?,?,?,?,?,1)
+            """,
+            (role_key, name, category, int(sort_order), 'vocals' if role_key.startswith('vox-') else None),
+        )
+    conn.execute("UPDATE ccb_roles SET allocation_pool='vocals' WHERE role_key LIKE 'vox-%' AND allocation_pool IS NULL")
+    for name, mode, role_key, pool_name in _CCB_DEFAULT_POSITIONS:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ccb_positions(name,mapping_mode,tdeck_role_key,pool_name)
+            VALUES (?,?,?,?)
+            """,
+            (name, mode, role_key, pool_name),
+        )
+    defaults = {
+        'enabled_category_ids': [],
+        'oauth_redirect_uri': '',
+        'oauth_scopes': CCB_DEFAULT_SCOPES,
+        'upcoming_days': 45,
+        'past_days': 1,
+    }
+    for key, value in defaults.items():
+        conn.execute(
+            'INSERT OR IGNORE INTO ccb_settings(key,value_json) VALUES (?,?)',
+            (key, json.dumps(value)),
+        )
 
 
 def _db() -> sqlite3.Connection:
@@ -517,6 +604,7 @@ def _init_auth_db() -> None:
             ('atem_allowed_audio_sources', 'TEXT'),
             ('atem_can_solo_audio', 'INTEGER'),
             ('atem_can_monitor_audio', 'INTEGER'),
+            ('suspend_while_ccb_active', 'INTEGER NOT NULL DEFAULT 0'),
         ):
             if col_name not in group_cols:
                 try:
@@ -645,6 +733,216 @@ def _init_auth_db() -> None:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_settings (
+              key TEXT PRIMARY KEY,
+              value_json TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_roles (
+              role_key TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              display_category TEXT NOT NULL,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              allocation_pool TEXT,
+              is_active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        try:
+            ccb_role_cols = [str(r['name']) for r in conn.execute('PRAGMA table_info(ccb_roles)').fetchall()]
+        except Exception:
+            ccb_role_cols = []
+        if 'allocation_pool' not in ccb_role_cols:
+            try:
+                conn.execute('ALTER TABLE ccb_roles ADD COLUMN allocation_pool TEXT')
+            except Exception:
+                pass
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_positions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ccb_position_id INTEGER,
+              name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+              mapping_mode TEXT NOT NULL DEFAULT 'display',
+              tdeck_role_key TEXT,
+              pool_name TEXT,
+              last_seen_at TEXT,
+              raw_json TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_group_roles (
+              group_id INTEGER NOT NULL,
+              role_key TEXT NOT NULL,
+              UNIQUE(group_id, role_key)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_user_identities (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              provider TEXT NOT NULL,
+              external_id TEXT NOT NULL,
+              user_id INTEGER NOT NULL,
+              display_name TEXT,
+              email TEXT,
+              is_vocalist INTEGER NOT NULL DEFAULT 0,
+              linked_at TEXT,
+              linked_by INTEGER,
+              last_seen_at TEXT,
+              raw_json TEXT,
+              UNIQUE(provider, external_id),
+              UNIQUE(provider, user_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_services (
+              event_id INTEGER PRIMARY KEY,
+              schedule_id INTEGER NOT NULL,
+              category_id INTEGER NOT NULL,
+              name TEXT NOT NULL,
+              schedule_name TEXT,
+              start_at TEXT,
+              end_at TEXT,
+              service_plan_id INTEGER,
+              raw_json TEXT,
+              discovered_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_service_sources (
+              selected_event_id INTEGER NOT NULL,
+              branch_name TEXT NOT NULL,
+              source_event_id INTEGER NOT NULL,
+              UNIQUE(selected_event_id, branch_name)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_service_branches (
+              selected_event_id INTEGER NOT NULL,
+              branch_name TEXT NOT NULL,
+              source_event_id INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              pulled_at TEXT,
+              data_json TEXT,
+              warnings_json TEXT,
+              error TEXT,
+              UNIQUE(selected_event_id, branch_name)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_runsheet_items (
+              selected_event_id INTEGER NOT NULL,
+              source_event_id INTEGER NOT NULL,
+              plan_id INTEGER,
+              item_id INTEGER,
+              item_order INTEGER NOT NULL,
+              item_index INTEGER NOT NULL,
+              item_type TEXT,
+              name TEXT,
+              description TEXT,
+              duration_seconds INTEGER NOT NULL DEFAULT 0,
+              starts_at TEXT,
+              ends_at TEXT,
+              links_json TEXT,
+              files_json TEXT,
+              raw_json TEXT,
+              UNIQUE(selected_event_id, item_index)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_role_allocations (
+              selected_event_id INTEGER NOT NULL,
+              role_key TEXT NOT NULL,
+              ccb_individual_id TEXT NOT NULL,
+              source TEXT NOT NULL DEFAULT 'manual',
+              ccb_position_name TEXT,
+              assignment_status TEXT,
+              updated_at TEXT,
+              updated_by INTEGER,
+              UNIQUE(selected_event_id, role_key, ccb_individual_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_active_service (
+              singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+              selected_event_id INTEGER NOT NULL,
+              service_name TEXT,
+              service_start TEXT,
+              applied_at TEXT NOT NULL,
+              applied_by INTEGER,
+              source TEXT NOT NULL DEFAULT 'web'
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_user_group_memberships (
+              user_id INTEGER NOT NULL,
+              group_id INTEGER NOT NULL,
+              selected_event_id INTEGER NOT NULL,
+              role_key TEXT NOT NULL,
+              ccb_individual_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(user_id, group_id, selected_event_id, role_key)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_workflow_runs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              selected_event_id INTEGER NOT NULL,
+              trigger_source TEXT NOT NULL,
+              requested_branches_json TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              completed_at TEXT,
+              status TEXT NOT NULL,
+              summary_json TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ccb_workflow_branch_runs (
+              workflow_run_id INTEGER NOT NULL,
+              branch_name TEXT NOT NULL,
+              source_event_id INTEGER,
+              status TEXT NOT NULL,
+              warnings_json TEXT,
+              error TEXT,
+              UNIQUE(workflow_run_id, branch_name)
+            )
+            """
+        )
+        try:
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ccb_services_start ON ccb_services(start_at)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ccb_allocations_service ON ccb_role_allocations(selected_event_id, role_key)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ccb_memberships_user ON ccb_user_group_memberships(user_id, group_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_external_identity_user ON external_user_identities(provider, user_id)')
+        except Exception:
+            pass
+        _seed_ccb_defaults(conn)
         migrated_row = conn.execute(
             'SELECT value FROM auth_meta WHERE key=?',
             ('audit_to_activity_log_migrated',),
@@ -925,6 +1223,35 @@ def _set_group_atem_can_monitor_audio(group_id: int, enabled: bool) -> None:
         conn.close()
 
 
+def _set_group_ccb_roles(group_id: int, role_keys) -> None:
+    normalized = sorted({str(key or '').strip() for key in (role_keys or []) if str(key or '').strip()})
+    conn = _db()
+    try:
+        conn.execute('DELETE FROM ccb_group_roles WHERE group_id=?', (int(group_id),))
+        for role_key in normalized:
+            exists = conn.execute('SELECT 1 FROM ccb_roles WHERE role_key=? AND is_active=1', (role_key,)).fetchone()
+            if exists:
+                conn.execute(
+                    'INSERT OR IGNORE INTO ccb_group_roles(group_id,role_key) VALUES (?,?)',
+                    (int(group_id), role_key),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _set_group_ccb_fallback(group_id: int, enabled: bool) -> None:
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET suspend_while_ccb_active=? WHERE id=? AND COALESCE(is_admin,0)=0',
+            (1 if enabled else 0, int(group_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _set_group_pages(group_id: int, page_keys: list[str]) -> None:
     group_id = int(group_id)
     keys = [k for k in (page_keys or []) if str(k or '').strip()]
@@ -944,6 +1271,7 @@ def _group_settings_snapshot(group_id: int) -> dict:
     try:
         group = conn.execute('SELECT * FROM groups WHERE id=?', (gid,)).fetchone()
         pages = conn.execute('SELECT page_key FROM group_pages WHERE group_id=? ORDER BY page_key', (gid,)).fetchall()
+        ccb_roles = conn.execute('SELECT role_key FROM ccb_group_roles WHERE group_id=? ORDER BY role_key', (gid,)).fetchall()
     finally:
         conn.close()
     if not group:
@@ -962,6 +1290,8 @@ def _group_settings_snapshot(group_id: int) -> dict:
         'atem_allowed_audio_sources': _coerce_string_allow_list(group['atem_allowed_audio_sources'] if 'atem_allowed_audio_sources' in group.keys() else None),
         'atem_can_solo_audio': bool(int(group['atem_can_solo_audio'] or 0)) if 'atem_can_solo_audio' in group.keys() and group['atem_can_solo_audio'] is not None else False,
         'atem_can_monitor_audio': bool(int(group['atem_can_monitor_audio'] or 0)) if 'atem_can_monitor_audio' in group.keys() and group['atem_can_monitor_audio'] is not None else False,
+        'ccb_role_keys': sorted([str(r['role_key']) for r in ccb_roles or []]),
+        'suspend_while_ccb_active': bool(int(group['suspend_while_ccb_active'] or 0)) if 'suspend_while_ccb_active' in group.keys() else False,
     }
 
 
@@ -1068,6 +1398,43 @@ def _log_group_setting_changes(before: dict, after: dict) -> None:
                 'new_can_monitor': after.get('atem_can_monitor_audio'),
             },
         )
+    if _changed('ccb_role_keys') or _changed('suspend_while_ccb_active'):
+        log_event(
+            'group.ccb_access.update',
+            f"Updated CCB service access for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={
+                'group_id': gid,
+                'group_name': name,
+                'old_role_keys': before.get('ccb_role_keys'),
+                'new_role_keys': after.get('ccb_role_keys'),
+                'old_fallback': before.get('suspend_while_ccb_active'),
+                'new_fallback': after.get('suspend_while_ccb_active'),
+            },
+        )
+
+
+def _effective_user_memberships_sql() -> str:
+    """SQL returning manual plus active CCB memberships.
+
+    Manual fallback/practice groups are suppressed only while an applied CCB
+    service exists. Other manual groups and Admin remain effective.
+    """
+    return """
+        SELECT ug.user_id,ug.group_id
+        FROM user_groups ug
+        JOIN groups manual_group ON manual_group.id=ug.group_id
+        WHERE COALESCE(manual_group.suspend_while_ccb_active,0)=0
+           OR NOT EXISTS (SELECT 1 FROM ccb_active_service WHERE singleton_id=1)
+        UNION
+        SELECT cug.user_id,cug.group_id
+        FROM ccb_user_group_memberships cug
+        JOIN ccb_active_service active
+          ON active.singleton_id=1 AND active.selected_event_id=cug.selected_event_id
+    """
 
 
 def _get_user_groups(user_id: int | None) -> list[sqlite3.Row]:
@@ -1076,11 +1443,11 @@ def _get_user_groups(user_id: int | None) -> list[sqlite3.Row]:
     conn = _db()
     try:
         return conn.execute(
-            """
+            f"""
             SELECT g.*
             FROM groups g
-            JOIN user_groups ug ON ug.group_id = g.id
-            WHERE ug.user_id=?
+            JOIN ({_effective_user_memberships_sql()}) eug ON eug.group_id = g.id
+            WHERE eug.user_id=?
             ORDER BY lower(g.name)
             """,
             (int(user_id),),
@@ -1096,12 +1463,12 @@ def _get_user_access_snapshot(user_id: int | None) -> tuple[list[sqlite3.Row], d
     conn = _db()
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT g.*,gp.page_key AS granted_page_key
             FROM groups g
-            JOIN user_groups ug ON ug.group_id=g.id
+            JOIN ({_effective_user_memberships_sql()}) eug ON eug.group_id=g.id
             LEFT JOIN group_pages gp ON gp.group_id=g.id
-            WHERE ug.user_id=?
+            WHERE eug.user_id=?
             ORDER BY lower(g.name),gp.page_key
             """,
             (int(user_id),),
@@ -1129,12 +1496,12 @@ def _get_user_groups_for_page(user_id: int | None, page_key: str) -> list[sqlite
     conn = _db()
     try:
         return conn.execute(
-            """
+            f"""
             SELECT DISTINCT g.*
             FROM groups g
-            JOIN user_groups ug ON ug.group_id = g.id
+            JOIN ({_effective_user_memberships_sql()}) eug ON eug.group_id = g.id
             JOIN group_pages gp ON gp.group_id = g.id
-            WHERE ug.user_id=? AND gp.page_key=?
+            WHERE eug.user_id=? AND gp.page_key=?
             ORDER BY lower(g.name)
             """,
             (int(user_id), str(page_key)),
@@ -1171,11 +1538,11 @@ def _user_allows_page(user_id: int | None, page_key: str) -> bool:
     conn = _db()
     try:
         row = conn.execute(
-            """
+            f"""
             SELECT 1
-            FROM user_groups ug
-            JOIN group_pages gp ON gp.group_id = ug.group_id
-            WHERE ug.user_id=? AND gp.page_key=?
+            FROM ({_effective_user_memberships_sql()}) eug
+            JOIN group_pages gp ON gp.group_id = eug.group_id
+            WHERE eug.user_id=? AND gp.page_key=?
             LIMIT 1
             """,
             (int(user_id), str(page_key)),
@@ -2136,8 +2503,15 @@ def _user_by_username(username: str) -> sqlite3.Row | None:
     conn = _db()
     try:
         return conn.execute(
-            'SELECT u.* FROM users u WHERE lower(u.username)=lower(?)',
-            (str(username or ''),),
+            """
+            SELECT u.*
+            FROM users u
+            WHERE lower(u.username)=lower(?)
+               OR (u.email IS NOT NULL AND trim(u.email)!='' AND lower(u.email)=lower(?))
+            ORDER BY CASE WHEN lower(u.username)=lower(?) THEN 0 ELSE 1 END
+            LIMIT 1
+            """,
+            (str(username or ''), str(username or ''), str(username or '')),
         ).fetchone()
     finally:
         conn.close()
@@ -2386,12 +2760,12 @@ def _effective_permissions_for_user(user_id: int) -> list[dict[str, Any]]:
     conn = _db()
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT gp.page_key,g.name
             FROM group_pages gp
             JOIN groups g ON g.id=gp.group_id
-            JOIN user_groups ug ON ug.group_id=g.id
-            WHERE ug.user_id=?
+            JOIN ({_effective_user_memberships_sql()}) eug ON eug.group_id=g.id
+            WHERE eug.user_id=?
             ORDER BY lower(g.name)
             """,
             (int(user_id),),
@@ -2583,6 +2957,7 @@ _PAGE_LANDING_PATHS = (
     ('page:videohub', '/videohub'),
     ('page:atem_audio', '/foyer-audio'),
     ('page:routing', '/routing'),
+    ('page:ccb_service_access', '/service-access'),
     ('page:digico_mixer', '/personal-mixes'),
     ('page:surface_controls', '/surface-controls'),
     ('page:templates', '/templates'),
@@ -4262,6 +4637,8 @@ def admin_permissions_page():
                     if g and not bool(int(g['is_admin'] or 0)):
                         conn.execute('DELETE FROM user_groups WHERE group_id=?', (gid,))
                         conn.execute('DELETE FROM group_pages WHERE group_id=?', (gid,))
+                        conn.execute('DELETE FROM ccb_group_roles WHERE group_id=?', (gid,))
+                        conn.execute('DELETE FROM ccb_user_group_memberships WHERE group_id=?', (gid,))
                         conn.execute('DELETE FROM groups WHERE id=?', (gid,))
                         conn.commit()
                         _audit('group_delete', str(g['name']))
@@ -4344,6 +4721,11 @@ def admin_permissions_page():
                             _set_group_atem_audio_sources(gid, request.form.getlist('atem_allowed_audio_sources_role'))
                             _set_group_atem_can_solo_audio(gid, request.form.get('atem_can_solo_audio_role') == 'on')
                             _set_group_atem_can_monitor_audio(gid, request.form.get('atem_can_monitor_audio_role') == 'on')
+                    except Exception:
+                        pass
+                    try:
+                        _set_group_ccb_roles(gid, request.form.getlist('ccb_role_keys'))
+                        _set_group_ccb_fallback(gid, request.form.get('suspend_while_ccb_active') == 'on')
                     except Exception:
                         pass
                     try:
@@ -4444,6 +4826,8 @@ def admin_permissions_page():
                             pass
                         else:
                             conn.execute('DELETE FROM user_groups WHERE user_id=?', (uid,))
+                            conn.execute("DELETE FROM external_user_identities WHERE user_id=?", (uid,))
+                            conn.execute('DELETE FROM ccb_user_group_memberships WHERE user_id=?', (uid,))
                             conn.execute('UPDATE user_sessions SET revoked_at=COALESCE(revoked_at, ?) WHERE user_id=?', (_now_str(), uid))
                             conn.execute('DELETE FROM users WHERE id=?', (uid,))
                             conn.commit()
@@ -4459,7 +4843,7 @@ def admin_permissions_page():
     conn = _db()
     try:
         groups = conn.execute(
-            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,digico_allowed_auxes,atem_allowed_audio_sources,atem_can_solo_audio,atem_can_monitor_audio FROM groups ORDER BY is_system DESC, lower(name)'
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,digico_allowed_auxes,atem_allowed_audio_sources,atem_can_solo_audio,atem_can_monitor_audio,suspend_while_ccb_active FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
         group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
         group_users = conn.execute(
@@ -4485,6 +4869,10 @@ def admin_permissions_page():
             ORDER BY lower(g.name)
             """
         ).fetchall()
+        ccb_roles = conn.execute(
+            'SELECT role_key,name,display_category,sort_order FROM ccb_roles WHERE is_active=1 ORDER BY sort_order,lower(name)'
+        ).fetchall()
+        ccb_group_roles = conn.execute('SELECT group_id,role_key FROM ccb_group_roles').fetchall()
     finally:
         conn.close()
 
@@ -4507,6 +4895,9 @@ def admin_permissions_page():
     group_to_companion: dict[int, dict[str, list[str]]] = {}
     group_to_digico: dict[int, dict[str, list[str]]] = {}
     group_to_atem: dict[int, dict[str, Any]] = {}
+    group_to_ccb_roles: dict[int, set[str]] = {}
+    for mapping in ccb_group_roles or []:
+        group_to_ccb_roles.setdefault(int(mapping['group_id']), set()).add(str(mapping['role_key']))
     for g in groups or []:
         try:
             gid = int(g['id'])
@@ -4592,6 +4983,8 @@ def admin_permissions_page():
         group_to_digico=group_to_digico,
         digico_auxes=_digico_aux_options(),
         group_to_atem=group_to_atem,
+        ccb_roles=ccb_roles,
+        group_to_ccb_roles=group_to_ccb_roles,
         atem_audio_sources=_get_atem_audio_sources_for_permissions(),
         companion_surfaces=_load_companion_surfaces(),
         group_to_users=group_to_users,
@@ -4654,6 +5047,13 @@ def api_admin_group_update(group_id: int):
                 outs_raw = data.get('videohub_allowed_outputs_role')
                 ins_raw = data.get('videohub_allowed_inputs_role')
                 _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
+        except Exception:
+            pass
+        try:
+            _set_group_ccb_roles(gid, data.get('ccb_role_keys') or [])
+            fallback_raw = data.get('suspend_while_ccb_active', False)
+            fallback_enabled = bool(fallback_raw) if isinstance(fallback_raw, bool) else str(fallback_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+            _set_group_ccb_fallback(gid, fallback_enabled)
         except Exception:
             pass
 
@@ -4860,6 +5260,7 @@ def _admin_user_detail_context(user_id: int, error: str | None = None, message: 
         'lockout_attempts': _auth_lockout_failed_attempts(),
         'admin_email_rows': _admin_email_rows(),
         'generated_password': generated_password,
+        'ccb_identity': _ccb_store().identity_for_user(int(user_id)),
         'error': error,
         'message': message,
         'saved': str(request.args.get('saved') or '').strip(),
@@ -5025,6 +5426,8 @@ def admin_user_detail_page(user_id: int):
                     return render_template('admin_user_detail.html', **_admin_user_detail_context(user_id, error='Cannot delete the last active admin user.'))
                 username = str(user['username'] or '')
                 conn.execute('DELETE FROM user_groups WHERE user_id=?', (int(user_id),))
+                conn.execute('DELETE FROM external_user_identities WHERE user_id=?', (int(user_id),))
+                conn.execute('DELETE FROM ccb_user_group_memberships WHERE user_id=?', (int(user_id),))
                 conn.execute('UPDATE user_sessions SET revoked_at=COALESCE(revoked_at, ?) WHERE user_id=?', (now, int(user_id)))
                 conn.execute('DELETE FROM users WHERE id=?', (int(user_id),))
                 conn.commit()
@@ -11587,6 +11990,548 @@ def api_create_event_ui():
         return jsonify({'ok': True, 'id': new_id})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# --- ChurchStaq / CCB service workflow ------------------------------------
+
+_CCB_WORKFLOW_LOCK = threading.RLock()
+
+
+def _ccb_store() -> CCBTDeckStore:
+    _init_auth_db()
+    return CCBTDeckStore(_AUTH_DB_PATH)
+
+
+def _ccb_secret_store() -> CCBSecretStore:
+    # Follow a patched/relocated auth DB (notably tests and portable installs)
+    # while keeping this secret file outside normal config transport.
+    path = _AUTH_DB_PATH.with_name(_CCB_SECRETS_PATH.name)
+    return CCBSecretStore(path)
+
+
+def _ccb_client() -> CCBClient:
+    cfg = _auth_cfg()
+    try:
+        timeout = float(cfg.get('ccb_request_timeout_seconds', 15))
+    except Exception:
+        timeout = 15.0
+    return CCBClient(_ccb_secret_store(), timeout=timeout)
+
+
+def _ccb_request_source() -> str:
+    auth_header = str(request.headers.get('Authorization') or '')
+    if auth_header.lower().startswith('bearer '):
+        return 'companion'
+    return 'web' if getattr(current_user, 'is_authenticated', False) else 'api'
+
+
+def _ccb_api_guard(page_key: str = 'page:ccb_service_access', *, allow_companion: bool = True):
+    auth_header = str(request.headers.get('Authorization') or '').strip()
+    if auth_header:
+        if not allow_companion or not auth_header.lower().startswith('bearer '):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        supplied = auth_header.split(' ', 1)[1].strip()
+        expected = str(_ccb_secret_store().load().get('companion_api_token') or '').strip()
+        if not expected or not secrets.compare_digest(supplied, expected):
+            return jsonify({'ok': False, 'error': 'invalid CCB Companion API token'}), 401
+        return None
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access(page_key):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+    return None
+
+
+def _ccb_config_guard():
+    return _ccb_api_guard('page:config', allow_companion=False)
+
+
+def _ccb_actor_id() -> int | None:
+    try:
+        return int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+    except Exception:
+        return None
+
+
+def _ccb_safe_error(exc: Exception) -> tuple[Any, int]:
+    if isinstance(exc, (CCBError, CCBStoreError, ValueError)):
+        status = int(getattr(exc, 'status_code', 0) or 400)
+        if status < 400 or status > 599:
+            status = 400
+        return jsonify({'ok': False, 'error': str(exc)}), status
+    return jsonify({'ok': False, 'error': f'CCB operation failed: {exc}'}), 500
+
+
+def _ccb_refresh_services_cache() -> list[dict[str, Any]]:
+    store = _ccb_store()
+    category_ids = []
+    for raw in store.setting('enabled_category_ids', []):
+        try:
+            value = int(raw)
+        except Exception:
+            continue
+        if value > 0 and value not in category_ids:
+            category_ids.append(value)
+    if not category_ids:
+        raise CCBStoreError('Select at least one scheduling category in Config > CCB.')
+    past_days = max(0, min(int(store.setting('past_days', 1) or 1), 30))
+    upcoming_days = max(1, min(int(store.setting('upcoming_days', 45) or 45), 366))
+    after = (datetime.now() - timedelta(days=past_days)).strftime('%Y-%m-%d')
+    before = (datetime.now() + timedelta(days=upcoming_days)).strftime('%Y-%m-%d')
+    client = _ccb_client()
+    discovered: list[dict[str, Any]] = []
+    for category_id in category_ids:
+        schedules = client.schedules(category_id, after=after, before=before, full=False, sort='ASC')
+        discovered.extend(item.as_dict() for item in ccb_discover_services(schedules, category_id))
+    store.cache_services(discovered)
+    return _ccb_visible_services(store.services())
+
+
+def _ccb_visible_services(services: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    store = _ccb_store()
+    past_days = max(0, min(int(store.setting('past_days', 1) or 1), 30))
+    cutoff = datetime.now().astimezone() - timedelta(days=past_days)
+    output = []
+    for service in services or []:
+        raw_start = str(service.get('start') or '').strip()
+        try:
+            start = datetime.fromisoformat(raw_start.replace('Z', '+00:00'))
+            if start.tzinfo is None:
+                start = start.astimezone()
+            if start < cutoff and not service.get('active'):
+                continue
+        except Exception:
+            pass
+        output.append(service)
+    return output
+
+
+def _ccb_run_pull(
+    selected_event_id: int,
+    *,
+    branches: list[str],
+    source_ids: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    normalized_branches = []
+    for name in branches or []:
+        key = str(name or '').strip().lower()
+        if key in ('roster', 'runsheet') and key not in normalized_branches:
+            normalized_branches.append(key)
+    if not normalized_branches:
+        normalized_branches = ['roster', 'runsheet']
+    store = _ccb_store()
+    if source_ids:
+        store.set_sources(int(selected_event_id), {key: int(value) for key, value in source_ids.items() if key in normalized_branches and int(value) > 0})
+    selected = store.service(int(selected_event_id))
+    sources = store.sources(int(selected_event_id), normalized_branches)
+    pool_position_map = {
+        str(position['name']): str(position.get('pool_name') or '')
+        for position in store.positions()
+        if str(position.get('mapping_mode') or '') == 'pool' and str(position.get('pool_name') or '')
+    }
+    trigger_source = _ccb_request_source()
+    run_id = store.start_workflow_run(int(selected_event_id), normalized_branches, trigger_source)
+    try:
+        workflow = CCBWorkflow(_ccb_client())
+        result = workflow.pull(
+            selected_service=selected,
+            sources=sources,
+            branches=normalized_branches,
+            options={
+                'candidate_position_names': list(pool_position_map),
+                'candidate_position_pools': pool_position_map,
+            },
+        )
+        store.store_workflow_result(
+            run_id,
+            int(selected_event_id),
+            result,
+            sources,
+            actor_user_id=_ccb_actor_id(),
+        )
+    except Exception as exc:
+        store.fail_workflow_run(run_id, str(exc))
+        raise
+    branch_statuses = {
+        name: ('success' if branch.get('ok') else 'failure')
+        for name, branch in (result.get('branches') or {}).items()
+    }
+    log_event(
+        'ccb.workflow.pull',
+        f"Pulled CCB data for {selected.get('name') or selected_event_id}",
+        source=trigger_source,
+        status='success' if result.get('ok') else ('warning' if any(v == 'success' for v in branch_statuses.values()) else 'failure'),
+        target_type='ccb_service',
+        target_id=int(selected_event_id),
+        details={'workflow_run_id': run_id, 'branches': branch_statuses, 'sources': {key: value.get('event_id') for key, value in sources.items()}},
+    )
+    return {'workflow': result, 'state': store.service_state(int(selected_event_id))}
+
+
+@app.get('/service-access')
+@require_page('page:ccb_service_access', 'Service Access')
+def ccb_service_access_page():
+    try:
+        _init_auth_db()
+    except Exception:
+        pass
+    return render_template('ccb_service_access.html', page_title='Service Access')
+
+
+@app.get('/config/ccb')
+@require_page('page:config', 'Config')
+def ccb_config_page():
+    try:
+        _init_auth_db()
+    except Exception:
+        pass
+    return render_template('ccb_config.html', page_title='CCB Configuration', config_active_tab='ccb')
+
+
+@app.get('/config/ccb/oauth/start')
+@require_page('page:config', 'Config')
+def ccb_oauth_start():
+    state = secrets.token_urlsafe(24)
+    store = _ccb_store()
+    redirect_uri = str(store.setting('oauth_redirect_uri', '') or '').strip() or url_for('ccb_oauth_callback', _external=True)
+    session['_ccb_oauth_state'] = state
+    session['_ccb_oauth_redirect_uri'] = redirect_uri
+    try:
+        return redirect(_ccb_client().authorization_url(
+            redirect_uri=redirect_uri,
+            state=state,
+            scopes=str(store.setting('oauth_scopes', CCB_DEFAULT_SCOPES) or CCB_DEFAULT_SCOPES),
+        ))
+    except Exception as exc:
+        return redirect(url_for('ccb_config_page', error=str(exc)))
+
+
+@app.get('/config/ccb/oauth/callback')
+@require_page('page:config', 'Config')
+def ccb_oauth_callback():
+    expected = str(session.pop('_ccb_oauth_state', '') or '')
+    received = str(request.args.get('state') or '')
+    redirect_uri = str(session.pop('_ccb_oauth_redirect_uri', '') or '')
+    code = str(request.args.get('code') or '')
+    if not expected or not received or not secrets.compare_digest(expected, received):
+        return redirect(url_for('ccb_config_page', error='CCB OAuth state validation failed.'))
+    if not code:
+        return redirect(url_for('ccb_config_page', error=str(request.args.get('error_description') or request.args.get('error') or 'CCB did not return an authorization code.')))
+    try:
+        result = _ccb_client().exchange_code(code=code, redirect_uri=redirect_uri)
+        log_event('ccb.oauth.connect', 'Connected TDeck to CCB', source='web', status='success', target_type='integration', target_id='ccb', details=result)
+        return redirect(url_for('ccb_config_page', connected='1'))
+    except Exception as exc:
+        log_event('ccb.oauth.connect', 'Could not connect TDeck to CCB', source='web', status='failure', target_type='integration', target_id='ccb', details={'error': str(exc)})
+        return redirect(url_for('ccb_config_page', error=str(exc)))
+
+
+@app.get('/api/ccb/config')
+def api_ccb_config_get():
+    guard = _ccb_config_guard()
+    if guard:
+        return guard
+    store = _ccb_store()
+    secret_data = _ccb_secret_store().load()
+    return jsonify({
+        'ok': True,
+        'connection': _ccb_client().credentials_status(),
+        'credentials': {
+            'client_id': str(secret_data.get('client_id') or ''),
+            'subdomain': str(secret_data.get('subdomain') or ''),
+            'has_client_secret': bool(secret_data.get('client_secret')),
+            'has_companion_api_token': bool(secret_data.get('companion_api_token')),
+        },
+        'settings': {
+            'oauth_redirect_uri': str(store.setting('oauth_redirect_uri', '') or ''),
+            'oauth_scopes': str(store.setting('oauth_scopes', CCB_DEFAULT_SCOPES) or CCB_DEFAULT_SCOPES),
+            'enabled_category_ids': store.setting('enabled_category_ids', []),
+            'upcoming_days': int(store.setting('upcoming_days', 45) or 45),
+            'past_days': int(store.setting('past_days', 1) or 1),
+        },
+        'categories': store.setting('categories_cache', []),
+        'roles': store.roles(include_inactive=True),
+        'positions': store.positions(),
+        'default_callback_url': url_for('ccb_oauth_callback', _external=True),
+        'messages': {
+            'error': str(request.args.get('error') or ''),
+            'connected': bool(request.args.get('connected')),
+        },
+    })
+
+
+@app.put('/api/ccb/config')
+def api_ccb_config_put():
+    guard = _ccb_config_guard()
+    if guard:
+        return guard
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
+    try:
+        store = _ccb_store()
+        credentials = body.get('credentials') if isinstance(body.get('credentials'), dict) else {}
+        _ccb_secret_store().save({
+            'client_id': str(credentials.get('client_id') or ''),
+            'client_secret': str(credentials.get('client_secret') or ''),
+            'subdomain': str(credentials.get('subdomain') or ''),
+            'companion_api_token': str(credentials.get('companion_api_token') or ''),
+        })
+        settings = body.get('settings') if isinstance(body.get('settings'), dict) else {}
+        enabled_ids = []
+        for raw in settings.get('enabled_category_ids') or []:
+            try:
+                category_id = int(raw)
+            except Exception:
+                continue
+            if category_id > 0 and category_id not in enabled_ids:
+                enabled_ids.append(category_id)
+        store.set_setting('enabled_category_ids', enabled_ids)
+        store.set_setting('oauth_redirect_uri', str(settings.get('oauth_redirect_uri') or '').strip())
+        store.set_setting('oauth_scopes', str(settings.get('oauth_scopes') or CCB_DEFAULT_SCOPES).strip())
+        store.set_setting('upcoming_days', max(1, min(int(settings.get('upcoming_days') or 45), 366)))
+        store.set_setting('past_days', max(0, min(int(settings.get('past_days') or 1), 30)))
+        if isinstance(body.get('roles'), list):
+            store.save_roles(body['roles'])
+        if isinstance(body.get('positions'), list):
+            store.save_positions(body['positions'])
+        log_event('ccb.config.update', 'Updated CCB configuration', source='web', status='success', target_type='config', target_id='ccb', details={'enabled_category_ids': enabled_ids})
+        return api_ccb_config_get()
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/config/categories/refresh')
+def api_ccb_categories_refresh():
+    guard = _ccb_config_guard()
+    if guard:
+        return guard
+    try:
+        categories = _ccb_client().categories()
+        normalized = [
+            {'id': int(item.get('id')), 'name': str(item.get('name') or f"Category {item.get('id')}"), 'status': str(item.get('status') or '')}
+            for item in categories if item.get('id') is not None
+        ]
+        _ccb_store().set_setting('categories_cache', normalized)
+        return jsonify({'ok': True, 'categories': normalized})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/config/companion-token')
+def api_ccb_companion_token_generate():
+    guard = _ccb_config_guard()
+    if guard:
+        return guard
+    token = secrets.token_urlsafe(32)
+    _ccb_secret_store().save({'companion_api_token': token}, preserve_blank=False)
+    log_event('ccb.companion_token.rotate', 'Generated a new CCB Companion API token', source='web', status='success', target_type='integration', target_id='ccb')
+    return jsonify({'ok': True, 'token': token})
+
+
+@app.post('/api/ccb/config/test')
+def api_ccb_connection_test():
+    guard = _ccb_config_guard()
+    if guard:
+        return guard
+    try:
+        categories = _ccb_client().categories()
+        return jsonify({'ok': True, 'category_count': len(categories), 'connection': _ccb_client().credentials_status()})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.get('/api/ccb/status')
+def api_ccb_status():
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    store = _ccb_store()
+    services = store.services()
+    active = next((item for item in services if item.get('active')), None)
+    return jsonify({'ok': True, 'connection': _ccb_client().credentials_status(), 'active_service': active, 'branches': ['roster', 'runsheet']})
+
+
+@app.get('/api/ccb/services/upcoming')
+def api_ccb_services_upcoming():
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    try:
+        services = _ccb_refresh_services_cache() if str(request.args.get('refresh') or '').lower() in ('1', 'true', 'yes') else _ccb_visible_services(_ccb_store().services())
+        return jsonify({'ok': True, 'services': services})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/services/refresh')
+def api_ccb_services_refresh():
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    try:
+        services = _ccb_refresh_services_cache()
+        log_event('ccb.services.refresh', f'Refreshed {len(services)} upcoming CCB services', source=_ccb_request_source(), status='success', target_type='integration', target_id='ccb')
+        return jsonify({'ok': True, 'services': services})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.get('/api/ccb/services/<int:event_id>/assignments')
+def api_ccb_service_assignments_get(event_id: int):
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    try:
+        return jsonify({'ok': True, 'state': _ccb_store().service_state(event_id)})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.put('/api/ccb/services/<int:event_id>/assignments')
+def api_ccb_service_assignments_put(event_id: int):
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    body = request.get_json(silent=True) or {}
+    allocations = body.get('allocations') if isinstance(body.get('allocations'), dict) else {}
+    try:
+        state = _ccb_store().save_allocations(event_id, allocations, actor_user_id=_ccb_actor_id())
+        log_event('ccb.assignments.update', f'Updated reviewed CCB role allocations for service {event_id}', source=_ccb_request_source(), status='success', target_type='ccb_service', target_id=event_id, details={'roles': sorted(allocations.keys())})
+        return jsonify({'ok': True, 'state': state})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/services/<int:event_id>/pull')
+def api_ccb_service_pull(event_id: int):
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    body = request.get_json(silent=True) or {}
+    branches = body.get('branches') if isinstance(body.get('branches'), list) else ['roster', 'runsheet']
+    source_ids = body.get('sources') if isinstance(body.get('sources'), dict) else {}
+    try:
+        with _CCB_WORKFLOW_LOCK:
+            payload = _ccb_run_pull(event_id, branches=branches, source_ids={str(k): int(v) for k, v in source_ids.items() if str(v).isdigit()})
+        return jsonify({'ok': bool(payload['workflow'].get('ok')), **payload}), (200 if payload['workflow'].get('ok') else 207)
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/services/<int:event_id>/apply')
+def api_ccb_service_apply(event_id: int):
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    try:
+        with _CCB_WORKFLOW_LOCK:
+            result = _ccb_store().apply(event_id, actor_user_id=_ccb_actor_id(), source=_ccb_request_source())
+        log_event('ccb.access.apply', f"Applied CCB service access for {result['service'].get('name') or event_id}", source=_ccb_request_source(), status='warning' if result.get('warnings') else 'success', target_type='ccb_service', target_id=event_id, details={'membership_count': result['membership_count'], 'user_count': result['user_count'], 'warnings': result['warnings']})
+        return jsonify(result)
+    except Exception as exc:
+        log_event('ccb.access.apply', f'Could not apply CCB service access for {event_id}', source=_ccb_request_source(), status='failure', target_type='ccb_service', target_id=event_id, details={'error': str(exc)})
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/services/<int:event_id>/pull-and-apply')
+def api_ccb_service_pull_and_apply(event_id: int):
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    body = request.get_json(silent=True) or {}
+    branches = body.get('branches') if isinstance(body.get('branches'), list) else ['roster']
+    source_ids = body.get('sources') if isinstance(body.get('sources'), dict) else {}
+    try:
+        with _CCB_WORKFLOW_LOCK:
+            pulled = _ccb_run_pull(event_id, branches=branches, source_ids={str(k): int(v) for k, v in source_ids.items() if str(v).isdigit()})
+            roster_result = (pulled.get('workflow', {}).get('branches') or {}).get('roster')
+            if 'roster' in branches and (not roster_result or not roster_result.get('ok')):
+                return jsonify({'ok': False, 'error': 'Roster pull failed; existing access was left unchanged.', **pulled}), 502
+            applied = _ccb_store().apply(event_id, actor_user_id=_ccb_actor_id(), source=_ccb_request_source())
+        log_event('ccb.service_setup.run', f"Ran CCB service setup for {applied['service'].get('name') or event_id}", source=_ccb_request_source(), status='warning' if applied.get('warnings') or not pulled['workflow'].get('ok') else 'success', target_type='ccb_service', target_id=event_id, details={'branches': branches, 'membership_count': applied['membership_count'], 'warnings': applied['warnings']})
+        return jsonify({'ok': True, 'pull': pulled, 'apply': applied})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/access/clear')
+def api_ccb_access_clear():
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    try:
+        with _CCB_WORKFLOW_LOCK:
+            result = _ccb_store().clear()
+        log_event('ccb.access.clear', 'Cleared active CCB service access and restored fallback groups', source=_ccb_request_source(), status='success', target_type='ccb_service', target_id=(result.get('previous_service') or {}).get('selected_event_id'), details=result)
+        return jsonify(result)
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.get('/api/ccb/services/<int:event_id>/runsheet')
+def api_ccb_runsheet_items(event_id: int):
+    guard = _ccb_api_guard()
+    if guard:
+        return guard
+    try:
+        return jsonify({'ok': True, 'items': _ccb_store().runsheet_items(event_id)})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.get('/api/ccb/individuals')
+def api_ccb_individual_search():
+    guard = _ccb_api_guard('page:admin')
+    if guard:
+        return guard
+    query = str(request.args.get('query') or '').strip()
+    if len(query) < 2:
+        return jsonify({'ok': True, 'individuals': []})
+    try:
+        individuals = _ccb_client().individuals(query)
+        return jsonify({'ok': True, 'individuals': [
+            {'id': item.get('id'), 'name': item.get('name') or f"{item.get('first_name', '')} {item.get('last_name', '')}".strip(), 'email': item.get('email') or ''}
+            for item in individuals[:50]
+        ]})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.post('/api/ccb/identities/link')
+def api_ccb_identity_link():
+    guard = _ccb_api_guard('page:ccb_service_access')
+    if guard:
+        return guard
+    body = request.get_json(silent=True) or {}
+    try:
+        identity = _ccb_store().link_identity(
+            external_id=str(body.get('external_id') or ''),
+            user_id=int(body.get('user_id')),
+            display_name=str(body.get('display_name') or ''),
+            email=str(body.get('email') or ''),
+            is_vocalist=bool(body.get('is_vocalist', False)),
+            actor_user_id=_ccb_actor_id(),
+            raw=body.get('raw') or {},
+        )
+        log_event('ccb.identity.link', f"Linked CCB individual {identity.get('external_id')} to TDeck user {identity.get('user_id')}", source=_ccb_request_source(), status='success', target_type='user', target_id=identity.get('user_id'), details={'ccb_individual_id': identity.get('external_id')})
+        return jsonify({'ok': True, 'identity': identity})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
+
+
+@app.delete('/api/ccb/identities/<external_id>')
+def api_ccb_identity_unlink(external_id: str):
+    guard = _ccb_api_guard('page:admin')
+    if guard:
+        return guard
+    try:
+        removed = _ccb_store().unlink_identity(external_id=external_id)
+        log_event('ccb.identity.unlink', f'Unlinked CCB individual {external_id}', source=_ccb_request_source(), status='success', target_type='ccb_identity', target_id=external_id)
+        return jsonify({'ok': True, 'removed': removed})
+    except Exception as exc:
+        return _ccb_safe_error(exc)
 
 
 if __name__ == '__main__':

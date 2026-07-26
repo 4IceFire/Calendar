@@ -111,6 +111,7 @@
           {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
           {% if not auth_enabled or can_access('page:digico_mixer') %}<a class="nav-link{% if request.path.startswith('/personal-mixes') %} active{% endif %}" href="/personal-mixes">Personal Mixes</a>{% endif %}
           {% if not auth_enabled or can_access('page:surface_controls') %}<a class="nav-link{% if request.path.startswith('/surface-controls') %} active{% endif %}" href="/surface-controls">Surface Controls</a>{% endif %}
+          {% if not auth_enabled or can_access('page:ccb_service_access') %}<a class="nav-link{% if request.path.startswith('/service-access') %} active{% endif %}" href="/service-access">Service Access</a>{% endif %}
         </nav>
       </div>
     </div>

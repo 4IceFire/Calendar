@@ -59,6 +59,42 @@
       </div>
 
       <div class="col-lg-6">
+        <div class="card tdeck-soft h-100" id="ccb-user-identity-card"
+             data-user-id="{{ user_row.id }}"
+             data-external-id="{{ ccb_identity.external_id if ccb_identity else '' }}">
+          <div class="card-body">
+            <h2 class="h5 mb-1">CCB identity</h2>
+            <div class="small text-muted mb-3">Links use the immutable CCB individual ID. Names are never used as an automatic match.</div>
+            <div id="ccb-user-identity-status" class="mb-2"></div>
+            {% if ccb_identity %}
+              <dl class="row small mb-3">
+                <dt class="col-4">CCB ID</dt><dd class="col-8">{{ ccb_identity.external_id }}</dd>
+                <dt class="col-4">Name</dt><dd class="col-8">{{ ccb_identity.display_name or 'Unknown' }}</dd>
+                <dt class="col-4">Email</dt><dd class="col-8">{{ ccb_identity.email or 'Unknown' }}</dd>
+                <dt class="col-4">Last seen</dt><dd class="col-8">{{ ccb_identity.last_seen_at or 'Not pulled yet' }}</dd>
+              </dl>
+              <div class="form-check form-switch mb-3">
+                <input id="ccb-user-vocalist" class="form-check-input" type="checkbox" {% if ccb_identity.is_vocalist %}checked{% endif %}>
+                <label class="form-check-label" for="ccb-user-vocalist">Include in the all-vocalists override pool</label>
+              </div>
+              <div class="d-flex gap-2">
+                <button id="ccb-user-save-identity" class="btn btn-sm btn-primary" type="button"
+                        data-name="{{ ccb_identity.display_name|default('', true)|e }}" data-email="{{ ccb_identity.email|default('', true)|e }}">Save CCB settings</button>
+                <button id="ccb-user-unlink" class="btn btn-sm btn-outline-danger" type="button">Unlink CCB identity</button>
+              </div>
+            {% else %}
+              <label class="form-label" for="ccb-user-search">Search CCB by name or email</label>
+              <div class="input-group mb-2">
+                <input id="ccb-user-search" class="form-control" value="{{ user_row.email or user_row.full_name or '' }}">
+                <button id="ccb-user-search-button" class="btn btn-outline-secondary" type="button">Search</button>
+              </div>
+              <div id="ccb-user-search-results" class="list-group"></div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
         <div class="card tdeck-soft h-100">
           <div class="card-body">
             <h2 class="h5 mb-3">Access</h2>
@@ -231,4 +267,8 @@
       </div>
     </div>
   </div>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/static/ccb_user_identity.js"></script>
 {% endblock %}
