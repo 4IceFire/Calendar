@@ -83,7 +83,7 @@ class HisenseWebApiTests(unittest.TestCase):
         self.assertIn(b"hisense-tree", page.data)
         self.assertIn(b"hisense-expand-all", page.data)
         self.assertIn(b"hisense-collapse-all", page.data)
-        self.assertIn(b"name, IP address, and TV MAC address", page.data)
+        self.assertNotIn(b"installed VIDAA support files", page.data)
         self.assertNotIn(b"Certificate compatibility profiles", page.data)
         self.assertNotIn(b"State poll", page.data)
         script = self.client.get("/static/hisense_setup.js")
