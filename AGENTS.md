@@ -83,6 +83,7 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 
 ## Hisense / VIDAA TV Control
 - `hisense.py` owns the process-wide manager, one serialized/reconnecting worker per TV, Wake-on-LAN, protocol/authentication selection, certificate-profile fallback, ordered group fan-out, and aggregate group state.
+- A successful TDeck/Companion power-off records that TV in the backend-managed `hisense_power_state.json` runtime file. While marked intentionally off, its worker pauses reconnects, reports `expectedOff: true`/`healthy: true`, and does not create connection errors or Activity Log offline warnings. Power-on, toggle-on, reconnect, pairing, or another control clears the marker so genuine connection failures remain visible.
 - TV setup lives at `/config/tvs` in `templates/hisense_setup.html` and `static/hisense_setup.js`. Configuration/pairing APIs require normal Config access; operational TV and target APIs remain intentionally callable on the trusted LAN for Companion.
 - Config lives in the main `config.json`:
   - `hisense_tvs` is the ordered TV list. Normal setup exposes only the human-readable name, IP/host, and television MAC; it auto-generates and internally preserves the slug-style ID so Companion targets remain stable. Saving through the simplified UI enables TVs and resets authentication/certificate selection to automatic. `uuid` is the separate case-sensitive paired-client UUID used by dynamic VIDAA authentication and is exposed only in the contextual Pair or repair panel.

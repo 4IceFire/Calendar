@@ -74,6 +74,8 @@ TV and group order are explicit. The setup page uses a collapsible tree: each TV
 
 Keep the TV's own MAC address for Wake-on-LAN. Newer VIDAA authentication also requires a separate, case-sensitive paired-device UUID: the Bluetooth/Wi-Fi MAC or UUID of a phone/device paired with that TV through the official VIDAA app. The paired-device UUID is not the TV MAC and appears only in the TV's contextual **Pair or repair** panel. Protocol generation is detected automatically, but TDeck cannot derive this UUID or redistribute the official app's private client key.
 
+When TDeck or Companion successfully powers a TV off, TDeck records it as intentionally off and pauses that TV's reconnect loop. The TV page shows a normal **Off (intentional)** state and does not create an offline warning in the Activity Log. The state survives a TDeck restart; power-on, reconnect, or another control clears it so an unexpected network or authentication failure is still reported.
+
 The TDeck Companion module exposes both group and individual targets for power, volume, source, reconnect, feedbacks, and variables.
 
 Some newer VIDAA firmware accepts an MQTT connection but rejects pairing requests made with certificates from an older RemoteNOW/VIDAA app generation, displaying a “TV model is no longer compatible” message on the screen. That condition is not returned to TDeck over MQTT, so it cannot be inferred from the IP address or software version alone. Administrators place approved support files at `hisense_certs/vidaa_client.pem` / `.key` (legacy) and `hisense_certs/vidaa_current.pem` / `.key` (current); TDeck tries installed pairs in the appropriate order automatically. Certificate/private-key files remain local and must not be committed.

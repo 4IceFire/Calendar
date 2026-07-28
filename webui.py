@@ -3848,15 +3848,23 @@ def _probe_hisense_status(cfg: dict) -> dict:
     manager = _get_hisense_manager_from_config()
     status = manager.status() if manager is not None else {}
     online = int(status.get('online', 0) or 0)
+    off = int(status.get('off', 0) or 0)
     total = int(status.get('total', 0) or 0)
+    detail = f'{online}/{total} online'
+    if off:
+        detail += f', {off} intentionally off'
     return {
-        'connected': bool(status.get('connected', False)),
+        # An intentionally powered-off TV is healthy even though its MQTT
+        # transport is no longer connected. This keeps expected shutdowns out
+        # of the integration error state and Activity Log disconnect warnings.
+        'connected': bool(status.get('healthy', status.get('connected', False))),
         'enabled': enabled,
         'configured': bool(status.get('configured', False)),
         'available': bool(status.get('available', False)),
         'online': online,
+        'off': off,
         'total': total,
-        'detail': f'{online}/{total} online' if enabled and total else ('disabled' if not enabled else 'not configured'),
+        'detail': detail if enabled and total else ('disabled' if not enabled else 'not configured'),
         'checked_at': time.time(),
     }
 

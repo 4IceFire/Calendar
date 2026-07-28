@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -158,12 +159,65 @@ class HisenseManagerTests(unittest.TestCase):
         self.assertEqual(controller.status()["volume"], 27)
         self.assertTrue(controller.submit("source", "HDMI 2", wait=1)["ok"])
         self.assertEqual(controller.status()["source"], "HDMI2")
-        self.assertTrue(controller.submit("power_off", wait=1)["ok"])
         self.assertTrue(controller.submit("mute", wait=1)["ok"])
+        self.assertTrue(controller.submit("power_off", wait=1)["ok"])
 
         result = controller.submit("power_on", wait=1)
         self.assertTrue(result["ok"])
         self.assertEqual(self.wakes[0], ("a0:62:fb:84:ed:28", "10.5.10"))
+
+    def test_intentional_power_off_is_healthy_and_survives_restart(self):
+        controller = self.manager.get("foyer")
+        instances_before = len(_FakeVidaa.instances)
+
+        result = controller.submit("power_off", wait=1)
+        self.assertTrue(result["ok"], result)
+        tv = controller.status()
+        self.assertFalse(tv["connected"])
+        self.assertTrue(tv["expectedOff"])
+        self.assertTrue(tv["healthy"])
+        self.assertEqual(tv["power"], "off")
+        self.assertEqual(tv["lastError"], "")
+
+        status = self.manager.status()
+        self.assertFalse(status["connected"])
+        self.assertTrue(status["healthy"])
+        self.assertEqual(status["off"], 1)
+        self.assertTrue(status["groups"][0]["healthy"])
+        self.assertEqual(status["groups"][0]["off"], 1)
+        self.assertEqual(status["groups"][0]["lastError"], "")
+
+        # Even if the normal reconnect deadline is due, an intentionally off
+        # TV must stay quiet instead of creating another client and error.
+        controller._last_connect_attempt = 0.0
+        controller._wake_worker.set()
+        time.sleep(0.6)
+        self.assertEqual(len(_FakeVidaa.instances), instances_before)
+
+        power_state = Path(self.manager.config.statefile)
+        self.assertEqual(
+            json.loads(power_state.read_text(encoding="utf-8"))["expectedOff"],
+            ["foyer"],
+        )
+
+        config = self.manager.config
+        self.manager.close()
+        self.manager = HisenseManager(
+            config,
+            client_factory=_FakeVidaa,
+            wake_function=lambda mac, subnet: self.wakes.append((mac, subnet)) is None,
+        )
+        restart_instance_count = len(_FakeVidaa.instances)
+        self.manager.start()
+        time.sleep(0.2)
+        restarted = self.manager.get("foyer").status()
+        self.assertTrue(restarted["expectedOff"])
+        self.assertTrue(restarted["healthy"])
+        self.assertEqual(len(_FakeVidaa.instances), restart_instance_count)
+
+        powered_on = self.manager.get("foyer").submit("power_on", wait=1)
+        self.assertTrue(powered_on["ok"], powered_on)
+        self.assertFalse(powered_on["tv"]["expectedOff"])
 
     def test_pair_and_validation(self):
         controller = self.manager.get("foyer")
@@ -255,6 +309,8 @@ class HisenseManagerTests(unittest.TestCase):
                 time.sleep(0.01)
             tv = manager.status()["tvs"][0]
             self.assertFalse(tv["connected"])
+            self.assertFalse(tv["expectedOff"])
+            self.assertFalse(tv["healthy"])
             self.assertFalse(tv["uuidConfigured"])
             self.assertIn("paired device UUID is required", tv["lastError"])
             self.assertEqual(len(_FakeVidaa.instances), initial_client_count)

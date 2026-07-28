@@ -91,6 +91,7 @@
   }
 
   const tvStatusText = (status = {}) => {
+    if (status.expectedOff) return 'Off (intentional)'
     if (!status.connected) {
       return status.lastError ? `Offline - ${friendlyError(status.lastError)}` : 'Offline'
     }
@@ -98,20 +99,21 @@
   }
 
   const tvStatusClass = (status = {}) => {
+    if (status.expectedOff) return 'text-muted'
     if (status.connected) return 'text-success'
     return status.lastError ? 'text-danger' : 'text-muted'
   }
 
-  const healthSummary = (total, online, errors) => {
+  const healthSummary = (total, online, errors, off = 0) => {
     if (!total) return {
       text: '0 TVs',
       className: 'text-muted',
     }
     return {
-      text: `${online}/${total} online${errors ? ` - ${errors} error${errors === 1 ? '' : 's'}` : ''}`,
+      text: `${online}/${total} online${off ? ` - ${off} off` : ''}${errors ? ` - ${errors} error${errors === 1 ? '' : 's'}` : ''}`,
       className: errors
         ? 'text-danger'
-        : (online === total ? 'text-success' : (online ? 'text-warning' : 'text-muted')),
+        : (online + off === total ? (online ? 'text-success' : 'text-muted') : (online ? 'text-warning' : 'text-muted')),
     }
   }
 
@@ -120,7 +122,8 @@
     return healthSummary(
       tvs.length,
       states.filter((status) => status.connected).length,
-      states.filter((status) => status.lastError).length,
+      states.filter((status) => status.lastError && !status.expectedOff).length,
+      states.filter((status) => status.expectedOff).length,
     )
   }
 
@@ -130,6 +133,7 @@
       rows.length,
       rows.filter((row) => row.dataset.connected === 'true').length,
       rows.filter((row) => row.dataset.hasError === 'true').length,
+      rows.filter((row) => row.dataset.expectedOff === 'true').length,
     )
     label.textContent = summary.text
     label.classList.remove('text-muted', 'text-success', 'text-warning', 'text-danger')
@@ -146,7 +150,8 @@
       data-id-auto="${isNew ? 'true' : 'false'}"
       data-saved="${isNew ? 'false' : 'true'}"
       data-connected="${status.connected ? 'true' : 'false'}"
-      data-has-error="${status.lastError ? 'true' : 'false'}"
+      data-expected-off="${status.expectedOff ? 'true' : 'false'}"
+      data-has-error="${status.lastError && !status.expectedOff ? 'true' : 'false'}"
       data-requires-uuid="${requiresUuid ? 'true' : 'false'}"
       style="padding-left:${groupId ? '44px' : '24px'}">
       <input type="hidden" class="tv-id" value="${escapeHtml(id)}">

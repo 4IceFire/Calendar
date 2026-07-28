@@ -95,6 +95,8 @@ class HisenseWebApiTests(unittest.TestCase):
             self.assertIn(b"TV MAC address", script.data)
             self.assertIn(b"group-health", script.data)
             self.assertIn(b"root-health", script.data)
+            self.assertIn(b"Off (intentional)", script.data)
+            self.assertIn(b"data-expected-off", script.data)
             self.assertNotIn(b"tv-auth-mode", script.data)
             self.assertNotIn(b"tv-profile", script.data)
             self.assertNotIn(b"Advanced identity", script.data)
@@ -114,6 +116,23 @@ class HisenseWebApiTests(unittest.TestCase):
             [(action, value) for action, value, _wait in self.manager.controller.commands],
             [("power_off", None), ("volume_set", 35), ("source", "HDMI2"), ("reconnect", None), ("power_off", None)],
         )
+
+    def test_intentionally_off_tv_is_healthy_for_connectivity_logging(self):
+        with patch.object(self.manager, "status", return_value={
+            "enabled": True,
+            "available": True,
+            "configured": True,
+            "connected": False,
+            "healthy": True,
+            "online": 0,
+            "off": 1,
+            "total": 1,
+        }):
+            status = webui._probe_hisense_status({"hisense_enabled": True})
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["online"], 0)
+        self.assertEqual(status["off"], 1)
+        self.assertEqual(status["detail"], "0/1 online, 1 intentionally off")
 
     def test_invalid_control_payloads(self):
         self.assertEqual(self.client.post("/api/tvs/test-tv/power", json={"state": "maybe"}).status_code, 400)

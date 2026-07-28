@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 import queue
 import re
 import threading
@@ -224,6 +225,7 @@ class HisenseConfig:
     enabled: bool
     certfile: str
     keyfile: str
+    statefile: str
     poll_interval: float
     reconnect_interval: float
     tvs: tuple[HisenseTvConfig, ...]
@@ -260,6 +262,7 @@ class HisenseConfig:
             enabled=_bool(cfg.get("hisense_enabled"), False),
             certfile=_resolve_path(cfg.get("hisense_cert_path") or "hisense_certs/vidaa_client.pem", root),
             keyfile=_resolve_path(cfg.get("hisense_key_path") or "hisense_certs/vidaa_client.key", root),
+            statefile=_resolve_path(cfg.get("hisense_state_path") or "hisense_power_state.json", root),
             poll_interval=max(2.0, float(cfg.get("hisense_poll_interval") or 10.0)),
             reconnect_interval=max(2.0, float(cfg.get("hisense_reconnect_interval") or 15.0)),
             tvs=tvs,
@@ -286,6 +289,8 @@ class HisenseTvController:
         client_factory: Callable[..., Any] | None = None,
         wake_function: Callable[[str, str | None], bool] | None = None,
         protocol_detector: Callable[..., int | None] | None = None,
+        expected_off: bool = False,
+        expected_off_callback: Callable[[str, bool], None] | None = None,
     ) -> None:
         self.config = config
         self.service_config = service_config
@@ -296,6 +301,7 @@ class HisenseTvController:
             if protocol_detector is not None
             else (detect_protocol if client_factory is None else None)
         )
+        self._expected_off_callback = expected_off_callback
         self._client: Any = None
         self._queue: queue.Queue[_Command] = queue.Queue()
         self._stop = threading.Event()
@@ -309,7 +315,8 @@ class HisenseTvController:
         self._selected_dynamic_auth = False
         self._state: dict[str, Any] = {
             "connected": False,
-            "power": "unknown",
+            "power": "off" if expected_off else "unknown",
+            "expectedOff": expected_off,
             "volume": None,
             "muted": False,
             "source": "",
@@ -321,7 +328,7 @@ class HisenseTvController:
             "protocolVersion": None,
             "authMethod": "",
             "certificateProfile": "",
-            "compatibilityStatus": "Not connected",
+            "compatibilityStatus": "Powered off intentionally" if expected_off else "Not connected",
         }
 
     def start(self) -> None:
@@ -346,6 +353,7 @@ class HisenseTvController:
         with self._lock:
             state = dict(self._state)
             state["sources"] = [dict(source) for source in self._state.get("sources", [])]
+            state["healthy"] = bool(state.get("connected") or state.get("expectedOff"))
         return {
             "id": self.config.id,
             "name": self.config.name,
@@ -379,6 +387,11 @@ class HisenseTvController:
 
             if command is not None:
                 self._execute_command(command)
+                continue
+
+            if self._is_expected_off():
+                self._wake_worker.wait(0.5)
+                self._wake_worker.clear()
                 continue
 
             now = time.monotonic()
@@ -509,6 +522,8 @@ class HisenseTvController:
         )
 
     def _connect(self) -> bool:
+        if self._is_expected_off():
+            return False
         self._last_connect_attempt = time.monotonic()
         self._disconnect(clear_error=False)
         protocol_version = self._detect_protocol_version()
@@ -577,6 +592,53 @@ class HisenseTvController:
             transport_connected = getattr(client, "is_connected", True) if client is not None else False
             return bool(self._state.get("connected") and client is not None and transport_connected)
 
+    def _is_expected_off(self) -> bool:
+        with self._lock:
+            return bool(self._state.get("expectedOff"))
+
+    def _set_expected_off(self, expected: bool) -> None:
+        expected = bool(expected)
+        with self._lock:
+            changed = bool(self._state.get("expectedOff")) != expected
+            self._state["expectedOff"] = expected
+            if expected:
+                self._state.update({
+                    "connected": False,
+                    "power": "off",
+                    "lastError": "",
+                    "pairing": False,
+                    "compatibilityStatus": "Powered off intentionally",
+                })
+            elif self._state.get("compatibilityStatus") == "Powered off intentionally":
+                self._state.update({
+                    "power": "unknown",
+                    "compatibilityStatus": "Reconnecting",
+                })
+        if changed and self._expected_off_callback is not None:
+            try:
+                self._expected_off_callback(self.config.id, expected)
+            except Exception:
+                # Runtime state persistence must never turn a successful TV
+                # command into an operator-facing connection error.
+                pass
+
+    def _mark_powered_off(self) -> None:
+        self._pending_power_on = False
+        self._set_expected_off(True)
+        self._disconnect(clear_error=True)
+
+    def _begin_power_on(self) -> bool:
+        self._set_expected_off(False)
+        if not self.config.mac:
+            raise ValueError("A MAC address is required for power on")
+        subnet = self.config.host.rsplit(".", 1)[0] if self.config.host.count(".") == 3 else None
+        if self._wake is None or not self._wake(self.config.mac, subnet):
+            raise RuntimeError("Wake-on-LAN packet could not be sent")
+        self._pending_power_on = True
+        self._disconnect(clear_error=True)
+        self._last_connect_attempt = 0.0
+        return True
+
     def _ensure_connected(self) -> Any:
         if not self._is_connected() and not self._connect():
             raise RuntimeError(self.status().get("lastError") or "TV is offline")
@@ -635,35 +697,47 @@ class HisenseTvController:
         if state.get("sourceid") or state.get("sourcename"):
             updates["source"] = str(state.get("sourceid") or state.get("sourcename"))
         with self._lock:
+            if self._state.get("expectedOff"):
+                updates.update({
+                    "connected": False,
+                    "power": "off",
+                    "lastError": "",
+                })
             self._state.update(updates)
 
     def _set_error(self, message: str) -> None:
         with self._lock:
+            if self._state.get("expectedOff"):
+                return
             self._state["lastError"] = str(message or "Unknown TV error")
 
     def _execute_command(self, command: _Command) -> None:
         try:
             action, value = command.action, command.value
             if action == "reconnect":
+                self._set_expected_off(False)
                 self._disconnect(clear_error=True)
                 self._protocol_checked = False
                 ok = self._connect()
             elif action == "power_on":
-                if not self.config.mac:
-                    raise ValueError("A MAC address is required for power on")
-                subnet = self.config.host.rsplit(".", 1)[0] if self.config.host.count(".") == 3 else None
-                if self._wake is None or not self._wake(self.config.mac, subnet):
-                    raise RuntimeError("Wake-on-LAN packet could not be sent")
-                self._pending_power_on = True
-                self._disconnect(clear_error=True)
-                self._last_connect_attempt = 0.0
+                ok = self._begin_power_on()
+            elif action == "power_toggle" and (
+                self._is_expected_off() or self.status().get("power") != "on"
+            ):
+                ok = self._begin_power_on()
+            elif action == "power_off" and self._is_expected_off():
                 ok = True
             else:
+                self._set_expected_off(False)
                 client = self._ensure_connected()
                 if action == "power_off":
                     ok = bool(client.power_off())
+                    if ok:
+                        self._mark_powered_off()
                 elif action == "power_toggle":
-                    ok = bool(client.power_off()) if self.status().get("power") == "on" else self._power_on_connected(client)
+                    ok = bool(client.power_off())
+                    if ok:
+                        self._mark_powered_off()
                 elif action == "volume_set":
                     level = max(0, min(100, int(value)))
                     ok = bool(client.set_volume(level))
@@ -697,12 +771,6 @@ class HisenseTvController:
         finally:
             if command.done:
                 command.done.set()
-
-    def _power_on_connected(self, client: Any) -> bool:
-        if self.config.mac and self._wake is not None:
-            subnet = self.config.host.rsplit(".", 1)[0] if self.config.host.count(".") == 3 else None
-            self._wake(self.config.mac, subnet)
-        return bool(client.power_on())
 
     def _set_source(self, client: Any, requested: str) -> bool:
         needle = requested.strip().lower().replace(" ", "")
@@ -761,6 +829,8 @@ class HisenseManager:
         protocol_detector: Callable[..., int | None] | None = None,
     ) -> None:
         self.config = config
+        self._power_state_lock = threading.Lock()
+        self._expected_off_ids = self._load_expected_off_ids()
         self.controllers = {
             tv.id: HisenseTvController(
                 tv,
@@ -768,9 +838,50 @@ class HisenseManager:
                 client_factory=client_factory,
                 wake_function=wake_function,
                 protocol_detector=protocol_detector,
+                expected_off=tv.id in self._expected_off_ids,
+                expected_off_callback=self._persist_expected_off,
             )
             for tv in config.tvs
         }
+
+    def _load_expected_off_ids(self) -> set[str]:
+        try:
+            payload = json.loads(Path(self.config.statefile).read_text(encoding="utf-8"))
+            values = payload.get("expectedOff") if isinstance(payload, dict) else []
+            configured = {tv.id for tv in self.config.tvs}
+            return {
+                _safe_id(value, "")
+                for value in values
+                if _safe_id(value, "") in configured
+            } if isinstance(values, list) else set()
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return set()
+
+    def _persist_expected_off(self, tv_id: str, expected: bool) -> None:
+        with self._power_state_lock:
+            if expected:
+                self._expected_off_ids.add(tv_id)
+            else:
+                self._expected_off_ids.discard(tv_id)
+            path = Path(self.config.statefile)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(
+                f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            try:
+                temporary.write_text(
+                    json.dumps({
+                        "version": 1,
+                        "expectedOff": sorted(self._expected_off_ids),
+                    }, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temporary, path)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def start(self) -> None:
         if self.config.enabled:
@@ -801,6 +912,8 @@ class HisenseManager:
         ]
         enabled = [tv for tv in members if tv.get("enabled")]
         online = [tv for tv in enabled if tv.get("connected")]
+        expected_off = [tv for tv in enabled if tv.get("expectedOff")]
+        healthy = [tv for tv in enabled if tv.get("healthy")]
         source_lists: list[dict[str, str]] = []
         seen_sources: set[str] = set()
         for tv in members:
@@ -824,7 +937,9 @@ class HisenseManager:
             "tvIds": list(group.tv_ids),
             "tvs": members,
             "connected": bool(enabled) and len(online) == len(enabled),
+            "healthy": bool(enabled) and len(healthy) == len(enabled),
             "online": len(online),
+            "off": len(expected_off),
             "total": len(enabled),
             "power": self._common([tv.get("power") for tv in enabled], empty="unknown"),
             "volume": volume if volume != "mixed" else None,
@@ -896,6 +1011,8 @@ class HisenseManager:
         tvs = [controller.status() for controller in self.controllers.values()]
         enabled = [tv for tv in tvs if tv.get("enabled")]
         online = [tv for tv in enabled if tv.get("connected")]
+        expected_off = [tv for tv in enabled if tv.get("expectedOff")]
+        healthy = [tv for tv in enabled if tv.get("healthy")]
         groups = [self.group_status(group) for group in self.config.groups]
         targets = [
             {
@@ -923,7 +1040,9 @@ class HisenseManager:
             "available": VidaaTV is not None or any(c._client_factory is not None for c in self.controllers.values()),
             "configured": bool(enabled),
             "connected": bool(enabled) and len(online) == len(enabled),
+            "healthy": bool(enabled) and len(healthy) == len(enabled),
             "online": len(online),
+            "off": len(expected_off),
             "total": len(enabled),
             "tvs": tvs,
             "groups": groups,
@@ -943,6 +1062,7 @@ def _signature(config: HisenseConfig) -> str:
             "enabled": config.enabled,
             "certfile": config.certfile,
             "keyfile": config.keyfile,
+            "statefile": config.statefile,
             "poll": config.poll_interval,
             "reconnect": config.reconnect_interval,
             "tvs": [tv.__dict__ for tv in config.tvs],
