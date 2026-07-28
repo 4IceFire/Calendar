@@ -1,6 +1,5 @@
 (() => {
   const tree = document.getElementById('hisense-tree')
-  const profileRows = document.getElementById('hisense-profiles')
   const alertBox = document.getElementById('hisense-alert')
   let config = {}
 
@@ -50,43 +49,6 @@
       <button type="button" class="btn btn-outline-secondary" data-action="${kind}-down" title="Move down">&darr;</button>
     </div>`
 
-  const currentProfiles = () => [...profileRows.querySelectorAll('.hisense-profile')].map((row, index) => ({
-    id: row.querySelector('.profile-id').value.trim() || `profile-${index + 1}`,
-    name: row.querySelector('.profile-name').value.trim() || `Profile ${index + 1}`,
-    cert_path: row.querySelector('.profile-cert').value.trim(),
-    key_path: row.querySelector('.profile-key').value.trim(),
-    compatible_models: row.querySelector('.profile-models').value.trim(),
-    enabled: row.querySelector('.profile-enabled').checked,
-  }))
-
-  const profileOptions = (selected = 'auto') => {
-    const profiles = currentProfiles()
-    return [{ id: 'auto', name: 'Automatic (try enabled profiles in order)' }, ...profiles]
-      .map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === selected ? 'selected' : ''}>${escapeHtml(profile.name)}</option>`)
-      .join('')
-  }
-
-  const profileCard = (profile = {}, index = 0) => `
-    <div class="card mb-3 hisense-profile" data-profile-id="${escapeHtml(profile.id || '')}">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-start mb-3">
-          <div>
-            <strong class="profile-title">${escapeHtml(profile.name || `Profile ${index + 1}`)}</strong>
-            <div class="small text-muted">Automatic selection tries enabled profiles from top to bottom.</div>
-          </div>
-          <div class="d-flex gap-2">${orderButtons('profile')}<button type="button" class="btn btn-sm btn-outline-danger" data-action="profile-remove">Remove</button></div>
-        </div>
-        <div class="row g-3">
-          <div class="col-md-3"><label class="form-label">ID</label><input class="form-control profile-id" value="${escapeHtml(profile.id || '')}" placeholder="current-vidaa"></div>
-          <div class="col-md-3"><label class="form-label">Name</label><input class="form-control profile-name" value="${escapeHtml(profile.name || '')}" placeholder="Current VIDAA certificate"></div>
-          <div class="col-md-3"><label class="form-label">Client certificate path</label><input class="form-control profile-cert" value="${escapeHtml(profile.cert_path || '')}" placeholder="hisense_certs/current.pem"></div>
-          <div class="col-md-3"><label class="form-label">Client key path</label><input class="form-control profile-key" value="${escapeHtml(profile.key_path || '')}" placeholder="hisense_certs/current.key"></div>
-          <div class="col-md-9"><label class="form-label">Compatible models / firmware</label><input class="form-control profile-models" value="${escapeHtml(profile.compatible_models || '')}" placeholder="55A7G, 65A7G or VIDAA 9 / Q0109"></div>
-          <div class="col-md-3"><div class="form-check form-switch mt-4"><input class="form-check-input profile-enabled" type="checkbox" ${profile.enabled !== false ? 'checked' : ''}><label class="form-check-label">Enabled for automatic selection</label></div></div>
-        </div>
-      </div>
-    </div>`
-
   const groupRecords = () => [...tree.querySelectorAll(':scope > .hisense-group')].map((row) => ({
     id: row.querySelector('.group-id').value.trim(),
     name: row.querySelector('.group-name').value.trim(),
@@ -114,94 +76,134 @@
     return candidate
   }
 
-  const tvStatusText = (status = {}) => {
-    if (!status.connected) return `Offline${status.lastError ? ` · ${status.lastError}` : ''}`
-    return `Online · ${status.power || 'unknown'} · Vol ${status.volume ?? '—'} · ${status.source || 'no source'}`
+  const friendlyError = (message) => {
+    const text = String(message || '')
+    if (/paired device UUID is required/i.test(text)) {
+      return 'Phone pairing required. Open Pair or repair for this TV.'
+    }
+    if (/certificate profile.+files were not found|client certificate\/key not found|support files are missing/i.test(text)) {
+      return 'TDeck TV support files need to be installed.'
+    }
+    if (/connection timed out or authentication was rejected/i.test(text)) {
+      return 'The TV did not accept the connection. It may need pairing or repair.'
+    }
+    return text
   }
 
-  const tvDetectedText = (status = {}) => [
-    status.model ? `Model ${status.model}` : '',
-    status.protocolVersion ? `Protocol ${status.protocolVersion}` : 'Protocol not detected',
-    status.authMethod ? `Auth ${status.authMethod}` : '',
-    status.certificateProfile ? `Certificate ${status.certificateProfile}` : '',
-  ].filter(Boolean).join(' · ')
+  const tvStatusText = (status = {}) => {
+    if (!status.connected) {
+      return status.lastError ? `Offline - ${friendlyError(status.lastError)}` : 'Offline'
+    }
+    return `Online - ${status.power || 'unknown'} - Vol ${status.volume ?? '-'} - ${status.source || 'no source'}`
+  }
+
+  const tvStatusClass = (status = {}) => {
+    if (status.connected) return 'text-success'
+    return status.lastError ? 'text-danger' : 'text-muted'
+  }
+
+  const healthSummary = (total, online, errors) => {
+    if (!total) return {
+      text: '0 TVs',
+      className: 'text-muted',
+    }
+    return {
+      text: `${online}/${total} online${errors ? ` - ${errors} error${errors === 1 ? '' : 's'}` : ''}`,
+      className: errors
+        ? 'text-danger'
+        : (online === total ? 'text-success' : (online ? 'text-warning' : 'text-muted')),
+    }
+  }
+
+  const healthFromTvs = (tvs = [], statuses = {}) => {
+    const states = tvs.map((tv) => statuses[tv.id] || {})
+    return healthSummary(
+      tvs.length,
+      states.filter((status) => status.connected).length,
+      states.filter((status) => status.lastError).length,
+    )
+  }
+
+  const applyHealth = (label, rows) => {
+    if (!label) return
+    const summary = healthSummary(
+      rows.length,
+      rows.filter((row) => row.dataset.connected === 'true').length,
+      rows.filter((row) => row.dataset.hasError === 'true').length,
+    )
+    label.textContent = summary.text
+    label.classList.remove('text-muted', 'text-success', 'text-warning', 'text-danger')
+    label.classList.add(summary.className)
+  }
 
   const tvCard = (tv = {}, status = {}, groupId = '', isNew = false) => {
     const id = tv.id || uniqueId('tv', tv.name || 'tv')
     const open = isNew ? true : storedOpen('tv', id, false)
-    const connected = Boolean(status.connected)
-    return `<div class="list-group-item hisense-tv" data-tv-id="${escapeHtml(id)}" data-id-auto="${isNew ? 'true' : 'false'}" data-saved="${isNew ? 'false' : 'true'}" style="padding-left:${groupId ? '44px' : '24px'}">
+    const requiresUuid = /paired device UUID is required/i.test(String(status.lastError || ''))
+    const pairingOpen = storedOpen('pair', id, requiresUuid)
+    return `<div class="list-group-item hisense-tv"
+      data-tv-id="${escapeHtml(id)}"
+      data-id-auto="${isNew ? 'true' : 'false'}"
+      data-saved="${isNew ? 'false' : 'true'}"
+      data-connected="${status.connected ? 'true' : 'false'}"
+      data-has-error="${status.lastError ? 'true' : 'false'}"
+      data-requires-uuid="${requiresUuid ? 'true' : 'false'}"
+      style="padding-left:${groupId ? '44px' : '24px'}">
+      <input type="hidden" class="tv-id" value="${escapeHtml(id)}">
       <div class="d-flex flex-wrap align-items-center gap-2">
         <button type="button" class="btn btn-sm btn-outline-secondary tv-toggle" data-action="tv-toggle" title="Expand/collapse TV" style="width:32px">${open ? '&#9662;' : '&#9656;'}</button>
         <div class="flex-grow-1 text-truncate">
           <div class="fw-semibold text-truncate tv-title">${escapeHtml(tv.name || 'New TV')}</div>
-          <div class="small ${connected ? 'text-success' : 'text-muted'} text-truncate tv-status">${escapeHtml(tvStatusText(status))}</div>
+          <div class="small ${tvStatusClass(status)} text-truncate tv-status">${escapeHtml(tvStatusText(status))}</div>
         </div>
         <select class="form-select form-select-sm tv-group-select" aria-label="TV group" style="max-width:210px">${groupOptions(groupId)}</select>
         ${orderButtons('tv')}
         <button type="button" class="btn btn-sm btn-outline-danger" data-action="tv-remove">Remove</button>
       </div>
       <div class="tv-details mt-3" ${open ? '' : 'style="display:none"'}>
-        <div class="small text-muted mb-3 tv-detected">${escapeHtml(tvDetectedText(status))}</div>
+        ${status.model ? `<div class="small text-muted mb-3">Detected model: ${escapeHtml(status.model)}</div>` : ''}
         <div class="row g-3">
           <div class="col-md-4">
             <label class="form-label">TV name</label>
             <input class="form-control tv-name" value="${escapeHtml(tv.name || '')}" placeholder="Foyer TV">
-            <div class="form-text">This is the name shown in TDeck and Companion.</div>
+            <div class="form-text">The name shown in TDeck and Companion.</div>
           </div>
           <div class="col-md-4">
             <label class="form-label">IP address</label>
             <input class="form-control tv-host" value="${escapeHtml(tv.host || '')}" placeholder="10.5.10.175">
           </div>
           <div class="col-md-4">
-            <label class="form-label">MAC address</label>
+            <label class="form-label">TV MAC address</label>
             <input class="form-control tv-mac" value="${escapeHtml(tv.mac || '')}" placeholder="e4:8a:93:f1:da:22">
-            <div class="form-text">The TV's own MAC address. Required for Wake-on-LAN power-on.</div>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">Paired device UUID</label>
-            <input class="form-control tv-uuid" value="${escapeHtml(tv.uuid || '')}" placeholder="56:b8:88:4e:f7:19">
-            <div class="form-text">Required for newer VIDAA authentication. Use the case-sensitive Bluetooth/Wi-Fi MAC or UUID of the phone/device paired through the official VIDAA app—not the TV MAC.</div>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">Protocol / authentication</label>
-            <select class="form-select tv-auth-mode">
-              <option value="auto" ${(tv.auth_mode || 'auto') === 'auto' ? 'selected' : ''}>Automatic (recommended)</option>
-              <option value="static-legacy" ${tv.auth_mode === 'static-legacy' ? 'selected' : ''}>Static legacy (A7G fallback)</option>
-              <option value="dynamic-legacy" ${tv.auth_mode === 'dynamic-legacy' ? 'selected' : ''}>Dynamic legacy (&lt;3000)</option>
-              <option value="dynamic-middle" ${tv.auth_mode === 'dynamic-middle' ? 'selected' : ''}>Dynamic middle (3000–3289)</option>
-              <option value="dynamic-modern" ${tv.auth_mode === 'dynamic-modern' ? 'selected' : ''}>Dynamic modern (3290+)</option>
-            </select>
-          </div>
-          <div class="col-md-5">
-            <label class="form-label">Certificate compatibility profile</label>
-            <select class="form-select tv-profile" data-selected="${escapeHtml(tv.certificate_profile || 'auto')}">${profileOptions(tv.certificate_profile || 'auto')}</select>
-          </div>
-          <div class="col-md-3">
-            <div class="form-check form-switch mt-4">
-              <input class="form-check-input tv-enabled" type="checkbox" ${tv.enabled !== false ? 'checked' : ''}>
-              <label class="form-check-label">Enabled</label>
-            </div>
+            <div class="form-text">Used for Wake-on-LAN power-on.</div>
           </div>
         </div>
-        <details class="mt-3">
-          <summary class="small text-muted">Advanced identity</summary>
-          <div class="row g-3 mt-1">
-            <div class="col-md-6">
-              <label class="form-label">Internal ID</label>
-              <input class="form-control tv-id" value="${escapeHtml(id)}" placeholder="foyer-tv">
-              <div class="form-text">Generated from the name for new TVs. Keep it unchanged after creating Companion buttons so those buttons retain their target.</div>
+        <div class="d-flex flex-wrap gap-2 mt-3">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="tv-reconnect">Reconnect</button>
+          <button type="button" class="btn btn-sm btn-outline-warning" data-action="tv-pairing-toggle">${pairingOpen ? 'Hide pairing' : 'Pair or repair'}</button>
+          <button type="button" class="btn btn-sm btn-outline-primary" data-action="tv-test">Test volume +</button>
+        </div>
+        <div class="tv-pairing mt-3 p-3 rounded border border-warning-subtle" ${pairingOpen ? '' : 'style="display:none"'}>
+          <div class="small text-muted mb-3">
+            Most older TVs only need the PIN buttons below. For a newer TV, first pair the
+            official VIDAA phone app, then enter that phone's case-sensitive Wi-Fi/Bluetooth
+            MAC or UUID here. This is not the TV MAC address.
+          </div>
+          <div class="row g-3 align-items-end">
+            <div class="col-lg-5">
+              <label class="form-label">Paired phone UUID <span class="text-muted">(newer TVs only)</span></label>
+              <input class="form-control tv-uuid" value="${escapeHtml(tv.uuid || '')}" placeholder="AA:BB:CC:DD:EE:FF">
+            </div>
+            <div class="col-lg-7">
+              <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-sm btn-outline-warning" data-action="tv-pair">Request pairing PIN</button>
+                <div class="input-group input-group-sm" style="max-width:220px">
+                  <input class="form-control tv-pin" maxlength="4" inputmode="numeric" placeholder="4-digit PIN">
+                  <button class="btn btn-outline-warning" type="button" data-action="tv-submit-pin">Submit PIN</button>
+                </div>
+              </div>
             </div>
           </div>
-        </details>
-        <div class="d-flex flex-wrap gap-2 mt-3">
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-action="tv-reconnect">Reconnect / redetect</button>
-          <button type="button" class="btn btn-sm btn-outline-warning" data-action="tv-pair">Request pairing PIN</button>
-          <div class="input-group input-group-sm" style="max-width:220px">
-            <input class="form-control tv-pin" maxlength="4" inputmode="numeric" placeholder="4-digit PIN">
-            <button class="btn btn-outline-warning" type="button" data-action="tv-submit-pin">Submit PIN</button>
-          </div>
-          <button type="button" class="btn btn-sm btn-outline-primary" data-action="tv-test">Test volume +</button>
         </div>
       </div>
     </div>`
@@ -210,6 +212,7 @@
   const groupCard = (group = {}, tvs = [], statuses = {}) => {
     const id = group.id || uniqueId('group', group.name || 'group')
     const open = storedOpen('group', id, true)
+    const health = healthFromTvs(tvs, statuses)
     return `<div class="hisense-group" data-group-id="${escapeHtml(id)}">
       <input type="hidden" class="group-id" value="${escapeHtml(id)}">
       <input type="hidden" class="group-name" value="${escapeHtml(group.name || id)}">
@@ -217,11 +220,7 @@
         <button type="button" class="btn btn-sm btn-outline-secondary group-toggle" data-action="group-toggle" title="Expand/collapse group" style="width:32px">${open ? '&#9662;' : '&#9656;'}</button>
         <div class="flex-grow-1 text-truncate">
           <div class="fw-semibold text-truncate group-title">${escapeHtml(group.name || id)}</div>
-          <div class="small text-muted group-count">${tvs.length} TV${tvs.length === 1 ? '' : 's'}</div>
-        </div>
-        <div class="form-check form-switch mb-0">
-          <input class="form-check-input group-enabled" type="checkbox" ${group.enabled !== false ? 'checked' : ''} aria-label="Enable group in Companion" title="Show group in Companion">
-          <label class="form-check-label small">Companion</label>
+          <div class="small ${health.className} group-health">${escapeHtml(health.text)}</div>
         </div>
         ${orderButtons('group')}
         <button type="button" class="btn btn-sm btn-outline-secondary" data-action="group-rename">Rename</button>
@@ -235,12 +234,13 @@
 
   const rootCard = (tvs = [], statuses = {}) => {
     const open = storedOpen('root', 'ungrouped', true)
+    const health = healthFromTvs(tvs, statuses)
     return `<div class="hisense-root">
       <div class="list-group-item d-flex flex-wrap align-items-center gap-2">
         <button type="button" class="btn btn-sm btn-outline-secondary root-toggle" data-action="root-toggle" title="Expand/collapse ungrouped TVs" style="width:32px">${open ? '&#9662;' : '&#9656;'}</button>
         <div class="flex-grow-1">
           <div class="fw-semibold">Ungrouped TVs</div>
-          <div class="small text-muted root-count">${tvs.length} TV${tvs.length === 1 ? '' : 's'}</div>
+          <div class="small ${health.className} root-health">${escapeHtml(health.text)}</div>
         </div>
       </div>
       <div class="tree-tv-list list-group list-group-flush" data-group-id="" ${open ? '' : 'style="display:none"'}>
@@ -252,14 +252,12 @@
   const directTvRows = (list) => [...list.children].filter((child) => child.classList.contains('hisense-tv'))
 
   const currentTvs = () => [...tree.querySelectorAll('.hisense-tv')].map((row, index) => ({
-    id: row.querySelector('.tv-id').value.trim() || uniqueId('tv', row.querySelector('.tv-name').value || `tv-${index + 1}`, row),
+    id: row.querySelector('.tv-id').value.trim()
+      || uniqueId('tv', row.querySelector('.tv-name').value || `tv-${index + 1}`, row),
     name: row.querySelector('.tv-name').value.trim() || `TV ${index + 1}`,
     host: row.querySelector('.tv-host').value.trim(),
     mac: row.querySelector('.tv-mac').value.trim(),
     uuid: row.querySelector('.tv-uuid').value.trim(),
-    enabled: row.querySelector('.tv-enabled').checked,
-    auth_mode: row.querySelector('.tv-auth-mode').value,
-    certificate_profile: row.querySelector('.tv-profile').value,
   }))
 
   const currentGroups = () => [...tree.querySelectorAll(':scope > .hisense-group')].map((row, index) => {
@@ -267,21 +265,24 @@
     return {
       id: row.querySelector('.group-id').value.trim() || `group-${index + 1}`,
       name: row.querySelector('.group-name').value.trim() || `Group ${index + 1}`,
-      enabled: row.querySelector('.group-enabled').checked,
       tv_ids: directTvRows(list).map((tvRow) => tvRow.querySelector('.tv-id').value.trim()),
     }
   })
 
-  const parentGroupId = (tvRow) => tvRow.closest('.hisense-group')?.querySelector('.group-id')?.value.trim() || ''
+  const parentGroupId = (tvRow) =>
+    tvRow.closest('.hisense-group')?.querySelector('.group-id')?.value.trim() || ''
 
-  const refreshCounts = () => {
+  const refreshHealthSummaries = () => {
     const rootList = tree.querySelector('.hisense-root > .tree-tv-list')
-    const rootCount = rootList ? directTvRows(rootList).length : 0
-    const rootLabel = tree.querySelector('.root-count')
-    if (rootLabel) rootLabel.textContent = `${rootCount} TV${rootCount === 1 ? '' : 's'}`
+    applyHealth(
+      tree.querySelector('.root-health'),
+      rootList ? directTvRows(rootList) : [],
+    )
     for (const group of tree.querySelectorAll(':scope > .hisense-group')) {
-      const count = directTvRows(group.querySelector('.tree-tv-list')).length
-      group.querySelector('.group-count').textContent = `${count} TV${count === 1 ? '' : 's'}`
+      applyHealth(
+        group.querySelector('.group-health'),
+        directTvRows(group.querySelector('.tree-tv-list')),
+      )
     }
   }
 
@@ -292,22 +293,19 @@
       select.innerHTML = groupOptions(selected)
       select.value = selected
     }
-    refreshCounts()
-  }
-
-  const refreshProfileChoices = (renamedFrom = '', renamedTo = '') => {
-    for (const select of tree.querySelectorAll('.tv-profile')) {
-      let selected = select.value || select.dataset.selected || 'auto'
-      if (renamedFrom && selected === renamedFrom) selected = renamedTo || 'auto'
-      select.innerHTML = profileOptions(selected)
-      if (![...select.options].some((option) => option.value === selected)) select.value = 'auto'
-    }
+    refreshHealthSummaries()
   }
 
   const setTvOpen = (row, open) => {
     row.querySelector('.tv-details').style.display = open ? '' : 'none'
     row.querySelector('.tv-toggle').innerHTML = open ? '&#9662;' : '&#9656;'
     storeOpen('tv', row.querySelector('.tv-id').value.trim(), open)
+  }
+
+  const setPairingOpen = (row, open) => {
+    row.querySelector('.tv-pairing').style.display = open ? '' : 'none'
+    row.querySelector('[data-action="tv-pairing-toggle"]').textContent = open ? 'Hide pairing' : 'Pair or repair'
+    storeOpen('pair', row.querySelector('.tv-id').value.trim(), open)
   }
 
   const setGroupOpen = (row, open) => {
@@ -351,56 +349,51 @@
     const ungrouped = (tvs || []).filter((tv) => !assigned.has(String(tv.id || '')))
     tree.innerHTML = rootCard(ungrouped, statuses) + groupHtml.join('')
     refreshGroupSelects()
-    refreshProfileChoices()
   }
 
   const load = async () => {
     try {
-      const [settings, state] = await Promise.all([request('/api/hisense/config'), request('/api/tvs')])
+      const [settings, state] = await Promise.all([
+        request('/api/hisense/config'),
+        request('/api/tvs'),
+      ])
       config = settings.config || {}
-      document.getElementById('hisense-enabled').checked = Boolean(config.hisense_enabled)
-      document.getElementById('hisense-poll').value = config.hisense_poll_interval || 10
-      document.getElementById('hisense-reconnect').value = config.hisense_reconnect_interval || 15
-      document.getElementById('hisense-compatible-models').value = config.hisense_compatible_models || ''
-      profileRows.innerHTML = (config.hisense_certificate_profiles || []).map(profileCard).join('')
-      if (!profileRows.children.length) profileRows.insertAdjacentHTML('beforeend', profileCard({}, 0))
       const statuses = Object.fromEntries((state.tvs || []).map((tv) => [tv.id, tv]))
       renderTree(config.hisense_tvs || [], config.hisense_tv_groups || [], statuses)
     } catch (error) {
-      notify(error.message, 'danger')
+      notify(friendlyError(error.message), 'danger')
     }
+  }
+
+  const saveConfiguration = async ({ reload = true, announce = true } = {}) => {
+    const payload = {
+      hisense_tvs: currentTvs(),
+      hisense_tv_groups: currentGroups(),
+    }
+    const result = await request('/api/hisense/config', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+    for (const row of tree.querySelectorAll('.hisense-tv')) row.dataset.saved = 'true'
+    if (announce) notify('TV configuration saved. Connections have restarted.')
+    if (reload) await load()
+    return result
   }
 
   document.getElementById('hisense-save').addEventListener('click', async () => {
     try {
-      const payload = {
-        hisense_enabled: document.getElementById('hisense-enabled').checked,
-        hisense_poll_interval: Number(document.getElementById('hisense-poll').value || 10),
-        hisense_reconnect_interval: Number(document.getElementById('hisense-reconnect').value || 15),
-        hisense_compatible_models: document.getElementById('hisense-compatible-models').value.trim(),
-        hisense_certificate_profiles: currentProfiles(),
-        hisense_tvs: currentTvs(),
-        hisense_tv_groups: currentGroups(),
-      }
-      await request('/api/hisense/config', { method: 'PUT', body: JSON.stringify(payload) })
-      notify('TV configuration saved. Protocol detection and TV connections have restarted.')
-      await load()
+      await saveConfiguration()
     } catch (error) {
-      notify(error.message, 'danger')
+      notify(friendlyError(error.message), 'danger')
     }
   })
 
   document.getElementById('hisense-refresh').addEventListener('click', load)
-  document.getElementById('hisense-add-profile').addEventListener('click', () => {
-    profileRows.insertAdjacentHTML('beforeend', profileCard({}, profileRows.children.length))
-    refreshProfileChoices()
-  })
   document.getElementById('hisense-add').addEventListener('click', () => {
     const rootList = tree.querySelector('.hisense-root > .tree-tv-list')
     rootList.insertAdjacentHTML('beforeend', tvCard({}, {}, '', true))
     setRootOpen(true)
     refreshGroupSelects()
-    refreshProfileChoices()
     const row = directTvRows(rootList).at(-1)
     row?.querySelector('.tv-name')?.focus()
   })
@@ -408,7 +401,7 @@
     const name = window.prompt('Group name?')
     if (!name?.trim()) return
     const id = uniqueId('group', name)
-    tree.insertAdjacentHTML('beforeend', groupCard({ id, name: name.trim(), enabled: true }, []))
+    tree.insertAdjacentHTML('beforeend', groupCard({ id, name: name.trim() }, []))
     storeOpen('group', id, true)
     refreshGroupSelects()
   })
@@ -423,39 +416,14 @@
     for (const tv of tree.querySelectorAll('.hisense-tv')) setTvOpen(tv, false)
   })
 
-  profileRows.addEventListener('input', (event) => {
-    const row = event.target.closest('.hisense-profile')
-    if (!row) return
-    if (event.target.classList.contains('profile-name')) {
-      row.querySelector('.profile-title').textContent = event.target.value || 'Certificate profile'
-    }
-    if (event.target.classList.contains('profile-id')) {
-      const previousId = row.dataset.profileId
-      const nextId = event.target.value.trim()
-      refreshProfileChoices(previousId, nextId)
-      if (nextId) row.dataset.profileId = nextId
-    } else refreshProfileChoices()
-  })
-
-  profileRows.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-action]')
-    const row = event.target.closest('.hisense-profile')
-    if (!button || !row) return
-    const action = button.dataset.action
-    if (action === 'profile-remove') {
-      if (profileRows.children.length <= 1) return notify('At least one certificate profile is required.', 'warning')
-      row.remove()
-      refreshProfileChoices()
-    } else if (action === 'profile-up') moveSibling(row, -1, '.hisense-profile')
-    else if (action === 'profile-down') moveSibling(row, 1, '.hisense-profile')
-  })
-
   tree.addEventListener('change', (event) => {
     if (!event.target.classList.contains('tv-group-select')) return
     const tvRow = event.target.closest('.hisense-tv')
     const groupId = event.target.value
     const destination = groupId
-      ? [...tree.querySelectorAll(':scope > .hisense-group')].find((group) => group.querySelector('.group-id').value === groupId)?.querySelector('.tree-tv-list')
+      ? [...tree.querySelectorAll(':scope > .hisense-group')]
+        .find((group) => group.querySelector('.group-id').value === groupId)
+        ?.querySelector('.tree-tv-list')
       : tree.querySelector('.hisense-root > .tree-tv-list')
     if (!destination) return
     destination.appendChild(tvRow)
@@ -476,11 +444,6 @@
         tvRow.querySelector('.tv-id').value = id
         tvRow.dataset.tvId = id
       }
-    } else if (event.target.classList.contains('tv-id')) {
-      const normalized = slugify(event.target.value, 'tv')
-      event.target.value = uniqueId('tv', normalized, tvRow)
-      tvRow.dataset.tvId = event.target.value
-      tvRow.dataset.idAuto = 'false'
     }
   })
 
@@ -531,45 +494,65 @@
     if (action === 'tv-toggle') {
       return setTvOpen(tvRow, tvRow.querySelector('.tv-details').style.display === 'none')
     }
+    if (action === 'tv-pairing-toggle') {
+      return setPairingOpen(tvRow, tvRow.querySelector('.tv-pairing').style.display === 'none')
+    }
     if (action === 'tv-up') {
       moveSibling(tvRow, -1, '.hisense-tv')
-      return refreshCounts()
+      return refreshHealthSummaries()
     }
     if (action === 'tv-down') {
       moveSibling(tvRow, 1, '.hisense-tv')
-      return refreshCounts()
+      return refreshHealthSummaries()
     }
     if (action === 'tv-remove') {
       tvRow.remove()
-      return refreshCounts()
+      return refreshHealthSummaries()
     }
 
     const id = tvRow.querySelector('.tv-id').value.trim()
-    if (tvRow.dataset.saved !== 'true') {
-      return notify('Save the new TV before testing, reconnecting, or pairing it.', 'warning')
-    }
+    const pin = tvRow.querySelector('.tv-pin').value.trim()
     try {
+      if (
+        action === 'tv-pair'
+        && tvRow.dataset.requiresUuid === 'true'
+        && !tvRow.querySelector('.tv-uuid').value.trim()
+      ) {
+        throw new Error(
+          'Pair this TV with the official VIDAA phone app first, then enter the phone UUID in Pair or repair.',
+        )
+      }
+      await saveConfiguration({ reload: false, announce: false })
       if (action === 'tv-reconnect') {
-        await request(`/api/tvs/${encodeURIComponent(id)}/reconnect`, { method: 'POST', body: '{}' })
+        await request(`/api/tvs/${encodeURIComponent(id)}/reconnect`, {
+          method: 'POST',
+          body: '{}',
+        })
+        notify('Reconnect requested.')
       } else if (action === 'tv-pair') {
-        await request(`/api/tvs/${encodeURIComponent(id)}/pair/request`, { method: 'POST', body: '{}' })
-        notify('Pairing request sent. If the TV reports that the app is no longer compatible, select a newer certificate profile, save, reconnect, and retry.', 'warning')
-        return
+        await request(`/api/tvs/${encodeURIComponent(id)}/pair/request`, {
+          method: 'POST',
+          body: '{}',
+        })
+        notify('Pairing request sent. Enter the four-digit PIN shown by the TV.')
       } else if (action === 'tv-submit-pin') {
         await request(`/api/tvs/${encodeURIComponent(id)}/pair/submit`, {
           method: 'POST',
-          body: JSON.stringify({ pin: tvRow.querySelector('.tv-pin').value.trim() }),
+          body: JSON.stringify({ pin }),
         })
+        notify('Pairing PIN submitted.')
       } else if (action === 'tv-test') {
         await request(`/api/tvs/${encodeURIComponent(id)}/volume`, {
           method: 'POST',
           body: JSON.stringify({ action: 'up' }),
         })
-      } else return
-      notify('TV command accepted.')
+        notify('Volume test sent.')
+      } else {
+        return
+      }
       await load()
     } catch (error) {
-      notify(error.message, 'danger')
+      notify(friendlyError(error.message), 'danger')
     }
   })
 

@@ -39,6 +39,25 @@ DEFAULT_SOURCES = [
     {"id": "AVS", "name": "AV"},
 ]
 
+BUILTIN_CERTIFICATE_PROFILES = (
+    {
+        "id": "current-vidaa",
+        "name": "Current VIDAA Android",
+        "cert_path": "hisense_certs/vidaa_current.pem",
+        "key_path": "hisense_certs/vidaa_current.key",
+        "compatible_models": "Newer VIDAA authentication",
+        "enabled": True,
+    },
+    {
+        "id": "default",
+        "name": "Default / legacy",
+        "cert_path": "hisense_certs/vidaa_client.pem",
+        "key_path": "hisense_certs/vidaa_client.key",
+        "compatible_models": "55A7G, 65A7G and legacy VIDAA authentication",
+        "enabled": True,
+    },
+)
+
 
 def _bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
@@ -58,6 +77,57 @@ def _resolve_path(value: Any, base_dir: Path) -> str:
     if not path.is_absolute():
         path = base_dir / path
     return str(path.resolve())
+
+
+def _certificate_profile_mappings(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return configured profiles plus TDeck's known local certificate pairs.
+
+    Certificate setup is intentionally backend-managed. Existing custom
+    profiles remain supported for upgraded installations, while the standard
+    legacy and current VIDAA filenames are discovered without UI configuration.
+    """
+    configured = cfg.get("hisense_certificate_profiles")
+    raw_profiles = [
+        dict(profile)
+        for profile in configured
+        if isinstance(profile, dict)
+    ] if isinstance(configured, list) else []
+
+    legacy_cert = cfg.get("hisense_cert_path") or BUILTIN_CERTIFICATE_PROFILES[1]["cert_path"]
+    legacy_key = cfg.get("hisense_key_path") or BUILTIN_CERTIFICATE_PROFILES[1]["key_path"]
+    if not raw_profiles:
+        raw_profiles.append({
+            **BUILTIN_CERTIFICATE_PROFILES[1],
+            "cert_path": legacy_cert,
+            "key_path": legacy_key,
+            "compatible_models": (
+                cfg.get("hisense_compatible_models")
+                or BUILTIN_CERTIFICATE_PROFILES[1]["compatible_models"]
+            ),
+        })
+
+    seen_ids = {
+        _safe_id(profile.get("id") or profile.get("name"), "")
+        for profile in raw_profiles
+    }
+    seen_pairs = {
+        (
+            str(profile.get("cert_path") or profile.get("certfile") or "").strip().lower(),
+            str(profile.get("key_path") or profile.get("keyfile") or "").strip().lower(),
+        )
+        for profile in raw_profiles
+    }
+    for builtin in BUILTIN_CERTIFICATE_PROFILES:
+        pair = (
+            str(builtin["cert_path"]).lower(),
+            str(builtin["key_path"]).lower(),
+        )
+        if builtin["id"] in seen_ids or pair in seen_pairs:
+            continue
+        raw_profiles.append(dict(builtin))
+        seen_ids.add(str(builtin["id"]))
+        seen_pairs.add(pair)
+    return raw_profiles
 
 
 @dataclass(frozen=True)
@@ -167,16 +237,7 @@ class HisenseConfig:
         root = (base_dir or Path.cwd()).resolve()
         raw_tvs = cfg.get("hisense_tvs") if isinstance(cfg.get("hisense_tvs"), list) else []
         tvs = tuple(HisenseTvConfig.from_mapping(v, i) for i, v in enumerate(raw_tvs) if isinstance(v, dict))
-        raw_profiles = cfg.get("hisense_certificate_profiles")
-        if not isinstance(raw_profiles, list) or not raw_profiles:
-            raw_profiles = [{
-                "id": "default",
-                "name": "Default / legacy",
-                "cert_path": cfg.get("hisense_cert_path") or "hisense_certs/vidaa_client.pem",
-                "key_path": cfg.get("hisense_key_path") or "hisense_certs/vidaa_client.key",
-                "compatible_models": cfg.get("hisense_compatible_models") or "55A7G, 65A7G",
-                "enabled": True,
-            }]
+        raw_profiles = _certificate_profile_mappings(cfg)
         profiles = tuple(
             HisenseCertificateProfile.from_mapping(v, i, root)
             for i, v in enumerate(raw_profiles)
@@ -346,11 +407,45 @@ class HisenseTvController:
             self._state["protocolVersion"] = version
         return version
 
-    def _certificate_candidates(self) -> list[HisenseCertificateProfile]:
+    @staticmethod
+    def _certificate_generation(profile: HisenseCertificateProfile) -> int:
+        text = " ".join((
+            profile.id,
+            profile.name,
+            Path(profile.certfile).name,
+            profile.compatible_models,
+        )).lower()
+        if any(word in text for word in ("current", "modern", "q0109", "newer")):
+            return 2
+        if any(word in text for word in ("legacy", "vidaa_client")):
+            return 0
+        return 1
+
+    def _certificate_candidates(self, protocol_version: int | None) -> list[HisenseCertificateProfile]:
         profiles = [profile for profile in self.service_config.certificate_profiles if profile.enabled]
-        if self.config.certificate_profile == "auto":
-            return profiles
-        return [profile for profile in profiles if profile.id == self.config.certificate_profile]
+        if self.config.certificate_profile != "auto":
+            return [profile for profile in profiles if profile.id == self.config.certificate_profile]
+
+        # Avoid filling the status with missing optional-profile errors when at
+        # least one installed pair is available. If none exist, retain every
+        # candidate so the final error still explains that support files are
+        # missing.
+        installed = [
+            profile
+            for profile in profiles
+            if Path(profile.certfile).is_file() and Path(profile.keyfile).is_file()
+        ]
+        candidates = installed or profiles
+        preferred_generation = (
+            2 if (protocol_version is not None and protocol_version >= 3000) or self.config.uuid
+            else 0
+        )
+        indexed = list(enumerate(candidates))
+        indexed.sort(key=lambda item: (
+            abs(self._certificate_generation(item[1]) - preferred_generation),
+            item[0],
+        ))
+        return [profile for _index, profile in indexed]
 
     def _auth_candidates(self, protocol_version: int | None) -> list[tuple[bool, Any, str]]:
         mode = self.config.auth_mode
@@ -417,7 +512,7 @@ class HisenseTvController:
         self._last_connect_attempt = time.monotonic()
         self._disconnect(clear_error=False)
         protocol_version = self._detect_protocol_version()
-        profiles = self._certificate_candidates()
+        profiles = self._certificate_candidates(protocol_version)
         if not profiles:
             self._set_error("No enabled certificate profile is available for this TV")
             return False

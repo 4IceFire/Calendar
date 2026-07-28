@@ -7692,12 +7692,22 @@ def api_hisense_config_put():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
+    cfg = utils.get_config()
     tvs = body.get('hisense_tvs')
     if not isinstance(tvs, list):
         return jsonify({'ok': False, 'error': 'hisense_tvs must be a list'}), 400
     raw_profiles = body.get('hisense_certificate_profiles')
     if not isinstance(raw_profiles, list) or not raw_profiles:
-        return jsonify({'ok': False, 'error': 'at least one certificate profile is required'}), 400
+        raw_profiles = cfg.get('hisense_certificate_profiles')
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        raw_profiles = [{
+            'id': 'default',
+            'name': 'Default / legacy',
+            'cert_path': cfg.get('hisense_cert_path') or 'hisense_certs/vidaa_client.pem',
+            'key_path': cfg.get('hisense_key_path') or 'hisense_certs/vidaa_client.key',
+            'compatible_models': cfg.get('hisense_compatible_models') or '55A7G, 65A7G',
+            'enabled': True,
+        }]
     profile_ids: set[str] = set()
     profiles = []
     for index, profile in enumerate(raw_profiles):
@@ -7721,7 +7731,6 @@ def api_hisense_config_put():
         })
     seen: set[str] = set()
     normalized = []
-    auth_modes = {'auto', 'static-legacy', 'dynamic-legacy', 'dynamic-middle', 'dynamic-modern'}
     for index, tv in enumerate(tvs):
         if not isinstance(tv, dict):
             return jsonify({'ok': False, 'error': f'TV {index + 1} is invalid'}), 400
@@ -7734,25 +7743,23 @@ def api_hisense_config_put():
         uuid = str(tv.get('uuid') or '').strip().replace('-', ':')
         if bool(tv.get('enabled', True)) and (not host or not re.fullmatch(r'[0-9A-Za-z.-]+', host)):
             return jsonify({'ok': False, 'error': f'{ident} needs a valid IP address or hostname'}), 400
-        if mac and not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac):
+        if not mac:
+            return jsonify({'ok': False, 'error': f'{ident} needs the TV MAC address for power-on'}), 400
+        if not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac):
             return jsonify({'ok': False, 'error': f'{ident} has an invalid MAC address'}), 400
         if uuid and not re.fullmatch(r'(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}', uuid):
             return jsonify({'ok': False, 'error': f'{ident} has an invalid paired device UUID'}), 400
-        auth_mode = str(tv.get('auth_mode') or 'auto').strip().lower()
-        if auth_mode not in auth_modes:
-            return jsonify({'ok': False, 'error': f'{ident} has an invalid authentication mode'}), 400
-        certificate_profile = str(tv.get('certificate_profile') or 'auto').strip().lower()
-        if certificate_profile != 'auto' and certificate_profile not in profile_ids:
-            certificate_profile = 'auto'
         normalized.append({
             'id': ident,
             'name': str(tv.get('name') or ident).strip(),
             'host': host,
             'mac': mac,
             'uuid': uuid,
-            'enabled': bool(tv.get('enabled', True)),
-            'auth_mode': auth_mode,
-            'certificate_profile': certificate_profile,
+            # The simplified UI deliberately makes these backend concerns.
+            # Existing configs migrate to automatic handling on the next save.
+            'enabled': True,
+            'auth_mode': 'auto',
+            'certificate_profile': 'auto',
         })
     raw_groups = body.get('hisense_tv_groups')
     if raw_groups is None:
@@ -7780,24 +7787,25 @@ def api_hisense_config_put():
         groups.append({
             'id': ident,
             'name': str(group.get('name') or ident).strip(),
-            'enabled': bool(group.get('enabled', True)),
+            'enabled': True,
             'tv_ids': member_ids,
         })
     primary_profile = profiles[0]
     updates = {
-        'hisense_enabled': bool(body.get('hisense_enabled', False)),
+        'hisense_enabled': bool(normalized),
         # Keep the original keys synchronized for compatibility with older
         # TDeck builds and config exports.
         'hisense_cert_path': primary_profile['cert_path'],
         'hisense_key_path': primary_profile['key_path'],
-        'hisense_poll_interval': max(2, int(body.get('hisense_poll_interval') or 10)),
-        'hisense_reconnect_interval': max(2, int(body.get('hisense_reconnect_interval') or 15)),
-        'hisense_compatible_models': str(body.get('hisense_compatible_models') or '').strip(),
+        'hisense_poll_interval': max(2, int(cfg.get('hisense_poll_interval') or 10)),
+        'hisense_reconnect_interval': max(2, int(cfg.get('hisense_reconnect_interval') or 15)),
+        'hisense_compatible_models': str(
+            cfg.get('hisense_compatible_models') or 'Confirmed: 55A7G, 65A7G'
+        ).strip(),
         'hisense_certificate_profiles': profiles,
         'hisense_tv_groups': groups,
         'hisense_tvs': normalized,
     }
-    cfg = utils.get_config()
     cfg.update(updates)
     utils.save_config(cfg)
     utils.reload_config(force=True)

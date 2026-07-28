@@ -296,6 +296,75 @@ class HisenseManagerTests(unittest.TestCase):
         finally:
             manager.close()
 
+    def test_builtin_current_certificate_is_preferred_for_newer_protocols(self):
+        root = Path(self.temp.name)
+        cert_dir = root / "hisense_certs"
+        cert_dir.mkdir()
+        (cert_dir / "vidaa_client.pem").write_text("legacy cert", encoding="utf-8")
+        (cert_dir / "vidaa_client.key").write_text("legacy key", encoding="utf-8")
+        (cert_dir / "vidaa_current.pem").write_text("current cert", encoding="utf-8")
+        (cert_dir / "vidaa_current.key").write_text("current key", encoding="utf-8")
+        cfg = HisenseConfig.from_mapping({
+            "hisense_enabled": True,
+            "hisense_tvs": [{
+                "id": "modern",
+                "host": "10.5.10.175",
+                "mac": "e4:8a:93:f1:da:22",
+                "uuid": "56:b8:88:4e:f7:19",
+            }],
+        }, base_dir=root)
+        manager = HisenseManager(
+            cfg,
+            client_factory=_FakeVidaa,
+            wake_function=lambda _mac, _subnet: True,
+            protocol_detector=lambda *_args, **_kwargs: 3290,
+        )
+        try:
+            manager.start()
+            deadline = time.time() + 1
+            while time.time() < deadline and not manager.status()["connected"]:
+                time.sleep(0.01)
+            tv = manager.status()["tvs"][0]
+            self.assertTrue(tv["connected"], tv)
+            self.assertEqual(tv["certificateProfile"], "current-vidaa")
+            self.assertEqual(Path(_FakeVidaa.instances[-1].kwargs["certfile"]).name, "vidaa_current.pem")
+        finally:
+            manager.close()
+
+    def test_builtin_legacy_certificate_is_preferred_for_older_protocols(self):
+        root = Path(self.temp.name)
+        cert_dir = root / "hisense_certs"
+        cert_dir.mkdir()
+        (cert_dir / "vidaa_client.pem").write_text("legacy cert", encoding="utf-8")
+        (cert_dir / "vidaa_client.key").write_text("legacy key", encoding="utf-8")
+        (cert_dir / "vidaa_current.pem").write_text("current cert", encoding="utf-8")
+        (cert_dir / "vidaa_current.key").write_text("current key", encoding="utf-8")
+        cfg = HisenseConfig.from_mapping({
+            "hisense_enabled": True,
+            "hisense_tvs": [{
+                "id": "legacy",
+                "host": "10.5.10.140",
+                "mac": "a0:62:fb:84:ed:28",
+            }],
+        }, base_dir=root)
+        manager = HisenseManager(
+            cfg,
+            client_factory=_FakeVidaa,
+            wake_function=lambda _mac, _subnet: True,
+            protocol_detector=lambda *_args, **_kwargs: 1000,
+        )
+        try:
+            manager.start()
+            deadline = time.time() + 1
+            while time.time() < deadline and not manager.status()["connected"]:
+                time.sleep(0.01)
+            tv = manager.status()["tvs"][0]
+            self.assertTrue(tv["connected"], tv)
+            self.assertEqual(tv["certificateProfile"], "default")
+            self.assertEqual(Path(_FakeVidaa.instances[-1].kwargs["certfile"]).name, "vidaa_client.pem")
+        finally:
+            manager.close()
+
     def test_a_tv_can_only_belong_to_the_first_configured_group(self):
         cfg = HisenseConfig.from_mapping({
             "hisense_tvs": [{"id": "foyer", "host": "10.5.10.175"}],

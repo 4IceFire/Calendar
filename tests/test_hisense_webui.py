@@ -80,18 +80,24 @@ class HisenseWebApiTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"Hisense / VIDAA", page.data)
         self.assertIn(b"hisense_setup.js", page.data)
-        self.assertIn(b"hisense-profiles", page.data)
         self.assertIn(b"hisense-tree", page.data)
         self.assertIn(b"hisense-expand-all", page.data)
         self.assertIn(b"hisense-collapse-all", page.data)
-        self.assertIn(b"hisense-compatible-models", page.data)
+        self.assertIn(b"name, IP address, and TV MAC address", page.data)
+        self.assertNotIn(b"Certificate compatibility profiles", page.data)
+        self.assertNotIn(b"State poll", page.data)
         script = self.client.get("/static/hisense_setup.js")
         try:
             self.assertEqual(script.status_code, 200)
             self.assertIn(b"tv-group-select", script.data)
-            self.assertIn(b"Advanced identity", script.data)
-            self.assertIn(b"Paired device UUID", script.data)
-            self.assertIn(b"Required for Wake-on-LAN power-on", script.data)
+            self.assertIn(b"Pair or repair", script.data)
+            self.assertIn(b"Paired phone UUID", script.data)
+            self.assertIn(b"TV MAC address", script.data)
+            self.assertIn(b"group-health", script.data)
+            self.assertIn(b"root-health", script.data)
+            self.assertNotIn(b"tv-auth-mode", script.data)
+            self.assertNotIn(b"tv-profile", script.data)
+            self.assertNotIn(b"Advanced identity", script.data)
         finally:
             script.close()
 
@@ -114,6 +120,20 @@ class HisenseWebApiTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/tvs/test-tv/volume", json={"level": 101}).status_code, 400)
         self.assertEqual(self.client.post("/api/tvs/test-tv/source", json={}).status_code, 400)
         self.assertEqual(self.client.get("/api/tvs/missing/state").status_code, 404)
+
+    def test_simplified_config_requires_tv_mac_for_power_on(self):
+        with patch.object(webui.utils, "get_config", return_value={}):
+            response = self.client.put("/api/hisense/config", json={
+                "hisense_tvs": [{
+                    "id": "foyer",
+                    "name": "Foyer",
+                    "host": "10.5.10.175",
+                    "mac": "",
+                }],
+                "hisense_tv_groups": [],
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("TV MAC address", response.get_json()["error"])
 
     def test_config_normalizes_ordered_profiles_tvs_and_groups(self):
         stored = {}
@@ -163,9 +183,58 @@ class HisenseWebApiTests(unittest.TestCase):
         saved = save_config.call_args.args[0]
         self.assertEqual(saved["hisense_tv_groups"][0]["tv_ids"], ["foyer"])
         self.assertEqual(saved["hisense_tv_groups"][1]["tv_ids"], [])
-        self.assertEqual(saved["hisense_tvs"][0]["certificate_profile"], "current")
+        self.assertEqual(saved["hisense_tvs"][0]["certificate_profile"], "auto")
+        self.assertEqual(saved["hisense_tvs"][0]["auth_mode"], "auto")
+        self.assertTrue(saved["hisense_tvs"][0]["enabled"])
         self.assertEqual(saved["hisense_tvs"][0]["uuid"], "56:b8:88:4e:f7:19")
+        self.assertTrue(saved["hisense_tv_groups"][0]["enabled"])
         self.assertEqual(saved["hisense_cert_path"], "hisense_certs/current.pem")
+
+    def test_simplified_config_preserves_backend_settings(self):
+        stored = {
+            "hisense_enabled": False,
+            "hisense_poll_interval": 22,
+            "hisense_reconnect_interval": 33,
+            "hisense_compatible_models": "Existing compatibility notes",
+            "hisense_certificate_profiles": [{
+                "id": "installed",
+                "name": "Installed support files",
+                "cert_path": "hisense_certs/installed.pem",
+                "key_path": "hisense_certs/installed.key",
+                "enabled": True,
+            }],
+        }
+        payload = {
+            "hisense_tvs": [{
+                "id": "ground-foyer",
+                "name": "Ground Foyer",
+                "host": "10.5.10.175",
+                "mac": "e4:8a:93:f1:da:22",
+                "uuid": "",
+            }],
+            "hisense_tv_groups": [{
+                "id": "ground",
+                "name": "Ground",
+                "tv_ids": ["ground-foyer"],
+            }],
+        }
+        with (
+            patch.object(webui.utils, "get_config", return_value=stored),
+            patch.object(webui.utils, "save_config") as save_config,
+            patch.object(webui.utils, "reload_config"),
+            patch.object(webui, "_close_hisense_manager"),
+        ):
+            response = self.client.put("/api/hisense/config", json=payload)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        saved = save_config.call_args.args[0]
+        self.assertTrue(saved["hisense_enabled"])
+        self.assertEqual(saved["hisense_poll_interval"], 22)
+        self.assertEqual(saved["hisense_reconnect_interval"], 33)
+        self.assertEqual(saved["hisense_compatible_models"], "Existing compatibility notes")
+        self.assertEqual(saved["hisense_certificate_profiles"][0]["id"], "installed")
+        self.assertEqual(saved["hisense_tvs"][0]["auth_mode"], "auto")
+        self.assertEqual(saved["hisense_tvs"][0]["certificate_profile"], "auto")
+        self.assertTrue(saved["hisense_tv_groups"][0]["enabled"])
 
 
 if __name__ == "__main__":

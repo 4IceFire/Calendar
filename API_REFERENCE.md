@@ -29,6 +29,8 @@ When configuring a scheduled **API Call** trigger in the UI, you can enter paths
 
 TV control is intended for a trusted production LAN. Pairing and configuration are restricted to users who can access **Config**; normal control endpoints remain available to the TDeck Companion module.
 
+The normal **Config → TVs** workflow only requires each TV's name, IP/host, and television MAC address. Authentication mode, polling/reconnect intervals, and certificate selection are backend-managed. Legacy configuration keys remain accepted for upgrades and API compatibility.
+
 - **GET** `/api/tvs` — list ordered TVs, ordered groups, Companion target IDs, compatible-model notes, and cached connection, power, volume, mute, source, model, protocol, authentication, certificate-profile, and error state.
 - **GET** `/api/tvs/<tv_id>/state` — get one TV's cached state.
 - **POST** `/api/tvs/<tv_id>/power` with `{ "state": "on" | "off" | "toggle" }`.
