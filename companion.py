@@ -100,8 +100,11 @@ class Companion:
             self._dbg(f"POST {full_url}")
             resp = self.session.post(full_url, params=params, json=json, timeout=timeout or self.timeout)
             self._dbg(f"-> {resp.status_code}")
-            return 200 <= resp.status_code < 300
+            ok = 200 <= resp.status_code < 300
+            self._connected = ok
+            return ok
         except requests.RequestException:
+            self._connected = False
             self._dbg("-> request error")
             return False
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from typing import Any, Dict, TYPE_CHECKING
 import re
@@ -370,6 +371,7 @@ def save_config(cfg: Dict[str, Any], path: str = CONFIG_FILE) -> None:
 _CONFIG = load_config(CONFIG_FILE)
 _RUNTIME_DEBUG = bool(_CONFIG.get("debug", False))
 _debug_lock = threading.Lock()
+_config_reload_lock = threading.RLock()
 try:
     _config_mtime = os.path.getmtime(CONFIG_FILE)
 except Exception:
@@ -406,24 +408,31 @@ def reload_config(force: bool = False) -> bool:
     Returns True if a reload occurred (and module state updated).
     """
     global _CONFIG, _RUNTIME_DEBUG, _companion_client, _config_mtime
-    try:
-        mtime = os.path.getmtime(CONFIG_FILE)
-    except Exception:
-        mtime = None
+    with _config_reload_lock:
+        try:
+            mtime = os.path.getmtime(CONFIG_FILE)
+        except Exception:
+            mtime = None
 
-    if not force and _config_mtime is not None and mtime == _config_mtime:
-        return False
+        if not force and _config_mtime is not None and mtime == _config_mtime:
+            return False
 
-    cfg = load_config(CONFIG_FILE)
-    _CONFIG = cfg
-    with _debug_lock:
-        _RUNTIME_DEBUG = bool(_CONFIG.get("debug", False))
+        cfg = load_config(CONFIG_FILE)
+        _CONFIG = cfg
+        with _debug_lock:
+            _RUNTIME_DEBUG = bool(_CONFIG.get("debug", False))
 
-    # recreate or update companion client
-    _companion_client = _create_companion_client(_CONFIG)
+        # Recreate the client only for an actual/forced config reload. The
+        # scheduler calls this every tick, so unchanged files must be cheap and
+        # must not perform a Companion network probe.
+        _companion_client = _create_companion_client(_CONFIG)
 
-    _config_mtime = mtime
-    return True
+        try:
+            # load_config() can migrate and rewrite the file.
+            _config_mtime = os.path.getmtime(CONFIG_FILE)
+        except Exception:
+            _config_mtime = mtime
+        return True
 
 
 # Companion client singleton

@@ -3869,6 +3869,66 @@ def _probe_hisense_status(cfg: dict) -> dict:
     }
 
 
+def _probe_scheduler_status(cfg: dict) -> dict:
+    """Return the real calendar worker state, not merely object existence."""
+    checked_at = time.time()
+    try:
+        calendar_app = get_app('calendar')
+        status = dict(calendar_app.status() or {}) if calendar_app is not None else {}
+    except Exception as exc:
+        return {
+            'running': False,
+            'healthy': False,
+            'detail': f'status error: {exc}',
+            'checked_at': checked_at,
+        }
+
+    running = bool(status.get('running', False))
+    watcher_alive = bool(status.get('watcher_alive', False))
+    last_tick_at = status.get('last_tick_at')
+    tick_age_seconds = None
+    if last_tick_at:
+        try:
+            tick_age_seconds = max(
+                0.0,
+                (datetime.now() - datetime.fromisoformat(str(last_tick_at))).total_seconds(),
+            )
+        except Exception:
+            tick_age_seconds = None
+    try:
+        # A configured internal API action can legitimately hold the scheduler
+        # thread for several seconds. Do not call that a stale heartbeat while
+        # its bounded request timeout is still in force.
+        stale_after = max(
+            30.0,
+            float(cfg.get('poll_interval', 1.0)) * 5.0,
+            float(cfg.get('internal_api_timeout_seconds', 10.0)) + 5.0,
+        )
+    except Exception:
+        stale_after = 5.0
+    heartbeat_current = tick_age_seconds is None or tick_age_seconds <= stale_after
+    healthy = running and watcher_alive and heartbeat_current and not status.get('last_watcher_error')
+    if not running:
+        detail = str(status.get('last_error') or 'scheduler worker is not running')
+    elif not watcher_alive:
+        detail = 'events/config file watcher is not running'
+    elif not heartbeat_current:
+        detail = f'scheduler heartbeat is {tick_age_seconds:.1f}s old'
+    elif status.get('last_watcher_error'):
+        detail = str(status.get('last_watcher_error'))
+    else:
+        detail = 'running'
+
+    status.update({
+        'running': running,
+        'healthy': healthy,
+        'detail': detail,
+        'tick_age_seconds': tick_age_seconds,
+        'checked_at': checked_at,
+    })
+    return status
+
+
 def _refresh_status_snapshot() -> dict:
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
@@ -3881,6 +3941,7 @@ def _refresh_status_snapshot() -> dict:
     digico = _probe_digico_status(cfg)
     atem = _probe_atem_status(cfg)
     hisense = _probe_hisense_status(cfg)
+    scheduler = _probe_scheduler_status(cfg)
     now = time.time()
 
     payload = {
@@ -3892,6 +3953,7 @@ def _refresh_status_snapshot() -> dict:
         'digico': digico,
         'atem': atem,
         'hisense': hisense,
+        'scheduler': scheduler,
     }
 
     with _status_cache_lock:
@@ -7487,6 +7549,16 @@ def atem_status():
 def api_status_summary():
     """Return a consolidated connectivity snapshot for the top navbar."""
     return jsonify(_get_status_snapshot())
+
+
+@app.route('/api/scheduler_status')
+def api_scheduler_status():
+    """Expose scheduler liveness and queue diagnostics for operators."""
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    return jsonify(_probe_scheduler_status(cfg))
 
 
 def _hisense_manager_or_error():
