@@ -1,4 +1,5 @@
 import heapq
+import os
 import threading
 import time as t
 from datetime import datetime, timedelta
@@ -26,7 +27,9 @@ def _activity_log_scheduler_event(
 
     try:
         db_path = utils.get_project_path("auth.db")
-        conn = sqlite3.connect(str(db_path))
+        # Activity logging is diagnostic and must never hold up later cues for
+        # SQLite's default five-second busy timeout.
+        conn = sqlite3.connect(str(db_path), timeout=0.5)
         try:
             conn.execute(
                 """
@@ -200,6 +203,17 @@ class ClockScheduler:
         # Track next-job alerts to avoid repeating threshold notices
         self._next_due = None
         self._announced_thresholds = set()
+        self._running = threading.Event()
+        self._watch_thread: threading.Thread | None = None
+        self._started_at: datetime | None = None
+        self._last_tick_at: datetime | None = None
+        self._last_trigger_at: datetime | None = None
+        self._last_trigger_due: datetime | None = None
+        self._last_trigger_event: str | None = None
+        self._last_trigger_success: bool | None = None
+        self._last_error: str | None = None
+        self._last_watch_error: str | None = None
+        self._last_watch_error_log_at = 0.0
 
     def _dbg(self, msg: str) -> None:
         if self.debug:
@@ -236,6 +250,10 @@ class ClockScheduler:
             pass
 
     def start(self) -> None:
+        if self._running.is_set():
+            raise RuntimeError("scheduler is already running")
+        self._stop.clear()
+        self._started_at = datetime.now()
         self._dbg(f"Scheduler starting (file={self.events_file}, poll={self.poll_interval}s)")
 
         # Startup efficiency: the scheduler does one intentional initial load
@@ -243,7 +261,7 @@ class ClockScheduler:
         # starts so the first watcher iteration doesn't also flag both files
         # as "changed" and cause extra reloads.
         try:
-            self._last_mtime = __import__("os").path.getmtime(self.events_file)
+            self._last_mtime = os.path.getmtime(self.events_file)
         except FileNotFoundError:
             self._last_mtime = None
         except Exception:
@@ -251,14 +269,27 @@ class ClockScheduler:
             pass
 
         try:
-            self._last_config_mtime = __import__("os").path.getmtime(utils.CONFIG_FILE)
+            self._last_config_mtime = os.path.getmtime(utils.CONFIG_FILE)
         except FileNotFoundError:
             self._last_config_mtime = None
         except Exception:
             pass
 
-        threading.Thread(target=self._watch_file, daemon=True).start()
-        self._run_forever()
+        self._watch_thread = threading.Thread(
+            target=self._watch_file,
+            name="tdeck-calendar-file-watcher",
+            daemon=True,
+        )
+        self._watch_thread.start()
+        self._running.set()
+        try:
+            self._run_forever()
+        except Exception as exc:
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("Calendar scheduler worker stopped unexpectedly")
+            raise
+        finally:
+            self._running.clear()
 
     def stop(self) -> None:
         self._stop.set()
@@ -266,72 +297,112 @@ class ClockScheduler:
             self._cv.notify_all()
         self._dbg("Scheduler stopped")
 
+    @staticmethod
+    def _format_status_time(value: datetime | None) -> str | None:
+        return value.isoformat(timespec="seconds") if value is not None else None
+
+    def status(self) -> dict:
+        with self._cv:
+            next_job = self._heap[0] if self._heap else None
+            queued = len(self._heap)
+        return {
+            "pid": os.getpid(),
+            "running": self._running.is_set() and not self._stop.is_set(),
+            "watcher_alive": bool(self._watch_thread and self._watch_thread.is_alive()),
+            "started_at": self._format_status_time(self._started_at),
+            "last_tick_at": self._format_status_time(self._last_tick_at),
+            "last_trigger_at": self._format_status_time(self._last_trigger_at),
+            "last_trigger_due": self._format_status_time(self._last_trigger_due),
+            "last_trigger_event": self._last_trigger_event,
+            "last_trigger_success": self._last_trigger_success,
+            "next_trigger_due": self._format_status_time(getattr(next_job, "due", None)),
+            "next_trigger_event": getattr(getattr(next_job, "event", None), "name", None),
+            "queued_triggers": queued,
+            "events_file": str(self.events_file),
+            "poll_interval_seconds": self.poll_interval,
+            "companion_health": bool(self.c is not None and getattr(self.c, "connected", False)),
+            "reload_pending": bool(self._reload_needed),
+            "last_error": self._last_error,
+            "last_watcher_error": self._last_watch_error,
+        }
+
     def _watch_file(self) -> None:
         while not self._stop.is_set():
             try:
-                mtime = __import__("os").path.getmtime(self.events_file)
-            except FileNotFoundError:
-                mtime = None
+                self._watch_once()
+                self._last_watch_error = None
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                now_mono = t.monotonic()
+                if error != self._last_watch_error or (now_mono - self._last_watch_error_log_at) >= 60.0:
+                    logger.exception("Calendar scheduler file watcher error; will retry")
+                    self._last_watch_error_log_at = now_mono
+                self._last_watch_error = error
+            self._stop.wait(max(0.05, self.poll_interval))
 
-            # detect changes to the events file
-            if mtime != self._last_mtime:
-                self._last_mtime = mtime
-                with self._cv:
-                    self._reload_needed = True
-                    self._cv.notify()
-                self._dbg("Detected change in events file; scheduling reload")
+    def _watch_once(self) -> None:
+        try:
+            mtime = os.path.getmtime(self.events_file)
+        except FileNotFoundError:
+            mtime = None
 
-            # detect changes to the config file and reload runtime config
+        # detect changes to the events file
+        if mtime != self._last_mtime:
+            self._last_mtime = mtime
+            with self._cv:
+                self._reload_needed = True
+                self._cv.notify()
+            self._dbg("Detected change in events file; scheduling reload")
+
+        # detect changes to the config file and reload runtime config
+        try:
+            cfg_mtime = os.path.getmtime(utils.CONFIG_FILE)
+        except FileNotFoundError:
+            cfg_mtime = None
+
+        if cfg_mtime != self._last_config_mtime:
+            # update stored mtime first to avoid repeated reloads
+            self._last_config_mtime = cfg_mtime
+            # Best-effort reload. Note: in this process, config.json may
+            # have already been reloaded elsewhere (e.g., web UI save), in
+            # which case reload_config() can return False even though the
+            # file changed. We still must react to the new config values.
             try:
-                cfg_mtime = __import__("os").path.getmtime(utils.CONFIG_FILE)
-            except FileNotFoundError:
-                cfg_mtime = None
+                utils.reload_config()
+            except Exception:
+                pass
 
-            if cfg_mtime != self._last_config_mtime:
-                # update stored mtime first to avoid repeated reloads
-                self._last_config_mtime = cfg_mtime
-                # Best-effort reload. Note: in this process, config.json may
-                # have already been reloaded elsewhere (e.g., web UI save), in
-                # which case reload_config() can return False even though the
-                # file changed. We still must react to the new config values.
-                try:
-                    utils.reload_config()
-                except Exception:
-                    pass
+            # Pull new companion client and dynamic debug immediately
+            try:
+                self.c = utils.get_companion()
+                new_debug = bool(utils.get_debug())
+                if new_debug != self.debug:
+                    print(f"[DEBUG] Dynamic debug set to {new_debug}")
+                    self.debug = new_debug
+                    try:
+                        if self.c is not None:
+                            self.c.debug = self.debug
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
-                # Pull new companion client and dynamic debug immediately
-                try:
-                    self.c = utils.get_companion()
-                    new_debug = bool(utils.get_debug())
-                    if new_debug != self.debug:
-                        print(f"[DEBUG] Dynamic debug set to {new_debug}")
-                        self.debug = new_debug
-                        try:
-                            if self.c is not None:
-                                self.c.debug = self.debug
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+            # If events filename changed in config, adopt it and force reload
+            try:
+                cfg = utils.get_config()
+                new_events = cfg.get("EVENTS_FILE", self.events_file)
+                if new_events != self.events_file:
+                    self._dbg(f"Config changed EVENTS_FILE: '{self.events_file}' -> '{new_events}'")
+                    self.events_file = new_events
+                    # force events-file mtime refresh so loader picks up the file
+                    self._last_mtime = None
+            except Exception:
+                pass
 
-                # If events filename changed in config, adopt it and force reload
-                try:
-                    cfg = utils.get_config()
-                    new_events = cfg.get("EVENTS_FILE", self.events_file)
-                    if new_events != self.events_file:
-                        self._dbg(f"Config changed EVENTS_FILE: '{self.events_file}' -> '{new_events}'")
-                        self.events_file = new_events
-                        # force events-file mtime refresh so loader picks up the file
-                        self._last_mtime = None
-                except Exception:
-                    pass
-
-                with self._cv:
-                    self._reload_needed = True
-                    self._cv.notify()
-                self._dbg("Detected change in config file; scheduling reload")
-
-            t.sleep(self.poll_interval)
+            with self._cv:
+                self._reload_needed = True
+                self._cv.notify()
+            self._dbg("Detected change in config file; scheduling reload")
 
     def _rebuild_schedule(self) -> None:
         now = datetime.now()
@@ -496,7 +567,7 @@ class ClockScheduler:
                     pass
             return False
 
-    def _handle_trigger(self, job: TriggerJob) -> None:
+    def _handle_trigger(self, job: TriggerJob) -> bool:
         action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
         name = _resolve_trigger_display_name(job.trigger)
         if action_type == "api":
@@ -559,7 +630,7 @@ class ClockScheduler:
                     },
                 )
                 self._dbg("Internal API action -> FAIL")
-            return
+            return ok
         if action_type == "timer":
             timer = getattr(job.trigger, "timer", None)
             if not isinstance(timer, dict):
@@ -576,7 +647,7 @@ class ClockScheduler:
                     details={"error": "invalid timer payload"},
                 )
                 self._dbg("Timer action -> FAIL (invalid payload)")
-                return
+                return False
             body = dict(timer)
             body["action"] = "update_preset"
             api_action = {"method": "POST", "path": "/api/timers/mutate", "body": body}
@@ -618,9 +689,12 @@ class ClockScheduler:
                     },
                 )
                 self._dbg("Timer action -> FAIL")
-            return
+            return ok
 
-        if self.c and getattr(self.c, "connected", False):
+        # A prior health probe is only advisory. Always attempt the scheduled
+        # POST when a client exists; otherwise a transient GET failure can make
+        # us permanently discard a trigger that Companion was ready to accept.
+        if self.c is not None:
             ok = self.c.post_command(job.trigger.buttonURL)
             if ok:
                 # Companion is reachable; if it was previously down, notify recovery
@@ -654,6 +728,7 @@ class ClockScheduler:
                     details={"button_url": job.trigger.buttonURL},
                 )
                 self._dbg(f"Companion POST '{job.trigger.buttonURL}' -> FAIL")
+            return ok
         else:
             # Companion not connected: print a short summary once and log it
             if not self._companion_down:
@@ -670,9 +745,107 @@ class ClockScheduler:
             )
 
             self._dbg("Companion not connected; skipping POST")
+            return False
+
+    def _fire_due_jobs(self, *, now: datetime | None = None) -> int:
+        """Fire all jobs due at ``now`` and leave future jobs queued.
+
+        Supplying ``now`` makes the queue behavior deterministic for tests. In
+        normal operation time is re-read between jobs so slow actions cannot
+        leave another now-due job waiting for the next scheduler tick.
+        """
+
+        fired = 0
+        while not self._stop.is_set():
+            current = now if now is not None else datetime.now()
+            with self._cv:
+                if self._reload_needed or not self._heap:
+                    break
+                job = self._heap[0]
+                if job.due > current:
+                    break
+                heapq.heappop(self._heap)
+
+            trigger_success = False
+            try:
+                trigger_success = bool(self._handle_trigger(job))
+            except Exception as exc:
+                self._last_error = f"Trigger handler {type(exc).__name__}: {exc}"
+                logger.exception(
+                    "Calendar trigger handler error | event=#%s '%s' | due=%s",
+                    getattr(job.event, "id", None),
+                    getattr(job.event, "name", ""),
+                    job.due,
+                )
+                print(f"[CLOCK] Trigger handler error: {exc}")
+            finally:
+                fired += 1
+                self._last_trigger_at = datetime.now()
+                self._last_trigger_due = job.due
+                self._last_trigger_event = str(getattr(job.event, "name", "") or "")
+                self._last_trigger_success = trigger_success
+
+            if self.debug:
+                with self._cv:
+                    if self._heap:
+                        nxt = self._heap[0]
+                        comparison_now = now if now is not None else datetime.now()
+                        secs = (nxt.due - comparison_now).total_seconds()
+                        if secs > 0:
+                            print(
+                                f"[NEXT] Next trigger in {int(secs)}s at "
+                                f"{nxt.due.strftime('%Y-%m-%d %H:%M:%S')} for '{nxt.event.name}'"
+                            )
+                            self._next_due = getattr(nxt, "due", None)
+                            self._announced_thresholds.clear()
+                    else:
+                        self._next_due = None
+                        self._announced_thresholds.clear()
+
+            if job.event.repeating:
+                try:
+                    # Reschedule only after all triggers for this occurrence
+                    # have been removed from the queue.
+                    with self._cv:
+                        still_pending = any(
+                            queued.event is job.event and queued.occurrence == job.occurrence
+                            for queued in self._heap
+                        )
+                    if not still_pending:
+                        # Every queued trigger for this occurrence has fired,
+                        # so the next occurrence is unambiguously one week
+                        # later. Asking next_weekly_occurrence() relative to
+                        # event start + 1 second is incorrect when the event has
+                        # AFTER triggers: it can return this same occurrence,
+                        # after which every cue is filtered as already due and
+                        # the event vanishes.
+                        next_occ = job.occurrence + timedelta(days=7)
+                        comparison_now = now if now is not None else datetime.now()
+                        with self._cv:
+                            push_triggers_for_occurrence(
+                                self._heap,
+                                job.event,
+                                next_occ,
+                                comparison_now,
+                            )
+                            heapq.heapify(self._heap)
+                        self._dbg(
+                            f"Rescheduled weekly event #{getattr(job.event,'id',None)} "
+                            f"'{job.event.name}' for {next_occ.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                except Exception as exc:
+                    self._last_error = f"Trigger reschedule {type(exc).__name__}: {exc}"
+                    logger.exception(
+                        "Calendar repeating event reschedule failed | event=#%s '%s'",
+                        getattr(job.event, "id", None),
+                        getattr(job.event, "name", ""),
+                    )
+
+        return fired
 
     def _run_forever(self) -> None:
         while not self._stop.is_set():
+            self._last_tick_at = datetime.now()
             # Refresh dynamic debug/companion state each loop so runtime changes apply quickly
             self._refresh_debug_dynamic()
             # Rebuild schedule if needed
@@ -681,8 +854,10 @@ class ClockScheduler:
                     try:
                         self._rebuild_schedule()
                         self._reload_needed = False
-                    except Exception as e:
-                        print(f"[CLOCK] Failed to reload events: {e}")
+                    except Exception as exc:
+                        self._last_error = f"Schedule reload {type(exc).__name__}: {exc}"
+                        logger.exception("Calendar scheduler failed to reload events")
+                        print(f"[CLOCK] Failed to reload events: {exc}")
                         self._cv.wait(timeout=1.0)
                         continue
 
@@ -691,79 +866,30 @@ class ClockScheduler:
                     continue
 
                 next_job = self._heap[0]
-                now = datetime.now()
-                seconds = (next_job.due - now).total_seconds()
+                current = datetime.now()
+                seconds = (next_job.due - current).total_seconds()
 
                 timeout = max(0.0, min(seconds, 1.0))
-                # In debug mode, emit sparse alerts for upcoming trigger times
                 if self.debug and seconds > 0:
-                    # If we've switched to a new next job, reset announced thresholds
-                    if self._next_due is None or self._next_due != getattr(next_job, 'due', None):
-                        self._next_due = getattr(next_job, 'due', None)
+                    if self._next_due is None or self._next_due != getattr(next_job, "due", None):
+                        self._next_due = getattr(next_job, "due", None)
                         self._announced_thresholds.clear()
 
-                    # Alert thresholds in seconds (announce once each)
-                    for thr in (30, 15, 5):
-                        if seconds <= thr and thr not in self._announced_thresholds:
-                            print(f"[ALERT] {int(seconds)}s until next trigger at {next_job.due.strftime('%Y-%m-%d %H:%M:%S')} for #{getattr(next_job.event,'id',None)} '{next_job.event.name}'")
-                            self._announced_thresholds.add(thr)
+                    for threshold in (30, 15, 5):
+                        if seconds <= threshold and threshold not in self._announced_thresholds:
+                            print(
+                                f"[ALERT] {int(seconds)}s until next trigger at "
+                                f"{next_job.due.strftime('%Y-%m-%d %H:%M:%S')} for "
+                                f"#{getattr(next_job.event,'id',None)} '{next_job.event.name}'"
+                            )
+                            self._announced_thresholds.add(threshold)
                 self._cv.wait(timeout=timeout)
 
                 if self._reload_needed:
                     continue
 
-            # Fire all due jobs (outside the lock)
-            while True:
-                with self._cv:
-                    if self._reload_needed or not self._heap:
-                        break
-
-                    job = self._heap[0]
-                    if job.due > datetime.now():
-                        break
-
-                    heapq.heappop(self._heap)
-
-                try:
-                    self._handle_trigger(job)
-                except Exception as e:
-                    print(f"[CLOCK] Trigger handler error: {e}")
-
-                # After firing due jobs, if debug is enabled, announce the time until next job (single concise message)
-                if self.debug:
-                    with self._cv:
-                        if self._heap:
-                            nxt = self._heap[0]
-                            secs = (nxt.due - datetime.now()).total_seconds()
-                            if secs > 0:
-                                print(f"[NEXT] Next trigger in {int(secs)}s at {nxt.due.strftime('%Y-%m-%d %H:%M:%S')} for '{nxt.event.name}'")
-                                # Reset thresholds tracking for the newly reported next job
-                                self._next_due = getattr(nxt, 'due', None)
-                                self._announced_thresholds.clear()
-                        else:
-                            # no upcoming jobs
-                            self._next_due = None
-                            self._announced_thresholds.clear()
-                if job.event.repeating:
-                    # Reschedule only after all triggers for the current occurrence have fired.
-                    still_pending = False
-                    with self._cv:
-                        for j in self._heap:
-                            try:
-                                if j.event is job.event and j.occurrence == job.occurrence:
-                                    still_pending = True
-                                    break
-                            except Exception:
-                                continue
-                    if not still_pending:
-                        next_occ = next_weekly_occurrence(job.event, job.occurrence + timedelta(seconds=1))
-                        if next_occ is not None:
-                            with self._cv:
-                                push_triggers_for_occurrence(self._heap, job.event, next_occ, datetime.now())
-                                heapq.heapify(self._heap)
-                                self._dbg(
-                                    f"Rescheduled weekly event #{getattr(job.event,'id',None)} '{job.event.name}' for {next_occ.strftime('%Y-%m-%d %H:%M:%S')}"
-                                )
+            # Fire due jobs outside the condition lock.
+            self._fire_due_jobs()
 
 
 # Helper scheduling functions
