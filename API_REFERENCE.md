@@ -90,6 +90,11 @@ Event shape (simplified):
 - **Notes:** Used by the UI to display the next few trigger actions.
 - **Query:** optional `limit` (default `3`, max `500`).
 
+### Scheduler health
+- **GET** `/api/scheduler_status`
+- **Returns:** scheduler worker/file-watcher liveness, last heartbeat and processed trigger, last trigger result, next queued trigger, queue size, reload state, and any worker/watcher error.
+- **Notes:** `running=true` is based on the actual worker thread rather than the presence of an app object. `healthy=true` additionally requires a current heartbeat and live events/config watcher.
+
 Trigger entry shape (simplified):
 ```json
 {

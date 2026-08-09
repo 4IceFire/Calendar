@@ -81,6 +81,7 @@ python webui.py
 It reads `webserver_port` from `config.json` and prints the URL at startup.
 
 The Web UI also has controls to start/stop registered apps (including the calendar scheduler) from the browser.
+Starting `webui.py` starts the calendar scheduler automatically. Do not also run `cli.py start calendar` for the same installation; that would create a second scheduler process and can duplicate cues.
 
 ## DiGiCo Personal Mixes
 
@@ -216,6 +217,11 @@ Notes:
 ## Troubleshooting
 
 - If triggers are not firing, confirm the scheduler is running and the event is `active=true`.
+- Check the scheduler's real worker/queue health from PowerShell:
+  ```powershell
+  Invoke-RestMethod http://127.0.0.1:5000/api/scheduler_status | ConvertTo-Json -Depth 4
+  ```
+  `healthy` should be `true`; confirm `next_trigger_due`, `next_trigger_event`, `queued_triggers`, and `last_trigger_success`. This reports a stopped worker or file watcher as unhealthy.
 - If you see Companion connectivity errors:
   - verify `companion_ip` and `companion_port` in `config.json`
   - ensure Companion’s HTTP API is enabled/reachable
@@ -226,6 +232,12 @@ Notes:
   - confirm no other process is using `digico_listen_port`
   - check Windows Firewall for the configured UDP listen port
   - use **Config → DiGiCo Mixer → Diagnostics** to identify the missing discovery request and last socket error
+
+Run the deterministic scheduler reliability regression (including independent 8 AM and 10 AM repeating services) with:
+
+```powershell
+python -m unittest discover -s tests -p "test_scheduler_reliability.py" -v
+```
 
 ## Tests
 
