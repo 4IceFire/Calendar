@@ -4,7 +4,7 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 
 ## Project Structure & Module Organization
 - `package/`: Python package code. `package/apps/calendar/` contains scheduler, storage, and utilities.
-- Entry points: `webui.py` (Flask Web UI), `cli.py` (CLI), `companion.py`/`propresentor.py` (external integrations), and `digico.py` (DiGiCo OSC transport/cache/relay).
+- Entry points: `webui.py` (Flask Web UI), `cli.py` (CLI), `companion.py`/`propresentor.py` (external integrations), `digico.py` (DiGiCo OSC transport/cache/relay), and `hisense.py` (native VIDAA TV workers, protocol compatibility, groups, and target aggregation).
 - `static/`: front-end JS/CSS assets. `templates/`: HTML templates.
 - Data/config: `config.json`, `events.json`, `timer_presets.json`, `videohub_presets.json`, `videohub_rooms.json`, `auth.db`.
 - VideoHub room images: local uploads live in `videohub_room_images/` and should remain ignored by Git.
@@ -32,6 +32,7 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 ## Testing Guidelines
 - Tests use the standard-library `unittest` runner: `python -m unittest discover -s tests -p "test_*.py" -v`.
 - DiGiCo tests include an in-process UDP desk simulator and Flask API/page coverage; keep tests independent of real church hardware and production config.
+- Hisense tests use fake VIDAA clients/protocol detection and Flask API coverage. They must remain independent of real TVs, local certificates, and the production network.
 - For manual checks: start `python webui.py`, load the UI, and run a CLI command like `python cli.py list`.
 - Place new tests under `tests/` with `test_*.py` and document any additional runner in `README.md`.
 
@@ -79,6 +80,25 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - DiGiCo mixer/setup APIs are an explicit exception: they control live audio and must enforce login, the relevant page permission, enabled routes, and the per-group AUX allow-list on the server.
 - For VideoHub preset visibility, enforce group restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
 - VideoHub room metadata is global for all presets and users. Access control applies to who can manage the room layout UI, not to the room data itself.
+
+## Hisense / VIDAA TV Control
+- `hisense.py` owns the process-wide manager, one serialized/reconnecting worker per TV, Wake-on-LAN, protocol/authentication selection, certificate-profile fallback, ordered group fan-out, and aggregate group state.
+- A successful TDeck/Companion power-off records that TV in the backend-managed `hisense_power_state.json` runtime file. While marked intentionally off, its worker pauses reconnects, reports `expectedOff: true`/`healthy: true`, and does not create connection errors or Activity Log offline warnings. Power-on, toggle-on, reconnect, pairing, or another control clears the marker so genuine connection failures remain visible.
+- TV setup lives at `/config/tvs` in `templates/hisense_setup.html` and `static/hisense_setup.js`. Configuration/pairing APIs require normal Config access; operational TV and target APIs remain intentionally callable on the trusted LAN for Companion.
+- Config lives in the main `config.json`:
+  - `hisense_tvs` is the ordered TV list. Normal setup exposes only the human-readable name, IP/host, and television MAC; it auto-generates and internally preserves the slug-style ID so Companion targets remain stable. Saving through the simplified UI enables TVs and resets authentication/certificate selection to automatic. `uuid` is the separate case-sensitive paired-client UUID used by dynamic VIDAA authentication and is exposed only in the contextual Pair or repair panel.
+  - `hisense_tv_groups` is the ordered group list; each group's `tv_ids` is also ordered. Membership is exclusive: a TV belongs to the first configured group that contains it, or the Ungrouped root.
+  - `hisense_certificate_profiles` remains a backward-compatible backend list for custom certificate/key pairs and is not operator-configurable in the TV page. Runtime discovery always adds the standard local pairs `hisense_certs/vidaa_current.pem` / `.key` and `hisense_certs/vidaa_client.pem` / `.key`, deduplicates configured paths, and prefers current or legacy credentials based on the detected protocol and paired UUID.
+  - `hisense_compatible_models`, polling, and reconnect intervals are backend-maintained values rather than normal TV-page controls.
+  - Legacy `hisense_cert_path` / `hisense_key_path` remain synchronized to the first profile for config backward compatibility.
+- Certificate/private-key files are local secrets and must stay ignored by Git. Do not bundle, log, export as ordinary source, or commit extracted vendor private keys.
+- With authentication set to automatic, preserve static legacy first for advertised protocols below 3000 (the confirmed A7G path); newer protocols use pyvidaa's detected legacy/middle/modern dynamic authentication and persisted refresh/access tokens. A manual reconnect must redetect the protocol.
+- Protocol generation can be inferred from the TV's UPnP descriptor. A TV-screen “model is no longer compatible with the current app” pairing warning cannot be observed over MQTT and can indicate an outdated client certificate generation; do not claim TDeck can infer or obtain that certificate from IP, model, or firmware alone. An administrator supplies an approved current pair at the standard backend filename, after which automatic selection retries it.
+- The TV setup page mirrors the Button Templates tree interaction: compact group/root rows, persisted group and TV collapse state, per-TV group dropdown movement, and up/down sibling ordering. Deleting a group moves its TVs to Ungrouped. Collapsed group and Ungrouped rows summarize `online/total` and the number of member errors.
+- Keep both identity fields distinct. The TV MAC is used only for Wake-on-LAN power-on. Newer dynamic VIDAA authentication passes the separate paired-device `uuid` to pyvidaa's historically named `mac_address` argument. Never substitute the TV MAC for the paired UUID.
+- `GET /api/tvs` returns TVs, groups, target choices, compatible-model notes, and cached compatibility state. Unified operational routes use `/api/tv-targets/<target_id>/...` with `tv:<id>` or `group:<id>`; keep `/api/tvs/<id>/...` working for backward compatibility.
+- Group commands enqueue once per enabled member in configured order. Group feedback semantics are strict: `connected` requires every enabled member; power/source/volume expose a shared value only when members agree, otherwise mixed state.
+- The separate `companion-module-tdeck` repository consumes the unified target routes. Preserve existing action option IDs so saved Companion actions continue working; dropdown values may be legacy raw TV IDs or prefixed target IDs.
 
 ## ATEM Record Audio Controls
 - The Record Audio page controls a Blackmagic ATEM 4 M/E Broadcast Studio 4K used as an audio switcher. The page route remains `/foyer-audio` and the nav label is `Record Audio`.

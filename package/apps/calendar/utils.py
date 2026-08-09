@@ -112,6 +112,9 @@ _defaults = {
     "hisense_key_path": "hisense_certs/vidaa_client.key",
     "hisense_poll_interval": 10,
     "hisense_reconnect_interval": 15,
+    "hisense_compatible_models": "Confirmed: 55A7G, 65A7G",
+    "hisense_certificate_profiles": [],
+    "hisense_tv_groups": [],
     "hisense_tvs": [],
 
     # ATEM audio defaults

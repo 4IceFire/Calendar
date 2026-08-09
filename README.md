@@ -9,7 +9,7 @@ It supports:
 - A **CLI** (`cli.py`) for starting/stopping the scheduler and managing events.
 - A **Web UI** (`webui.py`) for editing events and templates in a browser.
 - A **DiGiCo Personal Mixes** web app that lets multiple phones mix permitted AUXes through one shared SD9 OSC connection.
-- A native **Hisense / VIDAA TV service** for power, absolute volume, source selection, pairing, and automatic reconnect.
+- A native **Hisense / VIDAA TV service** for individual and ordered-group power, absolute volume, source selection, pairing, protocol detection, and automatic reconnect.
 
 ## What this app does
 
@@ -68,7 +68,17 @@ Common keys:
 
 DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
 
-Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Put the VIDAA client certificate and private key at the paths shown on that page, add each TV's stable IP and MAC address, save, then pair once using the PIN shown on the TV. The service retries disconnected TVs automatically.
+Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Normal setup only asks for a TV name, stable IP address, and the TV's MAC address. Saving automatically enables the service, while the backend handles polling, reconnects, protocol/authentication detection, and selection of installed legacy/current VIDAA support files.
+
+TV and group order are explicit. The setup page uses a collapsible tree: each TV belongs to one group or the Ungrouped root, its group dropdown moves it between branches, and arrow buttons order siblings. Collapsed group/root rows show online totals and error counts. The visible TV name is used throughout TDeck and Companion. A slug-style internal ID is generated from that name for new TVs and retained internally so renaming a TV does not break saved Companion buttons.
+
+Keep the TV's own MAC address for Wake-on-LAN. Newer VIDAA authentication also requires a separate, case-sensitive paired-device UUID: the Bluetooth/Wi-Fi MAC or UUID of a phone/device paired with that TV through the official VIDAA app. The paired-device UUID is not the TV MAC and appears only in the TV's contextual **Pair or repair** panel. Protocol generation is detected automatically, but TDeck cannot derive this UUID or redistribute the official app's private client key.
+
+When TDeck or Companion successfully powers a TV off, TDeck records it as intentionally off and pauses that TV's reconnect loop. The TV page shows a normal **Off (intentional)** state and does not create an offline warning in the Activity Log. The state survives a TDeck restart; power-on, reconnect, or another control clears it so an unexpected network or authentication failure is still reported.
+
+The TDeck Companion module exposes both group and individual targets for power, volume, source, reconnect, feedbacks, and variables.
+
+Some newer VIDAA firmware accepts an MQTT connection but rejects pairing requests made with certificates from an older RemoteNOW/VIDAA app generation, displaying a “TV model is no longer compatible” message on the screen. That condition is not returned to TDeck over MQTT, so it cannot be inferred from the IP address or software version alone. Administrators place approved support files at `hisense_certs/vidaa_client.pem` / `.key` (legacy) and `hisense_certs/vidaa_current.pem` / `.key` (current); TDeck tries installed pairs in the appropriate order automatically. Certificate/private-key files remain local and must not be committed.
 
 ## Run (Web UI)
 
