@@ -1,0 +1,108 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Pixie Setup' %}
+{% set page_subtitle = 'Gateway connection, auditorium arrangement, devices and scenes' %}
+{% set config_active_tab = 'pixie' %}
+
+{% block head_extra %}
+{{ super() }}
+<link rel="stylesheet" href="{{ url_for('static', filename='pixie.css') }}">
+{% endblock %}
+
+{% block content %}
+<div id="pixie-setup" data-csrf-token="{{ csrf_token() }}">
+  {% include '_config_tabs.html' %}
+  <div id="pixie-setup-alert" aria-live="polite"></div>
+
+  <div class="card tdeck-soft mb-4">
+    <div class="card-body">
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+        <div>
+          <h2 class="h5 mb-1">Gateway connection</h2>
+          <div class="small text-muted">Credentials are retained locally, excluded from exports, and never written to the Activity Log.</div>
+        </div>
+        <div id="pixie-connection-badge" class="badge text-bg-secondary">Loading</div>
+      </div>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label" for="pixie-network-mode">Network mode</label>
+          <select id="pixie-network-mode" class="form-select">
+            <option value="disabled">Disabled</option>
+            <option value="observe">Observe only</option>
+            <option value="control">Control enabled</option>
+          </select>
+        </div>
+        <div class="col-md-8">
+          <label class="form-label" for="pixie-gateway-host">Gateway IP address</label>
+          <div class="input-group">
+            <input id="pixie-gateway-host" class="form-control" placeholder="Blank for passive discovery">
+            <button id="pixie-discover" class="btn btn-outline-secondary" type="button">Discover</button>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="pixie-username">Pixie account email</label>
+          <input id="pixie-username" class="form-control" autocomplete="username">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="pixie-password">Pixie account password</label>
+          <input id="pixie-password" class="form-control" type="password" autocomplete="current-password" placeholder="Leave blank to keep the saved password">
+        </div>
+        <div class="col-md-8">
+          <label class="form-label" for="pixie-home-id">Pixie Home</label>
+          <select id="pixie-home-id" class="form-select"></select>
+        </div>
+        <div class="col-md-4 d-flex align-items-end">
+          <button id="pixie-load-homes" class="btn btn-outline-primary w-100" type="button">Load homes</button>
+        </div>
+      </div>
+      <div class="row g-2 mt-3 small">
+        <div class="col-md-4"><span class="text-muted">Net ID:</span> <code id="pixie-net-id">—</code></div>
+        <div class="col-md-4"><span class="text-muted">Mesh Net:</span> <code id="pixie-mesh-net">—</code></div>
+        <div class="col-md-4"><span class="text-muted">Mesh Net 2:</span> <code id="pixie-mesh-net-2">—</code></div>
+      </div>
+      <div id="pixie-diagnostics" class="small text-muted mt-3"></div>
+    </div>
+  </div>
+
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <div>
+      <h2 class="h5 mb-1">Auditoriums and device order</h2>
+      <div class="small text-muted">Each device belongs to one auditorium or Ungrouped. Original Pixie names remain visible here for identification.</div>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+      <button id="pixie-add-auditorium" type="button" class="btn btn-outline-primary">New auditorium</button>
+      <button id="pixie-expand-all" type="button" class="btn btn-outline-secondary">Expand all</button>
+      <button id="pixie-collapse-all" type="button" class="btn btn-outline-secondary">Collapse all</button>
+      <button id="pixie-refresh-inventory" type="button" class="btn btn-outline-secondary">Refresh inventory</button>
+    </div>
+  </div>
+  <div class="tdeck-soft rounded-3 overflow-hidden mb-4" style="background:transparent;border-color:rgba(127,127,127,.20)">
+    <div id="pixie-device-tree" class="list-group list-group-flush">Loading…</div>
+  </div>
+
+  <div class="card tdeck-soft mb-5">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+        <div>
+          <h2 class="h5 mb-1">Scenes</h2>
+          <div class="small text-muted">Rename, enable, and order scenes for the operator page. Group access is configured in Permissions.</div>
+        </div>
+      </div>
+      <div id="pixie-scene-list" class="list-group list-group-flush"></div>
+    </div>
+  </div>
+
+  <div class="pixie-save-bar">
+    <div>
+      <div class="fw-semibold">Pixie configuration</div>
+      <div id="pixie-unsaved" class="small text-muted">No unsaved changes</div>
+    </div>
+    <button id="pixie-save" type="button" class="btn btn-primary">Save and restart Pixie service</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='pixie_setup.js') }}"></script>
+{% endblock %}

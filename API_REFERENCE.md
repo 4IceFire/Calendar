@@ -31,9 +31,9 @@ TV control is intended for a trusted production LAN. Pairing and configuration a
 
 The normal **Config → TVs** workflow only requires each TV's name, IP/host, and television MAC address. Authentication mode, polling/reconnect intervals, and certificate selection are backend-managed. Legacy configuration keys remain accepted for upgrades and API compatibility.
 
-- **GET** `/api/tvs` — list ordered TVs, ordered groups, Companion target IDs, compatible-model notes, and cached connection, power, volume, mute, source, model, protocol, authentication, certificate-profile, and error state.
+- **GET** `/api/tvs` — list ordered TVs, ordered groups, Companion target IDs, compatible-model notes, and cached connection, power, `powerOnPending`, volume, mute, source, model, protocol, authentication, certificate-profile, and error state.
 - **GET** `/api/tvs/<tv_id>/state` — get one TV's cached state.
-- **POST** `/api/tvs/<tv_id>/power` with `{ "state": "on" | "off" | "toggle" }`.
+- **POST** `/api/tvs/<tv_id>/power` with `{ "state": "on" | "off" | "toggle" }`. Power-on responses include `pending` and `confirmed`; a successful Wake-on-LAN send remains pending until VIDAA reports the TV on.
 - **POST** `/api/tvs/<tv_id>/volume` with `{ "level": 20 }` for absolute volume, or `{ "action": "up" | "down" | "mute" }`.
 - **POST** `/api/tvs/<tv_id>/source` with `{ "source": "HDMI1" }`. Discovered display names such as `HDMI 1` are also accepted.
 - **POST** `/api/tvs/<tv_id>/reconnect` — discard the current TV connection and reconnect it.
@@ -48,6 +48,21 @@ Power-on sends Wake-on-LAN using each configured MAC address. Commands are seria
 For newer dynamic authentication, each TV may also have a case-sensitive `uuid`. This is the UUID/MAC of a client device paired through the official VIDAA app; it is separate from the television's `mac`, which is used for Wake-on-LAN. Operational status exposes only `uuidConfigured`, not the UUID value.
 
 Group membership is exclusive: a TV can belong to one ordered group or remain ungrouped. If a raw config/API payload assigns a TV to more than one group, the first group in configured order wins.
+
+---
+
+## Pixie Controls
+
+Pixie endpoints are intentionally stricter than most trusted-LAN APIs. They require a logged-in TDeck session and the relevant page permission when authentication is enabled. Mutating endpoints also require the session CSRF token in `X-CSRF-Token`. Auditorium/device and scene grants are enforced server-side.
+
+- **GET** `/api/pixie/state` — return only the auditoriums and scenes available to the current user. Add `auditorium_id=<id>` to return that auditorium's accessible devices. Add `refresh=1` to refresh local inventory first. Device `online`, `brightness`, and `on` feedback are populated from the process-wide one-second Pixie Home status cache; `online` is `null` when reachability is unavailable. `reachabilityAvailable` and `reachabilityStale` describe the status cache without affecting direct Gateway control.
+- **POST** `/api/pixie/devices/brightness` with `{ "auditorium_id": "main", "device_ids": ["120", "233"], "level": 50, "final": false }` — control individually validated physical devices. On/Off devices are skipped at levels 1–99. Set `final=true` for the released/final fader value so the change is recorded in Activity Log.
+- **POST** `/api/pixie/scenes/<scene_id>/activate` — activate an allowed, enabled inventory scene through the Gateway's native scene operation.
+- **GET/PUT** `/api/pixie/config` — protected Config API for connection settings, auditorium/device arrangement, display names, control-type overrides, and scene ordering/visibility. PUT saves and restarts the Pixie service.
+- **POST** `/api/pixie/discover` — protected, passive Gateway advertisement discovery.
+- **POST** `/api/pixie/homes` — protected account-assisted Home listing used by Pixie Setup. Credentials are never returned.
+
+`pixie_secrets.json` stores the retained account email/password locally and is ignored by Git and config export. Connection identifiers and the auditorium/device/scene arrangement live in `config.json`. Native Pixie group control is never exposed or transmitted; auditorium operations fan out as physical-device commands.
 
 ---
 

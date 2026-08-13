@@ -284,6 +284,63 @@
                         <hr class="my-3">
                         <div class="row g-3">
                           <div class="col-12">
+                            <div class="fw-semibold">Pixie Controls access</div>
+                            <div class="small text-muted">Grant auditoriums first, then allow all devices or choose individual devices in that auditorium. Scenes are granted separately.</div>
+                          </div>
+                          {% set pixie_group = group_to_pixie.get(g.id) if group_to_pixie else none %}
+                          {% set selected_pixie_auditoriums = pixie_group.auditoriums if pixie_group else [] %}
+                          {% for auditorium in pixie_catalog.auditoriums %}
+                            {% set auditorium_selected = auditorium.id in selected_pixie_auditoriums %}
+                            {% set device_permission = pixie_group.devices.get(auditorium.id, '*') if pixie_group else '*' %}
+                            <div class="col-12 border rounded-3 p-3" data-role="pixie-auditorium-block" data-auditorium-id="{{ auditorium.id }}">
+                              <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="pixie_allowed_auditoriums_role" value="{{ auditorium.id }}"
+                                  data-role="pixie-auditorium" data-auditorium-id="{{ auditorium.id }}" {% if auditorium_selected %}checked{% endif %}>
+                                <label class="form-check-label fw-semibold">{{ auditorium.name }}</label>
+                              </div>
+                              <div class="ms-4 mt-2" data-role="pixie-device-scope">
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="pixie_all_devices_role" value="{{ auditorium.id }}"
+                                    data-role="pixie-all-devices" data-auditorium-id="{{ auditorium.id }}" {% if device_permission == '*' %}checked{% endif %}>
+                                  <label class="form-check-label">All devices, including devices added later</label>
+                                </div>
+                                {% for device in auditorium.devices %}
+                                  <div class="form-check ms-3">
+                                    <input class="form-check-input" type="checkbox" name="pixie_allowed_devices_role" value="{{ device.id }}"
+                                      data-role="pixie-device" data-auditorium-id="{{ auditorium.id }}"
+                                      {% if device_permission != '*' and device.id in device_permission %}checked{% endif %}>
+                                    <label class="form-check-label">{{ device.name }}</label>
+                                  </div>
+                                {% endfor %}
+                                {% if not auditorium.devices %}<div class="small text-muted ms-3">No devices are assigned yet.</div>{% endif %}
+                              </div>
+                            </div>
+                          {% else %}
+                            <div class="col-12 text-muted small">No auditoriums are configured. Create them in Config → Pixie.</div>
+                          {% endfor %}
+                          <div class="col-12 mt-3">
+                            <div class="fw-semibold mb-2">Scenes</div>
+                            {% set selected_pixie_scenes = pixie_group.scenes if pixie_group else [] %}
+                            <div class="row g-2">
+                              {% for scene in pixie_catalog.scenes %}
+                                <div class="col-12 col-md-6">
+                                  <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="pixie_allowed_scenes_role" value="{{ scene.id }}"
+                                      data-role="pixie-scene" {% if scene.id in selected_pixie_scenes %}checked{% endif %}>
+                                    <label class="form-check-label">{{ scene.name }}{% if not scene.enabled %} <span class="text-muted">(disabled)</span>{% endif %}</label>
+                                  </div>
+                                </div>
+                              {% else %}
+                                <div class="col-12 text-muted small">No scenes are configured.</div>
+                              {% endfor %}
+                            </div>
+                          </div>
+                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the Pixie Controls page permission.</div></div>
+                        </div>
+
+                        <hr class="my-3">
+                        <div class="row g-3">
+                          <div class="col-12">
                             <div class="fw-semibold">Record Audio controls</div>
                             <div class="small text-muted">Checked channels are visible on the Record Audio page. No checked channels means no audio controls.</div>
                           </div>

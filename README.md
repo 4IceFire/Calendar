@@ -10,6 +10,7 @@ It supports:
 - A **Web UI** (`webui.py`) for editing events and templates in a browser.
 - A **DiGiCo Personal Mixes** web app that lets multiple phones mix permitted AUXes through one shared SD9 OSC connection.
 - A native **Hisense / VIDAA TV service** for individual and ordered-group power, absolute volume, source selection, pairing, protocol detection, and automatic reconnect.
+- A direct **Pixie Controls** web app for permission-scoped auditorium lighting, individual device faders/on-off controls, and scenes through one Pixie Plus Gateway.
 
 ## What this app does
 
@@ -79,6 +80,16 @@ When TDeck or Companion successfully powers a TV off, TDeck records it as intent
 The TDeck Companion module exposes both group and individual targets for power, volume, source, reconnect, feedbacks, and variables.
 
 Some newer VIDAA firmware accepts an MQTT connection but rejects pairing requests made with certificates from an older RemoteNOW/VIDAA app generation, displaying a “TV model is no longer compatible” message on the screen. That condition is not returned to TDeck over MQTT, so it cannot be inferred from the IP address or software version alone. Administrators place approved support files at `hisense_certs/vidaa_client.pem` / `.key` (legacy) and `hisense_certs/vidaa_current.pem` / `.key` (current); TDeck tries installed pairs in the appropriate order automatically. Certificate/private-key files remain local and must not be committed.
+
+## Pixie Controls
+
+Pixie Plus is managed from **Config → Pixie**. TDeck connects directly to one local Gateway in Disabled, Observe only, or Control enabled mode. Setup discovers physical devices and scenes, arranges devices into ordered TDeck auditoriums, keeps missing inventory records so names and permissions survive an outage, and supports automatic or administrator-overridden Dimmable/On/Off classification. Pixie credentials are retained in the ignored local `pixie_secrets.json`; the password is excluded from config export and Activity Log details.
+
+The operator page is `/pixie`. Users with one accessible auditorium go directly to its controls; users with several see an auditorium tile chooser. Device state refreshes once per second only while an auditorium's Devices view is visible. TDeck obtains live reachability and level/on-off feedback from the authenticated Pixie Home status maps through one server-side one-second cache shared by every browser; controls continue to use the local Gateway directly. A newly commanded level is preserved while feedback catches up, rather than being overwritten by the Gateway inventory's stale setup-era value. Offline devices are shown disabled. Brief status-service interruptions retain the last result for 30 seconds and then show **Status unknown** without preventing control. Faders stream throttled changes and final values, while On/Off devices in a mixed selection react only at 0% or 100%. Scene access is configured separately.
+
+Permissions are configured in **Permissions → Groups**. Grant the **Pixie Controls** page, then choose auditoriums, all devices or individual devices within each granted auditorium, and scenes. Multiple group grants union, but a device grant is only effective from a group that also grants its auditorium. Every Pixie read and control API enforces login, page access, auditorium/device or scene scope, and CSRF for writes. Admin remains unrestricted.
+
+TDeck never uses the Gateway's native group-address command. A prior G3 Gateway interpreted an experimental group packet as a building-wide broadcast, so each TDeck auditorium action fans out to validated physical-device IDs only.
 
 ## Run (Web UI)
 

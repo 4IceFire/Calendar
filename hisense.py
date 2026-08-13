@@ -311,6 +311,9 @@ class HisenseTvController:
         self._last_connect_attempt = 0.0
         self._last_poll = 0.0
         self._pending_power_on = False
+        self._power_on_started = 0.0
+        self._last_wake_attempt = 0.0
+        self._power_key_sent = False
         self._protocol_checked = False
         self._selected_dynamic_auth = False
         self._state: dict[str, Any] = {
@@ -354,6 +357,7 @@ class HisenseTvController:
             state = dict(self._state)
             state["sources"] = [dict(source) for source in self._state.get("sources", [])]
             state["healthy"] = bool(state.get("connected") or state.get("expectedOff"))
+            state["powerOnPending"] = self._pending_power_on
         return {
             "id": self.config.id,
             "name": self.config.name,
@@ -395,10 +399,21 @@ class HisenseTvController:
                 continue
 
             now = time.monotonic()
+            if self._pending_power_on:
+                if now - self._power_on_started >= 45.0:
+                    self._clear_pending_power_on()
+                    self._set_error("Power on was requested, but the TV did not confirm that it turned on")
+                elif now - self._last_wake_attempt >= 5.0:
+                    # Wake-on-LAN has no acknowledgement. Repeat a bounded
+                    # number of packet bursts while waiting for a real VIDAA
+                    # state update, but never substitute a blind power toggle.
+                    self._send_wake_packets()
             if not self._is_connected():
                 if now - self._last_connect_attempt >= self.service_config.reconnect_interval:
                     self._connect()
-            elif now - self._last_poll >= self.service_config.poll_interval:
+            elif now - self._last_poll >= (
+                2.0 if self._pending_power_on else self.service_config.poll_interval
+            ):
                 self._poll()
             self._wake_worker.wait(0.5)
             self._wake_worker.clear()
@@ -556,8 +571,6 @@ class HisenseTvController:
                             "certificateProfile": profile.id,
                             "compatibilityStatus": "Connected",
                         })
-                    if self._pending_power_on and self._client.power_on():
-                        self._pending_power_on = False
                     self._poll(full=True)
                     return True
                 except Exception as exc:
@@ -623,20 +636,88 @@ class HisenseTvController:
                 pass
 
     def _mark_powered_off(self) -> None:
-        self._pending_power_on = False
+        self._clear_pending_power_on()
         self._set_expected_off(True)
         self._disconnect(clear_error=True)
 
+    def _clear_pending_power_on(self) -> None:
+        self._pending_power_on = False
+        self._power_on_started = 0.0
+        self._last_wake_attempt = 0.0
+        self._power_key_sent = False
+
+    def _send_wake_packets(self) -> bool:
+        if not self.config.mac or self._wake is None:
+            return False
+        subnet = self.config.host.rsplit(".", 1)[0] if self.config.host.count(".") == 3 else None
+        self._last_wake_attempt = time.monotonic()
+        try:
+            return bool(self._wake(self.config.mac, subnet))
+        except Exception:
+            return False
+
     def _begin_power_on(self) -> bool:
         self._set_expected_off(False)
+
+        # Treat repeated ON commands as idempotent while an earlier request is
+        # still being verified. Sending a second toggle-key command during the
+        # TV's wake transition can immediately turn it back off.
+        if self._pending_power_on:
+            return True
+
+        client = self._client if self._is_connected() else None
+        observed_state: dict[str, Any] = {}
+        if client is not None:
+            try:
+                observed_state = client.get_state(timeout=2.0) or {}
+            except Exception:
+                observed_state = {}
+
+        if observed_state and observed_state.get("statetype") != "fake_sleep_0":
+            self._clear_pending_power_on()
+            with self._lock:
+                self._state.update({
+                    "connected": True,
+                    "power": "on",
+                    "lastError": "",
+                    "lastSeen": time.time(),
+                    "compatibilityStatus": "Connected",
+                })
+            return True
+
         if not self.config.mac:
             raise ValueError("A MAC address is required for power on")
-        subnet = self.config.host.rsplit(".", 1)[0] if self.config.host.count(".") == 3 else None
-        if self._wake is None or not self._wake(self.config.mac, subnet):
-            raise RuntimeError("Wake-on-LAN packet could not be sent")
+
         self._pending_power_on = True
-        self._disconnect(clear_error=True)
+        self._power_on_started = time.monotonic()
+        self._last_wake_attempt = self._power_on_started
+        self._power_key_sent = False
+        command_sent = False
+
+        # KEY_POWER is a toggle on these TVs. It is safe only after this same
+        # connection has explicitly reported standby; an empty/timed-out state
+        # must fall back to Wake-on-LAN instead.
+        if client is not None and observed_state.get("statetype") == "fake_sleep_0":
+            try:
+                command_sent = bool(client.send_key("KEY_POWER"))
+                self._power_key_sent = command_sent
+            except Exception:
+                command_sent = False
+
+        if not command_sent:
+            command_sent = self._send_wake_packets()
+        if not command_sent:
+            self._clear_pending_power_on()
+            raise RuntimeError("Power-on request could not be sent")
+
+        if client is None:
+            self._disconnect(clear_error=True)
         self._last_connect_attempt = 0.0
+        with self._lock:
+            self._state.update({
+                "lastError": "",
+                "compatibilityStatus": "Power on requested; awaiting TV confirmation",
+            })
         return True
 
     def _ensure_connected(self) -> Any:
@@ -648,9 +729,16 @@ class HisenseTvController:
         self._last_poll = time.monotonic()
         try:
             client = self._ensure_connected()
-            if self._pending_power_on and client.power_on():
-                self._pending_power_on = False
             state = client.get_state(timeout=2.0) or {}
+            if self._pending_power_on and state:
+                if state.get("statetype") == "fake_sleep_0":
+                    if not self._power_key_sent:
+                        # The fresh state above proves the TV is off, so one
+                        # toggle-key command is safe. Never retry it without a
+                        # new explicit standby observation.
+                        self._power_key_sent = bool(client.send_key("KEY_POWER"))
+                else:
+                    self._clear_pending_power_on()
             volume = client.get_volume(timeout=2.0)
             updates: dict[str, Any] = {
                 "power": "off" if state.get("statetype") == "fake_sleep_0" else ("on" if state else "unknown"),
@@ -660,6 +748,10 @@ class HisenseTvController:
                 "lastError": "",
                 "connected": True,
             }
+            if self._pending_power_on:
+                updates["compatibilityStatus"] = "Power on requested; awaiting TV confirmation"
+            elif state:
+                updates["compatibilityStatus"] = "Connected"
             source = state.get("sourceid") or state.get("sourcename")
             if source:
                 updates["source"] = str(source)
@@ -694,6 +786,8 @@ class HisenseTvController:
         updates: dict[str, Any] = {"lastSeen": time.time(), "connected": True}
         if state.get("statetype"):
             updates["power"] = "off" if state.get("statetype") == "fake_sleep_0" else "on"
+            if state.get("statetype") != "fake_sleep_0":
+                self._clear_pending_power_on()
         if state.get("sourceid") or state.get("sourcename"):
             updates["source"] = str(state.get("sourceid") or state.get("sourcename"))
         with self._lock:
@@ -728,6 +822,7 @@ class HisenseTvController:
             elif action == "power_off" and self._is_expected_off():
                 ok = True
             else:
+                self._clear_pending_power_on()
                 self._set_expected_off(False)
                 client = self._ensure_connected()
                 if action == "power_off":
@@ -764,7 +859,14 @@ class HisenseTvController:
                     raise ValueError(f"Unknown TV command: {action}")
             if not ok:
                 raise RuntimeError("TV rejected the command")
-            command.result = {"ok": True, "accepted": True, "tv": self.status()}
+            status = self.status()
+            command.result = {"ok": True, "accepted": True, "tv": status}
+            if action == "power_on":
+                pending = bool(status.get("powerOnPending"))
+                command.result.update({
+                    "pending": pending,
+                    "confirmed": bool(not pending and status.get("power") == "on"),
+                })
         except Exception as exc:
             self._set_error(str(exc))
             command.result = {"ok": False, "error": str(exc), "tv": self.status()}
@@ -999,9 +1101,11 @@ class HisenseManager:
                 result = {"ok": False, "error": str(exc)}
             results.append({"tvId": controller.config.id, **result})
         ok = all(result.get("ok") for result in results)
+        pending = ok and action in {"power_on", "power_off", "power_toggle"}
         return {
             "ok": ok,
             "accepted": ok,
+            "pending": pending,
             "target": self.group_status(group),
             "results": results,
             **({"error": "One or more group commands were rejected"} if not ok else {}),

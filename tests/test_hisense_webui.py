@@ -69,7 +69,7 @@ class HisenseWebApiTests(unittest.TestCase):
         self.log = patch.object(webui, "log_event")
         self.auth.start()
         self.factory.start()
-        self.log.start()
+        self.log_event = self.log.start()
         self.addCleanup(self.auth.stop)
         self.addCleanup(self.factory.stop)
         self.addCleanup(self.log.stop)
@@ -133,6 +133,21 @@ class HisenseWebApiTests(unittest.TestCase):
         self.assertEqual(status["online"], 0)
         self.assertEqual(status["off"], 1)
         self.assertEqual(status["detail"], "0/1 online, 1 intentionally off")
+
+    def test_pending_power_on_is_logged_as_warning_not_success(self):
+        with patch.object(self.manager.controller, "submit", return_value={
+            "ok": True,
+            "accepted": True,
+            "pending": True,
+            "confirmed": False,
+            "tv": self.manager.controller.status(),
+        }):
+            response = self.client.post("/api/tvs/test-tv/power", json={"state": "on"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["pending"], True)
+        self.assertEqual(self.log_event.call_args.kwargs["status"], "warning")
+        self.assertIn("awaiting TV confirmation", self.log_event.call_args.args[1])
 
     def test_invalid_control_payloads(self):
         self.assertEqual(self.client.post("/api/tvs/test-tv/power", json={"state": "maybe"}).status_code, 400)

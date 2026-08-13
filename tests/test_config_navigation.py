@@ -22,6 +22,7 @@ class ConfigNavigationTests(unittest.TestCase):
         self.assertIn('href="/config#cfg-web-ui"', markup)
         self.assertIn('href="/config/digico"', markup)
         self.assertIn('href="/config/tvs"', markup)
+        self.assertIn('href="/config/pixie"', markup)
         self.assertIn('href="/config/companion-surfaces"', markup)
         self.assertIn('href="/config/export"', markup)
         self.assertIn('href="/config/import"', markup)
@@ -33,6 +34,7 @@ class ConfigNavigationTests(unittest.TestCase):
         pages = {
             "/config/digico": 'active" href="/config/digico"',
             "/config/tvs": 'active" href="/config/tvs"',
+            "/config/pixie": 'active" href="/config/pixie"',
             "/config/companion-surfaces": 'active" href="/config/companion-surfaces"',
             "/config/export": 'active" href="/config/export"',
             "/config/import": 'active" href="/config/import"',

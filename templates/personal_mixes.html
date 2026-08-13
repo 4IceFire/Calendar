@@ -16,13 +16,13 @@
 {% block content %}
 <div id="digico-mixer" class="digico-mixer-shell">
   <div class="digico-mixer-topbar">
-    <button id="digico-aux-change" class="digico-aux-current d-none" type="button" aria-label="Choose another AUX">
+    <button id="digico-aux-change" class="digico-aux-current d-none" type="button" aria-label="Choose another AUX" aria-controls="digico-aux-picker" aria-expanded="false">
       <span id="digico-aux-current-icon" class="digico-current-icon"></span>
       <span>
         <span class="digico-eyebrow">Mixing</span>
         <strong id="digico-aux-current-label">Choose an AUX</strong>
       </span>
-      <span aria-hidden="true">⌄</span>
+      <span class="digico-aux-change-label" aria-hidden="true">Change</span>
     </button>
     <div class="digico-mixer-meta">
       <span id="digico-mixer-connection" class="digico-connection is-waiting"><span></span> Connecting</span>

@@ -47,6 +47,10 @@
               <span id="atem-dot" class="indicator-dot bg-danger"></span>
               <span id="atem-label">Switcher: Checking...</span>
             </div>
+            <div id="pixie-indicator" class="me-2">
+              <span id="pixie-dot" class="indicator-dot bg-danger"></span>
+              <span id="pixie-label">Pixie: Checking...</span>
+            </div>
           </div>
 
           <div class="dropdown tdeck-account-dropdown">
@@ -109,6 +113,7 @@
           {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub</a>{% endif %}
           {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Record Audio</a>{% endif %}
           {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
+          {% if not auth_enabled or can_access('page:pixie_controls') %}<a class="nav-link{% if request.path.startswith('/pixie') %} active{% endif %}" href="/pixie">Pixie Controls</a>{% endif %}
           {% if not auth_enabled or can_access('page:digico_mixer') %}<a class="nav-link{% if request.path.startswith('/personal-mixes') %} active{% endif %}" href="/personal-mixes">Personal Mixes</a>{% endif %}
           {% if not auth_enabled or can_access('page:surface_controls') %}<a class="nav-link{% if request.path.startswith('/surface-controls') %} active{% endif %}" href="/surface-controls">Surface Controls</a>{% endif %}
         </nav>

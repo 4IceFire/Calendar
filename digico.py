@@ -254,6 +254,11 @@ class DigicoMixerClient:
         self._cache: dict[str, dict[str, Any]] = {}
         self._pending: deque[str] = deque()
         self._pending_set: set[str] = set()
+        self._meter_pending: deque[tuple[str, list[Any]]] = deque()
+        self._meter_requests_queued = False
+        self._input_meters: dict[int, dict[str, Any]] = {}
+        self._meter_revision = 0
+        self._last_meter_at = 0.0
         self._request_sent_at: dict[str, float] = {}
         self._last_query_address = ""
         self._last_query_at = 0.0
@@ -313,6 +318,11 @@ class DigicoMixerClient:
             self._worker_thread.start()
 
     def close(self) -> None:
+        try:
+            if self._socket is not None and self._desk_ip:
+                self.send("/Meters/clear")
+        except Exception:
+            pass
         self._stop.set()
         with self._lock:
             sock = self._socket
@@ -333,6 +343,11 @@ class DigicoMixerClient:
             self._cache.clear()
             self._pending.clear()
             self._pending_set.clear()
+            self._meter_pending.clear()
+            self._meter_requests_queued = False
+            self._input_meters.clear()
+            self._meter_revision += 1
+            self._last_meter_at = 0.0
             self._request_sent_at.clear()
             self._last_query_address = ""
             self._last_query_at = 0.0
@@ -443,6 +458,10 @@ class DigicoMixerClient:
         now: float,
     ) -> None:
         with self._lock:
+            if address == "/Meters/values":
+                self._handle_meter_values_locked(args, now)
+                return
+
             prior = self._cache.get(address)
             changed = prior is None or prior.get("args") != args
             if address.startswith(self.CACHE_PREFIXES):
@@ -455,6 +474,11 @@ class DigicoMixerClient:
                 self._cache.clear()
                 self._pending.clear()
                 self._pending_set.clear()
+                self._meter_pending.clear()
+                self._meter_requests_queued = False
+                self._input_meters.clear()
+                self._meter_revision += 1
+                self._last_meter_at = 0.0
                 self._request_sent_at.clear()
                 self._last_query_address = ""
                 self._current_snapshot = -1
@@ -485,6 +509,42 @@ class DigicoMixerClient:
                             self._current_snapshot_name = str(args[0])
                     except Exception:
                         pass
+
+    @staticmethod
+    def _meter_percent(value: Any) -> float | None:
+        """Convert DiGiCo's 0..4,000,000 meter scale to a UI percentage."""
+
+        try:
+            raw = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(raw):
+            return None
+        return max(0.0, min(100.0, 100.0 - (raw / 40000.0)))
+
+    def _handle_meter_values_locked(self, args: list[Any], now: float) -> None:
+        changed = False
+        for index in range(0, len(args) - 1, 2):
+            meter_id = str(args[index] or "").strip()
+            if not meter_id.startswith("1") or len(meter_id) < 2:
+                continue
+            try:
+                channel = int(meter_id[1:])
+            except Exception:
+                continue
+            if channel < 1 or channel > self._channel_count_locked():
+                continue
+            level = self._meter_percent(args[index + 1])
+            if level is None:
+                continue
+            prior = self._input_meters.get(channel)
+            if prior is None or abs(float(prior.get("level", 0.0)) - level) >= 0.05:
+                changed = True
+            self._input_meters[channel] = {"level": level, "ts": now}
+        if changed:
+            self._meter_revision += 1
+        if args:
+            self._last_meter_at = now
 
     def _cache_args_locked(self, address: str) -> list[Any] | None:
         entry = self._cache.get(address)
@@ -524,6 +584,7 @@ class DigicoMixerClient:
     def _worker_loop(self) -> None:
         while not self._stop.wait(self.config.request_interval):
             query = ""
+            query_args: list[Any] | None = None
             now = time.time()
             with self._lock:
                 discovery = self._next_discovery_query_locked()
@@ -537,13 +598,18 @@ class DigicoMixerClient:
                     query = self._pending.popleft()
                     self._pending_set.discard(query)
                 else:
-                    # Discovery and browser polling can both be idle. A small
-                    # snapshot query keeps connectivity status truthful and
-                    # notices a disconnected desk without flooding the wire.
-                    heartbeat_interval = max(0.5, min(5.0, self.config.stale_after / 3.0))
-                    if (now - self._last_heartbeat_at) >= heartbeat_interval:
-                        query = "/Snapshots/Current_Snapshot/?"
-                        self._last_heartbeat_at = now
+                    if not self._meter_requests_queued:
+                        self._queue_meter_requests_locked()
+                    if self._meter_pending:
+                        query, query_args = self._meter_pending.popleft()
+                    else:
+                        # Discovery and browser polling can both be idle. A small
+                        # snapshot query keeps connectivity status truthful and
+                        # notices a disconnected desk without flooding the wire.
+                        heartbeat_interval = max(0.5, min(5.0, self.config.stale_after / 3.0))
+                        if (now - self._last_heartbeat_at) >= heartbeat_interval:
+                            query = "/Snapshots/Current_Snapshot/?"
+                            self._last_heartbeat_at = now
 
                 if query:
                     self._last_query_address = query
@@ -551,9 +617,26 @@ class DigicoMixerClient:
                     self._request_sent_at[query] = now
             if query:
                 try:
-                    self.send(query)
+                    self.send(query, query_args)
                 except Exception:
                     pass
+
+    def _queue_meter_requests_locked(self) -> None:
+        """Subscribe once to post-channel meters on the shared desk socket."""
+
+        self._meter_pending.clear()
+        self._meter_pending.append(("/Meters/clear", []))
+        for channel in range(1, self._channel_count_locked() + 1):
+            custom = self._config_item(self.config.channels, channel)
+            if custom and not bool(custom.get("enabled", True)):
+                continue
+            self._meter_pending.append(
+                (
+                    f"/Meters/request/1{channel}",
+                    [f"/Input_Channels/{channel}/Channel_Input/post_meter/left"],
+                )
+            )
+        self._meter_requests_queued = True
 
     def _send_raw(self, raw: bytes, host: str, port: int, *, relay: bool = False) -> None:
         with self._lock:
@@ -726,6 +809,29 @@ class DigicoMixerClient:
                 "revision": self._revision,
             }
 
+    def input_meter_state(self) -> dict[str, Any]:
+        """Return cached input activity without adding browser-driven desk traffic."""
+
+        cfg = self.mixer_config()
+        with self._lock:
+            channels: list[dict[str, Any]] = []
+            for channel in cfg["channels"]:
+                if not bool(channel.get("enabled", True)):
+                    continue
+                number = int(channel["channel"])
+                meter = self._input_meters.get(number)
+                channels.append(
+                    {
+                        "channel": number,
+                        "meter": float(meter["level"]) if meter is not None else None,
+                    }
+                )
+            return {
+                "channels": channels,
+                "revision": self._meter_revision,
+                "active": bool(self._last_meter_at),
+            }
+
     def _validate_route(self, aux_number: int, channel_number: int) -> None:
         with self._lock:
             aux_count = len(self._aux_modes_locked())
@@ -807,6 +913,10 @@ class DigicoMixerClient:
                 "lastError": self._last_error,
                 "cacheEntries": len(self._cache),
                 "pendingRequests": len(self._pending),
+                "meterRequests": len(self._meter_pending),
+                "meterChannels": len(self._input_meters),
+                "meterRevision": self._meter_revision,
+                "lastMeterAt": self._last_meter_at or None,
                 "channels": self._channel_count_locked(),
                 "auxes": len(self._aux_modes_locked()),
                 "snapshot": self._current_snapshot_name,

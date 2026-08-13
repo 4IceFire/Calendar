@@ -21,6 +21,8 @@ class _FakeVidaa:
         self.muted = False
         self.state = {"statetype": "sourceswitch", "sourceid": "HDMI1"}
         self.published = []
+        self.sent_keys = []
+        self.power_on_calls = 0
         self._authenticated = False
         self._auth_event = None
 
@@ -79,7 +81,17 @@ class _FakeVidaa:
         return True
 
     def power_on(self):
+        self.power_on_calls += 1
         self.state = {"statetype": "sourceswitch", "sourceid": "HDMI1"}
+        return True
+
+    def send_key(self, key):
+        self.sent_keys.append(key)
+        if key == "KEY_POWER":
+            if self.state.get("statetype") == "fake_sleep_0":
+                self.state = {"statetype": "sourceswitch", "sourceid": "HDMI1"}
+            else:
+                self.state = {"statetype": "fake_sleep_0"}
         return True
 
     def start_pairing(self):
@@ -166,6 +178,52 @@ class HisenseManagerTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(self.wakes[0], ("a0:62:fb:84:ed:28", "10.5.10"))
 
+    def test_power_on_is_a_noop_when_tv_explicitly_reports_on(self):
+        controller = self.manager.get("foyer")
+        client = _FakeVidaa.instances[-1]
+        instance_count = len(_FakeVidaa.instances)
+
+        result = controller.submit("power_on", wait=1)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["confirmed"], result)
+        self.assertFalse(result["pending"], result)
+        self.assertEqual(client.sent_keys, [])
+        self.assertEqual(client.power_on_calls, 0)
+        self.assertEqual(self.wakes, [])
+        self.assertEqual(len(_FakeVidaa.instances), instance_count)
+        self.assertTrue(controller.status()["connected"])
+
+    def test_power_on_from_confirmed_standby_sends_one_safe_power_key(self):
+        controller = self.manager.get("foyer")
+        client = _FakeVidaa.instances[-1]
+        client.state = {"statetype": "fake_sleep_0"}
+
+        result = controller.submit("power_on", wait=1)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["pending"], result)
+        self.assertEqual(client.sent_keys, ["KEY_POWER"])
+        self.assertEqual(client.power_on_calls, 0)
+        self.assertEqual(self.wakes, [])
+
+        repeated = controller.submit("power_on", wait=1)
+        self.assertTrue(repeated["ok"], repeated)
+        self.assertEqual(client.sent_keys, ["KEY_POWER"])
+
+    def test_power_on_with_unknown_state_uses_wol_without_toggle(self):
+        controller = self.manager.get("foyer")
+        client = _FakeVidaa.instances[-1]
+        client.get_state = lambda timeout=0: None
+
+        result = controller.submit("power_on", wait=1)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["pending"], result)
+        self.assertEqual(client.sent_keys, [])
+        self.assertEqual(client.power_on_calls, 0)
+        self.assertEqual(self.wakes, [("a0:62:fb:84:ed:28", "10.5.10")])
+
     def test_intentional_power_off_is_healthy_and_survives_restart(self):
         controller = self.manager.get("foyer")
         instances_before = len(_FakeVidaa.instances)
@@ -246,6 +304,10 @@ class HisenseManagerTests(unittest.TestCase):
         while time.time() < deadline and self.manager.get("foyer").status()["volume"] != 31:
             time.sleep(0.01)
         self.assertEqual(self.manager.target_status("group:foyer-group")["volume"], 31)
+
+        power = self.manager.submit_target("group:foyer-group", "power_on")
+        self.assertTrue(power["ok"], power)
+        self.assertTrue(power["pending"], power)
 
     def test_newer_protocol_uses_detected_dynamic_auth(self):
         root = Path(self.temp.name)

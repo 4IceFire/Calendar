@@ -15,18 +15,32 @@
   const connection = document.getElementById('digico-mixer-connection');
   const snapshot = document.getElementById('digico-snapshot');
   const retry = document.getElementById('digico-mixer-retry');
+  const navbar = document.querySelector('.tdeck-navbar');
   const iconSystem = window.TDeckDigicoIcons;
   const CONTROL_SEND_INTERVAL_MS = 40;
+  const INPUT_METER_POLL_MS = 250;
+  const LEVEL_UNITY_SLIDER = 0.5;
+  const LEVEL_UNITY_LEGACY_SLIDER = Math.pow(100, 0.9) / 100;
+  const COLLAPSED_SECTIONS_KEY = 'tdeck.digico.collapsed-sections';
+
+  function syncStickyOffset() {
+    if (navbar) root.style.setProperty('--digico-navbar-height', `${navbar.getBoundingClientRect().height}px`);
+  }
+  syncStickyOffset();
+  if (navbar && window.ResizeObserver) new ResizeObserver(syncStickyOffset).observe(navbar);
+  else window.addEventListener('resize', syncStickyOffset);
 
   const state = {
     config: null,
     selectedAux: null,
     pollBusy: false,
+    meterBusy: false,
     configBusy: false,
     channelControls: new Map(),
     activeControls: new Set(),
     controlSends: new Map(),
     lastRevision: null,
+    lastMeterRevision: null,
     errorSince: 0,
   };
 
@@ -65,12 +79,17 @@
   }
 
   function showPicker() {
-    state.selectedAux = null;
-    state.lastRevision = null;
-    auxChange.classList.add('d-none');
-    channelSection.classList.add('d-none');
+    if (!state.selectedAux) {
+      state.lastRevision = null;
+      auxChange.classList.add('d-none');
+      channelSection.classList.add('d-none');
+    }
     picker.classList.remove('d-none');
+    auxChange.setAttribute('aria-expanded', 'true');
     renderAuxPicker();
+    if (state.selectedAux) {
+      window.requestAnimationFrame(() => picker.scrollIntoView({behavior: 'smooth', block: 'start'}));
+    }
   }
 
   function chooseAux(aux) {
@@ -84,10 +103,12 @@
     auxIcon.classList.toggle('d-none', !icon);
     if (icon) auxIcon.appendChild(iconSystem.create(icon, 'digico-current-icon-image'));
     auxChange.classList.remove('d-none');
+    auxChange.setAttribute('aria-expanded', 'false');
     picker.classList.add('d-none');
     channelSection.classList.remove('d-none');
     buildChannels(state.config ? state.config.channels : []);
     pollAuxState();
+    pollInputMeters();
   }
 
   function renderAuxPicker() {
@@ -118,19 +139,28 @@
   function sliderToDb(value) {
     const v = Number(value);
     if (v <= 0) return -150;
-    return ((Math.log(v * 100) / Math.log(100)) * 100) - 90;
+    if (v <= LEVEL_UNITY_SLIDER) {
+      const legacyPosition = (v / LEVEL_UNITY_SLIDER) * LEVEL_UNITY_LEGACY_SLIDER;
+      return ((Math.log(legacyPosition * 100) / Math.log(100)) * 100) - 90;
+    }
+    return ((v - LEVEL_UNITY_SLIDER) / (1 - LEVEL_UNITY_SLIDER)) * 10;
   }
 
   function dbToSlider(db) {
     const value = Number(db);
     if (!Number.isFinite(value) || value <= -90) return 0;
-    return Math.max(0, Math.min(1, Math.pow(100, (value + 90) / 100) / 100));
+    if (value <= 0) {
+      const legacyPosition = Math.pow(100, (value + 90) / 100) / 100;
+      return Math.max(0, Math.min(LEVEL_UNITY_SLIDER, (legacyPosition / LEVEL_UNITY_LEGACY_SLIDER) * LEVEL_UNITY_SLIDER));
+    }
+    return Math.max(LEVEL_UNITY_SLIDER, Math.min(1, LEVEL_UNITY_SLIDER + ((value / 10) * (1 - LEVEL_UNITY_SLIDER))));
   }
 
   function formatDb(db) {
     const value = Number(db);
     if (!Number.isFinite(value) || value <= -90) return '−∞';
-    return `${value > 0 ? '+' : ''}${value.toFixed(1)} dB`;
+    const displayValue = Math.abs(value) < 0.05 ? 0 : value;
+    return `${displayValue > 0 ? '+' : ''}${displayValue.toFixed(1)} dB`;
   }
 
   function formatPan(value) {
@@ -302,48 +332,127 @@
     return control;
   }
 
+  function collapsedSections() {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(COLLAPSED_SECTIONS_KEY) || '[]');
+      return new Set(Array.isArray(saved) ? saved.map(String) : []);
+    } catch (error) {
+      return new Set();
+    }
+  }
+
+  function saveSectionState(key, collapsed) {
+    const saved = collapsedSections();
+    if (collapsed) saved.add(key);
+    else saved.delete(key);
+    try { window.localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify(Array.from(saved))); } catch (error) { /* ignore */ }
+  }
+
+  function buildInputMeter(channel) {
+    const element = document.createElement('div');
+    element.className = 'digico-input-meter';
+    element.setAttribute('role', 'meter');
+    element.setAttribute('aria-valuemin', '0');
+    element.setAttribute('aria-valuemax', '100');
+    const label = document.createElement('span');
+    label.className = 'digico-input-meter-label';
+    label.textContent = 'Input';
+    const track = document.createElement('span');
+    track.className = 'digico-input-meter-track';
+    const fill = document.createElement('span');
+    fill.className = 'digico-input-meter-fill';
+    track.appendChild(fill);
+    element.append(label, track);
+    const control = {element, fill, channel};
+    updateInputMeter(control, null);
+    return control;
+  }
+
+  function updateInputMeter(control, rawValue) {
+    const value = Number(rawValue);
+    const known = rawValue !== null && rawValue !== undefined && Number.isFinite(value);
+    const percent = known ? Math.max(0, Math.min(100, value)) : 0;
+    control.fill.style.width = `${percent}%`;
+    control.element.classList.toggle('is-active', known);
+    control.element.classList.toggle('is-warm', known && percent >= 75);
+    control.element.classList.toggle('is-hot', known && percent >= 92);
+    const channelName = control.channel.label || `Channel ${control.channel.channel}`;
+    if (known) {
+      control.element.setAttribute('aria-valuenow', percent.toFixed(1));
+      control.element.setAttribute('aria-valuetext', `${channelName} input signal ${Math.round(percent)} percent`);
+    } else {
+      control.element.removeAttribute('aria-valuenow');
+      control.element.setAttribute('aria-valuetext', `${channelName} input signal unavailable`);
+    }
+  }
+
   function buildChannels(channels) {
     state.channelControls.clear();
     channelGroups.replaceChildren();
+    const sections = [];
+    const titleCounts = new Map();
+    let section = null;
     let previousHeading = '';
-    let list = null;
     for (const channel of channels || []) {
       const headingText = String(channel.group || '').trim();
-      if (headingText && headingText !== previousHeading) {
-        const heading = document.createElement('h3');
-        heading.className = 'digico-channel-group-title';
-        heading.textContent = headingText;
-        channelGroups.appendChild(heading);
-        list = null;
+      if ((headingText && headingText !== previousHeading) || !section) {
+        const title = headingText || 'Inputs';
+        const occurrence = (titleCounts.get(title) || 0) + 1;
+        titleCounts.set(title, occurrence);
+        section = {title, key: `${title.toLowerCase()}-${occurrence}`, channels: []};
+        sections.push(section);
       }
+      section.channels.push(channel);
       previousHeading = headingText;
-      if (!list) {
-        list = document.createElement('div');
-        list.className = 'digico-channel-list';
-        channelGroups.appendChild(list);
+    }
+
+    const collapsed = collapsedSections();
+    for (const channelSectionData of sections) {
+      const group = document.createElement('details');
+      group.className = 'digico-channel-group';
+      group.open = !collapsed.has(channelSectionData.key);
+      const heading = document.createElement('summary');
+      heading.className = 'digico-channel-group-title';
+      const headingLabel = document.createElement('span');
+      headingLabel.textContent = channelSectionData.title;
+      const count = document.createElement('span');
+      count.className = 'digico-channel-group-count';
+      count.textContent = `${channelSectionData.channels.length} input${channelSectionData.channels.length === 1 ? '' : 's'}`;
+      const collapseIcon = document.createElement('span');
+      collapseIcon.className = 'digico-collapse-icon';
+      collapseIcon.setAttribute('aria-hidden', 'true');
+      heading.append(headingLabel, count, collapseIcon);
+      const list = document.createElement('div');
+      list.className = 'digico-channel-list';
+      group.append(heading, list);
+      group.addEventListener('toggle', () => saveSectionState(channelSectionData.key, !group.open));
+      channelGroups.appendChild(group);
+
+      for (const channel of channelSectionData.channels) {
+        const row = document.createElement('div');
+        row.className = `digico-channel ${state.selectedAux && state.selectedAux.stereo ? 'is-stereo' : ''}`;
+        const name = document.createElement('div');
+        name.className = 'digico-channel-name';
+        const icon = iconSystem.normalize(channel.icon);
+        if (icon) name.appendChild(iconSystem.create(icon, 'digico-channel-icon'));
+        const nameText = document.createElement('span');
+        nameText.textContent = channel.label || `Channel ${channel.channel}`;
+        name.appendChild(nameText);
+        const identity = document.createElement('div');
+        identity.className = 'digico-channel-identity';
+        const meter = buildInputMeter(channel);
+        const send = buildSendToggle(channel);
+        identity.append(name, meter.element, send.button);
+        const level = buildControl(channel.channel, 'level', channel.level);
+        row.append(identity, level.element);
+        let pan = null;
+        if (state.selectedAux && state.selectedAux.stereo) {
+          pan = buildControl(channel.channel, 'pan', channel.pan);
+          row.appendChild(pan.element);
+        }
+        state.channelControls.set(Number(channel.channel), {send, meter, level, pan});
+        list.appendChild(row);
       }
-      const row = document.createElement('div');
-      row.className = `digico-channel ${state.selectedAux && state.selectedAux.stereo ? 'is-stereo' : ''}`;
-      const name = document.createElement('div');
-      name.className = 'digico-channel-name';
-      const icon = iconSystem.normalize(channel.icon);
-      if (icon) name.appendChild(iconSystem.create(icon, 'digico-channel-icon'));
-      const nameText = document.createElement('span');
-      nameText.textContent = channel.label || `Channel ${channel.channel}`;
-      name.appendChild(nameText);
-      const identity = document.createElement('div');
-      identity.className = 'digico-channel-identity';
-      const send = buildSendToggle(channel);
-      identity.append(name, send.button);
-      const level = buildControl(channel.channel, 'level', channel.level);
-      row.append(identity, level.element);
-      let pan = null;
-      if (state.selectedAux && state.selectedAux.stereo) {
-        pan = buildControl(channel.channel, 'pan', channel.pan);
-        row.appendChild(pan.element);
-      }
-      state.channelControls.set(Number(channel.channel), {send, level, pan});
-      list.appendChild(row);
     }
   }
 
@@ -373,6 +482,30 @@
       state.errorSince = Date.now();
     } else if ((Date.now() - state.errorSince) > 4000) {
       showNotice('TDeck is running, but the desk is not replying. Your controls will remain available while it reconnects.', 'warning');
+    }
+  }
+
+  function applyInputMeters(payload) {
+    if (Number.isFinite(Number(payload.revision))) state.lastMeterRevision = Number(payload.revision);
+    for (const channel of payload.channels || []) {
+      const controls = state.channelControls.get(Number(channel.channel));
+      if (controls && controls.meter) updateInputMeter(controls.meter, channel.meter);
+    }
+  }
+
+  async function pollInputMeters() {
+    if (state.meterBusy || !state.selectedAux || document.hidden) return;
+    state.meterBusy = true;
+    try {
+      const revisionQuery = Number.isFinite(state.lastMeterRevision)
+        ? `?revision=${encodeURIComponent(state.lastMeterRevision)}`
+        : '';
+      const payload = await getJson(`/api/digico/input-meters${revisionQuery}`);
+      if (!payload.unchanged) applyInputMeters(payload);
+    } catch (error) {
+      // Metering is an enhancement; a meter error must not interrupt mix controls.
+    } finally {
+      state.meterBusy = false;
     }
   }
 
@@ -433,10 +566,12 @@
     if (!document.hidden) {
       loadConfig(false);
       pollAuxState();
+      pollInputMeters();
     }
   });
 
   loadConfig(false);
   window.setInterval(pollAuxState, 750);
+  window.setInterval(pollInputMeters, INPUT_METER_POLL_MS);
   window.setInterval(() => loadConfig(false), 30000);
 })();

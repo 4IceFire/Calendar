@@ -19,6 +19,7 @@ hisense_certs/
 # Local Config/Event Files
 *.json
 !companion_surfaces.json
+pixie_secrets.json
 
 auth.db
 .DS_Store

@@ -126,6 +126,22 @@ async function updateStatusIndicators() {
     if (digicoIndicator) digicoIndicator.classList.toggle('d-none', !digicoEnabled);
     if (digicoEnabled) _applyServiceIndicator('digico', 'DiGiCo', !!data.digico.connected);
     _applyServiceIndicator('atem', 'Switcher', !!(data && data.atem && data.atem.connected));
+    const pixieIndicator = document.getElementById('pixie-indicator');
+    const pixie = (data && data.pixie) || {};
+    const pixieEnabled = !!(data && data.pixie && data.pixie.enabled);
+    if (pixieIndicator) pixieIndicator.classList.remove('d-none');
+    if (pixieIndicator) {
+      const pixieLabel = pixie.mode === 'disabled'
+        ? 'Pixie: Disabled'
+        : (pixie.mode === 'observe' && pixie.connected ? 'Pixie: Observe only' : (pixie.connected ? 'Pixie: Connected' : 'Pixie: Offline'));
+      const pixieDot = document.getElementById('pixie-dot');
+      const pixieText = document.getElementById('pixie-label');
+      if (pixieDot) {
+        pixieDot.classList.remove('bg-success', 'bg-danger', 'bg-secondary');
+        pixieDot.classList.add(pixie.mode === 'disabled' ? 'bg-secondary' : (pixie.connected ? 'bg-success' : 'bg-danger'));
+      }
+      if (pixieText) pixieText.textContent = pixieLabel;
+    }
     const services = [
       {label: 'Companion', connected: !!(data && data.companion && data.companion.connected)},
       {label: 'ProPresenter', connected: !!(data && data.propresenter && data.propresenter.connected)},
@@ -135,6 +151,9 @@ async function updateStatusIndicators() {
     if (digicoEnabled) {
       services.push({label: 'DiGiCo', connected: !!data.digico.connected});
     }
+    if (pixieEnabled) {
+      services.push({label: 'Pixie', connected: !!data.pixie.connected});
+    }
     _applyMobileConnectionSummary(services);
   } catch (e) {
     _applyServiceIndicatorUnknown('companion', 'Companion');
@@ -142,6 +161,7 @@ async function updateStatusIndicators() {
     _applyServiceIndicatorUnknown('videohub', 'VideoHub');
     _applyServiceIndicatorUnknown('digico', 'DiGiCo');
     _applyServiceIndicatorUnknown('atem', 'Switcher');
+    _applyServiceIndicatorUnknown('pixie', 'Pixie');
     _applyMobileConnectionSummary(null);
   }
 }
@@ -3762,12 +3782,14 @@ if (document.getElementById('access-levels-page')) {
     const videohubCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:videohub"]');
     const digicoCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:digico_mixer"]');
     const atemCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:atem_audio"]');
+    const pixieCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:pixie_controls"]');
     const outEl = form.querySelector('[data-role="vh-outputs"]');
     const inEl = form.querySelector('[data-role="vh-inputs"]');
     const presetsEl = form.querySelector('[data-role="vh-presets"]');
     const editPresetsEl = form.querySelector('[data-role="vh-edit-presets"]');
     const digicoAuxEls = Array.from(form.querySelectorAll('[data-role="digico-aux"]'));
     const atemFields = Array.from(form.querySelectorAll('[data-role="atem-audio-field"]'));
+    const pixieScenes = Array.from(form.querySelectorAll('[data-role="pixie-scene"]'));
     if (routingCb && outEl && inEl) {
       const routingEnabled = !!routingCb.checked;
       outEl.disabled = !routingEnabled;
@@ -3786,6 +3808,23 @@ if (document.getElementById('access-levels-page')) {
       atemFields.forEach(el => {
         el.disabled = !atemEnabled;
       });
+    }
+    if (pixieCb) {
+      const pixieEnabled = !!pixieCb.checked;
+      form.querySelectorAll('[data-role="pixie-auditorium-block"]').forEach(block => {
+        const auditorium = block.querySelector('[data-role="pixie-auditorium"]');
+        const allDevices = block.querySelector('[data-role="pixie-all-devices"]');
+        const deviceFields = Array.from(block.querySelectorAll('[data-role="pixie-device"]'));
+        if (auditorium) auditorium.disabled = !pixieEnabled;
+        const auditoriumEnabled = pixieEnabled && !!(auditorium && auditorium.checked);
+        if (allDevices) allDevices.disabled = !auditoriumEnabled;
+        deviceFields.forEach(field => {
+          field.disabled = !auditoriumEnabled || !!(allDevices && allDevices.checked);
+        });
+        const scope = block.querySelector('[data-role="pixie-device-scope"]');
+        if (scope) scope.classList.toggle('opacity-50', !auditoriumEnabled);
+      });
+      pixieScenes.forEach(field => { field.disabled = !pixieEnabled; });
     }
   }
 
@@ -3806,6 +3845,17 @@ if (document.getElementById('access-levels-page')) {
     const atemAudioSourceIds = Array.from(form.querySelectorAll('input[type="checkbox"][name="atem_allowed_audio_sources_role"]:checked')).map(cb => String(cb.value || ''));
     const atemCanSoloEl = form.querySelector('input[name="atem_can_solo_audio_role"]');
     const atemCanMonitorEl = form.querySelector('input[name="atem_can_monitor_audio_role"]');
+    const pixieAuditoriumIds = Array.from(form.querySelectorAll('[data-role="pixie-auditorium"]:checked')).map(cb => String(cb.value || ''));
+    const pixieDevicePermissions = {};
+    pixieAuditoriumIds.forEach(auditoriumId => {
+      const block = form.querySelector(`[data-role="pixie-auditorium-block"][data-auditorium-id="${CSS.escape(auditoriumId)}"]`);
+      if (!block) return;
+      const allDevices = block.querySelector('[data-role="pixie-all-devices"]');
+      pixieDevicePermissions[auditoriumId] = allDevices && allDevices.checked
+        ? '*'
+        : Array.from(block.querySelectorAll('[data-role="pixie-device"]:checked')).map(cb => String(cb.value || ''));
+    });
+    const pixieSceneIds = Array.from(form.querySelectorAll('[data-role="pixie-scene"]:checked')).map(cb => String(cb.value || ''));
 
     return {
       page_keys: pageKeys,
@@ -3819,6 +3869,9 @@ if (document.getElementById('access-levels-page')) {
       atem_allowed_audio_sources_role: atemAudioSourceIds,
       atem_can_solo_audio_role: atemCanSoloEl ? !!atemCanSoloEl.checked : false,
       atem_can_monitor_audio_role: atemCanMonitorEl ? !!atemCanMonitorEl.checked : false,
+      pixie_allowed_auditoriums_role: pixieAuditoriumIds,
+      pixie_allowed_devices_role: pixieDevicePermissions,
+      pixie_allowed_scenes_role: pixieSceneIds,
     };
   }
 
@@ -3838,9 +3891,13 @@ if (document.getElementById('access-levels-page')) {
     _roleSetError(panel, '');
 
     try {
+      const csrfEl = panel.querySelector('input[name="_csrf"]');
       const res = await fetch(`/api/admin/groups/${encodeURIComponent(id)}`, {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfEl ? String(csrfEl.value || '') : '',
+        },
         body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => ({}));

@@ -235,6 +235,16 @@ except Exception:
         "hisense_certificate_profiles": [],
         "hisense_tv_groups": [],
         "hisense_tvs": [],
+        "pixie_network_mode": "disabled",
+        "pixie_gateway_host": "",
+        "pixie_home_id": "",
+        "pixie_home_name": "",
+        "pixie_net_id": "",
+        "pixie_mesh_net": "",
+        "pixie_mesh_net_2": "",
+        "pixie_auditoriums": [],
+        "pixie_devices": [],
+        "pixie_scenes": [],
         "atem_ip": "127.0.0.1",
         "atem_port": 9910,
         "atem_timeout": 3,
@@ -497,6 +507,9 @@ def _init_auth_db() -> None:
               videohub_can_edit_presets INTEGER,
               companion_click_surfaces TEXT,
               digico_allowed_auxes TEXT,
+              pixie_allowed_auditoriums TEXT,
+              pixie_allowed_devices TEXT,
+              pixie_allowed_scenes TEXT,
               atem_allowed_audio_sources TEXT,
               atem_can_solo_audio INTEGER,
               atem_can_monitor_audio INTEGER
@@ -517,6 +530,9 @@ def _init_auth_db() -> None:
             ('videohub_can_edit_presets', 'INTEGER'),
             ('companion_click_surfaces', 'TEXT'),
             ('digico_allowed_auxes', 'TEXT'),
+            ('pixie_allowed_auditoriums', 'TEXT'),
+            ('pixie_allowed_devices', 'TEXT'),
+            ('pixie_allowed_scenes', 'TEXT'),
             ('atem_allowed_audio_sources', 'TEXT'),
             ('atem_can_solo_audio', 'INTEGER'),
             ('atem_can_monitor_audio', 'INTEGER'),
@@ -882,6 +898,56 @@ def _set_group_digico_allowed_auxes(group_id: int, aux_ids) -> None:
         conn.close()
 
 
+def _coerce_pixie_device_permissions(value, allowed_auditoriums: list[str] | None = None) -> dict[str, str | list[str]]:
+    """Normalize per-auditorium Pixie device permissions.
+
+    ``"*"`` means all present and future devices in that auditorium.  Explicit
+    lists stay scoped to the same group that grants the auditorium, preventing
+    permissions from unrelated groups from combining accidentally.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = {}
+    if not isinstance(value, dict):
+        value = {}
+    allowed = set(_coerce_string_allow_list(allowed_auditoriums)) if allowed_auditoriums is not None else None
+    result: dict[str, str | list[str]] = {}
+    for raw_auditorium_id, raw_devices in value.items():
+        auditorium_id = str(raw_auditorium_id or '').strip()
+        if not auditorium_id or (allowed is not None and auditorium_id not in allowed):
+            continue
+        if raw_devices in ('*', 'all', True, None):
+            result[auditorium_id] = '*'
+        else:
+            result[auditorium_id] = _coerce_string_allow_list(raw_devices)
+    if allowed is not None:
+        for auditorium_id in allowed:
+            result.setdefault(auditorium_id, '*')
+    return result
+
+
+def _set_group_pixie_permissions(group_id: int, auditorium_ids, device_permissions, scene_ids) -> None:
+    auditorium_ids = _coerce_string_allow_list(auditorium_ids)
+    scene_ids = _coerce_string_allow_list(scene_ids)
+    device_permissions = _coerce_pixie_device_permissions(device_permissions, auditorium_ids)
+    conn = _db()
+    try:
+        conn.execute(
+            'UPDATE groups SET pixie_allowed_auditoriums=?,pixie_allowed_devices=?,pixie_allowed_scenes=? WHERE id=?',
+            (
+                json.dumps(auditorium_ids),
+                json.dumps(device_permissions, sort_keys=True),
+                json.dumps(scene_ids),
+                int(group_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _set_group_atem_audio_sources(group_id: int, source_ids) -> None:
     source_ids = _coerce_string_allow_list(source_ids)
     conn = _db()
@@ -962,6 +1028,9 @@ def _group_settings_snapshot(group_id: int) -> dict:
         'videohub_can_edit_presets': bool(int(group['videohub_can_edit_presets'] or 0)) if 'videohub_can_edit_presets' in group.keys() and group['videohub_can_edit_presets'] is not None else False,
         'companion_click_surfaces': _coerce_string_allow_list(group['companion_click_surfaces'] if 'companion_click_surfaces' in group.keys() else None),
         'digico_allowed_auxes': _coerce_string_allow_list(group['digico_allowed_auxes'] if 'digico_allowed_auxes' in group.keys() else None),
+        'pixie_allowed_auditoriums': _coerce_string_allow_list(group['pixie_allowed_auditoriums'] if 'pixie_allowed_auditoriums' in group.keys() else None),
+        'pixie_allowed_devices': _coerce_pixie_device_permissions(group['pixie_allowed_devices'] if 'pixie_allowed_devices' in group.keys() else None),
+        'pixie_allowed_scenes': _coerce_string_allow_list(group['pixie_allowed_scenes'] if 'pixie_allowed_scenes' in group.keys() else None),
         'atem_allowed_audio_sources': _coerce_string_allow_list(group['atem_allowed_audio_sources'] if 'atem_allowed_audio_sources' in group.keys() else None),
         'atem_can_solo_audio': bool(int(group['atem_can_solo_audio'] or 0)) if 'atem_can_solo_audio' in group.keys() and group['atem_can_solo_audio'] is not None else False,
         'atem_can_monitor_audio': bool(int(group['atem_can_monitor_audio'] or 0)) if 'atem_can_monitor_audio' in group.keys() and group['atem_can_monitor_audio'] is not None else False,
@@ -1051,6 +1120,25 @@ def _log_group_setting_changes(before: dict, after: dict) -> None:
             target_type='group',
             target_id=gid,
             details={'group_id': gid, 'group_name': name, 'old': before.get('digico_allowed_auxes'), 'new': after.get('digico_allowed_auxes')},
+        )
+    if _changed('pixie_allowed_auditoriums') or _changed('pixie_allowed_devices') or _changed('pixie_allowed_scenes'):
+        log_event(
+            'group.pixie.permissions.update',
+            f"Updated Pixie Controls permissions for group '{name}'",
+            source=source,
+            status='success',
+            target_type='group',
+            target_id=gid,
+            details={
+                'group_id': gid,
+                'group_name': name,
+                'old_auditoriums': before.get('pixie_allowed_auditoriums'),
+                'new_auditoriums': after.get('pixie_allowed_auditoriums'),
+                'old_devices': before.get('pixie_allowed_devices'),
+                'new_devices': after.get('pixie_allowed_devices'),
+                'old_scenes': before.get('pixie_allowed_scenes'),
+                'new_scenes': after.get('pixie_allowed_scenes'),
+            },
         )
     if _changed('atem_allowed_audio_sources') or _changed('atem_can_solo_audio') or _changed('atem_can_monitor_audio'):
         log_event(
@@ -1312,6 +1400,46 @@ def _effective_digico_aux_ids_for_user(user_id: int | None) -> list[str]:
         _get_user_groups_for_page(user_id, 'page:digico_mixer'),
         'digico_allowed_auxes',
     )
+
+
+def _effective_pixie_permissions_for_user(user_id: int | None) -> dict[str, Any]:
+    """Union Pixie grants while keeping device scope tied to its auditorium grant."""
+    if not _auth_enabled() or (user_id is not None and _user_is_admin(user_id)):
+        return {'all': True, 'auditoriums': {}, 'scenes': []}
+    if user_id is None:
+        return {'all': False, 'auditoriums': {}, 'scenes': []}
+    rows = _get_user_groups_for_page(user_id, 'page:pixie_controls')
+    auditorium_permissions: dict[str, None | set[str]] = {}
+    scenes: set[str] = set()
+    for row in rows:
+        auditorium_ids = _coerce_string_allow_list(
+            row['pixie_allowed_auditoriums'] if 'pixie_allowed_auditoriums' in row.keys() else None
+        )
+        device_map = _coerce_pixie_device_permissions(
+            row['pixie_allowed_devices'] if 'pixie_allowed_devices' in row.keys() else None,
+            auditorium_ids,
+        )
+        for auditorium_id in auditorium_ids:
+            permission = device_map.get(auditorium_id, '*')
+            if permission == '*':
+                auditorium_permissions[auditorium_id] = None
+                continue
+            if auditorium_id in auditorium_permissions and auditorium_permissions[auditorium_id] is None:
+                continue
+            allowed = auditorium_permissions.setdefault(auditorium_id, set())
+            if isinstance(allowed, set):
+                allowed.update(_coerce_string_allow_list(permission))
+        scenes.update(_coerce_string_allow_list(
+            row['pixie_allowed_scenes'] if 'pixie_allowed_scenes' in row.keys() else None
+        ))
+    return {
+        'all': False,
+        'auditoriums': {
+            auditorium_id: None if device_ids is None else sorted(device_ids)
+            for auditorium_id, device_ids in auditorium_permissions.items()
+        },
+        'scenes': sorted(scenes),
+    }
 
 
 def _effective_atem_audio_source_ids_for_user(user_id: int | None) -> list[str]:
@@ -2586,6 +2714,7 @@ _PAGE_LANDING_PATHS = (
     ('page:videohub', '/videohub'),
     ('page:atem_audio', '/foyer-audio'),
     ('page:routing', '/routing'),
+    ('page:pixie_controls', '/pixie'),
     ('page:digico_mixer', '/personal-mixes'),
     ('page:surface_controls', '/surface-controls'),
     ('page:templates', '/templates'),
@@ -3384,6 +3513,24 @@ except Exception:
     _close_hisense_manager = None  # type: ignore
     _hisense_manager_factory = None  # type: ignore
 
+# Optional direct SAL Pixie Plus Gateway integration
+try:
+    from pixie import (
+        close_pixie_manager as _close_pixie_manager,
+        discover_gateways as _pixie_discover_gateways,
+        get_pixie_manager_from_config as _pixie_manager_factory,
+        load_pixie_secrets as _load_pixie_secrets,
+        provision_pixie_cloud as _provision_pixie_cloud,
+        save_pixie_secrets as _save_pixie_secrets,
+    )
+except Exception:
+    _close_pixie_manager = None  # type: ignore
+    _pixie_discover_gateways = None  # type: ignore
+    _pixie_manager_factory = None  # type: ignore
+    _load_pixie_secrets = None  # type: ignore
+    _provision_pixie_cloud = None  # type: ignore
+    _save_pixie_secrets = None  # type: ignore
+
 # Optional Blackmagic ATEM audio integration
 try:
     from atem import AtemAudioClient, get_atem_client_from_config, DEFAULT_PORT as ATEM_DEFAULT_PORT
@@ -3455,6 +3602,19 @@ def _get_hisense_manager_from_config():
         return None
 
 
+def _get_pixie_manager_from_config():
+    if _pixie_manager_factory is None:
+        return None
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    try:
+        return _pixie_manager_factory(cfg, base_dir=_APP_ROOT)
+    except Exception:
+        return None
+
+
 def _digico_aux_options() -> list[dict]:
     """Return discovered/configured AUX choices without failing the admin UI."""
     try:
@@ -3480,6 +3640,42 @@ def _digico_aux_options() -> list[dict]:
             'enabled': bool(item.get('enabled', True)),
         })
     return out
+
+
+def _pixie_permission_catalog() -> dict[str, list[dict[str, Any]]]:
+    """Return saved Pixie arrangement metadata without touching the Gateway."""
+    try:
+        cfg = utils.get_config()
+    except Exception:
+        cfg = {}
+    raw_devices = cfg.get('pixie_devices') if isinstance(cfg.get('pixie_devices'), list) else []
+    devices = {
+        str(item.get('id')): {
+            'id': str(item.get('id')),
+            'name': str(item.get('name') or item.get('original_name') or item.get('id')),
+        }
+        for item in raw_devices if isinstance(item, dict) and str(item.get('id') or '').strip()
+    }
+    auditoriums = []
+    for item in cfg.get('pixie_auditoriums') if isinstance(cfg.get('pixie_auditoriums'), list) else []:
+        if not isinstance(item, dict) or not str(item.get('id') or '').strip():
+            continue
+        member_ids = [str(value) for value in item.get('device_ids') if str(value or '').strip()] if isinstance(item.get('device_ids'), list) else []
+        auditoriums.append({
+            'id': str(item['id']),
+            'name': str(item.get('name') or item['id']),
+            'devices': [devices[device_id] for device_id in member_ids if device_id in devices],
+        })
+    scenes = []
+    for item in cfg.get('pixie_scenes') if isinstance(cfg.get('pixie_scenes'), list) else []:
+        if not isinstance(item, dict) or not str(item.get('id') or '').strip():
+            continue
+        scenes.append({
+            'id': str(item['id']),
+            'name': str(item.get('name') or item.get('original_name') or item['id']),
+            'enabled': bool(item.get('enabled', True)),
+        })
+    return {'auditoriums': auditoriums, 'scenes': scenes}
 
 
 def _get_atem_client_from_config():
@@ -3620,6 +3816,7 @@ _videohub_status_cache = {'ts': 0.0, 'connected': False}
 _digico_status_cache = {'ts': 0.0, 'connected': False}
 _atem_status_cache = {'ts': 0.0, 'connected': False}
 _hisense_status_cache = {'ts': 0.0, 'connected': False}
+_pixie_status_cache = {'ts': 0.0, 'connected': False}
 _status_snapshot_cache = {'ts': 0.0, 'payload': None}
 _videohub_labels_cache = {'ts': 0.0, 'payload': None}
 _videohub_state_cache = {'ts': 0.0, 'payload': None}
@@ -3644,6 +3841,7 @@ _connectivity_last: dict[str, bool | None] = {
     'digico': None,
     'atem': None,
     'hisense': None,
+    'pixie': None,
 }
 
 
@@ -3661,6 +3859,7 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
         'digico': 'DiGiCo',
         'atem': 'ATEM',
         'hisense': 'Hisense TVs',
+        'pixie': 'Pixie',
     }.get(service, service)
 
     should_log = False
@@ -3869,6 +4068,31 @@ def _probe_hisense_status(cfg: dict) -> dict:
     }
 
 
+def _probe_pixie_status(cfg: dict) -> dict:
+    mode = str(cfg.get('pixie_network_mode') or 'disabled').strip().lower()
+    manager = _get_pixie_manager_from_config()
+    status = manager.status() if manager is not None else {}
+    host = str(status.get('gatewayHost') or cfg.get('pixie_gateway_host') or '').strip()
+    if mode == 'disabled':
+        detail = 'disabled'
+    elif status.get('connected'):
+        detail = 'observe only' if mode == 'observe' else 'connected'
+    else:
+        detail = str(status.get('lastError') or (f'{host} offline' if host else 'not configured'))
+    return {
+        'connected': bool(status.get('connected', False)),
+        'control_ready': bool(status.get('controlReady', False)),
+        'enabled': mode != 'disabled',
+        'mode': mode,
+        'available': bool(status.get('available', manager is not None)),
+        'detail': detail,
+        'last_error': str(status.get('lastError') or ''),
+        'device_count': int(status.get('deviceCount', 0) or 0),
+        'scene_count': int(status.get('sceneCount', 0) or 0),
+        'checked_at': time.time(),
+    }
+
+
 def _probe_scheduler_status(cfg: dict) -> dict:
     """Return the real calendar worker state, not merely object existence."""
     checked_at = time.time()
@@ -3941,6 +4165,7 @@ def _refresh_status_snapshot() -> dict:
     digico = _probe_digico_status(cfg)
     atem = _probe_atem_status(cfg)
     hisense = _probe_hisense_status(cfg)
+    pixie = _probe_pixie_status(cfg)
     scheduler = _probe_scheduler_status(cfg)
     now = time.time()
 
@@ -3953,6 +4178,7 @@ def _refresh_status_snapshot() -> dict:
         'digico': digico,
         'atem': atem,
         'hisense': hisense,
+        'pixie': pixie,
         'scheduler': scheduler,
     }
 
@@ -3971,6 +4197,8 @@ def _refresh_status_snapshot() -> dict:
         _atem_status_cache['connected'] = bool(atem.get('connected', False))
         _hisense_status_cache['ts'] = hisense.get('checked_at', now)
         _hisense_status_cache['connected'] = bool(hisense.get('connected', False))
+        _pixie_status_cache['ts'] = pixie.get('checked_at', now)
+        _pixie_status_cache['connected'] = bool(pixie.get('connected', False))
 
     _log_connectivity_change('companion', bool(companion.get('connected', False)), detail=str(companion.get('detail') or ''))
     _log_connectivity_change('propresenter', bool(propresenter.get('connected', False)), detail=str(propresenter.get('detail') or ''))
@@ -3980,6 +4208,8 @@ def _refresh_status_snapshot() -> dict:
     _log_connectivity_change('atem', bool(atem.get('connected', False)), detail=str(atem.get('detail') or ''))
     if bool(hisense.get('enabled', False)):
         _log_connectivity_change('hisense', bool(hisense.get('connected', False)), detail=str(hisense.get('detail') or ''))
+    if bool(pixie.get('enabled', False)):
+        _log_connectivity_change('pixie', bool(pixie.get('connected', False)), detail=str(pixie.get('detail') or ''))
 
     return payload
 
@@ -4046,6 +4276,10 @@ def start_http_server(host: str, port: int) -> None:
         except Exception:
             pass
         try:
+            _get_pixie_manager_from_config()
+        except Exception:
+            pass
+        try:
             _refresh_status_snapshot()
         except Exception:
             pass
@@ -4072,6 +4306,11 @@ def stop_http_server() -> None:
         try:
             if _close_hisense_manager is not None:
                 _close_hisense_manager()
+        except Exception:
+            pass
+        try:
+            if _close_pixie_manager is not None:
+                _close_pixie_manager()
         except Exception:
             pass
         _http_server = None
@@ -4532,7 +4771,7 @@ def admin_permissions_page():
     conn = _db()
     try:
         groups = conn.execute(
-            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,digico_allowed_auxes,atem_allowed_audio_sources,atem_can_solo_audio,atem_can_monitor_audio FROM groups ORDER BY is_system DESC, lower(name)'
+            'SELECT id,name,is_system,is_admin,auth_idle_timeout_minutes_override,videohub_allowed_outputs,videohub_allowed_inputs,videohub_allowed_presets,videohub_can_edit_presets,companion_click_surfaces,digico_allowed_auxes,pixie_allowed_auditoriums,pixie_allowed_devices,pixie_allowed_scenes,atem_allowed_audio_sources,atem_can_solo_audio,atem_can_monitor_audio FROM groups ORDER BY is_system DESC, lower(name)'
         ).fetchall()
         group_pages = conn.execute('SELECT group_id,page_key FROM group_pages').fetchall()
         group_users = conn.execute(
@@ -4579,6 +4818,7 @@ def admin_permissions_page():
     group_to_vh: dict[int, dict[str, str]] = {}
     group_to_companion: dict[int, dict[str, list[str]]] = {}
     group_to_digico: dict[int, dict[str, list[str]]] = {}
+    group_to_pixie: dict[int, dict[str, Any]] = {}
     group_to_atem: dict[int, dict[str, Any]] = {}
     for g in groups or []:
         try:
@@ -4625,6 +4865,12 @@ def admin_permissions_page():
         group_to_digico[gid] = {
             'allowed_auxes': _coerce_string_allow_list(g['digico_allowed_auxes']),
         }
+        pixie_auditoriums = _coerce_string_allow_list(g['pixie_allowed_auditoriums'])
+        group_to_pixie[gid] = {
+            'auditoriums': pixie_auditoriums,
+            'devices': _coerce_pixie_device_permissions(g['pixie_allowed_devices'], pixie_auditoriums),
+            'scenes': _coerce_string_allow_list(g['pixie_allowed_scenes']),
+        }
         try:
             atem_can_solo = bool(int(g['atem_can_solo_audio'] or 0))
         except Exception:
@@ -4664,6 +4910,8 @@ def admin_permissions_page():
         group_to_companion=group_to_companion,
         group_to_digico=group_to_digico,
         digico_auxes=_digico_aux_options(),
+        group_to_pixie=group_to_pixie,
+        pixie_catalog=_pixie_permission_catalog(),
         group_to_atem=group_to_atem,
         atem_audio_sources=_get_atem_audio_sources_for_permissions(),
         companion_surfaces=_load_companion_surfaces(),
@@ -4685,6 +4933,13 @@ def admin_groups_page():
 @require_page('page:admin', 'Admin')
 def api_admin_group_update(group_id: int):
     """Update group settings via JSON (used by Groups auto-save UI)."""
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        if not can_access('page:admin'):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+        if not _validate_csrf():
+            return jsonify({'ok': False, 'error': 'invalid CSRF token'}), 400
     try:
         data = request.get_json(silent=True) or {}
     except Exception:
@@ -4760,6 +5015,19 @@ def api_admin_group_update(group_id: int):
             keys_set = set([str(k) for k in (data.get('page_keys') or [])])
             if 'page:digico_mixer' in keys_set and 'digico_allowed_auxes_role' in data:
                 _set_group_digico_allowed_auxes(gid, data.get('digico_allowed_auxes_role'))
+        except Exception:
+            pass
+
+        # Pixie auditorium, same-auditorium device, and scene grants.
+        try:
+            keys_set = set([str(k) for k in (data.get('page_keys') or [])])
+            if 'page:pixie_controls' in keys_set:
+                _set_group_pixie_permissions(
+                    gid,
+                    data.get('pixie_allowed_auditoriums_role'),
+                    data.get('pixie_allowed_devices_role'),
+                    data.get('pixie_allowed_scenes_role'),
+                )
         except Exception:
             pass
 
@@ -5684,6 +5952,12 @@ def timers_page():
     return render_template('timers.html')
 
 
+@app.route('/pixie')
+@require_page('page:pixie_controls', 'Pixie Controls')
+def pixie_controls_page():
+    return render_template('pixie_controls.html')
+
+
 @app.route('/personal-mixes')
 @require_page('page:digico_mixer', 'Personal Mixes')
 def personal_mixes_page():
@@ -5705,6 +5979,12 @@ def digico_config_page():
 @require_page('page:config', 'Config')
 def hisense_config_page():
     return render_template('hisense_setup.html')
+
+
+@app.route('/config/pixie')
+@require_page('page:config', 'Config')
+def pixie_config_page():
+    return render_template('pixie_setup.html')
 
 
 @app.route('/config/export', methods=['GET', 'POST'])
@@ -7426,6 +7706,33 @@ def api_digico_mixer_config():
     return jsonify({'ok': True, **_digico_filtered_mixer_config(client), 'status': client.status()})
 
 
+@app.route('/api/digico/input-meters')
+def api_digico_input_meters():
+    denied = _digico_api_guard()
+    if denied is not None:
+        return denied
+    client = _get_digico_client_from_config()
+    if client is None:
+        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+    try:
+        payload = client.input_meter_state()
+        current_revision = int(payload.get('revision', 0) or 0)
+        known_revision = request.args.get('revision')
+        try:
+            known_revision_number = int(known_revision) if known_revision is not None else None
+        except Exception:
+            known_revision_number = None
+        if known_revision_number is not None and known_revision_number == current_revision:
+            return jsonify({
+                'ok': True,
+                'unchanged': True,
+                'revision': current_revision,
+            })
+        return jsonify({'ok': True, **payload})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 503
+
+
 @app.route('/api/digico/aux/<int:aux_number>/state')
 def api_digico_aux_state(aux_number: int):
     denied = _digico_api_guard(aux_number=aux_number)
@@ -7570,14 +7877,16 @@ def _hisense_manager_or_error():
 
 def _hisense_log(action: str, tv_id: str, *, value: Any = None, result: dict | None = None) -> None:
     ok = bool((result or {}).get('ok', False))
+    pending = bool((result or {}).get('pending', False))
     is_group = str(tv_id).startswith('group:')
     target_label = 'TV group' if is_group else 'TV'
+    pending_suffix = ' (awaiting TV confirmation)' if pending else ''
     try:
         log_event(
             f'hisense.{action}',
-            f"{target_label} {tv_id}: {action.replace('_', ' ')}{' ' + str(value) if value not in (None, '') else ''}",
+            f"{target_label} {tv_id}: {action.replace('_', ' ')}{' ' + str(value) if value not in (None, '') else ''}{pending_suffix}",
             source='api',
-            status='success' if ok else 'failure',
+            status='warning' if ok and pending else ('success' if ok else 'failure'),
             target_type='hisense_tv_group' if is_group else 'hisense_tv',
             target_id=tv_id,
             details={'action': action, 'value': value, 'result': result or {}},
@@ -7924,6 +8233,616 @@ def api_hisense_tv_pair_submit(tv_id: str):
         return access_error
     body = request.get_json(silent=True) or {}
     return _hisense_submit(tv_id, 'pair_submit', str(body.get('pin') or '').strip(), wait=7.0)
+
+
+def _pixie_api_guard(*, config_only: bool = False, require_csrf: bool = False):
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        page_key = 'page:config' if config_only else 'page:pixie_controls'
+        if not can_access(page_key):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+        if require_csrf and not _validate_csrf():
+            return jsonify({'ok': False, 'error': 'invalid CSRF token'}), 400
+    return None
+
+
+def _pixie_slug(value: Any, fallback: str = '') -> str:
+    value = re.sub(r'[^a-z0-9_-]+', '-', str(value or '').strip().lower()).strip('-')
+    return value or fallback
+
+
+def _pixie_catalog(cfg: dict, status: dict | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Merge saved names/order with live inventory without losing missing devices."""
+    status = status if isinstance(status, dict) else {}
+    live_devices = {
+        str(item.get('id')): item
+        for item in status.get('devices') if isinstance(status.get('devices'), list) and isinstance(item, dict) and str(item.get('id') or '').strip()
+    }
+    live_scenes = {
+        str(item.get('id')): item
+        for item in status.get('scenes') if isinstance(status.get('scenes'), list) and isinstance(item, dict) and str(item.get('id') or '').strip()
+    }
+    saved_devices = cfg.get('pixie_devices') if isinstance(cfg.get('pixie_devices'), list) else []
+    saved_scenes = cfg.get('pixie_scenes') if isinstance(cfg.get('pixie_scenes'), list) else []
+
+    devices: list[dict[str, Any]] = []
+    seen_devices: set[str] = set()
+    for raw in [*saved_devices, *[item for ident, item in live_devices.items() if ident not in {str(v.get('id')) for v in saved_devices if isinstance(v, dict)}]]:
+        if not isinstance(raw, dict):
+            continue
+        ident = str(raw.get('id') or '').strip()
+        if not ident or ident in seen_devices:
+            continue
+        seen_devices.add(ident)
+        live = live_devices.get(ident, {})
+        original_name = str(live.get('name') or raw.get('original_name') or raw.get('name') or ident)
+        detected_kind = str(live.get('kind') or raw.get('detected_kind') or 'unknown')
+        control_type = str(raw.get('control_type') or 'automatic').strip().lower()
+        if control_type not in ('automatic', 'dimmer', 'on_off'):
+            control_type = 'automatic'
+        resolved_type = control_type if control_type != 'automatic' else (
+            'dimmer' if detected_kind == 'dimmer' else 'on_off' if detected_kind == 'switch' else 'unknown'
+        )
+        online = live.get('online') if isinstance(live.get('online'), bool) else None
+        devices.append({
+            'id': ident,
+            'name': str(raw.get('name') or original_name),
+            'original_name': original_name,
+            'model': str(live.get('model') or raw.get('model') or ''),
+            'detected_kind': detected_kind,
+            'control_type': control_type,
+            'resolved_type': resolved_type,
+            'online': online,
+            'on': live.get('on'),
+            'brightness': live.get('brightness'),
+            'missing': ident not in live_devices,
+        })
+
+    scenes: list[dict[str, Any]] = []
+    seen_scenes: set[str] = set()
+    saved_scene_ids = {str(v.get('id')) for v in saved_scenes if isinstance(v, dict)}
+    for raw in [*saved_scenes, *[item for ident, item in live_scenes.items() if ident not in saved_scene_ids]]:
+        if not isinstance(raw, dict):
+            continue
+        ident = str(raw.get('id') or '').strip()
+        if not ident or ident in seen_scenes:
+            continue
+        seen_scenes.add(ident)
+        live = live_scenes.get(ident, {})
+        original_name = str(live.get('name') or raw.get('original_name') or raw.get('name') or ident)
+        scenes.append({
+            'id': ident,
+            'name': str(raw.get('name') or original_name),
+            'original_name': original_name,
+            'enabled': bool(raw.get('enabled', True)),
+            'missing': ident not in live_scenes,
+        })
+
+    auditoriums: list[dict[str, Any]] = []
+    seen_auditoriums: set[str] = set()
+    assigned: set[str] = set()
+    for raw in cfg.get('pixie_auditoriums') if isinstance(cfg.get('pixie_auditoriums'), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        ident = _pixie_slug(raw.get('id'))
+        if not ident or ident in seen_auditoriums:
+            continue
+        seen_auditoriums.add(ident)
+        member_ids = []
+        for value in raw.get('device_ids') if isinstance(raw.get('device_ids'), list) else []:
+            device_id = str(value or '').strip()
+            if device_id and device_id in seen_devices and device_id not in assigned:
+                member_ids.append(device_id)
+                assigned.add(device_id)
+        auditoriums.append({'id': ident, 'name': str(raw.get('name') or ident), 'device_ids': member_ids})
+    return {'auditoriums': auditoriums, 'devices': devices, 'scenes': scenes}
+
+
+def _pixie_saved_catalog_payload(cfg: dict, status: dict) -> dict[str, Any]:
+    catalog = _pixie_catalog(cfg, status)
+    return {
+        'pixie_auditoriums': catalog['auditoriums'],
+        'pixie_devices': [{
+            key: item.get(key) for key in ('id', 'name', 'original_name', 'model', 'detected_kind', 'control_type', 'online', 'missing')
+        } for item in catalog['devices']],
+        'pixie_scenes': [{
+            key: item.get(key) for key in ('id', 'name', 'original_name', 'enabled', 'missing')
+        } for item in catalog['scenes']],
+    }
+
+
+def _pixie_current_permissions() -> dict[str, Any]:
+    if not _auth_enabled():
+        return {'all': True, 'auditoriums': {}, 'scenes': []}
+    try:
+        return _effective_pixie_permissions_for_user(int(current_user.get_id()))
+    except Exception:
+        return {'all': False, 'auditoriums': {}, 'scenes': []}
+
+
+def _pixie_operator_payload(cfg: dict, status: dict, selected_auditorium_id: str = '') -> dict[str, Any]:
+    catalog = _pixie_catalog(cfg, status)
+    permissions = _pixie_current_permissions()
+    allow_all = bool(permissions.get('all'))
+    allowed_auditoriums = permissions.get('auditoriums') if isinstance(permissions.get('auditoriums'), dict) else {}
+    allowed_scenes = set(_coerce_string_allow_list(permissions.get('scenes')))
+    device_by_id = {item['id']: item for item in catalog['devices']}
+
+    auditoriums = []
+    selected_devices = []
+    selected_allowed = False
+    for auditorium in catalog['auditoriums']:
+        auditorium_id = auditorium['id']
+        if not allow_all and auditorium_id not in allowed_auditoriums:
+            continue
+        device_scope = None if allow_all else allowed_auditoriums.get(auditorium_id)
+        visible_devices = []
+        for device_id in auditorium['device_ids']:
+            if device_scope is not None and device_id not in set(_coerce_string_allow_list(device_scope)):
+                continue
+            device = device_by_id.get(device_id)
+            if not device or device.get('resolved_type') == 'unknown':
+                continue
+            visible_devices.append({
+                'id': device['id'],
+                'name': device['name'],
+                'controlType': device['resolved_type'],
+                'online': device.get('online') if isinstance(device.get('online'), bool) else None,
+                'on': device.get('on'),
+                'brightness': device.get('brightness'),
+                # A missing device or an explicit offline signal is disabled.
+                # Unknown reachability remains operable because the Gateway's
+                # numeric `online` inventory field is not a live status flag.
+                'disabled': bool(device.get('missing')) or device.get('online') is False,
+            })
+        auditoriums.append({'id': auditorium_id, 'name': auditorium['name'], 'deviceCount': len(visible_devices)})
+        if selected_auditorium_id == auditorium_id:
+            selected_allowed = True
+            selected_devices = visible_devices
+
+    if selected_auditorium_id and not selected_allowed:
+        raise PermissionError('This auditorium is not assigned to your group.')
+
+    scenes = [
+        {'id': scene['id'], 'name': scene['name'], 'available': not bool(scene.get('missing'))}
+        for scene in catalog['scenes']
+        if bool(scene.get('enabled', True)) and (allow_all or scene['id'] in allowed_scenes)
+    ]
+    return {
+        'ok': True,
+        'mode': str(status.get('mode') or cfg.get('pixie_network_mode') or 'disabled'),
+        'connected': bool(status.get('connected', False)),
+        'controlReady': bool(status.get('controlReady', False)),
+        'lastError': str(status.get('lastError') or ''),
+        'reachabilityAvailable': bool(status.get('reachabilityAvailable', False)),
+        'reachabilityStale': bool(status.get('reachabilityStale', False)),
+        'auditoriums': auditoriums,
+        'selectedAuditoriumId': selected_auditorium_id,
+        'devices': selected_devices,
+        'scenes': scenes,
+    }
+
+
+@app.get('/api/pixie/config')
+def api_pixie_config_get():
+    access_error = _pixie_api_guard(config_only=True)
+    if access_error:
+        return access_error
+    cfg = utils.get_config()
+    manager = _get_pixie_manager_from_config()
+    refresh = str(request.args.get('refresh') or '').lower() in ('1', 'true', 'yes')
+    status = (manager.refresh_inventory(force=True) if refresh else manager.status()) if manager is not None else {'available': False, 'lastError': 'Pixie support is unavailable'}
+    secrets_value = _load_pixie_secrets(_APP_ROOT) if _load_pixie_secrets is not None else None
+    fields = {
+        key: cfg.get(key) for key in (
+            'pixie_network_mode', 'pixie_gateway_host', 'pixie_home_id', 'pixie_home_name',
+            'pixie_net_id', 'pixie_mesh_net', 'pixie_mesh_net_2',
+        )
+    }
+    fields.update(_pixie_saved_catalog_payload(cfg, status))
+    fields['pixie_username'] = str(getattr(secrets_value, 'username', '') or '')
+    fields['pixie_password_configured'] = bool(str(getattr(secrets_value, 'password', '') or ''))
+    return jsonify({'ok': True, 'config': fields, 'status': status})
+
+
+@app.post('/api/pixie/discover')
+def api_pixie_discover():
+    access_error = _pixie_api_guard(config_only=True, require_csrf=True)
+    if access_error:
+        return access_error
+    if _pixie_discover_gateways is None:
+        return jsonify({'ok': False, 'error': 'Pixie support is unavailable'}), 503
+    try:
+        gateways = _pixie_discover_gateways(5.0)
+        return jsonify({'ok': True, 'gateways': gateways})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+
+
+@app.post('/api/pixie/homes')
+def api_pixie_homes():
+    access_error = _pixie_api_guard(config_only=True, require_csrf=True)
+    if access_error:
+        return access_error
+    if _provision_pixie_cloud is None:
+        return jsonify({'ok': False, 'error': 'Pixie support is unavailable'}), 503
+    body = request.get_json(silent=True) or {}
+    stored = _load_pixie_secrets(_APP_ROOT) if _load_pixie_secrets is not None else None
+    username = str(body.get('username') or getattr(stored, 'username', '') or '').strip()
+    password = str(body.get('password') or getattr(stored, 'password', '') or '')
+    try:
+        provisioning = _provision_pixie_cloud(username, password)
+        homes = [{
+            'id': str(home.get('objectId') or ''),
+            'name': str(home.get('name') or home.get('objectId') or ''),
+        } for home in provisioning.get('homes') or []]
+        return jsonify({'ok': True, 'homes': homes, 'currentHomeId': provisioning.get('login', {}).get('currentHomeId')})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+
+
+def _normalize_pixie_setup_lists(body: dict, cfg: dict, status: dict) -> dict[str, Any]:
+    merged = _pixie_catalog(cfg, status)
+    known_devices = {item['id']: item for item in merged['devices']}
+    known_scenes = {item['id']: item for item in merged['scenes']}
+
+    raw_devices = body.get('pixie_devices')
+    if not isinstance(raw_devices, list):
+        raise ValueError('pixie_devices must be a list')
+    devices = []
+    seen_devices: set[str] = set()
+    for index, raw in enumerate(raw_devices):
+        if not isinstance(raw, dict):
+            raise ValueError(f'Device {index + 1} is invalid')
+        ident = str(raw.get('id') or '').strip()
+        if not ident or ident in seen_devices or ident not in known_devices:
+            raise ValueError(f'Device {index + 1} has an invalid or duplicate ID')
+        seen_devices.add(ident)
+        existing = known_devices[ident]
+        control_type = str(raw.get('control_type') or 'automatic').strip().lower()
+        if control_type not in ('automatic', 'dimmer', 'on_off'):
+            raise ValueError(f'Device {ident} has an invalid control type')
+        devices.append({
+            'id': ident,
+            'name': str(raw.get('name') or existing['original_name']).strip() or existing['original_name'],
+            'original_name': existing['original_name'],
+            'model': existing.get('model') or '',
+            'detected_kind': existing.get('detected_kind') or 'unknown',
+            'control_type': control_type,
+        })
+
+    raw_auditoriums = body.get('pixie_auditoriums')
+    if not isinstance(raw_auditoriums, list):
+        raise ValueError('pixie_auditoriums must be a list')
+    auditoriums = []
+    auditorium_ids: set[str] = set()
+    assigned: set[str] = set()
+    for index, raw in enumerate(raw_auditoriums):
+        if not isinstance(raw, dict):
+            raise ValueError(f'Auditorium {index + 1} is invalid')
+        ident = _pixie_slug(raw.get('id'))
+        if not ident or ident in auditorium_ids:
+            raise ValueError(f'Auditorium {index + 1} needs a unique name and ID')
+        auditorium_ids.add(ident)
+        member_ids = []
+        for value in raw.get('device_ids') if isinstance(raw.get('device_ids'), list) else []:
+            device_id = str(value or '').strip()
+            if device_id in seen_devices and device_id not in assigned:
+                assigned.add(device_id)
+                member_ids.append(device_id)
+        auditoriums.append({'id': ident, 'name': str(raw.get('name') or ident).strip(), 'device_ids': member_ids})
+
+    raw_scenes = body.get('pixie_scenes')
+    if not isinstance(raw_scenes, list):
+        raise ValueError('pixie_scenes must be a list')
+    scenes = []
+    seen_scenes: set[str] = set()
+    for index, raw in enumerate(raw_scenes):
+        if not isinstance(raw, dict):
+            raise ValueError(f'Scene {index + 1} is invalid')
+        ident = str(raw.get('id') or '').strip()
+        if not ident or ident in seen_scenes or ident not in known_scenes:
+            raise ValueError(f'Scene {index + 1} has an invalid or duplicate ID')
+        seen_scenes.add(ident)
+        existing = known_scenes[ident]
+        scenes.append({
+            'id': ident,
+            'name': str(raw.get('name') or existing['original_name']).strip() or existing['original_name'],
+            'original_name': existing['original_name'],
+            'enabled': bool(raw.get('enabled', True)),
+        })
+    return {'pixie_auditoriums': auditoriums, 'pixie_devices': devices, 'pixie_scenes': scenes}
+
+
+@app.put('/api/pixie/config')
+def api_pixie_config_put():
+    access_error = _pixie_api_guard(config_only=True, require_csrf=True)
+    if access_error:
+        return access_error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
+    cfg = utils.get_config()
+    old_cfg = copy.deepcopy(cfg)
+    manager = _get_pixie_manager_from_config()
+    status = manager.status() if manager is not None else {}
+    stored = _load_pixie_secrets(_APP_ROOT) if _load_pixie_secrets is not None else None
+    username = str(body.get('pixie_username') or getattr(stored, 'username', '') or '').strip()
+    password = str(body.get('pixie_password') or getattr(stored, 'password', '') or '')
+    mode = str(body.get('pixie_network_mode') or 'disabled').strip().lower()
+    if mode not in ('disabled', 'observe', 'control'):
+        return jsonify({'ok': False, 'error': 'Network mode must be disabled, observe, or control'}), 400
+    gateway_host = str(body.get('pixie_gateway_host') or '').strip()
+    home_id = str(body.get('pixie_home_id') or '').strip()
+    try:
+        lists = _normalize_pixie_setup_lists(body, cfg, status)
+        connection = {
+            'pixie_network_mode': mode,
+            'pixie_gateway_host': gateway_host,
+            'pixie_home_id': home_id,
+            'pixie_home_name': str(cfg.get('pixie_home_name') or ''),
+            'pixie_net_id': str(cfg.get('pixie_net_id') or ''),
+            'pixie_mesh_net': str(cfg.get('pixie_mesh_net') or ''),
+            'pixie_mesh_net_2': str(cfg.get('pixie_mesh_net_2') or ''),
+        }
+        credentials_changed = username != str(getattr(stored, 'username', '') or '') or bool(body.get('pixie_password'))
+        home_changed = home_id != str(cfg.get('pixie_home_id') or '')
+        needs_provision = mode != 'disabled' and (
+            credentials_changed or home_changed or not connection['pixie_net_id'] or not connection['pixie_mesh_net_2']
+        )
+        if needs_provision:
+            if _provision_pixie_cloud is None:
+                raise RuntimeError('Pixie support is unavailable')
+            provisioning = _provision_pixie_cloud(username, password)
+            homes = provisioning.get('homes') or []
+            selected_id = home_id or str(provisioning.get('login', {}).get('currentHomeId') or '')
+            selected = next((home for home in homes if str(home.get('objectId')) == selected_id), None)
+            if selected is None and len(homes) == 1:
+                selected = homes[0]
+            if selected is None:
+                choices = ', '.join(f"{home.get('name')} ({home.get('objectId')})" for home in homes)
+                raise ValueError(f"Select a Pixie Home; available Homes: {choices or 'none'}")
+            connection.update({
+                'pixie_home_id': str(selected.get('objectId') or ''),
+                'pixie_home_name': str(selected.get('name') or selected.get('objectId') or ''),
+                'pixie_net_id': str(selected.get('netId') or ''),
+                'pixie_mesh_net': str(selected.get('meshNet') or ''),
+                'pixie_mesh_net_2': str(selected.get('meshNet2') or ''),
+            })
+            if not connection['pixie_net_id'] or not connection['pixie_mesh_net_2']:
+                raise ValueError('The selected Pixie Home did not provide Net ID and Mesh Net 2')
+
+        cfg.update(connection)
+        cfg.update(lists)
+        if _save_pixie_secrets is None:
+            raise RuntimeError('Pixie secrets support is unavailable')
+        _save_pixie_secrets(_APP_ROOT, username, password)
+        utils.save_config(cfg)
+        utils.reload_config(force=True)
+        if _close_pixie_manager is not None:
+            _close_pixie_manager()
+        restarted = _get_pixie_manager_from_config()
+        new_status = restarted.status() if restarted is not None else {'available': False, 'lastError': 'Pixie support is unavailable'}
+        changed_keys = sorted(key for key in set(old_cfg) | set(cfg) if old_cfg.get(key) != cfg.get(key))
+        log_event(
+            'pixie.config.update',
+            f"Updated Pixie configuration ({len(lists['pixie_auditoriums'])} auditoriums, {len(lists['pixie_devices'])} devices, {len(lists['pixie_scenes'])} scenes)",
+            source='web',
+            status='success' if not new_status.get('lastError') else 'warning',
+            target_type='config',
+            target_id='pixie',
+            details={
+                'changed_keys': changed_keys,
+                'network_mode': mode,
+                'gateway_host': gateway_host,
+                'home_id': connection['pixie_home_id'],
+                'auditorium_ids': [item['id'] for item in lists['pixie_auditoriums']],
+                'device_count': len(lists['pixie_devices']),
+                'scene_count': len(lists['pixie_scenes']),
+                'connection_ready': bool(new_status.get('controlReady')),
+                'connection_error': str(new_status.get('lastError') or ''),
+            },
+        )
+        return jsonify({'ok': True, 'config': {**connection, **lists}, 'status': new_status})
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        log_event(
+            'pixie.config.update',
+            'Failed to update Pixie configuration',
+            source='web',
+            status='failure',
+            target_type='config',
+            target_id='pixie',
+            details={'error': str(exc)},
+        )
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+
+
+@app.get('/api/pixie/state')
+def api_pixie_state():
+    access_error = _pixie_api_guard()
+    if access_error:
+        return access_error
+    manager = _get_pixie_manager_from_config()
+    if manager is None:
+        return jsonify({'ok': False, 'error': 'Pixie support is unavailable'}), 503
+    refresh = str(request.args.get('refresh') or '').lower() in ('1', 'true', 'yes')
+    status = manager.refresh_inventory() if refresh else manager.status()
+    cfg = utils.get_config()
+    selected = str(request.args.get('auditorium_id') or '').strip()
+    try:
+        payload = _pixie_operator_payload(cfg, status, selected)
+        response = jsonify(payload)
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return response
+    except PermissionError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 403
+
+
+def _pixie_authorized_devices(cfg: dict, status: dict, auditorium_id: str, requested_ids: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    catalog = _pixie_catalog(cfg, status)
+    auditorium = next((item for item in catalog['auditoriums'] if item['id'] == auditorium_id), None)
+    if auditorium is None:
+        raise ValueError('Unknown auditorium')
+    permissions = _pixie_current_permissions()
+    allow_all = bool(permissions.get('all'))
+    auditorium_scopes = permissions.get('auditoriums') if isinstance(permissions.get('auditoriums'), dict) else {}
+    if not allow_all and auditorium_id not in auditorium_scopes:
+        raise PermissionError('This auditorium is not assigned to your group.')
+    scope = None if allow_all else auditorium_scopes.get(auditorium_id)
+    allowed_ids = set(auditorium['device_ids'])
+    if scope is not None:
+        allowed_ids &= set(_coerce_string_allow_list(scope))
+    requested = [str(value) for value in requested_ids]
+    if not requested:
+        raise ValueError('Select at least one device')
+    if any(device_id not in allowed_ids for device_id in requested):
+        raise PermissionError('One or more selected devices are not assigned to your group in this auditorium.')
+    device_by_id = {item['id']: item for item in catalog['devices']}
+    devices = [device_by_id[device_id] for device_id in requested if device_id in device_by_id]
+    if len(devices) != len(requested):
+        raise ValueError('One or more selected devices are unavailable')
+    return devices, requested
+
+
+@app.post('/api/pixie/devices/brightness')
+def api_pixie_devices_brightness():
+    access_error = _pixie_api_guard(require_csrf=True)
+    if access_error:
+        return access_error
+    body = request.get_json(silent=True) or {}
+    auditorium_id = str(body.get('auditorium_id') or '').strip()
+    raw_ids = body.get('device_ids')
+    try:
+        level = int(body.get('level'))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'level must be a whole number from 0 to 100'}), 400
+    if level < 0 or level > 100:
+        return jsonify({'ok': False, 'error': 'level must be from 0 to 100'}), 400
+    if not auditorium_id or not isinstance(raw_ids, list):
+        return jsonify({'ok': False, 'error': 'auditorium_id and device_ids are required'}), 400
+    manager = _get_pixie_manager_from_config()
+    if manager is None:
+        return jsonify({'ok': False, 'error': 'Pixie support is unavailable'}), 503
+    status = manager.status()
+    cfg = utils.get_config()
+    is_final = bool(body.get('final', False))
+    try:
+        devices, requested = _pixie_authorized_devices(cfg, status, auditorium_id, raw_ids)
+        command_ids = []
+        skipped = []
+        for device in devices:
+            if device.get('online') is False:
+                raise ValueError(f"{device.get('name')} is offline")
+            resolved_type = device.get('resolved_type')
+            if resolved_type == 'unknown':
+                raise ValueError(f"{device.get('name')} has an unknown control type")
+            if resolved_type == 'on_off' and level not in (0, 100):
+                skipped.append(device['id'])
+            else:
+                command_ids.append(device['id'])
+        result = manager.set_brightness(command_ids, level) if command_ids else {
+            'ok': True, 'succeeded': [], 'failed': [], 'level': level,
+        }
+        result['skipped'] = skipped
+        result['requested'] = requested
+        result['ok'] = not bool(result.get('failed'))
+        if is_final:
+            auditorium_name = next((item.get('name') for item in cfg.get('pixie_auditoriums', []) if isinstance(item, dict) and item.get('id') == auditorium_id), auditorium_id)
+            log_event(
+                'pixie.devices.brightness',
+                f"Set {len(result.get('succeeded') or [])} Pixie device(s) in {auditorium_name} to {level}%",
+                source='web',
+                status='success' if result['ok'] else ('warning' if result.get('succeeded') else 'failure'),
+                target_type='pixie_auditorium',
+                target_id=auditorium_id,
+                details={
+                    'level': level,
+                    'requested_device_ids': requested,
+                    'succeeded_device_ids': result.get('succeeded') or [],
+                    'skipped_on_off_device_ids': skipped,
+                    'failed': result.get('failed') or [],
+                },
+            )
+        return jsonify(result), (200 if result['ok'] or result.get('succeeded') else 502)
+    except PermissionError as exc:
+        log_event(
+            'pixie.permission.denied',
+            'Denied a Pixie device control request',
+            source='web',
+            status='failure',
+            target_type='pixie_auditorium',
+            target_id=auditorium_id,
+            details={'device_ids': [str(value) for value in raw_ids], 'error': str(exc)},
+        )
+        return jsonify({'ok': False, 'error': str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        if is_final:
+            log_event(
+                'pixie.devices.brightness',
+                'Failed to update Pixie devices',
+                source='web',
+                status='failure',
+                target_type='pixie_auditorium',
+                target_id=auditorium_id,
+                details={'level': level, 'device_ids': [str(value) for value in raw_ids], 'error': str(exc)},
+            )
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+
+
+@app.post('/api/pixie/scenes/<scene_id>/activate')
+def api_pixie_scene_activate(scene_id: str):
+    access_error = _pixie_api_guard(require_csrf=True)
+    if access_error:
+        return access_error
+    manager = _get_pixie_manager_from_config()
+    if manager is None:
+        return jsonify({'ok': False, 'error': 'Pixie support is unavailable'}), 503
+    cfg = utils.get_config()
+    status = manager.status()
+    catalog = _pixie_catalog(cfg, status)
+    scene = next((item for item in catalog['scenes'] if item['id'] == str(scene_id) and item.get('enabled', True)), None)
+    permissions = _pixie_current_permissions()
+    if scene is None:
+        return jsonify({'ok': False, 'error': 'Unknown or disabled scene'}), 404
+    if not permissions.get('all') and str(scene_id) not in set(_coerce_string_allow_list(permissions.get('scenes'))):
+        log_event(
+            'pixie.permission.denied',
+            'Denied a Pixie scene activation request',
+            source='web',
+            status='failure',
+            target_type='pixie_scene',
+            target_id=scene_id,
+            details={'scene_id': scene_id},
+        )
+        return jsonify({'ok': False, 'error': 'This scene is not assigned to your group.'}), 403
+    try:
+        result = manager.activate_scene(str(scene_id))
+        log_event(
+            'pixie.scene.activate',
+            f"Activated Pixie scene {scene['name']}",
+            source='web',
+            status='success',
+            target_type='pixie_scene',
+            target_id=scene_id,
+            details={'scene_id': scene_id, 'scene_name': scene['name']},
+        )
+        return jsonify(result)
+    except Exception as exc:
+        log_event(
+            'pixie.scene.activate',
+            f"Failed to activate Pixie scene {scene['name']}",
+            source='web',
+            status='failure',
+            target_type='pixie_scene',
+            target_id=scene_id,
+            details={'scene_id': scene_id, 'scene_name': scene['name'], 'error': str(exc)},
+        )
+        return jsonify({'ok': False, 'error': str(exc)}), 502
 
 
 @app.route('/api/atem/audio/state')

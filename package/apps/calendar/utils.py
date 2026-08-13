@@ -117,6 +117,18 @@ _defaults = {
     "hisense_tv_groups": [],
     "hisense_tvs": [],
 
+    # SAL Pixie Plus Gateway (direct local control)
+    "pixie_network_mode": "disabled",
+    "pixie_gateway_host": "",
+    "pixie_home_id": "",
+    "pixie_home_name": "",
+    "pixie_net_id": "",
+    "pixie_mesh_net": "",
+    "pixie_mesh_net_2": "",
+    "pixie_auditoriums": [],
+    "pixie_devices": [],
+    "pixie_scenes": [],
+
     # ATEM audio defaults
     "atem_ip": "127.0.0.1",
     "atem_port": 9910,

@@ -89,6 +89,9 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertIn(b"headingText", mixer_script.data)
             self.assertIn(b"Unmuted", mixer_script.data)
             self.assertIn(b"Muted", mixer_script.data)
+            self.assertIn(b"LEVEL_UNITY_SLIDER = 0.5", mixer_script.data)
+            self.assertIn(b"/api/digico/input-meters", mixer_script.data)
+            self.assertIn(b"digico-channel-group", mixer_script.data)
             self.assertNotIn(b"Send On", mixer_script.data)
             self.assertNotIn(b"Send Off", mixer_script.data)
             self.assertNotIn(b"const grouped = new Map", mixer_script.data)
@@ -97,6 +100,8 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertEqual(mixer_styles.status_code, 200)
             self.assertIn(b".tdeck-mixer-page", mixer_styles.data)
             self.assertIn(b".digico-aux-grid { grid-template-columns: 1fr;", mixer_styles.data)
+            self.assertIn(b"position: sticky", mixer_styles.data)
+            self.assertIn(b".digico-input-meter", mixer_styles.data)
             mixer_styles.close()
             with tempfile.TemporaryDirectory() as tmp, patch.object(
                 webui, "_AUTH_DB_PATH", Path(tmp) / "auth.db"
@@ -112,6 +117,23 @@ class DigicoWebApiTests(unittest.TestCase):
             self.assertEqual([item["icon"] for item in payload["auxes"]], ["vocals", "keyboard"])
             self.assertEqual([item["label"] for item in payload["channels"]], ["Lead Vocal", "Keys"])
             self.assertEqual([item["icon"] for item in payload["channels"]], ["vocals", "keyboard"])
+
+            meters_payload = client.get("/api/digico/input-meters").get_json()
+            deadline = time.time() + 2
+            while time.time() < deadline and any(
+                item.get("meter") is None for item in meters_payload.get("channels", [])
+            ):
+                time.sleep(0.05)
+                meters_payload = client.get("/api/digico/input-meters").get_json()
+            self.assertEqual(
+                [item["meter"] for item in meters_payload["channels"]],
+                [50.0, 50.0],
+            )
+            unchanged_meters = client.get(
+                f"/api/digico/input-meters?revision={meters_payload['revision']}"
+            )
+            self.assertEqual(unchanged_meters.status_code, 200)
+            self.assertTrue(unchanged_meters.get_json()["unchanged"])
 
             state = client.get("/api/digico/aux/2/state")
             self.assertEqual(state.status_code, 200)

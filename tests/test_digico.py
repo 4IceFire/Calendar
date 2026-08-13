@@ -31,6 +31,7 @@ class _DeskSimulator:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.controls: list[tuple[str, list]] = []
         self.queries: list[str] = []
+        self.meter_requests: list[tuple[str, list]] = []
 
     def start(self) -> None:
         self.thread.start()
@@ -76,6 +77,10 @@ class _DeskSimulator:
                     self._reply(source, address[:-2], [1])
                 elif address.endswith("/send_pan/?"):
                     self._reply(source, address[:-2], [0.5])
+                elif address.startswith("/Meters/request/"):
+                    meter_id = address.rsplit("/", 1)[-1]
+                    self.meter_requests.append((address, list(args)))
+                    self._reply(source, "/Meters/values", [meter_id, 2_000_000])
                 elif address.endswith(("/send_level", "/send_on", "/send_pan")):
                     self.controls.append((address, list(args)))
                     self._reply(source, address, list(args))
@@ -152,6 +157,19 @@ class DigicoClientIntegrationTests(unittest.TestCase):
             self.assertTrue(all(c["level"] == -20.0 for c in state["channels"]))
             self.assertTrue(all(c["pan"] == 0.5 for c in state["channels"]))
             self.assertTrue(all(c["sendOn"] is True for c in state["channels"]))
+
+            meter_state = client.input_meter_state()
+            deadline = time.time() + 2
+            while time.time() < deadline and any(c["meter"] is None for c in meter_state["channels"]):
+                time.sleep(0.05)
+                meter_state = client.input_meter_state()
+            self.assertTrue(meter_state["active"])
+            self.assertEqual([c["meter"] for c in meter_state["channels"]], [50.0, 50.0])
+            self.assertEqual(len(desk.meter_requests), 2)
+            self.assertEqual(
+                desk.meter_requests[0][1],
+                ["/Input_Channels/1/Channel_Input/post_meter/left"],
+            )
             aux_two_queries = [address for address in desk.queries if "/Aux_Send/2/" in address]
             last_level = max(i for i, address in enumerate(aux_two_queries) if "/send_level/" in address)
             first_on = min(i for i, address in enumerate(aux_two_queries) if "/send_on/" in address)
