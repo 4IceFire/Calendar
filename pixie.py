@@ -38,7 +38,11 @@ PIXIE_CONTROL_PORT = 41578
 PIXIE_INVENTORY_PORT = 53216
 PIXIE_REACHABILITY_INTERVAL = 1.0
 PIXIE_REACHABILITY_STALE_AFTER = 30.0
-PIXIE_COMMAND_FEEDBACK_GRACE = 4.0
+# A changed cloud value must be seen consistently before it can supersede a
+# locally commanded value. Pixie's cloud response has no per-device timestamp,
+# so an elapsed-time cutoff cannot distinguish stale feedback from a real
+# external change.
+PIXIE_CHANGED_FEEDBACK_CONFIRMATIONS = 2
 # The Gateway forwards local TCP commands onto a much slower Bluetooth mesh.
 # Leave enough time for it to drain one command before accepting the next.
 PIXIE_COMMAND_MIN_GAP = 0.15
@@ -759,6 +763,33 @@ class PixieSecrets:
     password: str = ""
 
 
+@dataclass
+class PixiePendingCommand:
+    level: int
+    baseline: tuple[int | None, bool | None]
+    candidate: tuple[int | None, bool | None] | None = None
+    candidate_observations: int = 0
+
+
+def _cloud_feedback_signature(state: dict[str, Any] | None) -> tuple[int | None, bool | None]:
+    state = state or {}
+    brightness_value = state.get("brightness")
+    brightness = int(brightness_value) if brightness_value is not None else None
+    on_value = state.get("on")
+    is_on = bool(on_value) if isinstance(on_value, bool) else None
+    return brightness, is_on
+
+
+def _cloud_feedback_matches_level(
+    feedback: tuple[int | None, bool | None],
+    level: int,
+) -> bool:
+    brightness, is_on = feedback
+    if brightness is not None:
+        return brightness == level
+    return is_on == (level > 0) if is_on is not None else False
+
+
 def pixie_secrets_path(base_dir: Path) -> Path:
     return Path(base_dir) / "pixie_secrets.json"
 
@@ -812,7 +843,7 @@ class PixieManager:
         self._cloud_online_ids: set[str] = set()
         self._cloud_device_states: dict[str, dict[str, Any]] = {}
         self._cloud_status_available = False
-        self._recent_commands: dict[str, tuple[int, float]] = {}
+        self._recent_commands: dict[str, PixiePendingCommand] = {}
         self._manager_stop = threading.Event()
         self._supervisor_thread: threading.Thread | None = None
         self._started_at = time.time()
@@ -1011,21 +1042,41 @@ class PixieManager:
                 self._last_cloud_status_at = success_at
                 with self._lock:
                     devices = []
-                    now_monotonic = time.monotonic()
                     for item in self._snapshot.get("devices", []):
                         ident = str(item.get("id"))
                         state = device_states.get(ident, {})
                         updated = {**item, "online": ident in online_ids}
                         pending = self._recent_commands.get(ident)
-                        if pending and (now_monotonic - pending[1]) < PIXIE_COMMAND_FEEDBACK_GRACE:
-                            updated["brightness"] = pending[0]
-                            updated["on"] = pending[0] > 0
-                        else:
-                            self._recent_commands.pop(ident, None)
+                        use_cloud_feedback = pending is None
+                        if pending is not None:
+                            feedback = _cloud_feedback_signature(state)
+                            if _cloud_feedback_matches_level(feedback, pending.level):
+                                self._recent_commands.pop(ident, None)
+                                use_cloud_feedback = True
+                            elif feedback == pending.baseline or feedback == (None, None):
+                                pending.candidate = None
+                                pending.candidate_observations = 0
+                            elif pending.baseline != (None, None):
+                                if feedback == pending.candidate:
+                                    pending.candidate_observations += 1
+                                else:
+                                    pending.candidate = feedback
+                                    pending.candidate_observations = 1
+                                if (
+                                    pending.candidate_observations
+                                    >= PIXIE_CHANGED_FEEDBACK_CONFIRMATIONS
+                                ):
+                                    self._recent_commands.pop(ident, None)
+                                    use_cloud_feedback = True
+
+                        if use_cloud_feedback:
                             if state.get("brightness") is not None:
                                 updated["brightness"] = state["brightness"]
                             if state.get("on") is not None:
                                 updated["on"] = state["on"]
+                        else:
+                            updated["brightness"] = pending.level
+                            updated["on"] = pending.level > 0
                         devices.append(updated)
                     self._snapshot["devices"] = devices
                     self._snapshot["reachabilityAvailable"] = True
@@ -1133,6 +1184,13 @@ class PixieManager:
                 self._counter = 0x10
             return value
 
+    def _record_recent_command(self, device_id: str, level: int) -> None:
+        ident = str(device_id)
+        self._recent_commands[ident] = PixiePendingCommand(
+            level=int(level),
+            baseline=_cloud_feedback_signature(self._cloud_device_states.get(ident)),
+        )
+
     def set_brightness(self, device_ids: list[str], level: int) -> dict[str, Any]:
         if self.mode != "control" or self._control is None or not self._control.is_ready:
             raise PixieError("Pixie control is not enabled or the authenticated session is not ready")
@@ -1153,7 +1211,7 @@ class PixieManager:
                 with self._lock:
                     device["brightness"] = level
                     device["on"] = level > 0
-                    self._recent_commands[device_id] = (level, time.monotonic())
+                    self._record_recent_command(device_id, level)
                 succeeded.append(device_id)
             except Exception as exc:
                 failed.append({"id": device_id, "error": str(exc)})
@@ -1177,7 +1235,7 @@ class PixieManager:
                 with self._lock:
                     device["brightness"] = level
                     device["on"] = bool(is_on)
-                    self._recent_commands[device_id] = (level, time.monotonic())
+                    self._record_recent_command(device_id, level)
                 succeeded.append(device_id)
             except Exception as exc:
                 failed.append({"id": device_id, "error": str(exc)})

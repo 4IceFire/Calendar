@@ -281,6 +281,61 @@ class PixieProtocolTests(unittest.TestCase):
         cloud_result = {
             "sessionToken": "token",
             "onlineIds": {"141"},
+            "deviceStates": {"141": {"online": True, "brightness": 0, "on": False}},
+            "updatedAt": "2026-08-13T00:00:00.000Z",
+        }
+        with (
+            patch.object(pixie, "fetch_local_inventory", return_value={"inventory": inventory}),
+            patch.object(pixie, "load_pixie_secrets", return_value=pixie.PixieSecrets("user", "password")),
+            patch.object(pixie, "fetch_pixie_cloud_reachability", return_value=cloud_result),
+        ):
+            manager = pixie.PixieManager(config, base_dir=Path("."))
+            try:
+                with manager._lock:
+                    manager._snapshot["devices"][0]["brightness"] = 42
+                    manager._record_recent_command("141", 42)
+
+                for _ in range(6):
+                    manager._refresh_cloud_reachability(force=True)
+                    self.assertEqual(manager.status()["devices"][0]["brightness"], 42)
+
+                cloud_result["deviceStates"]["141"] = {
+                    "online": True,
+                    "brightness": 42,
+                    "on": True,
+                }
+                manager._refresh_cloud_reachability(force=True)
+                self.assertEqual(manager.status()["devices"][0]["brightness"], 42)
+                self.assertNotIn("141", manager._recent_commands)
+
+                cloud_result["deviceStates"]["141"] = {
+                    "online": True,
+                    "brightness": 18,
+                    "on": True,
+                }
+                manager._refresh_cloud_reachability(force=True)
+                self.assertEqual(manager.status()["devices"][0]["brightness"], 18)
+            finally:
+                manager.close()
+
+    def test_consistent_changed_cloud_feedback_can_supersede_a_pending_command(self):
+        inventory = {
+            "deviceList": [
+                {"id": 141, "name": "House Lights", "online": 85, "state": {"br": 255}},
+            ],
+            "groupList": [],
+            "sceneList": [],
+        }
+        config = {
+            "pixie_network_mode": "observe",
+            "pixie_gateway_host": "10.0.0.50",
+            "pixie_home_id": "home-id",
+            "pixie_net_id": "12345",
+            "pixie_mesh_net_2": "67890",
+        }
+        cloud_result = {
+            "sessionToken": "token",
+            "onlineIds": {"141"},
             "deviceStates": {"141": {"online": True, "brightness": 37, "on": True}},
             "updatedAt": "2026-08-13T00:00:00.000Z",
         }
@@ -293,17 +348,18 @@ class PixieProtocolTests(unittest.TestCase):
             try:
                 with manager._lock:
                     manager._snapshot["devices"][0]["brightness"] = 42
-                    manager._recent_commands["141"] = (42, time.monotonic())
+                    manager._record_recent_command("141", 42)
+
+                cloud_result["deviceStates"]["141"] = {
+                    "online": True,
+                    "brightness": 18,
+                    "on": True,
+                }
                 manager._refresh_cloud_reachability(force=True)
                 self.assertEqual(manager.status()["devices"][0]["brightness"], 42)
-
-                with manager._lock:
-                    manager._recent_commands["141"] = (
-                        42,
-                        time.monotonic() - pixie.PIXIE_COMMAND_FEEDBACK_GRACE - 1,
-                    )
                 manager._refresh_cloud_reachability(force=True)
-                self.assertEqual(manager.status()["devices"][0]["brightness"], 37)
+                self.assertEqual(manager.status()["devices"][0]["brightness"], 18)
+                self.assertNotIn("141", manager._recent_commands)
             finally:
                 manager.close()
 
