@@ -35,6 +35,11 @@
   let sliderWriteInFlight = false
   let sliderWriteQueued = false
   let sliderFinalRequested = false
+  let sliderDrainWaiters = []
+  // A status request may have started before a level command. Keep that older
+  // response from repainting the fader while the command is being committed.
+  let levelDisplayOverride = null
+  let levelDisplayOverrideVersion = 0
 
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
@@ -164,6 +169,34 @@
 
   const currentFaderDevice = () => [...selectedDevices()].reverse().find((device) => device.controlType === 'dimmer')
 
+  const setDisplayedLevel = (value) => {
+    const level = Math.max(0, Math.min(100, Math.round(Number(value))))
+    levelRange.value = String(level)
+    levelOutput.value = `${level}%`
+    levelOutput.textContent = `${level}%`
+    return level
+  }
+
+  const holdDisplayedLevel = (value) => {
+    const level = setDisplayedLevel(value)
+    const version = ++levelDisplayOverrideVersion
+    levelDisplayOverride = { level, version }
+    return version
+  }
+
+  const clearDisplayedLevelHold = () => {
+    levelDisplayOverride = null
+    levelDisplayOverrideVersion += 1
+  }
+
+  const releaseDisplayedLevel = async (version) => {
+    if (!levelDisplayOverride || levelDisplayOverride.version !== version) return
+    await loadState({ refresh: true, quiet: true })
+    if (!levelDisplayOverride || levelDisplayOverride.version !== version) return
+    levelDisplayOverride = null
+    updateSelectionControls()
+  }
+
   const updateSelectionControls = ({ preserveLevel = false } = {}) => {
     const devices = selectedDevices()
     const hasDimmer = devices.some((device) => device.controlType === 'dimmer')
@@ -180,10 +213,8 @@
     document.querySelectorAll('[data-pixie-level], [data-pixie-switch]').forEach((button) => { button.disabled = !enabled })
     if (hasDimmer && !dragging && !preserveLevel) {
       const device = currentFaderDevice()
-      const level = Math.max(0, Math.min(100, Math.round(Number(device && device.brightness != null ? device.brightness : 0))))
-      levelRange.value = String(level)
-      levelOutput.value = `${level}%`
-      levelOutput.textContent = `${level}%`
+      const feedbackLevel = device && device.brightness != null ? device.brightness : 0
+      setDisplayedLevel(levelDisplayOverride ? levelDisplayOverride.level : feedbackLevel)
     }
   }
 
@@ -222,6 +253,7 @@
     activeAuditoriumId = String(auditoriumId || '')
     selectedIds.clear()
     selectionOrder = []
+    clearDisplayedLevelHold()
     if (remember && activeAuditoriumId) {
       try { localStorage.setItem('tdeck:pixie:auditorium', activeAuditoriumId) } catch (_error) {}
     }
@@ -317,7 +349,19 @@
         sliderWriteQueued = false
         await flushSliderWrite(false)
       }
+      if (!sliderTimer && !sliderWriteInFlight && !sliderWriteQueued && pendingLevel === null) {
+        const waiters = sliderDrainWaiters
+        sliderDrainWaiters = []
+        waiters.forEach((resolve) => resolve())
+      }
     }
+  }
+
+  const waitForSliderWrites = () => {
+    if (!sliderTimer && !sliderWriteInFlight && !sliderWriteQueued && pendingLevel === null) {
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => { sliderDrainWaiters.push(resolve) })
   }
 
   const queueSliderWrite = (level) => {
@@ -327,6 +371,17 @@
       sliderTimer = null
       flushSliderWrite(false)
     }, 80)
+  }
+
+  const commitLevel = async (value) => {
+    const level = Math.max(0, Math.min(100, Math.round(Number(value))))
+    const displayVersion = holdDisplayedLevel(level)
+    if (sliderTimer) clearTimeout(sliderTimer)
+    sliderTimer = null
+    pendingLevel = level
+    await flushSliderWrite(true)
+    await waitForSliderWrites()
+    await releaseDisplayedLevel(displayVersion)
   }
 
   document.querySelectorAll('[data-pixie-tab]').forEach((button) => {
@@ -344,6 +399,7 @@
     activeAuditoriumId = ''
     selectedIds.clear()
     selectionOrder = []
+    clearDisplayedLevelHold()
     resetAuditoriumDisplay()
     renderAuditoriumChooser()
     stopPolling()
@@ -352,6 +408,7 @@
   deviceTiles.addEventListener('change', (event) => {
     const checkbox = event.target.closest('input[type="checkbox"][value]')
     if (!checkbox) return
+    clearDisplayedLevelHold()
     const id = String(checkbox.value)
     if (checkbox.checked) {
       selectedIds.add(id)
@@ -365,12 +422,14 @@
   })
 
   document.getElementById('pixie-select-all').addEventListener('click', () => {
+    clearDisplayedLevelHold()
     selectedIds = new Set((payload.devices || []).filter((item) => !item.disabled).map((item) => item.id))
     selectionOrder = [...selectedIds]
     renderDevices()
   })
 
   document.getElementById('pixie-clear-selection').addEventListener('click', () => {
+    clearDisplayedLevelHold()
     selectedIds.clear()
     selectionOrder = []
     renderDevices()
@@ -392,19 +451,12 @@
   })
   levelRange.addEventListener('change', async () => {
     dragging = false
-    if (sliderTimer) clearTimeout(sliderTimer)
-    sliderTimer = null
-    pendingLevel = Math.round(Number(levelRange.value))
-    await flushSliderWrite(true)
+    await commitLevel(levelRange.value)
   })
 
   document.querySelectorAll('[data-pixie-level]').forEach((button) => {
     button.addEventListener('click', async () => {
-      const level = Number(button.dataset.pixieLevel)
-      levelRange.value = String(level)
-      levelOutput.value = `${level}%`
-      levelOutput.textContent = `${level}%`
-      await sendLevel(level, true)
+      await commitLevel(button.dataset.pixieLevel)
     })
   })
 

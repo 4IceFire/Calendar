@@ -103,6 +103,15 @@ class PixieWebUiTests(unittest.TestCase):
             self.assertEqual(style.status_code, 200)
             style.close()
 
+    def test_level_shortcuts_use_the_slider_commit_and_display_hold(self):
+        script = self.client.get("/static/pixie_controls.js")
+        self.addCleanup(script.close)
+        self.assertEqual(script.status_code, 200)
+        source = script.get_data(as_text=True)
+        self.assertIn("setDisplayedLevel(levelDisplayOverride ?", source)
+        self.assertIn("await waitForSliderWrites()", source)
+        self.assertIn("await commitLevel(button.dataset.pixieLevel)", source)
+
     def test_operator_payload_hides_inaccessible_devices_and_original_names(self):
         permissions = {"all": False, "auditoriums": {"main": ["120", "233"]}, "scenes": ["17578"]}
         with (
