@@ -17,6 +17,7 @@ const DEFAULT_SMOKE_PATHS = [
   '/personal-mixes',
   '/surface-controls',
   '/config',
+  '/config/api-tokens',
   '/api-reference',
   '/admin/permissions',
 ];

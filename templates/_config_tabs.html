@@ -32,6 +32,11 @@
       <li class="nav-item">
         <a class="nav-link{% if active == 'surfaces' %} active{% endif %}" href="/config/companion-surfaces"{% if active == 'surfaces' %} aria-current="page"{% endif %}>Surfaces</a>
       </li>
+      {% if can_manage_service_tokens %}
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'api-tokens' %} active{% endif %}" href="/config/api-tokens"{% if active == 'api-tokens' %} aria-current="page"{% endif %}>API Tokens</a>
+      </li>
+      {% endif %}
       <li class="nav-item config-section-tabs-divider">
         <a class="nav-link{% if active == 'export' %} active{% endif %}" href="/config/export"{% if active == 'export' %} aria-current="page"{% endif %}>Export</a>
       </li>

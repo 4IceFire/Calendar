@@ -3,7 +3,7 @@ import os
 import threading
 import time as t
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Callable, List, Optional
 import json
 import sqlite3
 import requests
@@ -182,10 +182,18 @@ def _resolve_trigger_display_name(trigger) -> str:
 
 
 class ClockScheduler:
-    def __init__(self, events_file: str = storage.DEFAULT_EVENTS_FILE, poll_interval: float = 1.0, *, debug: bool = False) -> None:
+    def __init__(
+        self,
+        events_file: str = storage.DEFAULT_EVENTS_FILE,
+        poll_interval: float = 1.0,
+        *,
+        debug: bool = False,
+        internal_action_executor: Callable[[dict, TriggerJob | None], bool] | None = None,
+    ) -> None:
         self.events_file = events_file
         self.poll_interval = poll_interval
         self.debug = debug
+        self._internal_action_executor = internal_action_executor
 
         self._cv = threading.Condition()
         self._stop = threading.Event()
@@ -214,6 +222,13 @@ class ClockScheduler:
         self._last_error: str | None = None
         self._last_watch_error: str | None = None
         self._last_watch_error_log_at = 0.0
+
+    def set_internal_action_executor(
+        self,
+        executor: Callable[[dict, TriggerJob | None], bool] | None,
+    ) -> None:
+        """Install the Web UI's private in-process action dispatcher."""
+        self._internal_action_executor = executor
 
     def _dbg(self, msg: str) -> None:
         if self.debug:
@@ -541,6 +556,24 @@ class ClockScheduler:
         if not path_norm.startswith('/api/'):
             return False
 
+        internal_action = {"method": method, "path": path_norm}
+        if body is not None:
+            internal_action["body"] = body
+
+        # The normal TDeck runtime injects a private in-process dispatcher.
+        # It reaches the same route validation without creating a network
+        # request or bearer credential that another process could reuse.
+        if self._internal_action_executor is not None:
+            try:
+                return bool(self._internal_action_executor(internal_action, job))
+            except Exception as exc:
+                if self.debug:
+                    self._dbg(f"Internal action dispatcher failed: {method} {path_norm} err={exc}")
+                return False
+
+        # A standalone scheduler is a separate process and therefore remains
+        # an external API client. Keep the authenticated HTTP fallback for the
+        # recovery CLI, but never treat loopback by itself as authorization.
         url = f"http://127.0.0.1:{port}{path_norm}"
         headers = {}
         internal_token = str(os.environ.get("TDECK_INTERNAL_API_TOKEN") or "").strip()

@@ -2,10 +2,16 @@
 
 This repo contains TDeck, a Python app for scheduling service cues, controlling production integrations, and serving operator/personal-control pages. Keep changes focused on the scheduler, CLI, Web UI, VideoHub and DiGiCo flows described in `README.md`.
 
+## Keeping These Instructions Current
+- Treat this file as part of the implementation contract. Whenever a change alters architecture, security, runtime configuration, API behavior, browser support, deployment steps, or test commands, update the relevant `AGENTS.md` guidance in the same change.
+- Remove or rewrite superseded guidance instead of leaving contradictory historical rules in place.
+
 ## Project Structure & Module Organization
 - `package/`: Python package code. `package/apps/calendar/` contains scheduler, storage, and utilities.
-- Entry points: `webui.py` (Flask Web UI), `cli.py` (CLI), `companion.py`/`propresentor.py` (external integrations), `digico.py` (DiGiCo OSC transport/cache/relay), and `hisense.py` (native VIDAA TV workers, protocol compatibility, groups, and target aggregation).
-- `static/`: front-end JS/CSS assets. `templates/`: HTML templates.
+- Entry points: `webui.py` (Flask Web UI), `cli.py` (CLI), `companion.py`/`propresentor.py` (external integrations), `digico.py` (DiGiCo OSC transport/cache/relay), and `hisense.py` (native VIDAA TV workers, protocol compatibility, groups, target aggregation, and safe setup preflight).
+- Shared infrastructure: `api_security.py` owns service-token lifecycle/constraints and `device_snapshot.py` owns process-wide stale-while-refresh hardware snapshots.
+- `static/`: front-end JS/CSS assets, the shared `api_client.js` CSRF wrapper, `client_telemetry.js`, the administrator token manager in `api_tokens.js`, and pinned local vendor assets. `templates/`: HTML templates.
+- Browser tests live in `tests/browser/`, with projects configured by `playwright.config.js`; `package.json`/`package-lock.json` are source-controlled for this test runner.
 - Data/config: `config.json`, `events.json`, `timer_presets.json`, `videohub_presets.json`, `videohub_rooms.json`, `auth.db`.
 - VideoHub room images: local uploads live in `videohub_room_images/` and should remain ignored by Git.
 - Logs/runtime files: `calendar.log`, `calendar_triggers.json`, and `calendar.pid`.
@@ -23,6 +29,10 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Docker:
   - `docker build -t tdeck-calendar:latest .`
   - `docker compose up --build`
+- Browser test setup and execution:
+  - `npm install`
+  - `npm run test:browser:install`
+  - `npm run test:browser`
 
 ## Coding Style & Naming Conventions
 - Python: 4-space indentation, PEP 8-style naming. Use `snake_case` for functions/vars, `CapWords` for classes, `UPPER_CASE` for constants.
@@ -33,6 +43,10 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Tests use the standard-library `unittest` runner: `python -m unittest discover -s tests -p "test_*.py" -v`.
 - DiGiCo tests include an in-process UDP desk simulator and Flask API/page coverage; keep tests independent of real church hardware and production config.
 - Hisense tests use fake VIDAA clients/protocol detection and Flask API coverage. They must remain independent of real TVs, local certificates, and the production network.
+- Hardware snapshot tests must use fakes and prove non-blocking responses, single-flight refresh, last-known-good retention, backoff, and recovery without contacting production devices.
+- Frontend compatibility tests protect the explicit page-initializer pattern and the supported-browser fallbacks. Do not reintroduce page functions inside top-level conditional blocks.
+- Playwright projects cover Chromium, Firefox, WebKit, mobile Chromium, and mobile WebKit. They refuse non-loopback targets unless `TDECK_ALLOW_REMOTE_BROWSER_TESTS=1`; use that override only for an approved staging server, never production.
+- Browser-test authentication uses `TDECK_USERNAME` / `TDECK_PASSWORD`; deployment identity can use `TDECK_BUILD_ID`.
 - For manual checks: start `python webui.py`, load the UI, and run a CLI command like `python cli.py list`.
 - Place new tests under `tests/` with `test_*.py` and document any additional runner in `README.md`.
 
@@ -42,9 +56,31 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Note any migration steps or new dependencies.
 
 ## Configuration & Security Tips
-- Keep secrets and environment-specific values out of Git; use `config.json` and local overrides.
+- Keep secrets and environment-specific values out of Git. Use documented ignored secret stores or process environment variables for credentials; use `config.json` only for non-secret instance configuration.
+- Never store service-token plaintext in `config.json`, events, URLs, logs, or source. Token hashes and metadata live in `auth.db`; plaintext is displayed only once by the Config token manager or CLI after creation/rotation.
 - If you change `webserver_port`, update Docker port mappings (`docker-compose.yml`) accordingly.
 - Keep `videohub_room_images/` out of source control; room backgrounds are local media, not repo assets.
+
+## Frontend Initialization and Browser Compatibility
+- Page features in `static/app.js` use explicit initializer functions such as `_initRoutingPage()` and `_initFoyerAudioPage()`. Each initializer locates its root and returns when the page is absent.
+- Do not put nested function declarations inside top-level conditional blocks. Older Safari/WebKit can mis-scope their captured `const`/`let` bindings and produce errors such as `Can't find variable: elOutputs`.
+- Preserve compatibility fallbacks checked by `tests/test_frontend_compatibility.py`: avoid untranspiled `Array.at()`, `Promise.finally()`, and `replaceChildren()`; retain the `<dialog>` fallback and CSS fallbacks where used.
+- `static/api_client.js` must load before telemetry and page scripts. It adds CSRF only to same-origin mutating `/api/*` requests and must not modify external fetches.
+- `static/client_telemetry.js` reports sanitized `error` and `unhandledrejection` events to `/api/client-errors`. Keep field allow-listing, truncation, query removal, secret redaction, authentication, CSRF/origin checks, and rate limiting intact.
+
+## Static Assets and Response Caching
+- `static_asset(...)` uses a SHA-256 digest of file bytes, not mtime/size. Only a URL with the current 64-character `v` digest is `public, max-age=31536000, immutable`; missing, stale, forged, or unversioned assets must revalidate.
+- Keep the same cache policy on static `200` and conditional `304` responses. HTML is private/revalidated and `/api/*` plus sensitive downloads are `no-store`.
+- Preserve gzip/ETag correctness and `Vary: Accept-Encoding`. Reverse proxies must preserve the digest query, ETag, Cache-Control, and Vary headers and must not independently cache HTML or live APIs.
+- Runtime pages must not depend on public CDNs. Marked and DOMPurify are pinned under `static/vendor/` with license/notice files; API Reference rendering must fail closed rather than inserting unsanitized HTML.
+- Do not add a general service worker that caches device/control state.
+
+## Shared Hardware State Delivery
+- `device_snapshot.SharedSnapshotCache` is the common process-wide stale-while-refresh primitive: one background refresh, immediate last-known/fallback response, exponential failure backoff, and `stale`/`refreshing`/`sampledAt`/`ageMs`/`lastError` metadata.
+- HTTP request handlers must not wait on slow hardware or let browser count multiply device reads. Preserve process-wide singleton managers and shared caches.
+- ATEM control state is shared across browsers; `/api/atem/audio/meters` is the compact high-rate contract and overlays the independent UDP meter data without a full PyATEMMax state read.
+- VideoHub `/api/videohub/state` and `/api/videohub/labels` share one cached device snapshot. Cache misses return immediate fallback/last-known data and start one background refresh.
+- Successful VideoHub route/preset commands must invalidate/update cached state and verify consolidated readback where safe; a mismatch is a failure, not a successful unconfirmed write.
 
 ## Config Export/Import
 - Config transport lives under the normal Config page access: `/config/export` and `/config/import`.
@@ -66,6 +102,7 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Use `status` values `success`, `failure`, `warning`, or `info`.
 - Put human-readable text in `summary`; put structured context in `details` so the Activity Log can show expandable diagnostic data.
 - Never log secrets, passwords, tokens, session cookies, CSRF values, or raw credentials. The helper redacts common sensitive keys, but callers should still avoid passing secrets.
+- Sanitized browser telemetry is recorded as `client.error` warnings with route, build IDs, browser User-Agent, and correlation ID. Preserve its allow-listing/redaction and never add request bodies, storage, cookies, or arbitrary client fields.
 - Do not use `print(...)`, `_console_append(...)`, or raw Python logging as the primary user-facing activity record. Keep `calendar.log` and Python logging for low-level runtime diagnostics only.
 
 ## Auth Model Notes
@@ -76,16 +113,32 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - User management lives on `/admin/permissions` for browsing/creating users and groups, and `/admin/users/<id>` for per-user profile, access, security, sessions, and activity management.
 - Account security state lives on the `users` table: email/full name, active/locked status, failed login count, force-password-change flag, password timestamps, and session version.
 - Logged-in sessions are tracked in `user_sessions`; revoking sessions or forcing password changes should use that table/session-version flow.
-- API endpoints are intentionally callable without login unless an endpoint is explicitly marked otherwise.
-- DiGiCo mixer/setup APIs are an explicit exception: they control live audio and must enforce login, the relevant page permission, enabled routes, and the per-group AUX allow-list on the server.
-- For VideoHub preset visibility, enforce group restrictions in the UI (hide non-allowed preset IDs) and do not add API auth/authorization checks for this behavior.
+- When authentication is enabled, every `/api` route is fail-closed through `_api_policy`. Any new API route must receive an explicit scope/page policy or it remains denied.
+- Browser API calls use the logged-in session. Reads require the associated page capability; writes additionally require CSRF and a trusted same-origin `Origin`/`Referer`. Resource-specific server checks remain mandatory for VideoHub ports/presets/editing, ATEM sources/solo/monitor, DiGiCo AUXes, Pixie resources, and similar allow-lists.
+- Automation uses scoped Bearer service tokens from `api_security.py`. Only token hashes are stored in `auth.db`; support expiry, revocation, atomic rotation, last-used metadata, and optional path/TV/VideoHub/ATEM constraints.
+- Normal lifecycle management lives at administrator-only `/config/api-tokens`; `python cli.py service-tokens create|list|rotate|revoke` remains the recovery/automation interface. The backing `/api/config/service-tokens*` routes are browser-session only, require the protected Admin group plus Config access, and must never accept a service token—even one with `admin` or `*` scope.
+- List responses must never expose token hashes or plaintext. Creation/rotation may return the new plaintext exactly once; clear it from the UI when the one-time dialog closes and never include it in Activity Log details. Keep create/rotate/revoke Activity Log events, expiry/last-used visibility, and atomic replacement-before-revocation behavior.
+- `/api/v1/...` aliases mirror the existing `/api/...` contracts and add `X-TDeck-API-Version: 1`; keep legacy routes during migration so saved Companion actions continue working.
+- The temporary `api_legacy_anonymous_enabled` escape hatch requires `api_legacy_anonymous_until` no more than 31 days ahead and is restricted to the former Companion status/home/timer/VideoHub/TV/CCB contract. It must never expose Admin, Config, telemetry, ATEM, Pixie, DiGiCo, ProPresenter, Calendar editing, or new endpoints.
+- `/videohub/monitor` requires normal authenticated VideoHub access; do not restore an unauthenticated shell backed by protected state APIs.
+- API writes are rate-limited per principal and request-size limited. Preserve consistent JSON `401`/`403`/`413`/`429` responses and Activity Log events without secrets.
 - VideoHub room metadata is global for all presets and users. Access control applies to who can manage the room layout UI, not to the room data itself.
+
+## Scheduler and Internal API Authentication
+- `webui.py` starts the Calendar scheduler automatically. Do not also run `cli.py start calendar` for the same installation; duplicate schedulers can duplicate cues.
+- The built-in scheduler receives `_execute_scheduler_internal_action` from `webui.py` through `CalendarApp.set_internal_action_executor`. It dispatches inside the Flask process with a non-network `scheduler` principal, runs normal route validation, and needs no bearer token or environment variable.
+- The scheduler principal is allowed only on explicitly classified operational APIs. It must remain denied from Admin, Config, service-token management, client telemetry, activity-log management, TV pairing/preflight, Pixie setup/discovery, and DiGiCo setup/restart/discovery.
+- `_auth_gate` may recognize the scheduler only through the private Flask `g._tdeck_scheduler_principal` marker installed by the in-process dispatcher. Never derive this authorization from a loopback address, header, cookie, request body, URL secret, or environment token.
+- `ClockScheduler` retains authenticated HTTP fallback only for a separately launched recovery/CLI scheduler process. That process is an external API client, uses `TDECK_INTERNAL_API_TOKEN`, and must not run alongside `webui.py`.
+- Companion button triggers do not call the TDeck API and do not use a TDeck service token; they remain direct posts to Companion.
+- Never bypass API authentication based only on loopback/`127.0.0.1`; another local process could exploit that trust.
+- Keep the internal dispatcher and HTTP routes on the same endpoint validation, device queues, and Activity Logging paths. Standalone/external scheduler processes must continue using a token or authenticated IPC.
 
 ## Hisense / VIDAA TV Control
 - `hisense.py` owns the process-wide manager, one serialized/reconnecting worker per TV, Wake-on-LAN, protocol/authentication selection, certificate-profile fallback, ordered group fan-out, and aggregate group state.
 - A successful TDeck/Companion power-off records that TV in the backend-managed `hisense_power_state.json` runtime file. While marked intentionally off, its worker pauses reconnects, reports `expectedOff: true`/`healthy: true`, and does not create connection errors or Activity Log offline warnings. Power-on, toggle-on, reconnect, pairing, or another control clears the marker so genuine connection failures remain visible.
 - Power-on must remain idempotent even though VIDAA exposes power as `KEY_POWER`, which is a toggle. If a connected TV explicitly reports on, do nothing. If that same connection explicitly reports `fake_sleep_0`, one power-key command is safe. If state is missing/timed out or the TV is offline, use Wake-on-LAN only and never fall back to a blind power key. Keep repeated on requests idempotent while confirmation is pending, and report an unconfirmed wake as pending/a warning rather than a successful TV response.
-- TV setup lives at `/config/tvs` in `templates/hisense_setup.html` and `static/hisense_setup.js`. Configuration/pairing APIs require normal Config access; operational TV and target APIs remain intentionally callable on the trusted LAN for Companion.
+- TV setup lives at `/config/tvs` in `templates/hisense_setup.html` and `static/hisense_setup.js`. Configuration/pairing/preflight APIs require a Config-authorized browser session; operational TV/target APIs require either an authorized browser session or a service token with the `tvs` scope.
 - Config lives in the main `config.json`:
   - `hisense_tvs` is the ordered TV list. Normal setup exposes only the human-readable name, IP/host, and television MAC; it auto-generates and internally preserves the slug-style ID so Companion targets remain stable. Saving through the simplified UI enables TVs and resets authentication/certificate selection to automatic. `uuid` is the separate case-sensitive paired-client UUID used by dynamic VIDAA authentication and is exposed only in the contextual Pair or repair panel.
   - `hisense_tv_groups` is the ordered group list; each group's `tv_ids` is also ordered. Membership is exclusive: a TV belongs to the first configured group that contains it, or the Ungrouped root.
@@ -97,7 +150,10 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Protocol generation can be inferred from the TV's UPnP descriptor. A TV-screen “model is no longer compatible with the current app” pairing warning cannot be observed over MQTT and can indicate an outdated client certificate generation; do not claim TDeck can infer or obtain that certificate from IP, model, or firmware alone. An administrator supplies an approved current pair at the standard backend filename, after which automatic selection retries it.
 - The TV setup page mirrors the Button Templates tree interaction: compact group/root rows, persisted group and TV collapse state, per-TV group dropdown movement, and up/down sibling ordering. Deleting a group moves its TVs to Ungrouped. Collapsed group and Ungrouped rows summarize `online/total` and the number of member errors.
 - Keep both identity fields distinct. The TV MAC is used only for Wake-on-LAN power-on. Newer dynamic VIDAA authentication passes the separate paired-device `uuid` to pyvidaa's historically named `mac_address` argument. Never substitute the TV MAC for the paired UUID.
-- `GET /api/tvs` returns TVs, groups, target choices, compatible-model notes, and cached compatibility state. Unified operational routes use `/api/tv-targets/<target_id>/...` with `tv:<id>` or `group:<id>`; keep `/api/tvs/<id>/...` working for backward compatibility.
+- The setup page's **Run safe preflight** is serialized through the TV worker and is strictly read-only. It may check configured identity, TCP reachability, UPnP protocol generation, approved local support-pair availability, auth selection, authenticated readiness, and harmless state/capability reads; it must never wake the TV or change power, volume, mute, or source.
+- Preflight states include ready, expected-off, needs-uuid, unreachable, timeout, auth-rejected, support-unavailable, and read-failed. Return actionable repair steps without returning/logging UUID values, certificate paths, refresh/access tokens, PINs, or credentials.
+- Rerun/update preflight after reconnect and PIN submission. Tests must cover missing UUID, static legacy, dynamic auth, timeout, authentication rejection, unreachable, and success with fake clients only.
+- `GET /api/tvs` returns TVs, groups, target choices, compatible-model notes, cached compatibility state, and the last safe preflight report. Unified operational routes use `/api/tv-targets/<target_id>/...` with `tv:<id>` or `group:<id>`; keep `/api/tvs/<id>/...` working for backward compatibility.
 - Group commands enqueue once per enabled member in configured order. Group feedback semantics are strict: `connected` requires every enabled member; power/source/volume expose a shared value only when members agree, otherwise mixed state.
 - The separate `companion-module-tdeck` repository consumes the unified target routes. Preserve existing action option IDs so saved Companion actions continue working; dropdown values may be legacy raw TV IDs or prefixed target IDs.
 
@@ -131,9 +187,12 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Non-admin users only see the union of source IDs granted by their groups. Solo and monitor permissions also union across groups.
 - Monitor On/Off in TDeck must use `setAudioMixerMonitorMute(...)`, inverted so On means `mute=False` and Off means `mute=True`. Do not use `setAudioMixerMonitorMonitorAudio(...)` for the TDeck On button, because that disables the monitor path and can break solo / route normal audio through headphones loudly on this switcher.
 - The monitor controls are intentionally styled like TDeck controls, not like the ATEM Software Control panel.
-- The Record Audio UI polls `/api/atem/audio/state` frequently so hardware/ATEM Software Control changes update TDeck live. Keep slider updates responsive but throttled to avoid flooding the switcher.
+- The Record Audio UI gets full control state on a slower cadence and compact levels from `/api/atem/audio/meters` while visible. Preserve one in-flight read, `AbortController` timeouts, recursive scheduling, visibility-aware 30-second hidden refresh, failure backoff/jitter, immediate visible refresh, and the backward-compatible full-state fallback.
+- Valid cached ATEM state should render without a routine last-known-state or background-refresh notification. Reserve the Record Audio status area for actionable refresh failures and metering/connection warnings.
+- The backend shares one ATEM control snapshot across all browsers and overlays the latest independent UDP meter data. Browser count must not multiply PyATEMMax state reads.
+- Keep slider writes responsive/coalesced and invalidate/refresh the shared snapshot after successful commands so confirmed hardware state wins.
 - `/foyer-audio/debug` is intentionally kept for production diagnosis. It reports effective permissions, ATEM sources, metering status, packet counters, and current levels. It is protected by Record Audio page access.
-- API auth in this repo is intentionally light unless explicitly guarded. The monitor control endpoint has a server-side permission guard; source visibility/solo permissions are primarily enforced in the UI.
+- All ATEM APIs pass through the central API policy. Browser writes enforce Record Audio page access plus server-side source, solo, and monitor permissions; automation requires an `atem`-scoped token and may be constrained to source IDs/actions.
 
 ## VideoHub Group Controls (Where To Look)
 - Storage: group settings live in `auth.db` table `groups` and are migrated/used in `webui.py`.
@@ -142,18 +201,18 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Routing page allow-lists (per group):
   - Columns: `videohub_allowed_outputs`, `videohub_allowed_inputs`
   - Semantics: blank/NULL/"all" => allow all; otherwise JSON list or CSV of 1-based port numbers.
-  - UI: configured on the Groups tab of `/admin/permissions`; enforced on `/routing` page.
+  - UI: configured on the Groups tab of `/admin/permissions`; enforced on `/routing` and by browser-session routing writes on the server.
   - If a user has multiple groups, blank/all in any applicable group means all ports are allowed; otherwise restricted lists are unioned.
-- VideoHub presets visibility (per group, UI-only):
+- VideoHub presets visibility (per group):
   - Column: `videohub_allowed_presets`
   - Semantics: blank/NULL/"all" => all presets visible; otherwise JSON list or CSV of 1-based preset IDs.
   - UI config: `templates/admin_permissions.html` + autosave payload in `static/app.js`.
-  - Enforcement: only in the VideoHub page UI (the `/api/videohub/presets*` endpoints remain unauthenticated by design).
-- VideoHub preset editing toggle (per group, UI-only):
+  - Enforcement: hide unavailable presets in the UI and reject browser-session preset application outside the effective server-side allow-list. Service-token calls require the `videohub` scope and may have preset constraints.
+- VideoHub preset editing toggle (per group):
   - Column: `videohub_can_edit_presets` (INTEGER, default allow when NULL for backward compatibility).
   - Meaning: when off, VideoHub page allows viewing/applying presets but disables create/save/delete/lock and room-based routing edits.
   - UI config: checkbox on the Groups tab of `/admin/permissions`; autosave in `static/app.js`.
-  - Enforcement: `webui.py` passes `can_edit_presets` into `templates/videohub.html` via `data-can-edit-presets`.
+  - Enforcement: `webui.py` passes `can_edit_presets` into `templates/videohub.html` and rejects browser-session edit writes on the server. Applying an allowed preset and an allowed direct route remain distinct from preset/room editing.
 - VideoHub Rooms management:
   - The room editor is a separate page at `/videohub/rooms`, but it is not a page-access permission that can be assigned independently in Access Levels.
   - Access is derived from existing VideoHub access plus `videohub_can_edit_presets`.
@@ -171,6 +230,9 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Input filter semantics:
   - Filtered inputs are global and stored in `videohub_rooms.json`.
   - Input selection defaults to the filtered list and can toggle to show all inputs.
+- State delivery:
+  - `/api/videohub/state` and `/api/videohub/labels` share one process-wide non-blocking cache. Preserve stale/refreshing metadata, one-flight background refresh, last-known-good retention, backoff, and immediate fallback labels.
+  - Successful route and preset operations update/invalidate cached routing and verify consolidated device readback. Do not reintroduce per-output verification reads or synchronous label cache misses.
 
 ## Companion Surface Embeds
 - Surface definitions live in `companion_surfaces.json`.

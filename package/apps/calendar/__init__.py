@@ -4,7 +4,7 @@ Wraps the refactored scheduler in package.apps.calendar.scheduler so the
 app can be registered without keeping code in the repository root.
 """
 from threading import Thread, current_thread
-from typing import Dict
+from typing import Callable, Dict
 import logging
 
 from package.core import AppBase, register_app
@@ -19,6 +19,12 @@ class CalendarApp(AppBase):
         self._scheduler: ClockScheduler | None = None
         self._thread: Thread | None = None
         self._last_error: str | None = None
+        self._internal_action_executor: Callable | None = None
+
+    def set_internal_action_executor(self, executor: Callable | None) -> None:
+        self._internal_action_executor = executor
+        if self._scheduler is not None:
+            self._scheduler.set_internal_action_executor(executor)
 
     def start(self, blocking: bool = True) -> None:
         if self._scheduler is not None:
@@ -33,7 +39,12 @@ class CalendarApp(AppBase):
         self._last_error = None
         events_file = cfg.get("EVENTS_FILE", storage.DEFAULT_EVENTS_FILE)
         poll = float(cfg.get("poll_interval", 1.0))
-        self._scheduler = ClockScheduler(events_file, poll_interval=poll, debug=utils.get_debug())
+        self._scheduler = ClockScheduler(
+            events_file,
+            poll_interval=poll,
+            debug=utils.get_debug(),
+            internal_action_executor=self._internal_action_executor,
+        )
 
         # Register signal handlers so the process can be stopped gracefully
         def _handle_term(signum, frame):

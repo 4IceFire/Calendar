@@ -88,27 +88,30 @@ Common keys:
 
 With authentication enabled, TDeck APIs are no longer anonymous merely because
 the caller is on the production LAN. Browser controls use the logged-in user's
-group permissions plus automatic same-origin CSRF protection. Companion,
-scheduled API triggers, and other automation use separately scoped Bearer
-service tokens whose plaintext is shown once and whose hashes and lifecycle
-metadata live in `auth.db`.
+group permissions plus automatic same-origin CSRF protection. Companion and
+other external automation use separately scoped Bearer service tokens whose
+plaintext is shown once and whose hashes and lifecycle metadata live in
+`auth.db`.
 
-Create a Companion token with:
+Administrators manage tokens at **Config → API Tokens**. Create a separate token
+for each integration, choose only the permissions and hardware targets it needs,
+and copy the secret when TDeck displays it. The page shows active, expiring,
+expired, and revoked credentials together with their last-used time, and supports
+atomic rotation and immediate revocation. Paste a Companion token into
+Companion's existing API-token field. TDeck's built-in Calendar scheduler uses
+a private in-process dispatcher, so it needs no token or environment variable.
+Never put plaintext tokens in `config.json`, event JSON, URLs, or logs.
 
-```powershell
-python cli.py service-tokens create "Companion Production" --scope read --scope timers --scope videohub --scope tvs --scope ccb --expires-in-days 365
-```
+The recovery CLI is a separate process. Commands that call the running Web UI,
+or the discouraged standalone `cli.py start calendar` mode, remain external API
+clients and require `TDECK_INTERNAL_API_TOKEN` when authentication is enabled.
+Normal `python webui.py` operation does not use that variable.
 
-Paste it into Companion's existing API-token field. If this TDeck instance uses
-scheduled API-call triggers, create a separate least-privilege token and set it
-as `TDECK_INTERNAL_API_TOKEN` in the environment of the account/service running
-TDeck. Never put plaintext tokens in `config.json`, event JSON, URLs, or logs.
-
-Use `python cli.py service-tokens list|rotate|revoke` for lifecycle management.
-Token creation supports `--allow-path`, `--tv-target`, `--videohub-output`,
-`--videohub-input`, `--videohub-preset`, and `--atem-source` constraints. See
-`API_REFERENCE.md` for the complete migration sequence, temporary expiring
-legacy flag, v1 endpoint aliases, limits, and scope semantics.
+The `python cli.py service-tokens create|list|rotate|revoke` commands remain as
+an emergency/recovery and automation interface, but normal token management no
+longer requires the CLI. See `API_REFERENCE.md` for the complete migration
+sequence, temporary expiring legacy flag, v1 endpoint aliases, limits, and
+scope semantics.
 
 DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
 

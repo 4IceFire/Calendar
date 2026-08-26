@@ -53,6 +53,15 @@ class FrontendCompatibilityTests(unittest.TestCase):
         self.assertIn("visibilitychange", app)
         self.assertNotRegex(app, r"setInterval\([^\n]*_loadState")
 
+    def test_api_token_page_has_an_explicit_initializer(self):
+        source = (ROOT / "static" / "api_tokens.js").read_text(encoding="utf-8")
+        self.assertIn("function _initApiTokensPage()", source)
+        self.assertIn("_initApiTokensPage();", source)
+        self.assertNotRegex(
+            source,
+            r"^if\s*\(document\.getElementById\(['\"][^'\"]+-page['\"]\)\)\s*\{",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

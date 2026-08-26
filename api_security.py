@@ -298,6 +298,126 @@ def revoke_service_token(
         conn.close()
 
 
+def rotate_service_token(
+    db_path: str | Path,
+    identifier: str | int,
+    *,
+    name: str | None = None,
+    created_by: str = "CLI",
+    expires_at: str | None = None,
+    expires_in_days: int | None = None,
+) -> dict | None:
+    """Atomically replace an active token while preserving its permissions.
+
+    The old token is revoked in the same SQLite transaction that stores the
+    replacement.  If either operation fails, both are rolled back.  As with
+    creation, the replacement plaintext is returned once and never persisted.
+    """
+    raw = str(identifier or "").strip()
+    if not raw:
+        raise ValueError("Token ID or prefix is required")
+    if expires_at and expires_in_days is not None:
+        raise ValueError("Use either expires_at or expires_in_days, not both")
+    expiry = _parse_timestamp(expires_at)
+    if expires_at and expiry is None:
+        raise ValueError("expires_at must be an ISO-8601 timestamp")
+    if expires_in_days is not None:
+        days = int(expires_in_days)
+        if days <= 0:
+            raise ValueError("expires_in_days must be positive")
+        expiry = _utc_now() + timedelta(days=days)
+    if expiry is not None and expiry <= _utc_now():
+        raise ValueError("Token expiry must be in the future")
+
+    ensure_service_token_schema(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if raw.isdigit():
+            old_row = conn.execute(
+                "SELECT * FROM service_tokens WHERE id=?", (int(raw),)
+            ).fetchone()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM service_tokens WHERE token_prefix LIKE ?",
+                (raw + "%",),
+            ).fetchall()
+            if len(rows) > 1:
+                raise ValueError("Token prefix is ambiguous; use the numeric ID")
+            old_row = rows[0] if rows else None
+        if old_row is None:
+            conn.rollback()
+            return None
+
+        previous = _row_to_public_dict(old_row)
+        if not previous["active"]:
+            raise ValueError("Only an active token can be rotated")
+        token_name = str(name or previous["name"]).strip()
+        if not token_name:
+            raise ValueError("Token name is required")
+        scope_list = normalize_scopes(previous["scopes"])
+        constraint_values = normalize_constraints(previous.get("constraints") or {})
+
+        prefix = secrets.token_hex(6)
+        plaintext = f"tdk_{prefix}_{secrets.token_urlsafe(32)}"
+        now = _timestamp()
+        cur = conn.execute(
+            """
+            INSERT INTO service_tokens(
+              name,description,token_prefix,token_hash,scopes_json,created_at,
+              created_by,expires_at,constraints_json
+            ) VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                token_name,
+                previous["description"] or None,
+                prefix,
+                token_digest(plaintext),
+                json.dumps(scope_list),
+                now,
+                str(created_by or "CLI").strip() or "CLI",
+                _timestamp(expiry) if expiry else None,
+                json.dumps(constraint_values, sort_keys=True),
+            ),
+        )
+        replacement_id = int(cur.lastrowid)
+        revoked_at = _timestamp()
+        revoked = conn.execute(
+            """
+            UPDATE service_tokens
+            SET revoked_at=?, revoked_by=?
+            WHERE id=? AND revoked_at IS NULL
+            """,
+            (
+                revoked_at,
+                str(created_by or "CLI").strip() or "CLI",
+                int(old_row["id"]),
+            ),
+        )
+        if revoked.rowcount != 1:
+            raise RuntimeError("The previous token changed while it was being rotated")
+        old_updated = conn.execute(
+            "SELECT * FROM service_tokens WHERE id=?", (int(old_row["id"]),)
+        ).fetchone()
+        replacement_row = conn.execute(
+            "SELECT * FROM service_tokens WHERE id=?", (replacement_id,)
+        ).fetchone()
+        conn.commit()
+
+        replacement = _row_to_public_dict(replacement_row)
+        replacement["token"] = plaintext
+        return {
+            "previous": _row_to_public_dict(old_updated),
+            "replacement": replacement,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def authenticate_service_token(
     db_path: str | Path,
     plaintext: str,

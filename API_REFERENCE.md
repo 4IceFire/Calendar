@@ -34,7 +34,15 @@ Available token scopes are `read`, `timers`, `videohub`, `tvs`, `atem`,
 that resource's reads and writes. Avoid `*` unless a tightly constrained
 internal automation genuinely spans every capability.
 
-Create a Companion token from the TDeck folder:
+Administrators normally create and maintain tokens at **Config → API Tokens**.
+The page provides scoped creation, optional path/device restrictions, expiry and
+last-used visibility, one-click copy, atomic rotation, and revocation. Plaintext
+is shown only after creation or rotation and is cleared when the one-time dialog
+closes. Service tokens cannot call these management APIs, so even an `admin`
+Bearer token cannot mint or revoke credentials.
+
+The CLI remains available for recovery and automation when the Web UI cannot be
+used. To create a Companion token from the TDeck folder:
 
 ```powershell
 python cli.py service-tokens create "Companion Production" `
@@ -43,8 +51,8 @@ python cli.py service-tokens create "Companion Production" `
 ```
 
 Copy the printed token immediately into the existing **API token** field on the
-Companion TDeck connection. TDeck cannot display it again. Inspect and manage
-metadata without exposing plaintext:
+Companion TDeck connection. TDeck cannot display it again. CLI lifecycle
+commands never relist plaintext:
 
 ```powershell
 python cli.py service-tokens list
@@ -72,25 +80,45 @@ preserves the old token's scopes and constraints. Creation, use, scope denials,
 rate limits, rotation, and revocation produce Activity Log security events
 without recording plaintext credentials.
 
-Scheduled API triggers and CLI commands calling the local Web UI read their
-token from the process environment. Create a token with only the scopes and
-`--allow-path` values used by the schedule, set `TDECK_INTERNAL_API_TOKEN` for
-the account/service running TDeck, and restart that service. Do not put the
-token in `config.json` or an event body.
+The browser management contract is administrator-session only:
+
+- `GET /api/config/service-tokens` lists metadata and available scopes; it never
+  returns a secret or stored hash.
+- `POST /api/config/service-tokens` creates a token with `name`, optional
+  `description`, `expires_in_days`, `scopes`, and optional `constraints`.
+- `POST /api/config/service-tokens/<id>/rotate` atomically stores a replacement
+  and revokes the old token. It accepts `name` and `expires_in_days`.
+- `DELETE /api/config/service-tokens/<id>` immediately revokes a token.
+
+Create and rotate responses contain the new plaintext once. These routes require
+an administrator's Config-capable browser session; writes also require the
+normal CSRF and same-origin checks.
+
+The built-in Calendar scheduler started by `webui.py` does not call the HTTP
+listener. TDeck injects a private in-process dispatcher that runs the same API
+route handlers and validation with a `scheduler` principal, so scheduled API
+and timer actions need no bearer token or environment variable. This principal
+cannot call Admin, Config, token-management, client-telemetry, or hardware setup
+APIs, and it cannot be created through a network request.
+
+CLI commands and a separately launched `cli.py start calendar` process are not
+in-process components. If they call the secured Web UI, they remain external API
+clients and read a scoped token from `TDECK_INTERNAL_API_TOKEN`. Do not run that
+standalone scheduler alongside `webui.py`, because duplicate schedulers can
+duplicate cues.
 
 ### Deployment migration sequence
 
 1. Back up `auth.db` through the normal Config export.
-2. Create separate tokens for Companion and the scheduler; do not share one
-   token between integrations.
-3. Put the Companion token in its existing API-token field and set
-   `TDECK_INTERNAL_API_TOKEN` for the TDeck service if scheduled API triggers
-   are used.
+2. Create a separate token for each external integration, such as each Companion
+   connection; do not share credentials between consumers.
+3. Put the Companion token in its existing API-token field. The built-in
+   scheduler requires no token.
 4. Restart the relevant services, verify status polling and one harmless action,
-   then confirm `last used` with `python cli.py service-tokens list`.
+   then confirm **Last used** at **Config → API Tokens**.
 5. Rotate a token to practise the recovery procedure, update the consumer with
    the newly displayed plaintext, verify it, then revoke the previous token if
-   it was not rotated by the CLI.
+   it was not rotated through TDeck's token manager.
 
 For a short migration only, an administrator may set both fields below. The
 expiry is mandatory and must be no more than 31 days in the future:

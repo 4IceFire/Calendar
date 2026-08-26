@@ -20,8 +20,13 @@ from typing import Any
 import zipfile
 
 from api_security import (
+    SERVICE_TOKEN_SCOPES,
     authenticate_service_token,
+    create_service_token,
     ensure_service_token_schema,
+    list_service_tokens,
+    revoke_service_token,
+    rotate_service_token,
     token_allows,
 )
 
@@ -1458,6 +1463,18 @@ def _user_is_admin(user_id: int | None) -> bool:
         conn.close()
 
 
+def _can_manage_service_tokens_for_current_user() -> bool:
+    """Token minting is reserved for administrators when auth is enabled."""
+    if not _auth_enabled():
+        return True
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+        return _user_is_admin(int(current_user.get_id()))
+    except Exception:
+        return False
+
+
 def _user_allows_page(user_id: int | None, page_key: str) -> bool:
     if not page_key or user_id is None:
         return False
@@ -1850,6 +1867,8 @@ def _activity_current_actor() -> tuple[int | None, str, str]:
             if isinstance(principal, dict) and principal.get('type') == 'service_token':
                 name = str(principal.get('name') or f"Token #{principal.get('id')}")
                 return None, f'service-token:{name}', f'Service token: {name}'
+            if isinstance(principal, dict) and principal.get('type') == 'scheduler':
+                return None, 'scheduler', 'Scheduler'
             if isinstance(principal, dict) and principal.get('type') == 'legacy_anonymous':
                 return None, '', 'Legacy anonymous API'
     except Exception:
@@ -1864,6 +1883,8 @@ def _activity_source_default() -> str:
             principal = getattr(g, 'api_principal', None)
             if isinstance(principal, dict) and principal.get('type') == 'service_token':
                 return 'companion'
+            if isinstance(principal, dict) and principal.get('type') == 'scheduler':
+                return 'scheduler'
         except Exception:
             pass
         return 'api'
@@ -3127,6 +3148,7 @@ def _inject_auth():
         'build_id': _build_id(),
         'can_click_companion_surface': _can_click_companion_surface_for_current_user,
         'can_access': can_access,
+        'can_manage_service_tokens': _can_manage_service_tokens_for_current_user(),
         'can_manage_videohub_rooms': _can_manage_videohub_rooms_for_current_user,
         'csrf_token': _csrf_token,
         'current_user': current_user,
@@ -3150,10 +3172,10 @@ def _api_normalized_path(path: str | None = None) -> str:
     return value
 
 
-def _api_request_is_service_token() -> bool:
+def _api_request_is_automation_principal() -> bool:
     try:
         principal = getattr(g, 'api_principal', None)
-        return isinstance(principal, dict) and principal.get('type') == 'service_token'
+        return isinstance(principal, dict) and principal.get('type') in ('service_token', 'scheduler')
     except Exception:
         return False
 
@@ -3168,6 +3190,8 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
     verb = str(method or 'GET').upper()
     write = verb in _API_MUTATING_METHODS
 
+    if p.startswith('/api/config/service-tokens'):
+        return {'scope': 'admin', 'pages': ('page:config',), 'service_tokens': False}
     if p.startswith('/api/admin/'):
         return {'scope': 'admin', 'pages': ('page:admin',)}
     if p.startswith('/api/config') or p.startswith('/api/companion-surfaces-config'):
@@ -3219,6 +3243,52 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
         '/api/scheduler_status',
     }:
         return {'scope': 'read', 'pages': ()}
+    return None
+
+
+def _api_scheduler_path_denied(path: str) -> bool:
+    """Keep scheduled actions out of credential and setup administration."""
+    p = _api_normalized_path(path)
+    if p.startswith(('/api/admin/', '/api/config', '/api/companion-surfaces-config', '/api/activity-log')):
+        return True
+    if p == '/api/client-errors':
+        return True
+    if p.startswith('/api/hisense/config') or '/pair/' in p or p.endswith('/preflight'):
+        return True
+    if p.startswith('/api/pixie/config') or p in ('/api/pixie/discover', '/api/pixie/homes'):
+        return True
+    if p.startswith('/api/digico/setup') or p in ('/api/digico/restart', '/api/digico/discover'):
+        return True
+    return False
+
+
+def _api_scheduler_internal_gate():
+    """Authorize only the private in-process Calendar scheduler principal."""
+    marker = getattr(g, '_tdeck_scheduler_principal', None)
+    if not isinstance(marker, dict) or marker.get('type') != 'scheduler':
+        return _api_json_error(403, 'forbidden', 'The internal scheduler principal is invalid.')
+
+    normalized = _api_normalized_path()
+    policy = _api_policy(normalized, request.method)
+    if (
+        policy is None
+        or policy.get('service_tokens') is False
+        or str(policy.get('scope') or '') in ('admin', 'config')
+        or _api_scheduler_path_denied(normalized)
+    ):
+        _api_security_event(
+            'security.api.scheduler_scope_denied',
+            'Denied an internal scheduler action outside its operational API boundary',
+            status='failure',
+            details={'path': normalized, 'method': request.method, 'endpoint': request.endpoint},
+        )
+        return _api_json_error(403, 'forbidden', 'The scheduler cannot call this API capability.')
+
+    within_limit, limit = _api_request_within_size_limit(normalized)
+    if not within_limit:
+        return _api_json_error(413, 'request_too_large', f'Request body exceeds the {limit}-byte limit.')
+
+    g.api_principal = dict(marker)
     return None
 
 
@@ -3385,6 +3455,9 @@ def _api_browser_resource_check(path: str, method: str):
         user_id = int(current_user.get_id())
     except Exception:
         return _api_json_error(403, 'forbidden', 'The session has no valid user identity.')
+
+    if p.startswith('/api/config/service-tokens') and not _user_is_admin(user_id):
+        return _api_json_error(403, 'forbidden', 'Only administrators can manage API tokens.')
 
     if write and p.startswith('/api/videohub/'):
         is_apply = bool(re.fullmatch(r'/api/videohub/presets/\d+/apply', p))
@@ -3642,11 +3715,17 @@ def _api_security_gate():
 
 @app.before_request
 def _auth_gate():
+    p = request.path or ''
+
+    # Only the in-process dispatcher can place this marker on Flask's request
+    # context. It is not derived from an address, header, cookie, or payload.
+    if p.startswith('/api/') and isinstance(getattr(g, '_tdeck_scheduler_principal', None), dict):
+        return _api_scheduler_internal_gate()
+
     if not _auth_enabled():
         return None
 
     # API requests have a separate boundary for human sessions and automation.
-    p = request.path or ''
     if p.startswith('/api/'):
         return _api_security_gate()
 
@@ -3909,7 +3988,7 @@ def _config_transport_log(message: str) -> None:
 
 def _config_access_error_json():
     if _auth_enabled():
-        if _api_request_is_service_token():
+        if _api_request_is_automation_principal():
             return None
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
@@ -4637,6 +4716,39 @@ for p in (TRIGGER_TEMPLATES, BUTTON_TEMPLATES):
         p.write_text('[]', encoding='utf-8')
 
 
+def _execute_scheduler_internal_action(action: dict, job=None) -> bool:
+    """Dispatch a Calendar action inside this process without API credentials."""
+    payload = action if isinstance(action, dict) else {}
+    method = str(payload.get('method') or 'POST').strip().upper()
+    path = str(payload.get('path') or '').strip()
+    if method not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
+        return False
+    if not path.startswith('/api/') or '://' in path:
+        return False
+
+    request_args: dict[str, Any] = {'method': method}
+    if method != 'GET' and 'body' in payload:
+        request_args['json'] = payload.get('body')
+    marker = {
+        'type': 'scheduler',
+        'key': 'scheduler:calendar',
+        'name': 'TDeck Scheduler',
+        'event_id': getattr(getattr(job, 'event', None), 'id', None),
+        'event_name': str(getattr(getattr(job, 'event', None), 'name', '') or ''),
+        'trigger_index': getattr(job, 'trigger_index', None),
+    }
+    try:
+        with app.test_request_context(path, **request_args):
+            g._tdeck_scheduler_principal = marker
+            response = app.full_dispatch_request()
+            return 200 <= int(response.status_code) < 300
+    except Exception:
+        logging.getLogger('calendar').exception(
+            'In-process scheduler action dispatch failed for %s %s', method, path
+        )
+        return False
+
+
 def _start_all_apps():
     """Start all registered apps in background threads."""
     apps = list_apps()
@@ -4653,6 +4765,12 @@ def _start_all_apps():
             app_inst = get_app(name)
             if app_inst is None:
                 continue
+
+            if name == 'calendar' and hasattr(app_inst, 'set_internal_action_executor'):
+                try:
+                    app_inst.set_internal_action_executor(_execute_scheduler_internal_action)
+                except Exception:
+                    pass
 
             try:
                 if hasattr(app_inst, 'status'):
@@ -6915,6 +7033,14 @@ def config_import_page():
     return render_template('config_import.html')
 
 
+@app.route('/config/api-tokens')
+@require_page('page:config', 'Config')
+def config_api_tokens_page():
+    if not _can_manage_service_tokens_for_current_user():
+        abort(403)
+    return render_template('config_api_tokens.html', service_token_scopes=SERVICE_TOKEN_SCOPES)
+
+
 @app.route('/config/companion-surfaces')
 @require_page('page:config', 'Config')
 def companion_surfaces_config_page():
@@ -7483,7 +7609,7 @@ def _api_requires_videohub_edit() -> bool:
     try:
         if not _auth_enabled():
             return True
-        if _api_request_is_service_token():
+        if _api_request_is_automation_principal():
             return True
     except Exception:
         return False
@@ -8381,7 +8507,7 @@ def _digico_api_guard(*, aux_number: int | None = None, config_only: bool = Fals
     """Enforce login, page access and AUX scope on every DiGiCo API call."""
     if not _auth_enabled():
         return None
-    if _api_request_is_service_token():
+    if _api_request_is_automation_principal():
         return None
     if not getattr(current_user, 'is_authenticated', False):
         return jsonify({'ok': False, 'error': 'unauthorized'}), 401
@@ -8402,7 +8528,7 @@ def _digico_api_guard(*, aux_number: int | None = None, config_only: bool = Fals
 def _digico_allowed_aux_ids_current_user() -> list[str]:
     if not _auth_enabled():
         return []
-    if _api_request_is_service_token():
+    if _api_request_is_automation_principal():
         return []
     try:
         return _effective_digico_aux_ids_for_user(int(current_user.get_id()))
@@ -8894,7 +9020,7 @@ def api_hisense_tv_preflight(tv_id: str):
     access_error = _config_access_error_json()
     if access_error:
         return access_error
-    if _auth_enabled() and not _api_request_is_service_token() and not _validate_csrf():
+    if _auth_enabled() and not _api_request_is_automation_principal() and not _validate_csrf():
         return jsonify({'ok': False, 'error': 'invalid CSRF token'}), 400
     manager, error = _hisense_manager_or_error()
     if error:
@@ -9181,7 +9307,7 @@ def api_hisense_tv_pair_submit(tv_id: str):
 
 def _pixie_api_guard(*, config_only: bool = False, require_csrf: bool = False):
     if _auth_enabled():
-        if _api_request_is_service_token():
+        if _api_request_is_automation_principal():
             return None
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
@@ -9803,7 +9929,7 @@ def api_pixie_scene_activate(scene_id: str):
 
 
 def _filter_atem_audio_payload_for_current_principal(payload: dict, *, meters: bool = False) -> dict:
-    if not _auth_enabled() or _api_request_is_service_token():
+    if not _auth_enabled() or _api_request_is_automation_principal():
         return payload
     try:
         user_id = int(current_user.get_id())
@@ -10022,7 +10148,7 @@ def api_atem_audio_solo():
 
 @app.route('/api/atem/audio/monitor', methods=['POST'])
 def api_atem_audio_monitor():
-    if _auth_enabled() and not _api_request_is_service_token():
+    if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         try:
@@ -10077,7 +10203,7 @@ def api_atem_audio_monitor():
 
 @app.route('/api/config', methods=['GET'])
 def api_get_config():
-    if _auth_enabled() and not _api_request_is_service_token():
+    if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -10097,7 +10223,7 @@ def api_get_config():
 
 @app.route('/api/config', methods=['POST'])
 def api_set_config():
-    if _auth_enabled() and not _api_request_is_service_token():
+    if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -10194,6 +10320,155 @@ def api_set_config():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+def _service_token_web_actor() -> str:
+    username = str(getattr(current_user, 'username', '') or '').strip()
+    if username:
+        return username
+    try:
+        return f"User {int(current_user.get_id())}"
+    except Exception:
+        return 'TDeck administrator'
+
+
+def _service_token_create_payload(body: Any) -> dict[str, Any]:
+    payload = body if isinstance(body, dict) else {}
+    name = str(payload.get('name') or '').strip()
+    description = str(payload.get('description') or '').strip()
+    if not name:
+        raise ValueError('Token name is required.')
+    if len(name) > 120:
+        raise ValueError('Token name must be 120 characters or fewer.')
+    if len(description) > 500:
+        raise ValueError('Description must be 500 characters or fewer.')
+    scopes = payload.get('scopes')
+    if not isinstance(scopes, list):
+        raise ValueError('Choose at least one token scope.')
+    try:
+        expires_in_days = int(payload.get('expires_in_days') or 0)
+    except (TypeError, ValueError):
+        raise ValueError('Expiry must be a whole number of days.') from None
+    if expires_in_days < 1 or expires_in_days > 3650:
+        raise ValueError('Expiry must be between 1 and 3650 days.')
+    constraints = payload.get('constraints') or {}
+    if not isinstance(constraints, dict):
+        raise ValueError('Token constraints must be an object.')
+    return {
+        'name': name,
+        'description': description,
+        'scopes': scopes,
+        'expires_in_days': expires_in_days,
+        'constraints': constraints,
+    }
+
+
+@app.get('/api/config/service-tokens')
+def api_config_service_tokens_list():
+    return jsonify({
+        'ok': True,
+        'tokens': list_service_tokens(_AUTH_DB_PATH),
+        'available_scopes': list(SERVICE_TOKEN_SCOPES),
+    })
+
+
+@app.post('/api/config/service-tokens')
+def api_config_service_tokens_create():
+    try:
+        values = _service_token_create_payload(request.get_json(silent=True))
+        record = create_service_token(
+            _AUTH_DB_PATH,
+            created_by=_service_token_web_actor(),
+            **values,
+        )
+    except (TypeError, ValueError) as exc:
+        return _api_json_error(400, 'invalid_request', str(exc))
+    log_event(
+        'security.service_token.create',
+        f"Created service token '{record['name']}'",
+        source='web',
+        status='success',
+        target_type='service_token',
+        target_id=record['id'],
+        details={
+            'name': record['name'],
+            'prefix': record['token_prefix'],
+            'scopes': record['scopes'],
+            'constraints': record.get('constraints') or {},
+            'expires_at': record.get('expires_at'),
+        },
+    )
+    return jsonify({'ok': True, 'token': record}), 201
+
+
+@app.post('/api/config/service-tokens/<int:token_id>/rotate')
+def api_config_service_tokens_rotate(token_id: int):
+    body = request.get_json(silent=True)
+    payload = body if isinstance(body, dict) else {}
+    name = str(payload.get('name') or '').strip() or None
+    if name and len(name) > 120:
+        return _api_json_error(400, 'invalid_request', 'Token name must be 120 characters or fewer.')
+    try:
+        expires_in_days = int(payload.get('expires_in_days') or 0)
+    except (TypeError, ValueError):
+        return _api_json_error(400, 'invalid_request', 'Expiry must be a whole number of days.')
+    if expires_in_days < 1 or expires_in_days > 3650:
+        return _api_json_error(400, 'invalid_request', 'Expiry must be between 1 and 3650 days.')
+    try:
+        rotation = rotate_service_token(
+            _AUTH_DB_PATH,
+            token_id,
+            name=name,
+            created_by=_service_token_web_actor(),
+            expires_in_days=expires_in_days,
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        return _api_json_error(409, 'rotation_failed', str(exc))
+    if rotation is None:
+        return _api_json_error(404, 'not_found', 'Service token not found.')
+    previous = rotation['previous']
+    replacement = rotation['replacement']
+    log_event(
+        'security.service_token.rotate',
+        f"Rotated service token '{previous['name']}'",
+        source='web',
+        status='success',
+        target_type='service_token',
+        target_id=replacement['id'],
+        details={
+            'old_id': previous['id'],
+            'old_prefix': previous['token_prefix'],
+            'new_id': replacement['id'],
+            'new_prefix': replacement['token_prefix'],
+            'scopes': replacement['scopes'],
+            'expires_at': replacement.get('expires_at'),
+        },
+    )
+    return jsonify({'ok': True, 'previous': previous, 'token': replacement})
+
+
+@app.delete('/api/config/service-tokens/<int:token_id>')
+def api_config_service_tokens_revoke(token_id: int):
+    try:
+        record = revoke_service_token(
+            _AUTH_DB_PATH,
+            token_id,
+            revoked_by=_service_token_web_actor(),
+        )
+    except ValueError as exc:
+        return _api_json_error(400, 'invalid_request', str(exc))
+    if record is None:
+        return _api_json_error(404, 'not_found', 'Service token not found.')
+    log_event(
+        'security.service_token.revoke',
+        f"Revoked service token '{record['name']}'",
+        source='web',
+        status='success',
+        target_type='service_token',
+        target_id=record['id'],
+        details={'name': record['name'], 'prefix': record['token_prefix']},
+    )
+    return jsonify({'ok': True, 'token': record})
+
+
 @app.get('/api/config/export-items')
 def api_config_export_items():
     access_error = _config_access_error_json()
@@ -10287,7 +10562,7 @@ def api_config_import_apply():
 
 @app.route('/api/companion-surfaces-config', methods=['GET'])
 def api_get_companion_surfaces_config():
-    if _auth_enabled() and not _api_request_is_service_token():
+    if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -10301,7 +10576,7 @@ def api_get_companion_surfaces_config():
 
 @app.route('/api/companion-surfaces-config', methods=['POST'])
 def api_set_companion_surfaces_config():
-    if _auth_enabled() and not _api_request_is_service_token():
+    if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -10342,7 +10617,7 @@ def api_videohub_presets_list():
         cfg = {}
     try:
         presets = app_inst.list_presets(cfg)  # type: ignore[attr-defined]
-        if _auth_enabled() and not _api_request_is_service_token():
+        if _auth_enabled() and not _api_request_is_automation_principal():
             try:
                 allowed_ids = set(_effective_videohub_preset_ids_for_user(int(current_user.get_id())))
             except Exception:
@@ -11180,7 +11455,7 @@ def api_home_overview():
 def _activity_log_access_error():
     if not _auth_enabled():
         return None
-    if _api_request_is_service_token():
+    if _api_request_is_automation_principal():
         return None
     try:
         if not getattr(current_user, 'is_authenticated', False):

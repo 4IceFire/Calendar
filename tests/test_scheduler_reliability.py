@@ -106,6 +106,103 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(["location/1/0/2/press"], companion.posts)
 
+    def test_scheduler_prefers_private_in_process_dispatch_without_a_token(self):
+        captured: list[tuple[dict, TriggerJob | None]] = []
+
+        def execute(action, job):
+            captured.append((action, job))
+            return True
+
+        scheduler = ClockScheduler(debug=False, internal_action_executor=execute)
+        event = _event(3, "10AM Service", 10)
+        occurrence = datetime(2026, 8, 9, 10, 0)
+        job = TriggerJob(occurrence, event, occurrence, 0, event.times[0])
+
+        with (
+            patch.object(utils, "get_config", return_value={}),
+            patch.dict(os.environ, {"TDECK_INTERNAL_API_TOKEN": ""}, clear=False),
+            patch("package.apps.calendar.scheduler.requests.request") as request_call,
+        ):
+            result = scheduler._execute_internal_api_action(
+                {"method": "POST", "path": "timers/mutate", "body": {"action": "noop"}},
+                job,
+            )
+
+        self.assertTrue(result)
+        request_call.assert_not_called()
+        self.assertEqual(1, len(captured))
+        action, passed_job = captured[0]
+        self.assertIs(passed_job, job)
+        self.assertEqual("/api/timers/mutate", action["path"])
+        self.assertEqual(3, action["body"]["event_id"])
+        self.assertEqual("10AM Service", action["body"]["event_name"])
+
+    def test_webui_scheduler_dispatch_is_internal_and_cannot_manage_configuration(self):
+        import webui
+        from flask import g, jsonify
+
+        captured = {}
+
+        def route_stub():
+            captured["principal"] = dict(g.api_principal)
+            captured["body"] = webui.request.get_json(silent=True)
+            return jsonify({"ok": True})
+
+        endpoint = "api_apply_timer_preset"
+        original = webui.app.view_functions[endpoint]
+        webui.app.view_functions[endpoint] = route_stub
+        self.addCleanup(webui.app.view_functions.__setitem__, endpoint, original)
+        config = {
+            "auth_enabled": True,
+            "api_legacy_anonymous_enabled": False,
+            "api_max_request_bytes": 2 * 1024 * 1024,
+            "api_write_rate_limit_per_minute": 600,
+        }
+
+        with (
+            patch.object(webui, "_auth_cfg", return_value=config),
+            patch.object(webui, "log_event"),
+        ):
+            internal = webui._execute_scheduler_internal_action(
+                {"method": "POST", "path": "/api/timers/apply", "body": {"preset": 1}}
+            )
+            denied = webui._execute_scheduler_internal_action(
+                {"method": "GET", "path": "/api/config/service-tokens"}
+            )
+            external = webui.app.test_client().post(
+                "/api/timers/apply", json={"preset": 1}
+            )
+
+        self.assertTrue(internal)
+        self.assertEqual("scheduler", captured["principal"]["type"])
+        self.assertEqual({"preset": 1}, captured["body"])
+        self.assertFalse(denied)
+        self.assertEqual(401, external.status_code)
+        self.assertEqual("unauthorized", external.get_json()["error"])
+
+    def test_webui_injects_private_dispatcher_into_calendar_app(self):
+        import webui
+
+        class CalendarStub:
+            executor = None
+
+            def set_internal_action_executor(self, executor):
+                self.executor = executor
+
+            @staticmethod
+            def status():
+                return {"running": True}
+
+        calendar = CalendarStub()
+        with (
+            patch.object(webui, "list_apps", return_value={"calendar": object()}),
+            patch.object(webui, "get_app", return_value=calendar),
+            patch.object(webui, "_running_apps", {}),
+        ):
+            webui._start_all_apps()
+
+        self.assertIs(calendar.executor, webui._execute_scheduler_internal_action)
+
     def test_two_services_remain_queued_and_fire_independently(self):
         scheduler = ClockScheduler(debug=False)
         scheduler._reload_needed = False

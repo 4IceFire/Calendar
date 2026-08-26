@@ -4538,26 +4538,16 @@ function _initFoyerAudioPage() {
     }
   }
 
-  function _foyerStateAgeText(data) {
-    const ageMs = Number(data && data.ageMs);
-    if (Number.isFinite(ageMs) && ageMs >= 0) return ` (${Math.max(0, Math.round(ageMs / 1000))}s old)`;
-    const sampledAt = Number(data && data.sampledAt);
-    if (Number.isFinite(sampledAt) && sampledAt > 0) {
-      const sampledAtMs = sampledAt < 100000000000 ? sampledAt * 1000 : sampledAt;
-      return ` (${Math.max(0, Math.round((Date.now() - sampledAtMs) / 1000))}s old)`;
-    }
-    return '';
-  }
-
   function _applyFullState(data) {
     if (!data || !Array.isArray(data.sources)) {
       throw new Error((data && (data.error || data.lastError)) || 'Could not load ATEM audio state');
     }
     const nextSources = data.sources;
     monitorState = data.monitor || {};
-    if (data.stale) {
-      _foyerSetStatus(`Showing the last known ATEM state${_foyerStateAgeText(data)}. ${data.lastError || data.error || 'Refreshing in the background.'}`, 'warning');
-    } else if (data.refreshing) {
+    const stateError = data.lastError || data.error;
+    if (data.stale && stateError) {
+      _foyerSetStatus(stateError, 'warning');
+    } else if (!data.stale && data.refreshing) {
       _foyerSetStatus('Refreshing ATEM audio state…', 'info');
     } else if (data.ok === false && (data.error || data.lastError)) {
       _foyerSetStatus(data.error || data.lastError, 'warning');

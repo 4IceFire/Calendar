@@ -24,6 +24,7 @@ class ConfigNavigationTests(unittest.TestCase):
         self.assertIn('href="/config/tvs"', markup)
         self.assertIn('href="/config/pixie"', markup)
         self.assertIn('href="/config/companion-surfaces"', markup)
+        self.assertIn('href="/config/api-tokens"', markup)
         self.assertIn('href="/config/export"', markup)
         self.assertIn('href="/config/import"', markup)
         self.assertIn('id="config-save"', markup)
@@ -36,6 +37,7 @@ class ConfigNavigationTests(unittest.TestCase):
             "/config/tvs": 'active" href="/config/tvs"',
             "/config/pixie": 'active" href="/config/pixie"',
             "/config/companion-surfaces": 'active" href="/config/companion-surfaces"',
+            "/config/api-tokens": 'active" href="/config/api-tokens"',
             "/config/export": 'active" href="/config/export"',
             "/config/import": 'active" href="/config/import"',
         }

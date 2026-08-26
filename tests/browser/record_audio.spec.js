@@ -29,7 +29,7 @@ const METER_STATE = {
   metering: {enabled: true, connected: true, active: true},
 };
 
-async function installAudioMocks(page, counters, failFirstState) {
+async function installAudioMocks(page, counters, failFirstState, state = AUDIO_STATE) {
   await page.route('**/api/atem/audio/state**', route => {
     counters.state += 1;
     if (failFirstState && counters.state === 1) {
@@ -39,7 +39,7 @@ async function installAudioMocks(page, counters, failFirstState) {
         body: JSON.stringify({ok: false, error: 'Simulated ATEM outage'}),
       });
     }
-    return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(AUDIO_STATE)});
+    return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(state)});
   });
   await page.route('**/api/atem/audio/meters**', route => {
     counters.meters += 1;
@@ -62,6 +62,21 @@ test('Record Audio initializes and recovers from a failed state request', async 
   await expect(page.locator('#foyer-audio-grid')).toContainText('Lectern');
   expect(counters.state).toBeGreaterThanOrEqual(2);
   expect(pageErrors).toEqual([]);
+});
+
+test('Record Audio shows cached state without a routine stale-state notification', async ({page}) => {
+  const counters = {state: 0, meters: 0};
+  await installAudioMocks(page, counters, false, {
+    ...AUDIO_STATE,
+    stale: true,
+    refreshing: true,
+    ageMs: 5000,
+  });
+
+  const access = await openProtectedPage(page, '/foyer-audio');
+  test.skip(!access.ok, access.reason);
+  await expect(page.locator('.foyer-audio-strip')).toHaveCount(2);
+  await expect(page.locator('#foyer-audio-status')).toBeEmpty();
 });
 
 test('Record Audio pauses high-rate reads while the page is hidden', async ({page}) => {

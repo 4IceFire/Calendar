@@ -20,6 +20,7 @@ from api_security import (
     create_service_token,
     list_service_tokens,
     revoke_service_token,
+    rotate_service_token,
 )
 
 from package.core import list_apps, get_app
@@ -730,17 +731,6 @@ def _print_created_service_token(record: dict, *, rotated_from: str | None = Non
     print(record["token"])
 
 
-def _find_service_token(identifier: str) -> dict | None:
-    raw = str(identifier or "").strip()
-    records = list_service_tokens(_service_token_db_path())
-    if raw.isdigit():
-        return next((item for item in records if int(item["id"]) == int(raw)), None)
-    matches = [item for item in records if str(item["token_prefix"]).startswith(raw)]
-    if len(matches) > 1:
-        raise ValueError("Token prefix is ambiguous; use the numeric ID")
-    return matches[0] if matches else None
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="calendarctl")
     sub = parser.add_subparsers(dest="cmd")
@@ -937,26 +927,21 @@ def main(argv=None):
             return 0
         if args.service_tokens_cmd == "rotate":
             try:
-                old = _find_service_token(args.identifier)
-                if old is None:
-                    print("Service token not found")
-                    return 1
-                if not old["active"]:
-                    print("Only an active token can be rotated")
-                    return 2
-                replacement = create_service_token(
+                rotation = rotate_service_token(
                     _service_token_db_path(),
-                    name=args.name or old["name"],
-                    scopes=old["scopes"],
-                    description=old["description"],
+                    args.identifier,
+                    name=args.name,
                     expires_at=args.expires_at,
                     expires_in_days=args.expires_in_days,
-                    constraints=old.get("constraints") or {},
                 )
-                revoked = revoke_service_token(_service_token_db_path(), old["id"])
-            except ValueError as exc:
+                if rotation is None:
+                    print("Service token not found")
+                    return 1
+            except (RuntimeError, ValueError) as exc:
                 print(f"Could not rotate service token: {exc}")
                 return 2
+            old = rotation["previous"]
+            replacement = rotation["replacement"]
             _activity_log_cli_event(
                 "security.service_token.rotate",
                 f"Rotated service token '{old['name']}'",
@@ -964,7 +949,7 @@ def main(argv=None):
                 target_id=replacement["id"],
                 details={"old_id": old["id"], "old_prefix": old["token_prefix"], "new_id": replacement["id"], "new_prefix": replacement["token_prefix"], "scopes": replacement["scopes"]},
             )
-            _print_created_service_token(replacement, rotated_from=f"#{revoked['id']} {revoked['token_prefix']}")
+            _print_created_service_token(replacement, rotated_from=f"#{old['id']} {old['token_prefix']}")
             return 0
         token_p.print_help()
         return 2

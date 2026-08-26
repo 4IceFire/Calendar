@@ -1,0 +1,194 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'API Tokens' %}
+{% set page_subtitle = 'Create and maintain secure credentials for Companion and other external integrations' %}
+{% set config_active_tab = 'api-tokens' %}
+
+{% block content %}
+{% include '_config_tabs.html' %}
+
+<div id="api-token-page" data-default-expiry-days="365">
+  <div id="api-token-alert" aria-live="polite"></div>
+
+  <div class="alert alert-info d-flex gap-2 align-items-start" role="note">
+    <span aria-hidden="true">&#9432;</span>
+    <div>
+      <strong>Token secrets are shown once.</strong>
+      Copy the token after creating or rotating it. TDeck stores only a one-way hash and cannot reveal it later.
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-12 col-xl-4">
+      <div class="card tdeck-soft h-100">
+        <div class="card-body">
+          <h2 class="h5 mb-1">Create token</h2>
+          <p class="text-muted small">Give each app or device its own least-privilege token so it can be rotated independently.</p>
+
+          <form id="api-token-create-form" novalidate>
+            <div class="mb-3">
+              <label class="form-label" for="api-token-name">Name</label>
+              <input class="form-control" id="api-token-name" name="name" maxlength="120" placeholder="Companion - Auditorium" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="api-token-description">Description <span class="text-muted">(optional)</span></label>
+              <textarea class="form-control" id="api-token-description" name="description" maxlength="500" rows="2" placeholder="What uses this token and where it is installed"></textarea>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="api-token-expiry">Expires after</label>
+              <select class="form-select" id="api-token-expiry" name="expires_in_days" required>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+                <option value="180">180 days</option>
+                <option value="365" selected>1 year (recommended)</option>
+                <option value="730">2 years</option>
+              </select>
+              <div class="form-text">TDeck highlights tokens 30 days before expiry.</div>
+            </div>
+
+            <fieldset class="mb-3">
+              <legend class="form-label mb-2">Permissions</legend>
+              <div class="row g-2" id="api-token-scopes">
+                {% for scope in service_token_scopes %}
+                <div class="col-6">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="scopes" value="{{ scope }}" id="api-token-scope-{{ scope }}"{% if scope == 'read' %} checked{% endif %}>
+                    <label class="form-check-label" for="api-token-scope-{{ scope }}">{{ scope }}</label>
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+              <div class="form-text">Select only what this integration needs. Read permits all read-only API calls.</div>
+            </fieldset>
+
+            <details class="mb-3">
+              <summary class="fw-semibold">Advanced restrictions</summary>
+              <p class="text-muted small mt-2 mb-3">Optionally limit the token to specific actions or hardware targets. Leave blank for no additional restriction.</p>
+              <div class="mb-3">
+                <label class="form-label" for="api-token-allowed-paths">Allowed API actions</label>
+                <textarea class="form-control font-monospace" id="api-token-allowed-paths" rows="3" placeholder="POST /api/timers/apply&#10;GET /api/status/summary"></textarea>
+                <div class="form-text">One METHOD /api/path pattern per line. Wildcards are supported.</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label" for="api-token-tv-targets">TV target IDs</label>
+                <input class="form-control" id="api-token-tv-targets" placeholder="foyer, auditorium">
+              </div>
+              <div class="row g-2 mb-3">
+                <div class="col-md-4">
+                  <label class="form-label" for="api-token-vh-outputs">VideoHub outputs</label>
+                  <input class="form-control" id="api-token-vh-outputs" inputmode="numeric" placeholder="1, 2">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="api-token-vh-inputs">VideoHub inputs</label>
+                  <input class="form-control" id="api-token-vh-inputs" inputmode="numeric" placeholder="1, 3">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="api-token-vh-presets">VideoHub presets</label>
+                  <input class="form-control" id="api-token-vh-presets" inputmode="numeric" placeholder="2, 5">
+                </div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label" for="api-token-atem-sources">ATEM source IDs</label>
+                <input class="form-control" id="api-token-atem-sources" placeholder="1, MediaPlayer1">
+              </div>
+            </details>
+
+            <button class="btn btn-primary w-100" id="api-token-create" type="submit">Create token</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-xl-8">
+      <div class="card tdeck-soft h-100">
+        <div class="card-body">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+            <div>
+              <h2 class="h5 mb-1">Issued tokens</h2>
+              <div class="text-muted small">Expiry, usage, scopes, and revocation status.</div>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" id="api-token-refresh" type="button">Refresh</button>
+          </div>
+          <div id="api-token-loading" class="text-muted py-4 text-center">Loading tokens&hellip;</div>
+          <div id="api-token-empty" class="alert alert-secondary d-none">No API tokens have been created.</div>
+          <div class="table-responsive d-none" id="api-token-table-wrap">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr>
+                  <th scope="col">Token</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Permissions</th>
+                  <th scope="col">Last used</th>
+                  <th scope="col" class="text-end">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="api-token-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="api-token-rotate-modal" tabindex="-1" aria-labelledby="api-token-rotate-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <form id="api-token-rotate-form">
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="api-token-rotate-title">Rotate token</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <p class="text-muted small">A replacement will be created with the same permissions and restrictions. The current token will stop working immediately.</p>
+            <input type="hidden" id="api-token-rotate-id">
+            <div class="mb-3">
+              <label class="form-label" for="api-token-rotate-name">Replacement name</label>
+              <input class="form-control" id="api-token-rotate-name" maxlength="120" required>
+            </div>
+            <div>
+              <label class="form-label" for="api-token-rotate-expiry">Replacement expires after</label>
+              <select class="form-select" id="api-token-rotate-expiry">
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+                <option value="180">180 days</option>
+                <option value="365" selected>1 year (recommended)</option>
+                <option value="730">2 years</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-warning" id="api-token-rotate-confirm">Rotate and revoke old token</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="api-token-secret-modal" tabindex="-1" aria-labelledby="api-token-secret-title" aria-hidden="true" data-bs-backdrop="static">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title fs-5" id="api-token-secret-title">Copy your new token</h2>
+        </div>
+        <div class="modal-body">
+          <div class="alert alert-warning"><strong>This is the only time TDeck will show this secret.</strong> Copy it into the integration before closing.</div>
+          <label class="form-label" for="api-token-secret">Token</label>
+          <div class="input-group">
+            <input class="form-control font-monospace" id="api-token-secret" type="text" readonly autocomplete="off" spellcheck="false">
+            <button class="btn btn-primary" id="api-token-copy" type="button">Copy</button>
+          </div>
+          <div class="small text-muted mt-2" id="api-token-secret-meta"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="api-token-secret-close" data-bs-dismiss="modal">I have saved the token</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_asset('api_tokens.js') }}"></script>
+{% endblock %}
