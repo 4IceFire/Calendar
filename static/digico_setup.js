@@ -12,6 +12,7 @@
   const state = {payload: null, dirty: false, busy: false, initialized: false};
   let iconDialog = null;
   let iconTarget = null;
+  let iconDialogBackdrop = null;
 
   function setMessage(text, kind) {
     message.className = text ? `alert alert-${kind || 'secondary'} mb-3` : 'mb-3';
@@ -105,7 +106,7 @@
   function updateIconButton(button, input, valueText, kind) {
     const icon = iconSystem.normalize(valueText);
     input.value = icon;
-    button.replaceChildren();
+    button.textContent = '';
     button.appendChild(iconSystem.create(icon, 'digico-icon-select-preview'));
     const text = document.createElement('span');
     text.textContent = iconSystem.find(icon).label;
@@ -119,6 +120,7 @@
     const dialog = document.createElement('dialog');
     dialog.className = 'digico-icon-dialog';
     dialog.setAttribute('aria-labelledby', 'digico-icon-dialog-title');
+    if (typeof dialog.showModal !== 'function') dialog.hidden = true;
 
     const header = document.createElement('div');
     header.className = 'digico-icon-dialog-header';
@@ -130,7 +132,7 @@
     close.type = 'button';
     close.className = 'btn-close';
     close.setAttribute('aria-label', 'Close icon picker');
-    close.addEventListener('click', () => dialog.close());
+    close.addEventListener('click', () => closeIconDialog(dialog));
     header.append(heading, close);
 
     const help = document.createElement('p');
@@ -151,19 +153,61 @@
         if (!iconTarget) return;
         updateIconButton(iconTarget.button, iconTarget.input, item.id, iconTarget.kind);
         state.dirty = true;
-        dialog.close();
+        closeIconDialog(dialog);
       });
       grid.appendChild(option);
     }
     dialog.append(header, help, grid);
     dialog.addEventListener('click', event => {
-      if (event.target === dialog) dialog.close();
+      if (event.target === dialog) closeIconDialog(dialog);
     });
     dialog.addEventListener('close', () => { iconTarget = null; });
     document.body.appendChild(dialog);
     iconDialog = dialog;
     return dialog;
   }
+
+  function closeIconDialog(dialog) {
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') {
+      dialog.close();
+      return;
+    }
+    dialog.removeAttribute('open');
+    dialog.classList.remove('digico-icon-dialog-fallback');
+    dialog.hidden = true;
+    if (iconDialogBackdrop) iconDialogBackdrop.hidden = true;
+    document.body.classList.remove('digico-dialog-open');
+    iconTarget = null;
+  }
+
+  function showIconDialog(dialog) {
+    if (typeof dialog.showModal === 'function') {
+      dialog.showModal();
+      return;
+    }
+    if (!iconDialogBackdrop) {
+      iconDialogBackdrop = document.createElement('div');
+      iconDialogBackdrop.className = 'digico-icon-dialog-backdrop';
+      iconDialogBackdrop.hidden = true;
+      iconDialogBackdrop.addEventListener('click', () => closeIconDialog(iconDialog));
+      document.body.appendChild(iconDialogBackdrop);
+    }
+    dialog.hidden = false;
+    dialog.setAttribute('open', '');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.classList.add('digico-icon-dialog-fallback');
+    iconDialogBackdrop.hidden = false;
+    document.body.classList.add('digico-dialog-open');
+    const selected = dialog.querySelector('.digico-icon-option.is-selected');
+    const close = dialog.querySelector('.btn-close');
+    (selected || close || dialog).focus();
+  }
+
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && iconDialog && iconDialog.hasAttribute('open')) closeIconDialog(iconDialog);
+  });
 
   function iconControl(item, kind) {
     const wrap = document.createElement('div');
@@ -188,7 +232,7 @@
         option.classList.toggle('is-selected', active);
         option.setAttribute('aria-pressed', active ? 'true' : 'false');
       }
-      dialog.showModal();
+      showIconDialog(dialog);
     });
     wrap.append(label, button, input);
     return wrap;
@@ -252,7 +296,7 @@
 
   function renderMixerItems(kind, items) {
     const target = kind === 'aux' ? auxTable : channelTable;
-    target.replaceChildren();
+    target.textContent = '';
     if (!items.length) {
       const empty = document.createElement('div');
       empty.className = 'digico-config-empty';
@@ -333,7 +377,7 @@
   }
 
   function renderDevices(devices) {
-    deviceList.replaceChildren();
+    deviceList.textContent = '';
     for (const device of Array.isArray(devices) ? devices : []) renderDevice(device);
     if (!deviceList.children.length) {
       const empty = document.createElement('div');
@@ -353,7 +397,7 @@
     field('digico-channel-count').textContent = String(data.channels || 0);
 
     const diagnostics = document.getElementById('digico-diagnostics');
-    diagnostics.replaceChildren();
+    diagnostics.textContent = '';
     const fields = [
       ['Running', data.running ? 'Yes' : 'No'],
       ['Connected', data.connected ? 'Yes' : 'No'],

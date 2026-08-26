@@ -1,9 +1,12 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context, g
 import copy
+import fnmatch
 import gzip
+import hashlib
 import io
 import logging
 import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -16,12 +19,19 @@ import uuid
 from typing import Any
 import zipfile
 
+from api_security import (
+    authenticate_service_token,
+    ensure_service_token_schema,
+    token_allows,
+)
+
 from werkzeug.serving import make_server
 from werkzeug.utils import secure_filename
 import json
 import re
 from datetime import datetime, timedelta
 from tempfile import NamedTemporaryFile
+from urllib.parse import unquote, urlsplit
 
 from package.json_cache import read_json, write_json
 
@@ -328,6 +338,33 @@ except Exception:
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
+_BUILD_ID_LOCK = threading.Lock()
+_BUILD_ID_CACHE: str | None = None
+
+
+def _build_id() -> str:
+    """Return a non-secret release identifier for diagnostics and cache tracing."""
+    configured = str(os.environ.get('TDECK_BUILD_ID') or '').strip()
+    if configured:
+        cleaned = re.sub(r'[^A-Za-z0-9._-]+', '-', configured).strip('-')
+        if cleaned:
+            return cleaned[:80]
+
+    global _BUILD_ID_CACHE
+    with _BUILD_ID_LOCK:
+        if _BUILD_ID_CACHE:
+            return _BUILD_ID_CACHE
+        digest = hashlib.sha256()
+        root = Path(__file__).resolve().parent
+        for relative in ('webui.py', 'templates/base.html', 'static/app.js', 'static/client_telemetry.js'):
+            try:
+                digest.update(relative.encode('utf-8'))
+                digest.update((root / relative).read_bytes())
+            except Exception:
+                continue
+        _BUILD_ID_CACHE = f'local-{digest.hexdigest()[:12]}'
+        return _BUILD_ID_CACHE
+
 _COMPRESSIBLE_MIMETYPES = {
     'application/javascript',
     'application/json',
@@ -340,40 +377,114 @@ _COMPRESSIBLE_MIMETYPES = {
     'text/xml',
 }
 
+_STATIC_ASSET_MANIFEST_LOCK = threading.RLock()
+_STATIC_ASSET_MANIFEST: dict[str, str] = {}
+_STATIC_ASSET_DIGEST_RE = re.compile(r'^[0-9a-f]{64}$')
 
-@app.template_global()
-def static_asset(filename: str) -> str:
-    """Return a cache-safe URL for a bundled static asset."""
-    asset_name = str(filename or '').lstrip('/\\')
-    version = '1'
+
+def _resolve_static_asset(filename: str) -> tuple[str, Path] | None:
+    """Resolve a logical asset name without allowing it outside static/."""
+    asset_name = str(filename or '').strip().replace('\\', '/')
+    asset_name = asset_name.lstrip('/')
+    parts = asset_name.split('/')
+    if not asset_name or any(part in ('', '.', '..') for part in parts):
+        return None
     try:
         static_root = Path(str(app.static_folder or 'static')).resolve()
         asset_path = (static_root / asset_name).resolve()
         asset_path.relative_to(static_root)
-        stat = asset_path.stat()
-        version = f'{stat.st_mtime_ns:x}-{stat.st_size:x}'
-    except Exception:
-        pass
-    return url_for('static', filename=asset_name, v=version)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return asset_name, asset_path
+
+
+def _static_asset_digest(filename: str) -> tuple[str, str] | None:
+    """Return the logical name and SHA-256 of its current bytes.
+
+    Hashing the bytes, rather than trusting timestamps, makes the generated URL
+    a content identity. The small in-memory manifest is useful for diagnostics,
+    while deliberately recomputing prevents same-size/timestamp deployments from
+    retaining a stale URL.
+    """
+    resolved = _resolve_static_asset(filename)
+    if resolved is None:
+        return None
+    asset_name, asset_path = resolved
+    try:
+        if not asset_path.is_file():
+            return None
+        hasher = hashlib.sha256()
+        with asset_path.open('rb') as asset_stream:
+            for chunk in iter(lambda: asset_stream.read(1024 * 1024), b''):
+                hasher.update(chunk)
+        digest = hasher.hexdigest()
+    except OSError:
+        return None
+    with _STATIC_ASSET_MANIFEST_LOCK:
+        _STATIC_ASSET_MANIFEST[asset_name] = digest
+    return asset_name, digest
+
+
+@app.template_global()
+def static_asset(filename: str) -> str:
+    """Return a content-addressed URL for a bundled static asset.
+
+    Invalid names collapse to the static root and missing files remain ordinary,
+    revalidated 404 URLs; neither can be made immutable accidentally.
+    """
+    digest_entry = _static_asset_digest(filename)
+    if digest_entry is not None:
+        asset_name, digest = digest_entry
+        return url_for('static', filename=asset_name, v=digest)
+    resolved = _resolve_static_asset(filename)
+    safe_name = resolved[0] if resolved is not None else ''
+    return url_for('static', filename=safe_name)
+
+
+def _request_has_current_static_digest() -> bool:
+    if request.endpoint != 'static':
+        return False
+    requested_digest = str(request.args.get('v') or '').strip().lower()
+    if not _STATIC_ASSET_DIGEST_RE.fullmatch(requested_digest):
+        return False
+    filename = str((request.view_args or {}).get('filename') or '')
+    digest_entry = _static_asset_digest(filename)
+    return bool(digest_entry and secrets.compare_digest(digest_entry[1], requested_digest))
 
 
 @app.after_request
 def _optimize_web_response(response):
-    """Cache versioned assets and compress text sent to slower clients."""
+    """Apply safe cache policies and compress text for slower clients."""
     try:
-        if (
-            response.status_code == 200
-            and (request.path or '').startswith('/static/')
-            and request.args.get('v')
+        request_path = request.path or ''
+        is_static = request.endpoint == 'static' or request_path.startswith('/static/')
+        if is_static and response.status_code in (200, 304):
+            if _request_has_current_static_digest():
+                response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            else:
+                response.headers['Cache-Control'] = 'public, no-cache, max-age=0, must-revalidate'
+        elif request_path.startswith('/api/'):
+            # API state and live-control results must never be replayed from a
+            # browser or intermediary cache.
+            response.headers['Cache-Control'] = 'no-store'
+        elif response.mimetype == 'text/html':
+            # HTML can contain per-user navigation and CSRF/session state. Allow
+            # browser history while requiring validation before reuse.
+            response.headers['Cache-Control'] = 'private, no-cache, max-age=0, must-revalidate'
+        elif (
+            request_path.startswith('/config/')
+            and 'attachment' in str(response.headers.get('Content-Disposition') or '').lower()
         ):
-            response.cache_control.no_cache = None
-            response.cache_control.public = True
-            response.cache_control.max_age = 31536000
-            response.cache_control.immutable = True
+            response.headers['Cache-Control'] = 'private, no-store'
 
         accepts_gzip = request.accept_encodings['gzip'] > 0
         content_encoding = str(response.headers.get('Content-Encoding') or '').strip()
         cache_control = str(response.headers.get('Cache-Control') or '').lower()
+        if response.status_code in (200, 304) and response.mimetype in _COMPRESSIBLE_MIMETYPES:
+            response.headers['Vary'] = _append_vary_header(
+                response.headers.get('Vary'),
+                'Accept-Encoding',
+            )
         should_compress = (
             accepts_gzip
             and not content_encoding
@@ -805,6 +916,7 @@ def _init_auth_db() -> None:
         conn.commit()
     finally:
         conn.close()
+    ensure_service_token_schema(_AUTH_DB_PATH)
 
 
 def _auth_meta_get(key: str) -> str | None:
@@ -1732,12 +1844,28 @@ def _activity_current_actor() -> tuple[int | None, str, str]:
             return uid, uname, uname or f'User #{uid}'
     except Exception:
         pass
+    try:
+        if has_request_context():
+            principal = getattr(g, 'api_principal', None)
+            if isinstance(principal, dict) and principal.get('type') == 'service_token':
+                name = str(principal.get('name') or f"Token #{principal.get('id')}")
+                return None, f'service-token:{name}', f'Service token: {name}'
+            if isinstance(principal, dict) and principal.get('type') == 'legacy_anonymous':
+                return None, '', 'Legacy anonymous API'
+    except Exception:
+        pass
     return None, '', ''
 
 
 def _activity_source_default() -> str:
     path = _activity_request_path()
     if path.startswith('/api/'):
+        try:
+            principal = getattr(g, 'api_principal', None)
+            if isinstance(principal, dict) and principal.get('type') == 'service_token':
+                return 'companion'
+        except Exception:
+            pass
         return 'api'
     if path:
         return 'web'
@@ -2875,6 +3003,116 @@ def _validate_csrf() -> bool:
     return bool(sent) and str(sent) == str(session.get('_csrf'))
 
 
+_CLIENT_ERROR_RATE_LOCK = threading.Lock()
+_CLIENT_ERROR_RATE_BUCKETS: dict[str, deque[float]] = {}
+_CLIENT_ERROR_RATE_WINDOW_SECONDS = 60.0
+_CLIENT_ERROR_RATE_MAX = 10
+_CLIENT_ERROR_MAX_BODY_BYTES = 8192
+_CLIENT_ERROR_SECRET_RE = re.compile(
+    r'(?i)\b(password|passwd|token|secret|authorization|cookie|session|csrf)\b'
+    r'\s*[:=]\s*([^\s,;&]+)'
+)
+_CLIENT_ERROR_BEARER_RE = re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._~+\-/]+=*')
+_CLIENT_ERROR_URL_QUERY_RE = re.compile(r'((?:https?://|/)[^\s?#]+)[?#][^\s]*')
+
+
+def _client_error_text(value: Any, limit: int) -> str:
+    text = str(value or '').replace('\x00', '')
+    text = _CLIENT_ERROR_BEARER_RE.sub('Bearer [redacted]', text)
+    text = _CLIENT_ERROR_SECRET_RE.sub(lambda match: f'{match.group(1)}=[redacted]', text)
+    text = _CLIENT_ERROR_URL_QUERY_RE.sub(r'\1', text)
+    return text[:max(0, int(limit))]
+
+
+def _client_error_path(value: Any, limit: int = 240) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme or parsed.netloc:
+            text = parsed.path or '/'
+        else:
+            text = text.split('?', 1)[0].split('#', 1)[0]
+    except Exception:
+        text = text.split('?', 1)[0].split('#', 1)[0]
+    if not text.startswith('/'):
+        text = '/' + text.lstrip('/')
+    return _client_error_text(text, limit)
+
+
+def _client_error_rate_allowed() -> bool:
+    try:
+        if getattr(current_user, 'is_authenticated', False):
+            identity = f'user:{current_user.get_id()}'
+        else:
+            identity = f'ip:{request.remote_addr or "unknown"}'
+    except Exception:
+        identity = f'ip:{request.remote_addr or "unknown"}'
+    now = time.monotonic()
+    cutoff = now - _CLIENT_ERROR_RATE_WINDOW_SECONDS
+    with _CLIENT_ERROR_RATE_LOCK:
+        bucket = _CLIENT_ERROR_RATE_BUCKETS.setdefault(identity, deque())
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(bucket) >= _CLIENT_ERROR_RATE_MAX:
+            return False
+        bucket.append(now)
+        if len(_CLIENT_ERROR_RATE_BUCKETS) > 1000:
+            stale_keys = [key for key, values in _CLIENT_ERROR_RATE_BUCKETS.items() if not values or values[-1] <= cutoff]
+            for key in stale_keys[:250]:
+                _CLIENT_ERROR_RATE_BUCKETS.pop(key, None)
+        return True
+
+
+def _client_error_same_origin() -> bool:
+    if str(request.headers.get('Sec-Fetch-Site') or '').strip().lower() == 'cross-site':
+        return False
+    origin = str(request.headers.get('Origin') or '').strip()
+    if not origin:
+        return True
+    try:
+        return urlsplit(origin).netloc.lower() == str(request.host or '').lower()
+    except Exception:
+        return False
+
+
+def _client_error_payload(raw: Any) -> dict[str, Any]:
+    body = raw if isinstance(raw, dict) else {}
+    kind = str(body.get('kind') or 'error').strip().lower()
+    if kind not in ('error', 'unhandledrejection'):
+        kind = 'error'
+    correlation_id = str(body.get('correlationId') or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9._-]{8,80}', correlation_id):
+        correlation_id = uuid.uuid4().hex
+    try:
+        line = max(0, min(int(body.get('line') or 0), 10_000_000))
+    except Exception:
+        line = 0
+    try:
+        column = max(0, min(int(body.get('column') or 0), 10_000_000))
+    except Exception:
+        column = 0
+    client_build_id = re.sub(
+        r'[^A-Za-z0-9._-]+', '-', str(body.get('buildId') or '')
+    ).strip('-')[:80]
+    return {
+        'kind': kind,
+        'message': _client_error_text(body.get('message'), 600) or 'Unknown client error',
+        'stack': _client_error_text(body.get('stack'), 2400),
+        'source_path': _client_error_path(body.get('source')),
+        'route': _client_error_path(body.get('route') or request.path),
+        'line': line,
+        'column': column,
+        'client_build_id': client_build_id,
+        'server_build_id': _build_id(),
+        'correlation_id': correlation_id,
+        # The server-observed User-Agent is used instead of accepting a
+        # spoofable or accidentally sensitive arbitrary client field.
+        'user_agent': _client_error_text(request.headers.get('User-Agent'), 400),
+    }
+
+
 @app.context_processor
 def _inject_auth():
     # Flask-Login's `is_authenticated` is a property in newer versions and a
@@ -2886,6 +3124,7 @@ def _inject_auth():
         is_authed = False
     return {
         'auth_enabled': _auth_enabled(),
+        'build_id': _build_id(),
         'can_click_companion_surface': _can_click_companion_surface_for_current_user,
         'can_access': can_access,
         'can_manage_videohub_rooms': _can_manage_videohub_rooms_for_current_user,
@@ -2895,20 +3134,528 @@ def _inject_auth():
     }
 
 
+_API_MUTATING_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+_api_rate_lock = threading.Lock()
+_api_rate_events: dict[str, deque[float]] = {}
+_api_legacy_warning_lock = threading.Lock()
+_api_legacy_warning_at = 0.0
+
+
+def _api_normalized_path(path: str | None = None) -> str:
+    value = str(path if path is not None else (request.path or ''))
+    if value == '/api/v1':
+        return '/api'
+    if value.startswith('/api/v1/'):
+        return '/api/' + value[len('/api/v1/'):]
+    return value
+
+
+def _api_request_is_service_token() -> bool:
+    try:
+        principal = getattr(g, 'api_principal', None)
+        return isinstance(principal, dict) and principal.get('type') == 'service_token'
+    except Exception:
+        return False
+
+
+def _api_policy(path: str, method: str) -> dict[str, Any] | None:
+    """Return the required token scope and browser page capabilities.
+
+    This is intentionally an allow-list.  A new API endpoint has no access in
+    secure mode until its policy is deliberately classified here.
+    """
+    p = _api_normalized_path(path)
+    verb = str(method or 'GET').upper()
+    write = verb in _API_MUTATING_METHODS
+
+    if p.startswith('/api/admin/'):
+        return {'scope': 'admin', 'pages': ('page:admin',)}
+    if p.startswith('/api/config') or p.startswith('/api/companion-surfaces-config'):
+        return {'scope': 'config', 'pages': ('page:config',)}
+    if p == '/api/client-errors':
+        # Browser-only diagnostics still pass through session, CSRF, origin,
+        # request-size and write-rate enforcement before the route's tighter
+        # telemetry-specific sanitization and rate limit.
+        return {'scope': 'read', 'pages': (), 'service_tokens': False}
+    if p.startswith('/api/activity-log'):
+        return {'scope': 'admin', 'pages': ('page:console',)}
+    if p.startswith('/api/hisense/config') or '/pair/' in p or p.endswith('/preflight'):
+        return {'scope': 'tvs', 'pages': ('page:config',)}
+    if p.startswith('/api/tvs') or p.startswith('/api/tv-targets'):
+        return {'scope': 'tvs', 'pages': ('page:config',)}
+    if p.startswith('/api/pixie/config') or p in ('/api/pixie/discover', '/api/pixie/homes'):
+        return {'scope': 'pixie', 'pages': ('page:config',)}
+    if p.startswith('/api/pixie/'):
+        return {'scope': 'pixie', 'pages': ('page:pixie_controls',)}
+    if p.startswith('/api/digico/setup') or p in ('/api/digico/restart', '/api/digico/discover'):
+        return {'scope': 'digico', 'pages': ('page:config',)}
+    if p.startswith('/api/digico/'):
+        return {'scope': 'digico', 'pages': ('page:digico_mixer',)}
+    if p.startswith('/api/atem/audio/'):
+        return {'scope': 'atem', 'pages': ('page:atem_audio',)}
+    if p == '/api/videohub/route':
+        return {'scope': 'videohub', 'pages': ('page:routing',)}
+    if p.startswith('/api/videohub/'):
+        pages = ('page:videohub', 'page:routing') if not write else ('page:videohub',)
+        return {'scope': 'videohub', 'pages': pages}
+    if p.startswith('/api/timers'):
+        pages = ('page:timers',) if write else ('page:timers', 'page:templates', 'page:calendar', 'page:home')
+        return {'scope': 'timers', 'pages': pages}
+    if p.startswith('/api/propresenter/'):
+        return {'scope': 'propresenter', 'pages': ('page:timers',)}
+    if p.startswith('/api/templates'):
+        return {'scope': 'calendar', 'pages': ('page:templates', 'page:calendar')}
+    if p.startswith('/api/events/') or p.startswith('/api/ui/events'):
+        return {'scope': 'calendar', 'pages': ('page:calendar',)}
+    if p.startswith('/api/ccb/'):
+        return {'scope': 'ccb', 'pages': ('page:calendar',)}
+    if p == '/api/upcoming_triggers':
+        return {'scope': 'read', 'pages': ('page:home', 'page:calendar')}
+    if p == '/api/home/overview':
+        return {'scope': 'read', 'pages': ('page:home',)}
+    if p in {
+        '/api/companion_status', '/api/propresenter_status', '/api/videohub_status',
+        '/api/digico_status', '/api/atem_status', '/api/status/summary',
+        '/api/scheduler_status',
+    }:
+        return {'scope': 'read', 'pages': ()}
+    return None
+
+
+def _api_json_error(status: int, code: str, message: str, **extra):
+    payload = {'ok': False, 'error': str(code), 'message': str(message)}
+    payload.update(extra)
+    response = jsonify(payload)
+    response.status_code = int(status)
+    if int(status) == 401:
+        response.headers['WWW-Authenticate'] = 'Bearer realm="TDeck API"'
+    return response
+
+
+def _api_security_event(action: str, summary: str, *, status: str = 'warning', details=None) -> None:
+    try:
+        log_event(
+            action,
+            summary,
+            source='api',
+            status=status,
+            target_type='api_security',
+            details=details or {},
+        )
+    except Exception:
+        pass
+
+
+def _api_legacy_anonymous_active() -> tuple[bool, str]:
+    cfg = _auth_cfg()
+    if not bool(cfg.get('api_legacy_anonymous_enabled', False)):
+        return False, 'disabled'
+    raw_expiry = str(cfg.get('api_legacy_anonymous_until') or '').strip()
+    if not raw_expiry:
+        return False, 'missing_expiry'
+    try:
+        expiry_ts = float(raw_expiry)
+    except Exception:
+        try:
+            expiry = datetime.fromisoformat(raw_expiry.replace('Z', '+00:00'))
+            expiry_ts = expiry.timestamp()
+        except Exception:
+            return False, 'invalid_expiry'
+    remaining = expiry_ts - time.time()
+    if remaining <= 0:
+        return False, 'expired'
+    # The escape hatch is intentionally impossible to configure as a
+    # permanent mode.  Operators can renew it explicitly while migrating.
+    if remaining > (31 * 24 * 60 * 60):
+        return False, 'expiry_too_far_away'
+    return True, datetime.fromtimestamp(expiry_ts).isoformat(timespec='seconds')
+
+
+def _api_log_legacy_warning(expiry: str) -> None:
+    global _api_legacy_warning_at
+    now = time.monotonic()
+    with _api_legacy_warning_lock:
+        if now - _api_legacy_warning_at < 300:
+            return
+        _api_legacy_warning_at = now
+    _api_security_event(
+        'security.api.legacy_anonymous',
+        'Accepted an anonymous API request through the temporary migration flag',
+        details={'path': _api_normalized_path(), 'method': request.method, 'expires': expiry},
+    )
+
+
+def _api_legacy_path_allowed(path: str, method: str) -> bool:
+    """Limit the migration escape hatch to the pre-existing Companion API."""
+    p = _api_normalized_path(path)
+    verb = str(method or 'GET').upper()
+    exact = {
+        ('GET', '/api/status/summary'),
+        ('GET', '/api/home/overview'),
+        ('GET', '/api/timers'),
+        ('POST', '/api/timers/apply'),
+        ('POST', '/api/timers/preset'),
+        ('GET', '/api/videohub/presets'),
+        ('GET', '/api/videohub/state'),
+        ('POST', '/api/videohub/route'),
+        ('GET', '/api/tvs'),
+        ('GET', '/api/ccb/status'),
+        ('GET', '/api/ccb/services/upcoming'),
+        ('POST', '/api/ccb/services/refresh'),
+        ('POST', '/api/ccb/access/clear'),
+    }
+    if (verb, p) in exact:
+        return True
+    patterns = (
+        ('POST', r'/api/videohub/presets/\d+/apply'),
+        ('GET', r'/api/tvs/[^/]+/state'),
+        ('POST', r'/api/tvs/[^/]+/(?:power|volume|source|reconnect)'),
+        ('GET', r'/api/tv-targets/[^/]+/state'),
+        ('POST', r'/api/tv-targets/[^/]+/(?:power|volume|source|reconnect)'),
+        ('POST', r'/api/ccb/services/[^/]+/(?:pull|apply|pull-and-apply)'),
+    )
+    return any(verb == allowed_method and re.fullmatch(pattern, p) for allowed_method, pattern in patterns)
+
+
+def _api_same_origin_request() -> bool:
+    cfg = _auth_cfg()
+    configured = cfg.get('api_trusted_origins') or []
+    if isinstance(configured, str):
+        configured = [part.strip() for part in configured.split(',') if part.strip()]
+    allowed = {str(value).rstrip('/') for value in configured if str(value).strip()}
+    try:
+        current = urlsplit(request.url_root)
+        allowed.add(f'{current.scheme}://{current.netloc}')
+    except Exception:
+        pass
+    supplied = str(request.headers.get('Origin') or '').strip()
+    if not supplied:
+        supplied = str(request.headers.get('Referer') or '').strip()
+    if not supplied:
+        return False
+    try:
+        candidate = urlsplit(supplied)
+        origin = f'{candidate.scheme}://{candidate.netloc}'.rstrip('/')
+    except Exception:
+        return False
+    return origin in allowed
+
+
+def _api_request_within_size_limit(path: str) -> tuple[bool, int]:
+    cfg = _auth_cfg()
+    upload = path.startswith('/api/config/import/') or path.endswith('/background')
+    key = 'api_upload_max_request_bytes' if upload else 'api_max_request_bytes'
+    default_limit = 64 * 1024 * 1024 if upload else 2 * 1024 * 1024
+    try:
+        limit = max(1024, int(cfg.get(key, default_limit)))
+    except Exception:
+        limit = default_limit
+    length = request.content_length
+    return (length is None or int(length) <= limit), limit
+
+
+def _api_rate_limit(principal_key: str) -> tuple[bool, int]:
+    cfg = _auth_cfg()
+    try:
+        limit = max(10, min(10000, int(cfg.get('api_write_rate_limit_per_minute', 600))))
+    except Exception:
+        limit = 600
+    now = time.monotonic()
+    cutoff = now - 60.0
+    with _api_rate_lock:
+        events = _api_rate_events.setdefault(principal_key, deque())
+        while events and events[0] <= cutoff:
+            events.popleft()
+        if len(events) >= limit:
+            retry_after = max(1, int(61 - (now - events[0])))
+            return False, retry_after
+        events.append(now)
+        if len(_api_rate_events) > 2000:
+            stale = [key for key, values in _api_rate_events.items() if not values or values[-1] <= cutoff]
+            for key in stale[:500]:
+                _api_rate_events.pop(key, None)
+    return True, 0
+
+
+def _api_browser_resource_check(path: str, method: str):
+    """Enforce resource capabilities that are narrower than page access."""
+    p = _api_normalized_path(path)
+    write = str(method).upper() in _API_MUTATING_METHODS
+    try:
+        user_id = int(current_user.get_id())
+    except Exception:
+        return _api_json_error(403, 'forbidden', 'The session has no valid user identity.')
+
+    if write and p.startswith('/api/videohub/'):
+        is_apply = bool(re.fullmatch(r'/api/videohub/presets/\d+/apply', p))
+        is_route = p == '/api/videohub/route'
+        if not is_apply and not is_route and not _effective_videohub_can_edit_presets_for_user(user_id):
+            return _api_json_error(403, 'forbidden', 'VideoHub editing is not assigned to your group.')
+    preset_match = re.fullmatch(r'/api/videohub/presets/(\d+)/apply', p)
+    if preset_match:
+        allowed = _effective_videohub_preset_ids_for_user(user_id)
+        if allowed and int(preset_match.group(1)) not in set(allowed):
+            return _api_json_error(403, 'forbidden', 'This VideoHub preset is not assigned to your group.')
+    if write and p == '/api/videohub/route':
+        body = request.get_json(silent=True) or {}
+        try:
+            output_n = int(body.get('output') or body.get('destination') or request.args.get('output') or request.args.get('destination'))
+            input_n = int(body.get('input') or body.get('source') or request.args.get('input') or request.args.get('source'))
+            if bool(body.get('zero_based') or body.get('zerobased')):
+                output_n += 1
+                input_n += 1
+        except Exception:
+            return None  # The endpoint will return its normal validation error.
+        allowed_outputs, allowed_inputs = _effective_videohub_allowlists_for_user(user_id)
+        if allowed_outputs and output_n not in set(allowed_outputs):
+            return _api_json_error(403, 'forbidden', 'This VideoHub output is not assigned to your group.')
+        if allowed_inputs and input_n not in set(allowed_inputs):
+            return _api_json_error(403, 'forbidden', 'This VideoHub input is not assigned to your group.')
+    if write and p.startswith('/api/atem/audio/'):
+        if _user_is_admin(user_id):
+            return None
+        body = request.get_json(silent=True) or {}
+        if p.endswith('/monitor'):
+            if not _effective_atem_can_monitor_audio_for_user(user_id):
+                return _api_json_error(403, 'forbidden', 'ATEM monitor control is not assigned to your group.')
+            return None
+        source_id = str(body.get('source_id') or body.get('source') or '').strip()
+        allowed_sources = set(_effective_atem_audio_source_ids_for_user(user_id))
+        if not source_id or source_id not in allowed_sources:
+            return _api_json_error(403, 'forbidden', 'This ATEM audio source is not assigned to your group.')
+        if p.endswith('/solo') and not _effective_atem_can_solo_audio_for_user(user_id):
+            return _api_json_error(403, 'forbidden', 'ATEM solo control is not assigned to your group.')
+    return None
+
+
+def _api_service_token_constraint_error(token_record: dict, path: str, method: str):
+    constraints = token_record.get('constraints') if isinstance(token_record.get('constraints'), dict) else {}
+    if not constraints:
+        return None
+    p = _api_normalized_path(path)
+    verb = str(method or 'GET').upper()
+    allowed_paths = constraints.get('allowed_paths') or []
+    if allowed_paths and not any(
+        fnmatch.fnmatchcase(f'{verb} {p}', str(pattern)) for pattern in allowed_paths
+    ):
+        return _api_json_error(403, 'token_constraint_denied', 'The service token does not allow this API action.')
+
+    tv_targets = {str(value) for value in (constraints.get('tv_targets') or [])}
+    tv_match = re.match(r'/api/(?:tvs|tv-targets)/([^/]+)', p)
+    if tv_targets and tv_match:
+        target = unquote(tv_match.group(1))
+        if target not in tv_targets and f'tv:{target}' not in tv_targets:
+            return _api_json_error(403, 'token_constraint_denied', 'The service token does not allow this TV target.')
+
+    preset_ids = {int(value) for value in (constraints.get('videohub_presets') or [])}
+    preset_match = re.fullmatch(r'/api/videohub/presets/(\d+)/apply', p)
+    if preset_ids and preset_match and int(preset_match.group(1)) not in preset_ids:
+        return _api_json_error(403, 'token_constraint_denied', 'The service token does not allow this VideoHub preset.')
+    if p == '/api/videohub/route' and (constraints.get('videohub_outputs') or constraints.get('videohub_inputs')):
+        body = request.get_json(silent=True) or {}
+        try:
+            output_n = int(body.get('output') or body.get('destination') or request.args.get('output') or request.args.get('destination'))
+            input_n = int(body.get('input') or body.get('source') or request.args.get('input') or request.args.get('source'))
+            if bool(body.get('zero_based') or body.get('zerobased')):
+                output_n += 1
+                input_n += 1
+        except Exception:
+            return None
+        outputs = {int(value) for value in (constraints.get('videohub_outputs') or [])}
+        inputs = {int(value) for value in (constraints.get('videohub_inputs') or [])}
+        if outputs and output_n not in outputs:
+            return _api_json_error(403, 'token_constraint_denied', 'The service token does not allow this VideoHub output.')
+        if inputs and input_n not in inputs:
+            return _api_json_error(403, 'token_constraint_denied', 'The service token does not allow this VideoHub input.')
+
+    atem_sources = {str(value) for value in (constraints.get('atem_sources') or [])}
+    if atem_sources and verb in _API_MUTATING_METHODS and p.startswith('/api/atem/audio/') and not p.endswith('/monitor'):
+        body = request.get_json(silent=True) or {}
+        source_id = str(body.get('source_id') or body.get('source') or '').strip()
+        if source_id and source_id not in atem_sources:
+            return _api_json_error(403, 'token_constraint_denied', 'The service token does not allow this ATEM source.')
+    return None
+
+
+def _api_security_gate():
+    if not _auth_enabled():
+        g.api_principal = {'type': 'auth_disabled', 'key': 'auth-disabled'}
+        return None
+
+    normalized = _api_normalized_path()
+    policy = _api_policy(normalized, request.method)
+    if policy is None:
+        _api_security_event(
+            'security.api.policy_missing',
+            'Denied an API endpoint without an explicit security policy',
+            status='failure',
+            details={'path': normalized, 'method': request.method, 'endpoint': request.endpoint},
+        )
+        return _api_json_error(403, 'forbidden', 'This API endpoint has no configured access policy.')
+
+    within_limit, limit = _api_request_within_size_limit(normalized)
+    if not within_limit:
+        _api_security_event(
+            'security.api.request_too_large',
+            'Rejected an oversized API request',
+            details={'path': normalized, 'method': request.method, 'limit_bytes': limit, 'content_length': request.content_length},
+        )
+        return _api_json_error(413, 'request_too_large', f'Request body exceeds the {limit}-byte limit.')
+
+    authorization = str(request.headers.get('Authorization') or '').strip()
+    principal = None
+    if authorization:
+        scheme, separator, credential = authorization.partition(' ')
+        if not separator or scheme.lower() != 'bearer' or not credential.strip():
+            _api_security_event('security.api.invalid_authorization', 'Rejected a malformed API Authorization header')
+            return _api_json_error(401, 'invalid_token', 'A valid Bearer service token is required.')
+        token_record, token_error = authenticate_service_token(_AUTH_DB_PATH, credential.strip())
+        if token_record is None:
+            _api_security_event(
+                'security.api.token_rejected',
+                'Rejected an invalid, expired, or revoked service token',
+                details={'reason': token_error, 'path': normalized, 'method': request.method},
+            )
+            return _api_json_error(401, token_error or 'invalid_token', 'The service token is invalid, expired, or revoked.')
+        if policy.get('service_tokens') is False:
+            return _api_json_error(403, 'forbidden', 'This endpoint accepts browser sessions only.')
+        read_only = request.method in ('GET', 'HEAD')
+        if not token_allows(token_record.get('scopes') or [], str(policy['scope']), read_only=read_only):
+            _api_security_event(
+                'security.api.token_scope_denied',
+                'Denied a service token without the required scope',
+                details={
+                    'token_id': token_record.get('id'),
+                    'token_name': token_record.get('name'),
+                    'required_scope': policy['scope'],
+                    'path': normalized,
+                    'method': request.method,
+                },
+            )
+            return _api_json_error(403, 'insufficient_scope', f"The service token requires the '{policy['scope']}' scope.")
+        constraint_error = _api_service_token_constraint_error(token_record, normalized, request.method)
+        if constraint_error is not None:
+            _api_security_event(
+                'security.api.token_constraint_denied',
+                'Denied a service token outside its target/action constraints',
+                details={'token_id': token_record.get('id'), 'token_name': token_record.get('name'), 'path': normalized, 'method': request.method},
+            )
+            return constraint_error
+        principal = {
+            'type': 'service_token',
+            'key': f"token:{token_record['id']}",
+            'id': token_record['id'],
+            'name': token_record['name'],
+            'scopes': token_record.get('scopes') or [],
+            'constraints': token_record.get('constraints') or {},
+        }
+    elif getattr(current_user, 'is_authenticated', False):
+        try:
+            idle_minutes = _effective_idle_timeout_minutes_for_current_user()
+            last_activity = int(session.get('_last_activity') or 0)
+            if idle_minutes is not None and last_activity and (int(time.time()) - last_activity) > (idle_minutes * 60):
+                logout_user()
+                session.clear()
+                _api_security_event('security.api.session_idle', 'Rejected an API request from an expired browser session')
+                return _api_json_error(401, 'session_expired', 'The browser session expired due to inactivity.')
+        except Exception:
+            pass
+        try:
+            if not _touch_current_user_session():
+                raise PermissionError('session revoked')
+        except Exception:
+            logout_user()
+            session.clear()
+            _api_security_event('security.api.session_rejected', 'Rejected a revoked or invalid browser session')
+            return _api_json_error(401, 'unauthorized', 'The browser session is no longer valid.')
+        try:
+            user_id = int(current_user.get_id())
+        except Exception:
+            return _api_json_error(401, 'unauthorized', 'A logged-in browser session is required.')
+        try:
+            row = _user_record(user_id)
+            if row and bool(int(row['force_password_change'] or 0)):
+                return _api_json_error(403, 'password_change_required', 'Change your password before using the API.')
+        except Exception:
+            pass
+        pages = tuple(policy.get('pages') or ())
+        if pages and not any(can_access(page_key) for page_key in pages):
+            _api_security_event(
+                'security.api.page_denied',
+                'Denied an API request outside the user’s page permissions',
+                details={'user_id': user_id, 'required_pages': pages, 'path': normalized, 'method': request.method},
+            )
+            return _api_json_error(403, 'forbidden', 'Your groups do not grant access to this API capability.')
+        if request.method in _API_MUTATING_METHODS:
+            if not _validate_csrf():
+                _api_security_event(
+                    'security.api.csrf_denied',
+                    'Rejected a browser API write with an invalid CSRF token',
+                    details={'user_id': user_id, 'path': normalized, 'method': request.method},
+                )
+                return _api_json_error(403, 'invalid_csrf', 'A valid CSRF token is required.')
+            if not _api_same_origin_request():
+                _api_security_event(
+                    'security.api.origin_denied',
+                    'Rejected a browser API write from an untrusted origin',
+                    details={'user_id': user_id, 'path': normalized, 'method': request.method},
+                )
+                return _api_json_error(403, 'invalid_origin', 'The request Origin or Referer is not trusted.')
+        resource_error = _api_browser_resource_check(normalized, request.method)
+        if resource_error is not None:
+            return resource_error
+        principal = {'type': 'browser_session', 'key': f'user:{user_id}', 'id': user_id, 'name': str(getattr(current_user, 'username', '') or '')}
+    else:
+        legacy_enabled, legacy_detail = _api_legacy_anonymous_active()
+        if not legacy_enabled:
+            if legacy_detail not in ('disabled', 'expired'):
+                _api_security_event(
+                    'security.api.legacy_flag_invalid',
+                    'The legacy anonymous API flag was ignored because its expiry is unsafe or invalid',
+                    details={'reason': legacy_detail},
+                )
+            return _api_json_error(401, 'unauthorized', 'Log in or provide a scoped Bearer service token.')
+        if not _api_legacy_path_allowed(normalized, request.method):
+            _api_security_event(
+                'security.api.legacy_scope_denied',
+                'Denied a legacy-anonymous request outside the Companion migration allow-list',
+                details={'path': normalized, 'method': request.method},
+            )
+            return _api_json_error(403, 'forbidden', 'The temporary legacy flag does not allow this endpoint.')
+        _api_log_legacy_warning(legacy_detail)
+        principal = {'type': 'legacy_anonymous', 'key': f"legacy:{request.remote_addr or 'unknown'}", 'name': 'Legacy anonymous API'}
+
+    g.api_principal = principal
+    if request.method in _API_MUTATING_METHODS:
+        allowed, retry_after = _api_rate_limit(str(principal['key']))
+        if not allowed:
+            _api_security_event(
+                'security.api.rate_limited',
+                'Rate-limited repeated API writes',
+                details={'principal_type': principal.get('type'), 'principal_id': principal.get('id'), 'path': normalized},
+            )
+            response = _api_json_error(429, 'rate_limited', 'Too many API writes. Retry later.', retryAfter=retry_after)
+            response.headers['Retry-After'] = str(retry_after)
+            return response
+    return None
+
+
 @app.before_request
 def _auth_gate():
     if not _auth_enabled():
         return None
 
-    # Always allow static + API + login/logout + public VideoHub monitor assets/page
+    # API requests have a separate boundary for human sessions and automation.
     p = request.path or ''
+    if p.startswith('/api/'):
+        return _api_security_gate()
+
+    # Always allow static + login/logout assets/pages.
     if (
         p.startswith('/static/')
-        or p.startswith('/api/')
         or p.startswith('/media/videohub_room_images/')
         or p == '/login'
         or p == '/logout'
-        or p == '/videohub/monitor'
     ):
         return None
 
@@ -3002,6 +3749,46 @@ def auth_ping():
 def auth_touch():
     # Handled by _auth_gate (refreshes last-activity and returns 204)
     return ('', 204)
+
+
+@app.post('/api/client-errors')
+def api_client_errors():
+    """Accept a small, sanitized same-origin browser error report."""
+    if _auth_enabled():
+        if not getattr(current_user, 'is_authenticated', False):
+            return jsonify({'ok': False, 'error': 'authentication_required'}), 401
+        if not _validate_csrf():
+            return jsonify({'ok': False, 'error': 'invalid_csrf'}), 400
+    if not _client_error_same_origin():
+        return jsonify({'ok': False, 'error': 'cross_site_request'}), 403
+    if request.mimetype != 'application/json':
+        return jsonify({'ok': False, 'error': 'json_required'}), 415
+    if int(request.content_length or 0) > _CLIENT_ERROR_MAX_BODY_BYTES:
+        return jsonify({'ok': False, 'error': 'payload_too_large'}), 413
+    if not _client_error_rate_allowed():
+        response = jsonify({'ok': False, 'error': 'rate_limited'})
+        response.headers['Retry-After'] = str(int(_CLIENT_ERROR_RATE_WINDOW_SECONDS))
+        return response, 429
+
+    raw_report = request.get_json(silent=True)
+    if not isinstance(raw_report, dict):
+        return jsonify({'ok': False, 'error': 'invalid_report'}), 400
+    report = _client_error_payload(raw_report)
+    try:
+        log_event(
+            'client.error',
+            f"Browser {report['kind']}: {report['message'][:180]}",
+            source='web',
+            status='warning',
+            target_type='browser',
+            target_id=report['client_build_id'] or report['server_build_id'],
+            details=report,
+            request_path=report['route'],
+        )
+    except Exception:
+        # Telemetry must never turn a client-side issue into a page/API outage.
+        return jsonify({'ok': False, 'error': 'telemetry_unavailable'}), 503
+    return jsonify({'ok': True, 'requestId': report['correlation_id']}), 202
 
 
 @app.context_processor
@@ -3122,6 +3909,8 @@ def _config_transport_log(message: str) -> None:
 
 def _config_access_error_json():
     if _auth_enabled():
+        if _api_request_is_service_token():
+            return None
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -3910,8 +4699,14 @@ _atem_status_cache = {'ts': 0.0, 'connected': False}
 _hisense_status_cache = {'ts': 0.0, 'connected': False}
 _pixie_status_cache = {'ts': 0.0, 'connected': False}
 _status_snapshot_cache = {'ts': 0.0, 'payload': None}
-_videohub_labels_cache = {'ts': 0.0, 'payload': None}
-_videohub_state_cache = {'ts': 0.0, 'payload': None}
+_videohub_state_cache = {
+    'ts': 0.0,
+    'payload': None,
+    'last_error': None,
+    'failures': 0,
+    'retry_after': 0.0,
+    'invalidated': False,
+}
 _videohub_state_refresh_lock = threading.Lock()
 _videohub_state_refreshing = False
 _status_cache_lock = threading.Lock()
@@ -3919,8 +4714,9 @@ _status_refresher_lock = threading.Lock()
 _status_refresher_started = False
 _STATUS_CACHE_TTL_SECONDS = 2.0
 _STATUS_REFRESH_INTERVAL_SECONDS = 5.0
-_VIDEOHUB_LABELS_CACHE_TTL_SECONDS = 10.0
 _VIDEOHUB_STATE_CACHE_TTL_SECONDS = 5.0
+_VIDEOHUB_STATE_RETRY_BASE_SECONDS = 0.5
+_VIDEOHUB_STATE_RETRY_MAX_SECONDS = 10.0
 _atem_probe_failures = 0
 _ATEM_OFFLINE_AFTER_FAILURES = 3
 
@@ -5850,6 +6646,7 @@ def videohub_input_select_page():
 
 
 @app.route('/videohub/monitor')
+@require_page('page:videohub', 'VideoHub')
 def videohub_monitor_page():
     return render_template('videohub_monitor.html')
 
@@ -6685,6 +7482,8 @@ def _api_requires_videohub_edit() -> bool:
     """API auth guard for room metadata mutating routes."""
     try:
         if not _auth_enabled():
+            return True
+        if _api_request_is_service_token():
             return True
     except Exception:
         return False
@@ -7582,6 +8381,8 @@ def _digico_api_guard(*, aux_number: int | None = None, config_only: bool = Fals
     """Enforce login, page access and AUX scope on every DiGiCo API call."""
     if not _auth_enabled():
         return None
+    if _api_request_is_service_token():
+        return None
     if not getattr(current_user, 'is_authenticated', False):
         return jsonify({'ok': False, 'error': 'unauthorized'}), 401
     page_key = 'page:config' if config_only else 'page:digico_mixer'
@@ -7600,6 +8401,8 @@ def _digico_api_guard(*, aux_number: int | None = None, config_only: bool = Fals
 
 def _digico_allowed_aux_ids_current_user() -> list[str]:
     if not _auth_enabled():
+        return []
+    if _api_request_is_service_token():
         return []
     try:
         return _effective_digico_aux_ids_for_user(int(current_user.get_id()))
@@ -8085,6 +8888,55 @@ def api_hisense_tv_reconnect(tv_id: str):
     return _hisense_submit(tv_id, 'reconnect', wait=5.0)
 
 
+@app.post('/api/tvs/<tv_id>/preflight')
+def api_hisense_tv_preflight(tv_id: str):
+    """Run setup-only, read-only connectivity and authentication diagnostics."""
+    access_error = _config_access_error_json()
+    if access_error:
+        return access_error
+    if _auth_enabled() and not _api_request_is_service_token() and not _validate_csrf():
+        return jsonify({'ok': False, 'error': 'invalid CSRF token'}), 400
+    manager, error = _hisense_manager_or_error()
+    if error:
+        return error
+    try:
+        result = manager.get(tv_id).submit('preflight', wait=10.0)
+    except KeyError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+    except (TypeError, ValueError) as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+    report = result.get('preflight') if isinstance(result.get('preflight'), dict) else {}
+    pending = bool(result.get('pending', False))
+    diagnostic_state = str(report.get('state') or ('running' if pending else 'unknown'))
+    try:
+        log_event(
+            'hisense.preflight',
+            f'TV {tv_id}: read-only setup preflight {diagnostic_state}',
+            source='web',
+            status=(
+                'success' if report.get('ready')
+                else ('info' if diagnostic_state in {'queued', 'running', 'expected-off'} else 'warning')
+            ),
+            target_type='hisense_tv',
+            target_id=tv_id,
+            details={
+                'state': diagnostic_state,
+                'ready': bool(report.get('ready', False)),
+                'check_statuses': {
+                    str(check.get('id')): str(check.get('status'))
+                    for check in report.get('checks', [])
+                    if isinstance(check, dict) and check.get('id')
+                },
+            },
+        )
+    except Exception:
+        pass
+    return jsonify(result), (202 if pending else 200)
+
+
 @app.get('/api/tv-targets/<target_id>/state')
 def api_hisense_target_state(target_id: str):
     manager, error = _hisense_manager_or_error()
@@ -8329,6 +9181,8 @@ def api_hisense_tv_pair_submit(tv_id: str):
 
 def _pixie_api_guard(*, config_only: bool = False, require_csrf: bool = False):
     if _auth_enabled():
+        if _api_request_is_service_token():
+            return None
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         page_key = 'page:config' if config_only else 'page:pixie_controls'
@@ -8948,6 +9802,33 @@ def api_pixie_scene_activate(scene_id: str):
         return jsonify({'ok': False, 'error': str(exc)}), 502
 
 
+def _filter_atem_audio_payload_for_current_principal(payload: dict, *, meters: bool = False) -> dict:
+    if not _auth_enabled() or _api_request_is_service_token():
+        return payload
+    try:
+        user_id = int(current_user.get_id())
+        if _user_is_admin(user_id):
+            return payload
+        allowed = set(_effective_atem_audio_source_ids_for_user(user_id))
+    except Exception:
+        allowed = set()
+    result = dict(payload or {})
+    if meters:
+        sources = result.get('sources') if isinstance(result.get('sources'), dict) else {}
+        result['sources'] = {str(key): value for key, value in sources.items() if str(key) in allowed}
+        if 'master' not in allowed:
+            result['master'] = {}
+    else:
+        sources = result.get('sources') if isinstance(result.get('sources'), list) else []
+        result['sources'] = [item for item in sources if isinstance(item, dict) and str(item.get('id')) in allowed]
+        try:
+            if not _effective_atem_can_monitor_audio_for_user(user_id):
+                result.pop('monitor', None)
+        except Exception:
+            result.pop('monitor', None)
+    return result
+
+
 @app.route('/api/atem/audio/state')
 def api_atem_audio_state():
     atem = _get_atem_client_from_config()
@@ -8956,17 +9837,92 @@ def api_atem_audio_state():
             fallback = AtemAudioClient.fallback_sources() if AtemAudioClient is not None else [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
         except Exception:
             fallback = [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
-        return jsonify({'ok': False, 'connected': False, 'error': 'ATEM not configured', 'sources': fallback}), 200
+        payload = {
+            'ok': False,
+            'connected': False,
+            'error': 'ATEM not configured',
+            'sources': fallback,
+            'stale': True,
+            'refreshing': False,
+            'sampledAt': None,
+            'ageMs': None,
+        }
+        return jsonify(_filter_atem_audio_payload_for_current_principal(payload)), 200
     try:
-        state = atem.get_audio_state()
-        state['ok'] = True
-        return jsonify(state)
+        force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+        if hasattr(atem, 'get_audio_state_snapshot'):
+            state = atem.get_audio_state_snapshot(force_refresh=force)
+        else:
+            # Backward compatibility for third-party/fake clients.
+            state = atem.get_audio_state()
+        state['ok'] = bool(state.get('connected', True))
+        return jsonify(_filter_atem_audio_payload_for_current_principal(state))
     except Exception as e:
         try:
             fallback = AtemAudioClient.fallback_sources() if AtemAudioClient is not None else [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
         except Exception:
             fallback = [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
-        return jsonify({'ok': False, 'connected': False, 'error': str(e), 'sources': fallback}), 200
+        payload = {
+            'ok': False,
+            'connected': False,
+            'error': str(e),
+            'sources': fallback,
+            'stale': True,
+            'refreshing': False,
+            'sampledAt': None,
+            'ageMs': None,
+        }
+        return jsonify(_filter_atem_audio_payload_for_current_principal(payload)), 200
+
+
+@app.route('/api/atem/audio/meters')
+def api_atem_audio_meters():
+    """Return compact levels from the singleton UDP meter receiver."""
+    atem = _get_atem_client_from_config()
+    if atem is None:
+        return jsonify({
+            'ok': False,
+            'connected': False,
+            'error': 'ATEM not configured',
+            'master': {},
+            'sources': {},
+            'metering': {'enabled': False, 'connected': False, 'active': False},
+            'sampledAt': None,
+            'ageMs': None,
+            'stale': True,
+        }), 200
+    try:
+        if hasattr(atem, 'get_meter_snapshot'):
+            return jsonify(_filter_atem_audio_payload_for_current_principal(atem.get_meter_snapshot(), meters=True))
+        state = atem.get_audio_state()
+        sources = state.get('sources') if isinstance(state, dict) else []
+        payload = {
+            'ok': bool(state.get('connected', False)),
+            'connected': bool(state.get('connected', False)),
+            'master': next((item.get('level') for item in sources if str(item.get('id')) == 'master'), {}),
+            'sources': {
+                str(item.get('id')): item.get('level') or {}
+                for item in sources if isinstance(item, dict) and str(item.get('id')) != 'master'
+            },
+            'metering': state.get('metering') or {},
+            'sampledAt': None,
+            'ageMs': None,
+            'stale': False,
+        }
+        return jsonify(_filter_atem_audio_payload_for_current_principal(payload, meters=True))
+    except Exception as exc:
+        payload = {
+            'ok': False,
+            'connected': False,
+            'error': str(exc),
+            'master': {},
+            'sources': {},
+            'metering': {'enabled': False, 'connected': False, 'active': False},
+            'sampledAt': None,
+            'ageMs': None,
+            'stale': True,
+        }
+        return jsonify(_filter_atem_audio_payload_for_current_principal(payload, meters=True)), 200
 
 
 @app.route('/api/atem/audio/volume', methods=['POST'])
@@ -9066,7 +10022,7 @@ def api_atem_audio_solo():
 
 @app.route('/api/atem/audio/monitor', methods=['POST'])
 def api_atem_audio_monitor():
-    if _auth_enabled():
+    if _auth_enabled() and not _api_request_is_service_token():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         try:
@@ -9121,7 +10077,7 @@ def api_atem_audio_monitor():
 
 @app.route('/api/config', methods=['GET'])
 def api_get_config():
-    if _auth_enabled():
+    if _auth_enabled() and not _api_request_is_service_token():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -9141,7 +10097,7 @@ def api_get_config():
 
 @app.route('/api/config', methods=['POST'])
 def api_set_config():
-    if _auth_enabled():
+    if _auth_enabled() and not _api_request_is_service_token():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -9331,7 +10287,7 @@ def api_config_import_apply():
 
 @app.route('/api/companion-surfaces-config', methods=['GET'])
 def api_get_companion_surfaces_config():
-    if _auth_enabled():
+    if _auth_enabled() and not _api_request_is_service_token():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -9345,7 +10301,7 @@ def api_get_companion_surfaces_config():
 
 @app.route('/api/companion-surfaces-config', methods=['POST'])
 def api_set_companion_surfaces_config():
-    if _auth_enabled():
+    if _auth_enabled() and not _api_request_is_service_token():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
         if not can_access('page:config'):
@@ -9386,6 +10342,16 @@ def api_videohub_presets_list():
         cfg = {}
     try:
         presets = app_inst.list_presets(cfg)  # type: ignore[attr-defined]
+        if _auth_enabled() and not _api_request_is_service_token():
+            try:
+                allowed_ids = set(_effective_videohub_preset_ids_for_user(int(current_user.get_id())))
+            except Exception:
+                allowed_ids = set()
+            if allowed_ids:
+                presets = [
+                    preset for preset in presets
+                    if int((preset.get('id') if isinstance(preset, dict) else getattr(preset, 'id', 0)) or 0) in allowed_ids
+                ]
         return jsonify({'ok': True, 'presets': presets})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -9552,6 +10518,7 @@ def api_videohub_presets_apply(preset_id: int):
         cfg = {}
     try:
         result = app_inst.apply_preset(cfg, preset_id)  # type: ignore[attr-defined]
+        _invalidate_videohub_state_snapshot()
         try:
             _home_set_last_videohub_preset(preset_id=preset_id)
         except Exception:
@@ -9674,67 +10641,6 @@ def api_videohub_presets_from_device():
         return jsonify({'ok': False, 'error': str(e)}), 400
 
 
-@app.route('/api/videohub/labels', methods=['GET'])
-def api_videohub_labels():
-    """Return VideoHub input/output labels for UI dropdowns.
-
-    This endpoint is best-effort. If the router isn't configured/reachable,
-    it returns a numeric fallback list so the UI can still function.
-    """
-
-    # Default to 40, since common VideoHubs are 40x40.
-    fallback_count = 40
-    try:
-        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
-    except Exception:
-        cfg = {}
-
-    now = time.time()
-    force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
-    with _status_cache_lock:
-        if not force and (now - float(_videohub_labels_cache.get('ts', 0.0))) < _VIDEOHUB_LABELS_CACHE_TTL_SECONDS:
-            cached = _videohub_labels_cache.get('payload')
-            if isinstance(cached, dict):
-                return jsonify(cached)
-
-    vh = _get_videohub_client_from_config()
-    if vh is None:
-        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        payload = {
-            'ok': True,
-            'configured': False,
-            'inputs': nums,
-            'outputs': nums,
-        }
-        with _status_cache_lock:
-            _videohub_labels_cache['ts'] = now
-            _videohub_labels_cache['payload'] = payload
-        return jsonify(payload)
-
-    try:
-        labels = vh.get_labels(fallback_count=fallback_count)
-        payload = {
-            'ok': True,
-            'configured': True,
-            'inputs': labels.get('inputs', []),
-            'outputs': labels.get('outputs', []),
-        }
-    except Exception as e:
-        nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
-        payload = {
-            'ok': True,
-            'configured': True,
-            'error': str(e),
-            'inputs': nums,
-            'outputs': nums,
-        }
-
-    with _status_cache_lock:
-        _videohub_labels_cache['ts'] = now
-        _videohub_labels_cache['payload'] = payload
-    return jsonify(payload)
-
-
 def _videohub_state_fallback(*, configured: bool, refreshing: bool = False) -> dict[str, Any]:
     fallback_count = 40
     nums = [{"number": i, "label": ""} for i in range(1, fallback_count + 1)]
@@ -9751,6 +10657,8 @@ def _videohub_state_fallback(*, configured: bool, refreshing: bool = False) -> d
 def _refresh_videohub_state_cache() -> None:
     global _videohub_state_refreshing
     fallback_count = 40
+    payload: dict[str, Any] | None = None
+    error: Exception | None = None
     try:
         vh = _get_videohub_client_from_config()
         if vh is None:
@@ -9775,12 +10683,26 @@ def _refresh_videohub_state_cache() -> None:
                 'routing': routing,
             }
     except Exception as exc:
-        payload = _videohub_state_fallback(configured=True)
-        payload['error'] = str(exc)
+        error = exc
     finally:
+        now = time.time()
         with _status_cache_lock:
-            _videohub_state_cache['ts'] = time.time()
-            _videohub_state_cache['payload'] = payload
+            if error is None and isinstance(payload, dict):
+                _videohub_state_cache['ts'] = now
+                _videohub_state_cache['payload'] = payload
+                _videohub_state_cache['last_error'] = None
+                _videohub_state_cache['failures'] = 0
+                _videohub_state_cache['retry_after'] = 0.0
+                _videohub_state_cache['invalidated'] = False
+            else:
+                failures = int(_videohub_state_cache.get('failures', 0) or 0) + 1
+                delay = min(
+                    _VIDEOHUB_STATE_RETRY_MAX_SECONDS,
+                    _VIDEOHUB_STATE_RETRY_BASE_SECONDS * (2 ** max(0, failures - 1)),
+                )
+                _videohub_state_cache['last_error'] = str(error or 'VideoHub refresh failed')
+                _videohub_state_cache['failures'] = failures
+                _videohub_state_cache['retry_after'] = now + delay
         with _videohub_state_refresh_lock:
             _videohub_state_refreshing = False
 
@@ -9789,6 +10711,10 @@ def _start_videohub_state_refresh() -> bool:
     global _videohub_state_refreshing
     with _videohub_state_refresh_lock:
         if _videohub_state_refreshing:
+            return False
+        with _status_cache_lock:
+            retry_after = float(_videohub_state_cache.get('retry_after', 0.0) or 0.0)
+        if time.time() < retry_after:
             return False
         _videohub_state_refreshing = True
     threading.Thread(
@@ -9799,29 +10725,84 @@ def _start_videohub_state_refresh() -> bool:
     return True
 
 
-@app.route('/api/videohub/state', methods=['GET'])
-def api_videohub_state():
-    """Return cached routing immediately and refresh hardware off-request."""
+def _get_videohub_state_snapshot(*, force: bool = False) -> dict[str, Any]:
+    """Return shared VideoHub state immediately and refresh it off-request."""
     now = time.time()
-    force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
     with _status_cache_lock:
         cached = _videohub_state_cache.get('payload')
-        age = now - float(_videohub_state_cache.get('ts', 0.0) or 0.0)
-        if not force and age < _VIDEOHUB_STATE_CACHE_TTL_SECONDS and isinstance(cached, dict):
-            return jsonify(cached)
+        sampled_at = float(_videohub_state_cache.get('ts', 0.0) or 0.0)
+        age = max(0.0, now - sampled_at) if isinstance(cached, dict) and sampled_at else None
+        last_error = _videohub_state_cache.get('last_error')
+        failures = int(_videohub_state_cache.get('failures', 0) or 0)
+        invalidated = bool(_videohub_state_cache.get('invalidated', False))
+        fresh = (
+            isinstance(cached, dict)
+            and age is not None
+            and age < _VIDEOHUB_STATE_CACHE_TTL_SECONDS
+            and not invalidated
+        )
 
-    started = _start_videohub_state_refresh()
+    if force or not fresh:
+        _start_videohub_state_refresh()
     with _videohub_state_refresh_lock:
-        refreshing = bool(started or _videohub_state_refreshing)
+        refreshing = bool(_videohub_state_refreshing)
+
+    metadata = {
+        'stale': not fresh,
+        'refreshing': refreshing,
+        'sampledAt': sampled_at or None,
+        'ageMs': int(round(age * 1000.0)) if age is not None else None,
+        'lastError': last_error,
+        'consecutiveFailures': failures,
+    }
     if isinstance(cached, dict):
-        return jsonify({**cached, 'stale': True, 'refreshing': refreshing})
+        result = {**cached, **metadata}
+        if last_error:
+            result['error'] = str(last_error)
+        return result
 
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
         configured = bool(str(cfg.get('videohub_ip') or cfg.get('videohub_host') or '').strip())
     except Exception:
         configured = False
-    return jsonify(_videohub_state_fallback(configured=configured, refreshing=refreshing))
+    result = {**_videohub_state_fallback(configured=configured, refreshing=refreshing), **metadata}
+    if last_error:
+        result['error'] = str(last_error)
+    return result
+
+
+def _invalidate_videohub_state_snapshot(*, output_idx: int | None = None, input_idx: int | None = None) -> None:
+    """Mark routing stale after a command and retain any safely-known route."""
+    with _status_cache_lock:
+        cached = _videohub_state_cache.get('payload')
+        if isinstance(cached, dict) and output_idx is not None and input_idx is not None:
+            updated = copy.deepcopy(cached)
+            routing = list(updated.get('routing') or [])
+            while len(routing) <= int(output_idx):
+                routing.append(len(routing) + 1)
+            routing[int(output_idx)] = int(input_idx) + 1
+            updated['routing'] = routing
+            _videohub_state_cache['payload'] = updated
+        _videohub_state_cache['invalidated'] = True
+        # A confirmed command is evidence that the device may have recovered.
+        _videohub_state_cache['retry_after'] = 0.0
+    _start_videohub_state_refresh()
+
+
+@app.route('/api/videohub/labels', methods=['GET'])
+def api_videohub_labels():
+    """Return labels from the same non-blocking snapshot used by routing."""
+    force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+    snapshot = _get_videohub_state_snapshot(force=force)
+    return jsonify({key: value for key, value in snapshot.items() if key != 'routing'})
+
+
+@app.route('/api/videohub/state', methods=['GET'])
+def api_videohub_state():
+    """Return cached routing immediately and refresh hardware off-request."""
+    force = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+    return jsonify(_get_videohub_state_snapshot(force=force))
 
 
 @app.route('/media/videohub_room_images/<path:filename>', methods=['GET'])
@@ -10198,6 +11179,8 @@ def api_home_overview():
 
 def _activity_log_access_error():
     if not _auth_enabled():
+        return None
+    if _api_request_is_service_token():
         return None
     try:
         if not getattr(current_user, 'is_authenticated', False):
@@ -12527,6 +13510,8 @@ def api_videohub_route():
         _home_set_last_videohub_route(output=output_n, input_=input_n, monitor=monitor)
     except Exception:
         pass
+    if not monitor:
+        _invalidate_videohub_state_snapshot(output_idx=output_idx, input_idx=input_idx)
 
     try:
         log_event(
@@ -12881,6 +13866,39 @@ def api_create_event_ui():
         return jsonify({'ok': True, 'id': new_id})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+def _register_api_v1_aliases() -> None:
+    """Expose stable v1 aliases without changing legacy action payloads."""
+    existing = {str(rule.rule) for rule in app.url_map.iter_rules()}
+    for rule in list(app.url_map.iter_rules()):
+        legacy_path = str(rule.rule)
+        if not legacy_path.startswith('/api/') or legacy_path.startswith('/api/v1/'):
+            continue
+        alias = '/api/v1/' + legacy_path[len('/api/'):]
+        if alias in existing:
+            continue
+        methods = sorted(set(rule.methods or ()) - {'HEAD', 'OPTIONS'})
+        view_func = app.view_functions.get(rule.endpoint)
+        if view_func is None:
+            continue
+        app.add_url_rule(
+            alias,
+            endpoint=f'api_v1__{rule.endpoint}',
+            view_func=view_func,
+            methods=methods,
+        )
+        existing.add(alias)
+
+
+_register_api_v1_aliases()
+
+
+@app.after_request
+def _api_version_response_header(response):
+    if (request.path or '').startswith('/api/v1/'):
+        response.headers['X-TDeck-API-Version'] = '1'
+    return response
 
 
 if __name__ == '__main__':

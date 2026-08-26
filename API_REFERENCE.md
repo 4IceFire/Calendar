@@ -6,8 +6,112 @@ This document lists the HTTP API endpoints implemented by the Flask Web UI serve
 
 - Base URL: `http://<host>:<port>`
 - Port: configured by `webserver_port` in `config.json` (default typically `5000`)
-- Auth: none (intended for trusted LAN usage)
+- Auth: authenticated browser session or scoped Bearer service token when `auth_enabled` is true
 - Format: JSON (unless otherwise noted)
+
+## API authentication and migration
+
+TDeck applies an explicit, fail-closed policy to every `/api` endpoint when
+`auth_enabled` is true. A newly added endpoint is denied until it is assigned a
+server-side capability policy.
+
+- Browser reads require a logged-in session and the page permission associated
+  with that API. Browser writes additionally require `X-CSRF-Token` and a
+  same-origin `Origin` or `Referer`. The bundled `api_client.js` adds the CSRF
+  header to same-origin API writes automatically.
+- Automation uses `Authorization: Bearer <service-token>`. A service token does
+  not use cookies or CSRF. Tokens are stored as SHA-256 hashes in `auth.db`; the
+  plaintext is displayed only once.
+- `/api/v1/...` is a stable alias for every documented `/api/...` route and
+  returns `X-TDeck-API-Version: 1`. Existing `/api/...` routes remain during the
+  migration so saved Companion action option IDs and URLs keep working.
+- `/videohub/monitor` now requires normal VideoHub page access because its live
+  state API is authenticated; it is no longer a silently broken public shell.
+
+Available token scopes are `read`, `timers`, `videohub`, `tvs`, `atem`,
+`propresenter`, `ccb`, `pixie`, `digico`, `calendar`, `config`, and `admin`.
+`read` permits read-only calls across resource APIs; a resource scope permits
+that resource's reads and writes. Avoid `*` unless a tightly constrained
+internal automation genuinely spans every capability.
+
+Create a Companion token from the TDeck folder:
+
+```powershell
+python cli.py service-tokens create "Companion Production" `
+  --scope read --scope timers --scope videohub --scope tvs --scope ccb `
+  --expires-in-days 365
+```
+
+Copy the printed token immediately into the existing **API token** field on the
+Companion TDeck connection. TDeck cannot display it again. Inspect and manage
+metadata without exposing plaintext:
+
+```powershell
+python cli.py service-tokens list
+python cli.py service-tokens rotate <id-or-prefix> --expires-in-days 365
+python cli.py service-tokens revoke <id-or-prefix>
+```
+
+Optional least-privilege constraints can limit both actions and targets:
+
+```powershell
+python cli.py service-tokens create "Foyer TVs" `
+  --scope read --scope tvs `
+  --allow-path "GET /api/tvs" `
+  --allow-path "POST /api/tvs/*/power" `
+  --tv-target foyer-display --expires-in-days 180
+
+python cli.py service-tokens create "Auditorium Router" `
+  --scope videohub --allow-path "POST /api/videohub/route" `
+  --videohub-output 1 --videohub-output 2 `
+  --videohub-input 3 --videohub-input 4 --expires-in-days 180
+```
+
+Other constraints are `--videohub-preset` and `--atem-source`. Rotation
+preserves the old token's scopes and constraints. Creation, use, scope denials,
+rate limits, rotation, and revocation produce Activity Log security events
+without recording plaintext credentials.
+
+Scheduled API triggers and CLI commands calling the local Web UI read their
+token from the process environment. Create a token with only the scopes and
+`--allow-path` values used by the schedule, set `TDECK_INTERNAL_API_TOKEN` for
+the account/service running TDeck, and restart that service. Do not put the
+token in `config.json` or an event body.
+
+### Deployment migration sequence
+
+1. Back up `auth.db` through the normal Config export.
+2. Create separate tokens for Companion and the scheduler; do not share one
+   token between integrations.
+3. Put the Companion token in its existing API-token field and set
+   `TDECK_INTERNAL_API_TOKEN` for the TDeck service if scheduled API triggers
+   are used.
+4. Restart the relevant services, verify status polling and one harmless action,
+   then confirm `last used` with `python cli.py service-tokens list`.
+5. Rotate a token to practise the recovery procedure, update the consumer with
+   the newly displayed plaintext, verify it, then revoke the previous token if
+   it was not rotated by the CLI.
+
+For a short migration only, an administrator may set both fields below. The
+expiry is mandatory and must be no more than 31 days in the future:
+
+```json
+{
+  "api_legacy_anonymous_enabled": true,
+  "api_legacy_anonymous_until": "YYYY-MM-DDTHH:MM:SS+10:00"
+}
+```
+
+This flag permits only the previous Companion status/home/timer/VideoHub/TV/CCB
+contract. It never permits Config, Admin, browser telemetry, ATEM, Pixie,
+DiGiCo, ProPresenter, Calendar editing, or newly added endpoints. Every accepted
+legacy request emits a recurring Activity Log warning. Remove the flag as soon
+as all consumers show token `last used` timestamps.
+
+Security-related limits can be adjusted with `api_max_request_bytes` (default
+2 MiB), `api_upload_max_request_bytes` (default 64 MiB),
+`api_write_rate_limit_per_minute` (default 600 per user/token), and the optional
+exact-origin list `api_trusted_origins`. Cross-origin API access is not enabled.
 
 ### Note about `/api` in trigger editors
 
@@ -27,7 +131,9 @@ When configuring a scheduled **API Call** trigger in the UI, you can enter paths
 
 ## Hisense / VIDAA TVs
 
-TV control is intended for a trusted production LAN. Pairing and configuration are restricted to users who can access **Config**; normal control endpoints remain available to the TDeck Companion module.
+TV control requires a Config-authorized browser session or a service token with
+the `tvs` scope. Pairing and configuration remain restricted to Config access;
+normal control endpoints are available to a scoped TDeck Companion token.
 
 The normal **Config → TVs** workflow only requires each TV's name, IP/host, and television MAC address. Authentication mode, polling/reconnect intervals, and certificate selection are backend-managed. Legacy configuration keys remain accepted for upgrades and API compatibility.
 

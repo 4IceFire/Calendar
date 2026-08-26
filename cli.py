@@ -15,6 +15,13 @@ from datetime import datetime
 from typing import List, Optional
 import sqlite3
 
+from api_security import (
+    SERVICE_TOKEN_SCOPES,
+    create_service_token,
+    list_service_tokens,
+    revoke_service_token,
+)
+
 from package.core import list_apps, get_app
 from package.apps.calendar import storage, utils
 logger = utils.get_logger()
@@ -24,7 +31,7 @@ from videohub import VideohubClient, get_videohub_client_from_config
 PID_FILE = "calendar.pid"
 
 
-def _activity_log_cli_event(action: str, summary: str, *, status: str = "success", target_id=None, details: dict | None = None) -> None:
+def _activity_log_cli_event(action: str, summary: str, *, status: str = "success", target_type: str = "calendar_event", target_id=None, details: dict | None = None) -> None:
     try:
         conn = sqlite3.connect(str(utils.get_project_path("auth.db")))
         try:
@@ -60,7 +67,7 @@ def _activity_log_cli_event(action: str, summary: str, *, status: str = "success
                     "CLI",
                     "system",
                     str(action or ""),
-                    "calendar_event",
+                    str(target_type or "calendar_event"),
                     str(target_id or ""),
                     str(status or "info"),
                     str(summary or ""),
@@ -236,6 +243,9 @@ def _local_api_request(method: str, path: str, body=None, timeout: float = 3.0):
     url = f"http://127.0.0.1:{port}{path_norm}"
     req_data = None
     req_headers = {}
+    internal_token = str(os.environ.get("TDECK_INTERNAL_API_TOKEN") or "").strip()
+    if internal_token:
+        req_headers["Authorization"] = f"Bearer {internal_token}"
     if str(method or "POST").upper() != "GET":
         req_data = json.dumps(body if body is not None else {}).encode("utf-8")
         req_headers["Content-Type"] = "application/json"
@@ -415,7 +425,11 @@ def cmd_timers_apply(args) -> int:
 
     payload = {"TimersIndex": value}
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    headers = {"Content-Type": "application/json"}
+    internal_token = str(os.environ.get("TDECK_INTERNAL_API_TOKEN") or "").strip()
+    if internal_token:
+        headers["Authorization"] = f"Bearer {internal_token}"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=3) as resp:
             body = resp.read().decode("utf-8", errors="replace")
@@ -698,6 +712,35 @@ def cmd_trigger(args):
         print(f"Triggered '{ev.name}' -> {detail} -> FAIL")
 
 
+def _service_token_db_path():
+    return utils.get_project_path("auth.db")
+
+
+def _print_created_service_token(record: dict, *, rotated_from: str | None = None) -> None:
+    print(f"Created service token #{record['id']} '{record['name']}'")
+    print(f"Prefix: {record['token_prefix']}")
+    print(f"Scopes: {', '.join(record['scopes'])}")
+    print(f"Expires: {record.get('expires_at') or 'never'}")
+    if record.get("constraints"):
+        print(f"Constraints: {json.dumps(record['constraints'], sort_keys=True)}")
+    if rotated_from:
+        print(f"Revoked previous token: {rotated_from}")
+    print("")
+    print("Copy this token now. TDeck stores only its hash and cannot show it again:")
+    print(record["token"])
+
+
+def _find_service_token(identifier: str) -> dict | None:
+    raw = str(identifier or "").strip()
+    records = list_service_tokens(_service_token_db_path())
+    if raw.isdigit():
+        return next((item for item in records if int(item["id"]) == int(raw)), None)
+    matches = [item for item in records if str(item["token_prefix"]).startswith(raw)]
+    if len(matches) > 1:
+        raise ValueError("Token prefix is ambiguous; use the numeric ID")
+    return matches[0] if matches else None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="calendarctl")
     sub = parser.add_subparsers(dest="cmd")
@@ -796,7 +839,135 @@ def main(argv=None):
         help="Treat --output/--input as 0-based (VideoHub protocol). Default is 1-based for humans.",
     )
 
+    token_p = sub.add_parser("service-tokens", help="Create, list, rotate, and revoke scoped API service tokens")
+    token_sub = token_p.add_subparsers(dest="service_tokens_cmd")
+    token_create = token_sub.add_parser("create", help="Create a service token; plaintext is displayed once")
+    token_create.add_argument("name", help="Human-readable token name, such as Companion-Foyer")
+    token_create.add_argument(
+        "--scope",
+        action="append",
+        required=True,
+        choices=list(SERVICE_TOKEN_SCOPES) + ["*"],
+        help="Allowed capability; repeat for multiple scopes",
+    )
+    token_create.add_argument("--description", default="", help="Operator note describing this token's owner/use")
+    token_create.add_argument("--expires-in-days", type=int, help="Expire automatically after this many days")
+    token_create.add_argument("--expires-at", help="ISO-8601 expiry timestamp")
+    token_create.add_argument("--allow-path", action="append", default=[], help="Optional action pattern, e.g. 'POST /api/timers/apply' or 'POST /api/tvs/*/power'")
+    token_create.add_argument("--tv-target", action="append", default=[], help="Limit TV operations to this TV/group target ID")
+    token_create.add_argument("--videohub-output", action="append", type=int, default=[], help="Limit routing to this 1-based output")
+    token_create.add_argument("--videohub-input", action="append", type=int, default=[], help="Limit routing to this 1-based input")
+    token_create.add_argument("--videohub-preset", action="append", type=int, default=[], help="Limit preset application to this preset ID")
+    token_create.add_argument("--atem-source", action="append", default=[], help="Limit ATEM writes to this source ID")
+
+    token_sub.add_parser("list", help="List token metadata (never plaintext tokens)")
+    token_revoke = token_sub.add_parser("revoke", help="Revoke by numeric ID or displayed prefix")
+    token_revoke.add_argument("identifier", help="Token numeric ID or unique prefix")
+    token_rotate = token_sub.add_parser("rotate", help="Replace and revoke a token while preserving scopes")
+    token_rotate.add_argument("identifier", help="Token numeric ID or unique prefix")
+    token_rotate.add_argument("--name", help="Optional name for the replacement")
+    token_rotate.add_argument("--expires-in-days", type=int, help="Replacement expiry in days")
+    token_rotate.add_argument("--expires-at", help="Replacement ISO-8601 expiry timestamp")
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "service-tokens":
+        if args.service_tokens_cmd == "create":
+            try:
+                record = create_service_token(
+                    _service_token_db_path(),
+                    name=args.name,
+                    scopes=args.scope,
+                    description=args.description,
+                    expires_at=args.expires_at,
+                    expires_in_days=args.expires_in_days,
+                    constraints={
+                        "allowed_paths": args.allow_path,
+                        "tv_targets": args.tv_target,
+                        "videohub_outputs": args.videohub_output,
+                        "videohub_inputs": args.videohub_input,
+                        "videohub_presets": args.videohub_preset,
+                        "atem_sources": args.atem_source,
+                    },
+                )
+            except ValueError as exc:
+                print(f"Could not create service token: {exc}")
+                return 2
+            _activity_log_cli_event(
+                "security.service_token.create",
+                f"Created service token '{record['name']}'",
+                target_type="service_token",
+                target_id=record["id"],
+                details={"name": record["name"], "prefix": record["token_prefix"], "scopes": record["scopes"], "constraints": record.get("constraints") or {}, "expires_at": record.get("expires_at")},
+            )
+            _print_created_service_token(record)
+            return 0
+        if args.service_tokens_cmd == "list":
+            records = list_service_tokens(_service_token_db_path())
+            if not records:
+                print("No service tokens")
+                return 0
+            print("ID  STATUS   PREFIX        LAST USED                  EXPIRES                    NAME / SCOPES")
+            for item in records:
+                status = "active" if item["active"] else ("revoked" if item["revoked_at"] else "expired")
+                scopes = ",".join(item["scopes"])
+                print(
+                    f"{item['id']:<3} {status:<8} {item['token_prefix']:<13} "
+                    f"{(item['last_used_at'] or '-'): <26} {(item['expires_at'] or '-'): <26} "
+                    f"{item['name']} [{scopes}]"
+                )
+            return 0
+        if args.service_tokens_cmd == "revoke":
+            try:
+                record = revoke_service_token(_service_token_db_path(), args.identifier)
+            except ValueError as exc:
+                print(f"Could not revoke service token: {exc}")
+                return 2
+            if record is None:
+                print("Service token not found")
+                return 1
+            _activity_log_cli_event(
+                "security.service_token.revoke",
+                f"Revoked service token '{record['name']}'",
+                target_type="service_token",
+                target_id=record["id"],
+                details={"name": record["name"], "prefix": record["token_prefix"]},
+            )
+            print(f"Revoked service token #{record['id']} '{record['name']}'")
+            return 0
+        if args.service_tokens_cmd == "rotate":
+            try:
+                old = _find_service_token(args.identifier)
+                if old is None:
+                    print("Service token not found")
+                    return 1
+                if not old["active"]:
+                    print("Only an active token can be rotated")
+                    return 2
+                replacement = create_service_token(
+                    _service_token_db_path(),
+                    name=args.name or old["name"],
+                    scopes=old["scopes"],
+                    description=old["description"],
+                    expires_at=args.expires_at,
+                    expires_in_days=args.expires_in_days,
+                    constraints=old.get("constraints") or {},
+                )
+                revoked = revoke_service_token(_service_token_db_path(), old["id"])
+            except ValueError as exc:
+                print(f"Could not rotate service token: {exc}")
+                return 2
+            _activity_log_cli_event(
+                "security.service_token.rotate",
+                f"Rotated service token '{old['name']}'",
+                target_type="service_token",
+                target_id=replacement["id"],
+                details={"old_id": old["id"], "old_prefix": old["token_prefix"], "new_id": replacement["id"], "new_prefix": replacement["token_prefix"], "scopes": replacement["scopes"]},
+            )
+            _print_created_service_token(replacement, rotated_from=f"#{revoked['id']} {revoked['token_prefix']}")
+            return 0
+        token_p.print_help()
+        return 2
 
     if args.cmd == "apps":
         apps = list_apps()

@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import re
+import socket
 import threading
 import time
 from pathlib import Path
@@ -39,6 +40,19 @@ DEFAULT_SOURCES = [
     {"id": "HDMI3", "name": "HDMI 3"},
     {"id": "AVS", "name": "AV"},
 ]
+
+
+def _tcp_reachability_probe(host: str, port: int, timeout: float = 1.5) -> tuple[bool, str]:
+    """Perform a bounded, read-only TCP reachability check for setup diagnostics."""
+    try:
+        with socket.create_connection((host, port), timeout=max(0.1, float(timeout))):
+            return True, "VIDAA control port accepted a connection"
+    except socket.timeout:
+        return False, "VIDAA control port timed out"
+    except OSError:
+        # Keep operating-system details out of the operator/API response. They
+        # can contain local interface data without making repairs more useful.
+        return False, "VIDAA control port could not be reached"
 
 BUILTIN_CERTIFICATE_PROFILES = (
     {
@@ -289,6 +303,7 @@ class HisenseTvController:
         client_factory: Callable[..., Any] | None = None,
         wake_function: Callable[[str, str | None], bool] | None = None,
         protocol_detector: Callable[..., int | None] | None = None,
+        reachability_probe: Callable[..., Any] | None = None,
         expected_off: bool = False,
         expected_off_callback: Callable[[str, bool], None] | None = None,
     ) -> None:
@@ -301,6 +316,7 @@ class HisenseTvController:
             if protocol_detector is not None
             else (detect_protocol if client_factory is None else None)
         )
+        self._reachability_probe = reachability_probe or _tcp_reachability_probe
         self._expected_off_callback = expected_off_callback
         self._client: Any = None
         self._queue: queue.Queue[_Command] = queue.Queue()
@@ -315,6 +331,7 @@ class HisenseTvController:
         self._last_wake_attempt = 0.0
         self._power_key_sent = False
         self._protocol_checked = False
+        self._protocol_error = ""
         self._selected_dynamic_auth = False
         self._state: dict[str, Any] = {
             "connected": False,
@@ -332,6 +349,7 @@ class HisenseTvController:
             "authMethod": "",
             "certificateProfile": "",
             "compatibilityStatus": "Powered off intentionally" if expected_off else "Not connected",
+            "preflight": None,
         }
 
     def start(self) -> None:
@@ -356,6 +374,8 @@ class HisenseTvController:
         with self._lock:
             state = dict(self._state)
             state["sources"] = [dict(source) for source in self._state.get("sources", [])]
+            if isinstance(self._state.get("preflight"), dict):
+                state["preflight"] = json.loads(json.dumps(self._state["preflight"]))
             state["healthy"] = bool(state.get("connected") or state.get("expectedOff"))
             state["powerOnPending"] = self._pending_power_on
         return {
@@ -373,6 +393,20 @@ class HisenseTvController:
     def submit(self, action: str, value: Any = None, *, wait: float = 0.0) -> dict[str, Any]:
         if not self.config.enabled:
             raise ValueError("TV is disabled")
+        if action == "preflight":
+            with self._lock:
+                current = self._state.get("preflight")
+                if isinstance(current, dict) and current.get("state") in {"queued", "running"}:
+                    return {"ok": True, "accepted": True, "pending": True, "preflight": dict(current)}
+                self._state["preflight"] = {
+                    "state": "queued",
+                    "ready": False,
+                    "safe": True,
+                    "summary": "Preflight is queued",
+                    "checkedAt": None,
+                    "checks": [],
+                    "repairSteps": [],
+                }
         command = _Command(action=action, value=value, done=threading.Event() if wait > 0 else None)
         self._queue.put(command)
         self._wake_worker.set()
@@ -418,7 +452,10 @@ class HisenseTvController:
             self._wake_worker.wait(0.5)
             self._wake_worker.clear()
 
-    def _detect_protocol_version(self) -> int | None:
+    def _detect_protocol_version(self, *, force: bool = False) -> int | None:
+        if force:
+            self._protocol_checked = False
+            self._protocol_error = ""
         if self._protocol_checked:
             value = self._state.get("protocolVersion")
             return int(value) if isinstance(value, int) else None
@@ -429,7 +466,8 @@ class HisenseTvController:
                 version = self._protocol_detector(self.config.host, timeout=1.5, retries=0)
             except TypeError:
                 version = self._protocol_detector(self.config.host)
-            except Exception:
+            except Exception as exc:
+                self._protocol_error = str(exc or "Protocol discovery failed")
                 version = None
         with self._lock:
             self._state["protocolVersion"] = version
@@ -500,6 +538,355 @@ class HisenseTvController:
                 (True, AuthMethod.LEGACY, "dynamic-legacy"),
             ])
         return result
+
+    @staticmethod
+    def _protocol_generation(protocol_version: int | None) -> str:
+        if protocol_version is None:
+            return "unknown"
+        return "dynamic" if protocol_version >= 3000 else "static-legacy"
+
+    @staticmethod
+    def _preflight_check(
+        ident: str,
+        label: str,
+        status: str,
+        detail: str,
+    ) -> dict[str, str]:
+        return {
+            "id": ident,
+            "label": label,
+            "status": status,
+            "detail": detail,
+        }
+
+    def _store_preflight(self, report: dict[str, Any]) -> dict[str, Any]:
+        # Round-trip through JSON to ensure callers cannot mutate the cached
+        # report while the worker is updating it. The report contains no
+        # credentials, certificate paths, tokens, or paired UUID value.
+        snapshot = json.loads(json.dumps(report))
+        with self._lock:
+            self._state["preflight"] = snapshot
+        return snapshot
+
+    def _reachability(self) -> tuple[bool, str]:
+        try:
+            try:
+                result = self._reachability_probe(self.config.host, self.config.port, 1.5)
+            except TypeError:
+                result = self._reachability_probe(self.config.host, self.config.port)
+        except TimeoutError:
+            return False, "VIDAA control port timed out"
+        except Exception:
+            return False, "VIDAA control port could not be reached"
+        if isinstance(result, tuple):
+            reachable = bool(result[0]) if result else False
+            detail = str(result[1] if len(result) > 1 else "").strip()
+            return reachable, detail or (
+                "VIDAA control port accepted a connection"
+                if reachable else "VIDAA control port could not be reached"
+            )
+        if isinstance(result, dict):
+            reachable = bool(result.get("reachable", result.get("ok", False)))
+            detail = str(result.get("detail") or "").strip()
+            return reachable, detail or (
+                "VIDAA control port accepted a connection"
+                if reachable else "VIDAA control port could not be reached"
+            )
+        reachable = bool(result)
+        return reachable, (
+            "VIDAA control port accepted a connection"
+            if reachable else "VIDAA control port could not be reached"
+        )
+
+    def _run_preflight(self) -> dict[str, Any]:
+        """Run a bounded setup diagnostic without issuing a TV command.
+
+        The only network operations are TCP/protocol discovery, authentication,
+        and a state read. In particular, this never sends KEY_POWER, Wake-on-LAN,
+        volume, source, mute, or any other state-changing operation.
+        """
+        checked_at = time.time()
+        with self._lock:
+            self._state["preflight"] = {
+                "state": "running",
+                "ready": False,
+                "safe": True,
+                "summary": "Running read-only TV checks",
+                "checkedAt": checked_at,
+                "checks": [],
+                "repairSteps": [],
+            }
+
+        checks: list[dict[str, str]] = []
+        repair_steps: list[str] = []
+        protocol_version = self._detect_protocol_version(force=True)
+        generation = self._protocol_generation(protocol_version)
+        preferred_auth = self._auth_candidates(protocol_version)[0][2]
+        requires_uuid = (
+            self.config.auth_mode.startswith("dynamic-")
+            or (self.config.auth_mode == "auto" and protocol_version is not None and protocol_version >= 3000)
+        )
+
+        config_ready = bool(self.config.host and self.config.mac)
+        checks.append(self._preflight_check(
+            "configuration",
+            "Configuration",
+            "pass" if config_ready else "fail",
+            "Host and TV Wake-on-LAN MAC are configured"
+            if config_ready else "A host and separate TV MAC address are required",
+        ))
+        if not config_ready:
+            repair_steps.append("Enter the TV IP/hostname and the TV's Wake-on-LAN MAC address, then save.")
+
+        installed_profiles = [
+            profile
+            for profile in self.service_config.certificate_profiles
+            if profile.enabled and Path(profile.certfile).is_file() and Path(profile.keyfile).is_file()
+        ]
+        support_ready = self._client_factory is not None and bool(installed_profiles)
+        checks.append(self._preflight_check(
+            "support-files",
+            "VIDAA support",
+            "pass" if support_ready else "fail",
+            f"{len(installed_profiles)} installed certificate profile(s) available"
+            if support_ready else "VIDAA library or approved local certificate/key pair is unavailable",
+        ))
+        if not support_ready:
+            repair_steps.append(
+                "Install the Python requirements and an approved VIDAA certificate/key pair at the standard backend filenames."
+            )
+
+        if protocol_version is None:
+            protocol_detail = "The UPnP descriptor did not expose a protocol version"
+            if self._protocol_error:
+                protocol_detail = "Protocol discovery did not complete"
+            checks.append(self._preflight_check("protocol", "Protocol generation", "warning", protocol_detail))
+        else:
+            checks.append(self._preflight_check(
+                "protocol",
+                "Protocol generation",
+                "pass",
+                f"Protocol {protocol_version} uses {generation} authentication selection",
+            ))
+
+        if requires_uuid:
+            uuid_status = "pass" if self.config.uuid else "fail"
+            uuid_detail = (
+                "A paired-client UUID is configured separately from the TV MAC"
+                if self.config.uuid else "Dynamic authentication requires a paired-client UUID; the TV MAC cannot be used"
+            )
+        elif generation == "static-legacy" or self.config.auth_mode == "static-legacy":
+            uuid_status = "pass"
+            uuid_detail = "Static legacy authentication does not require a paired-client UUID"
+        else:
+            uuid_status = "pass" if self.config.uuid else "warning"
+            uuid_detail = (
+                "A paired-client UUID is available if dynamic authentication is selected"
+                if self.config.uuid else "Protocol is unknown; a paired-client UUID may be required by newer TVs"
+            )
+        checks.append(self._preflight_check("paired-uuid", "Paired-client identity", uuid_status, uuid_detail))
+
+        report_base = {
+            "tvId": self.config.id,
+            "safe": True,
+            "checkedAt": checked_at,
+            "protocol": {
+                "version": protocol_version,
+                "generation": generation,
+                "detected": protocol_version is not None,
+            },
+            "authentication": {
+                "method": preferred_auth,
+                "uuidConfigured": bool(self.config.uuid),
+                "uuidRequired": bool(requires_uuid),
+            },
+        }
+
+        if self._is_expected_off():
+            checks.extend([
+                self._preflight_check(
+                    "reachability", "Network reachability", "skipped",
+                    "TV is marked intentionally off; preflight will not wake it",
+                ),
+                self._preflight_check(
+                    "authentication", "Authenticated connection", "skipped",
+                    "Authentication was not attempted while the TV is intentionally off",
+                ),
+                self._preflight_check(
+                    "capability-read", "Harmless state read", "skipped",
+                    "No control or read command was sent to the powered-off TV",
+                ),
+            ])
+            repair_steps.append("If the TV should be on, use Reconnect to clear intentional-off state, then rerun preflight.")
+            return self._store_preflight({
+                **report_base,
+                "state": "expected-off",
+                "ready": False,
+                "summary": "TV is intentionally off; no wake or control command was sent",
+                "checks": checks,
+                "repairSteps": repair_steps,
+            })
+
+        if requires_uuid and not self.config.uuid:
+            reachable, reachability_detail = self._reachability()
+            checks.extend([
+                self._preflight_check(
+                    "reachability", "Network reachability", "pass" if reachable else "fail",
+                    reachability_detail,
+                ),
+                self._preflight_check(
+                    "authentication", "Authenticated connection", "fail",
+                    f"{preferred_auth} cannot start without the paired-client UUID",
+                ),
+                self._preflight_check(
+                    "capability-read", "Harmless state read", "skipped",
+                    "State read requires an authenticated connection",
+                ),
+            ])
+            repair_steps.append(
+                "Pair the official VIDAA phone app with this TV, then enter that phone's case-sensitive Wi-Fi/Bluetooth UUID in Pair or repair."
+            )
+            repair_steps.append("Do not enter the television's Wake-on-LAN MAC in the paired-client UUID field.")
+            if not reachable:
+                repair_steps.append(
+                    f"Also confirm this server can reach {self.config.host} on TCP port {self.config.port}."
+                )
+            return self._store_preflight({
+                **report_base,
+                "state": "needs-uuid",
+                "ready": False,
+                "summary": "Paired-client UUID is required before this TV can authenticate",
+                "checks": checks,
+                "repairSteps": repair_steps,
+            })
+
+        if self._is_connected():
+            reachable, reachability_detail = True, "An active VIDAA connection proves network reachability"
+        else:
+            reachable, reachability_detail = self._reachability()
+        checks.append(self._preflight_check(
+            "reachability",
+            "Network reachability",
+            "pass" if reachable else "fail",
+            reachability_detail,
+        ))
+        if not reachable:
+            checks.extend([
+                self._preflight_check(
+                    "authentication", "Authenticated connection", "skipped",
+                    "Authentication was not attempted because the control port is unreachable",
+                ),
+                self._preflight_check(
+                    "capability-read", "Harmless state read", "skipped",
+                    "State read requires network reachability",
+                ),
+            ])
+            repair_steps.extend([
+                "Confirm the TV is expected to be on and connected to the production network.",
+                f"Confirm this server can reach {self.config.host} on TCP port {self.config.port} and that the saved IP has not changed.",
+            ])
+            return self._store_preflight({
+                **report_base,
+                "state": "unreachable",
+                "ready": False,
+                "summary": "TV control port is unreachable",
+                "checks": checks,
+                "repairSteps": repair_steps,
+            })
+
+        connected = self._is_connected() or self._connect()
+        current = self.status()
+        selected_auth = str(current.get("authMethod") or preferred_auth)
+        report_base["authentication"]["method"] = selected_auth
+        report_base["authentication"]["connected"] = bool(connected)
+        if not connected:
+            error_text = str(current.get("lastError") or "Connection failed")
+            error_lower = error_text.lower()
+            if "timed out" in error_lower or "timeout" in error_lower:
+                state = "timeout"
+                summary = "TV was reachable but the authenticated connection timed out"
+                repair_steps.append("Check TV responsiveness and VLAN/firewall rules, then rerun Reconnect and preflight.")
+            elif "auth" in error_lower or "rejected" in error_lower or "not authorised" in error_lower:
+                state = "auth-rejected"
+                summary = "TV rejected the configured authentication"
+                repair_steps.extend([
+                    "Open Pair or repair and approve a new PIN pairing on the television.",
+                    "For a newer TV, verify the case-sensitive paired phone UUID and install the approved current VIDAA certificate pair if the TV reports app incompatibility.",
+                ])
+            elif "certificate" in error_lower or "support files" in error_lower:
+                state = "support-unavailable"
+                summary = "No compatible installed VIDAA support profile could connect"
+                repair_steps.append("Install the approved certificate generation for this television, then reconnect.")
+            else:
+                state = "connection-failed"
+                summary = "TV was reachable but a compatible authenticated session could not be established"
+                repair_steps.append("Rerun pairing and confirm the approved certificate generation matches the television.")
+            checks.extend([
+                self._preflight_check("authentication", "Authenticated connection", "fail", summary),
+                self._preflight_check(
+                    "capability-read", "Harmless state read", "skipped",
+                    "State read requires an authenticated connection",
+                ),
+            ])
+            return self._store_preflight({
+                **report_base,
+                "state": state,
+                "ready": False,
+                "summary": summary,
+                "checks": checks,
+                "repairSteps": repair_steps,
+            })
+
+        checks.append(self._preflight_check(
+            "authentication",
+            "Authenticated connection",
+            "pass",
+            f"Connected with {selected_auth}",
+        ))
+        try:
+            client = self._client
+            state_payload = client.get_state(timeout=2.0) if client is not None else None
+            if not isinstance(state_payload, dict) or not state_payload:
+                raise RuntimeError("TV returned no state data")
+            with self._lock:
+                self._state.update({"lastSeen": time.time(), "connected": True, "lastError": ""})
+            checks.append(self._preflight_check(
+                "capability-read",
+                "Harmless state read",
+                "pass",
+                "Authenticated TV state was read without changing power, volume, mute, or source",
+            ))
+        except Exception:
+            self._set_error("Authenticated state read failed")
+            self._disconnect(clear_error=False)
+            checks.append(self._preflight_check(
+                "capability-read",
+                "Harmless state read",
+                "fail",
+                "The session connected but did not return TV state",
+            ))
+            repair_steps.append("Reconnect the TV and check whether another client or network interruption is closing the VIDAA session.")
+            return self._store_preflight({
+                **report_base,
+                "state": "read-failed",
+                "ready": False,
+                "summary": "Authenticated connection could not complete a harmless state read",
+                "checks": checks,
+                "repairSteps": repair_steps,
+            })
+
+        ready = config_ready and support_ready
+        if not repair_steps and ready:
+            repair_steps.append("No operator action is required.")
+        return self._store_preflight({
+            **report_base,
+            "state": "ready" if ready else "support-unavailable",
+            "ready": ready,
+            "summary": "TV passed authentication and read-only capability checks"
+            if ready else "TV is connected, but local support files need repair before the next restart",
+            "checks": checks,
+            "repairSteps": repair_steps,
+        })
 
     def _make_client(
         self,
@@ -808,10 +1195,21 @@ class HisenseTvController:
     def _execute_command(self, command: _Command) -> None:
         try:
             action, value = command.action, command.value
+            if action == "preflight":
+                report = self._run_preflight()
+                command.result = {
+                    "ok": True,
+                    "accepted": True,
+                    "pending": False,
+                    "preflight": report,
+                    "tv": self.status(),
+                }
+                return
             if action == "reconnect":
                 self._set_expected_off(False)
                 self._disconnect(clear_error=True)
                 self._protocol_checked = False
+                self._protocol_error = ""
                 ok = self._connect()
             elif action == "power_on":
                 ok = self._begin_power_on()
@@ -929,6 +1327,7 @@ class HisenseManager:
         client_factory: Callable[..., Any] | None = None,
         wake_function: Callable[[str, str | None], bool] | None = None,
         protocol_detector: Callable[..., int | None] | None = None,
+        reachability_probe: Callable[..., Any] | None = None,
     ) -> None:
         self.config = config
         self._power_state_lock = threading.Lock()
@@ -940,6 +1339,7 @@ class HisenseManager:
                 client_factory=client_factory,
                 wake_function=wake_function,
                 protocol_detector=protocol_detector,
+                reachability_probe=reachability_probe,
                 expected_off=tv.id in self._expected_off_ids,
                 expected_off_callback=self._persist_expected_off,
             )

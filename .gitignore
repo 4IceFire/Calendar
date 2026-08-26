@@ -1,5 +1,7 @@
 # Local environment variables
 .venv/
+node_modules/
+test-results/
 
 # Python bytecode / caches
 __pycache__/
@@ -19,6 +21,8 @@ hisense_certs/
 # Local Config/Event Files
 *.json
 !companion_surfaces.json
+!package.json
+!package-lock.json
 pixie_secrets.json
 
 auth.db

@@ -309,8 +309,9 @@ function _routingParseAllowList(raw) {
   }
 }
 
-if (document.getElementById('routing-page')) {
+function _initRoutingPage() {
   const root = document.getElementById('routing-page');
+  if (!root) return;
   const allowedOutputs = _routingParseAllowList(root.getAttribute('data-allowed-outputs'));
   const allowedInputs = _routingParseAllowList(root.getAttribute('data-allowed-inputs'));
 
@@ -528,6 +529,8 @@ if (document.getElementById('routing-page')) {
 
   _loadRoutingState();
 }
+
+_initRoutingPage();
 
 // --- Config page ---
 function _configSetStatus(msg, kind) {
@@ -1111,7 +1114,8 @@ function _readConfigFromUI(originalCfg) {
   return cfg;
 }
 
-if (document.getElementById('config-page')) {
+function _initConfigPage() {
+  if (!document.getElementById('config-page')) return;
   let _configOriginal = {};
 
   // --- Unsaved changes tracking / navigation guard ---
@@ -1404,6 +1408,8 @@ if (document.getElementById('config-page')) {
     });
   }
 }
+
+_initConfigPage();
 
 // --- Activity Log page ---
 function _activityLogSetStatus(msg, kind) {
@@ -2849,7 +2855,8 @@ async function _timersLoad() {
   _timersApplyStagePresetId(stagePreset);
 }
 
-if (document.getElementById('timers-page')) {
+function _initTimersPage() {
+  if (!document.getElementById('timers-page')) return;
   // Initial load
   _timersLoad().catch(e => _timersSetStatus(String(e.message || e), 'error'));
 
@@ -3211,9 +3218,12 @@ if (document.getElementById('timers-page')) {
   }
 }
 
+_initTimersPage();
+
 // --- Permissions page (users + groups) ---
-if (document.getElementById('permissions-page')) {
+function _initPermissionsPage() {
   const permissionsRoot = document.getElementById('permissions-page');
+  if (!permissionsRoot) return;
   const userList = document.getElementById('permissions-user-list');
   const userSearch = document.getElementById('permissions-user-search');
   const createUserCard = document.getElementById('permissions-create-user-card');
@@ -3555,9 +3565,12 @@ if (document.getElementById('permissions-page')) {
   });
 }
 
+_initPermissionsPage();
+
 // --- Admin user detail page ---
-if (document.getElementById('admin-user-detail-page')) {
+function _initAdminUserDetailPage() {
   const root = document.getElementById('admin-user-detail-page');
+  if (!root) return;
   const userId = String(root.getAttribute('data-user-id') || '').trim();
   const minPasswordLength = Math.max(4, Math.min(Number(root.getAttribute('data-min-password-length')) || 6, 128));
   const accessForm = root.querySelector('[data-user-detail-access-form]');
@@ -3682,8 +3695,11 @@ if (document.getElementById('admin-user-detail-page')) {
   });
 }
 
+_initAdminUserDetailPage();
+
 // --- Groups editor ---
-if (document.getElementById('access-levels-page')) {
+function _initAccessLevelsPage() {
+  if (!document.getElementById('access-levels-page')) return;
   const ROLE_STORAGE_KEY = 'tdeck_groups_selectedGroupId';
   const roleList = document.getElementById('access-levels-role-list');
   const roleItems = Array.from(document.querySelectorAll('[data-role-item][data-role-id]'));
@@ -3973,7 +3989,10 @@ if (document.getElementById('access-levels-page')) {
   });
 }
 
-if (document.getElementById('companion-surfaces-config-page')) {
+_initAccessLevelsPage();
+
+function _initCompanionSurfacesConfigPage() {
+  if (!document.getElementById('companion-surfaces-config-page')) return;
   const statusEl = document.getElementById('companion-surfaces-status');
   const surfacesList = document.getElementById('companion-surfaces-list');
   const displaysList = document.getElementById('companion-displays-list');
@@ -4233,8 +4252,11 @@ if (document.getElementById('companion-surfaces-config-page')) {
   _csLoad();
 }
 
-if (document.getElementById('foyer-audio-page')) {
+_initCompanionSurfacesConfigPage();
+
+function _initFoyerAudioPage() {
   const root = document.getElementById('foyer-audio-page');
+  if (!root) return;
   const grid = document.getElementById('foyer-audio-grid');
   const monitorEl = document.getElementById('foyer-audio-monitor');
   const emptyEl = document.getElementById('foyer-audio-empty');
@@ -4245,6 +4267,18 @@ if (document.getElementById('foyer-audio-page')) {
   const volumeState = new Map();
   const VOLUME_SEND_INTERVAL_MS = 60;
   const METER_REFRESH_MS = 350;
+  const FULL_STATE_REFRESH_MS = 5000;
+  const HIDDEN_STATE_REFRESH_MS = 30000;
+  const STATE_REQUEST_TIMEOUT_MS = 4000;
+  const MAX_READ_BACKOFF_MS = 15000;
+  let readTimer = null;
+  let readInFlight = false;
+  let readController = null;
+  let consecutiveReadFailures = 0;
+  let compactMetersSupported = true;
+  let lastFullStateAt = 0;
+  let forceFullStateRead = true;
+  let pageActive = true;
 
   function _foyerJsonAttr(name, fallback) {
     try {
@@ -4469,40 +4503,178 @@ if (document.getElementById('foyer-audio-page')) {
     }
   }
 
-  async function _loadState(options) {
-    const meterOnly = !!(options && options.meterOnly);
+  function _foyerPayload(body) {
+    if (!body || typeof body !== 'object') return {};
+    if (!body.data || typeof body.data !== 'object' || Array.isArray(body.data)) return body;
+    return Object.assign({}, body.data, {
+      ok: body.ok === undefined ? body.data.ok : body.ok,
+      error: body.error || body.data.error,
+      stale: body.stale === undefined ? body.data.stale : body.stale,
+      refreshing: body.refreshing === undefined ? body.data.refreshing : body.refreshing,
+    });
+  }
+
+  async function _foyerFetchJson(url) {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    readController = controller;
+    const timeout = window.setTimeout(() => {
+      if (controller) controller.abort();
+    }, STATE_REQUEST_TIMEOUT_MS);
     try {
-      const res = await fetch('/api/atem/audio/state?_ts=' + Date.now(), {cache: 'no-store'});
-      const data = await res.json().catch(() => ({}));
-      if (!data || !Array.isArray(data.sources)) throw new Error((data && data.error) || 'Could not load ATEM audio state');
-      const nextSources = data.sources;
-      monitorState = data.monitor || {};
-      if (data.ok === false && data.error) {
-        _foyerSetStatus(data.error, 'warning');
-      } else if (data.metering && data.metering.active) {
-        _foyerSetStatus('', 'info');
-      } else if (!meterOnly && data.metering && data.metering.enabled === false && data.metering.unavailableReason) {
-        _foyerSetStatus(`Audio metering unavailable: ${data.metering.unavailableReason}`, 'warning');
-      } else if (!meterOnly && data.metering && data.metering.enabled && !data.metering.active) {
-        const suffix = data.metering.salnPacketsSent ? 'waiting for AMLv packets from the ATEM' : 'waiting to request levels from the ATEM';
-        _foyerSetStatus(`Audio metering connected, ${suffix}.`, 'warning');
-      } else if (!meterOnly) {
-        _foyerSetStatus('', 'info');
+      const options = {cache: 'no-store'};
+      if (controller) options.signal = controller.signal;
+      const res = await fetch(url, options);
+      const body = await res.json().catch(() => ({}));
+      const data = _foyerPayload(body);
+      if (!res.ok) {
+        const error = new Error(data.error || `ATEM request failed (${res.status})`);
+        error.status = res.status;
+        throw error;
       }
-      const nextSignature = _sourcesSignature(nextSources);
-      stateSources = nextSources;
-      if (!meterOnly && !root.hasAttribute('data-volume-dragging')) {
-        _render();
-      } else if (nextSignature !== sourceSignature && !root.hasAttribute('data-volume-dragging')) {
-        _render();
-      } else {
-        _updateMeters(nextSources);
-        _syncSourceControls(nextSources);
-        _syncMonitorControls();
-      }
-    } catch (e) {
-      _foyerSetStatus(e && e.message ? e.message : 'Could not load ATEM audio state', 'danger');
+      return data;
+    } finally {
+      window.clearTimeout(timeout);
+      if (readController === controller) readController = null;
     }
+  }
+
+  function _foyerStateAgeText(data) {
+    const ageMs = Number(data && data.ageMs);
+    if (Number.isFinite(ageMs) && ageMs >= 0) return ` (${Math.max(0, Math.round(ageMs / 1000))}s old)`;
+    const sampledAt = Number(data && data.sampledAt);
+    if (Number.isFinite(sampledAt) && sampledAt > 0) {
+      const sampledAtMs = sampledAt < 100000000000 ? sampledAt * 1000 : sampledAt;
+      return ` (${Math.max(0, Math.round((Date.now() - sampledAtMs) / 1000))}s old)`;
+    }
+    return '';
+  }
+
+  function _applyFullState(data) {
+    if (!data || !Array.isArray(data.sources)) {
+      throw new Error((data && (data.error || data.lastError)) || 'Could not load ATEM audio state');
+    }
+    const nextSources = data.sources;
+    monitorState = data.monitor || {};
+    if (data.stale) {
+      _foyerSetStatus(`Showing the last known ATEM state${_foyerStateAgeText(data)}. ${data.lastError || data.error || 'Refreshing in the background.'}`, 'warning');
+    } else if (data.refreshing) {
+      _foyerSetStatus('Refreshing ATEM audio state…', 'info');
+    } else if (data.ok === false && (data.error || data.lastError)) {
+      _foyerSetStatus(data.error || data.lastError, 'warning');
+    } else if (data.metering && data.metering.active) {
+      _foyerSetStatus('', 'info');
+    } else if (data.metering && data.metering.enabled === false && data.metering.unavailableReason) {
+      _foyerSetStatus(`Audio metering unavailable: ${data.metering.unavailableReason}`, 'warning');
+    } else if (data.metering && data.metering.enabled && !data.metering.active) {
+      const suffix = data.metering.salnPacketsSent ? 'waiting for AMLv packets from the ATEM' : 'waiting to request levels from the ATEM';
+      _foyerSetStatus(`Audio metering connected, ${suffix}.`, 'warning');
+    } else {
+      _foyerSetStatus('', 'info');
+    }
+    const nextSignature = _sourcesSignature(nextSources);
+    stateSources = nextSources;
+    if (!root.hasAttribute('data-volume-dragging') && (sourceSignature === '' || nextSignature !== sourceSignature)) {
+      _render();
+    } else {
+      _updateMeters(nextSources);
+      _syncSourceControls(nextSources);
+      _syncMonitorControls();
+    }
+    lastFullStateAt = Date.now();
+  }
+
+  function _applyCompactMeters(data) {
+    const levels = data && data.sources;
+    if (!levels || typeof levels !== 'object' || Array.isArray(levels)) {
+      throw new Error((data && data.error) || 'Could not load ATEM audio meters');
+    }
+    stateSources.forEach((source) => {
+      const id = String(source.id || '');
+      let level = Object.prototype.hasOwnProperty.call(levels, id) ? levels[id] : undefined;
+      if (id === 'master' && data.master !== undefined) level = data.master;
+      if (level === undefined || level === null) return;
+      source.level = typeof level === 'number' ? {left: level, right: level} : level;
+    });
+    _updateMeters(stateSources);
+  }
+
+  async function _loadFullState() {
+    const data = await _foyerFetchJson('/api/atem/audio/state?_ts=' + Date.now());
+    _applyFullState(data);
+  }
+
+  async function _loadCompactMeters() {
+    const data = await _foyerFetchJson('/api/atem/audio/meters?_ts=' + Date.now());
+    _applyCompactMeters(data);
+  }
+
+  function _clearReadTimer() {
+    if (readTimer !== null) {
+      window.clearTimeout(readTimer);
+      readTimer = null;
+    }
+  }
+
+  function _scheduleRead(delayMs) {
+    _clearReadTimer();
+    if (!pageActive) return;
+    readTimer = window.setTimeout(_runReadLoop, Math.max(0, Number(delayMs) || 0));
+  }
+
+  function _readBackoffDelay() {
+    const exponent = Math.max(0, Math.min(consecutiveReadFailures - 1, 6));
+    const base = Math.min(MAX_READ_BACKOFF_MS, METER_REFRESH_MS * Math.pow(2, exponent));
+    return Math.round(base * (0.8 + (Math.random() * 0.4)));
+  }
+
+  async function _runReadLoop() {
+    readTimer = null;
+    if (!pageActive) return;
+    if (readInFlight) {
+      _scheduleRead(100);
+      return;
+    }
+
+    const hidden = document.hidden;
+    const fullStateDue = forceFullStateRead || !lastFullStateAt || (Date.now() - lastFullStateAt >= (hidden ? HIDDEN_STATE_REFRESH_MS : FULL_STATE_REFRESH_MS));
+    readInFlight = true;
+    try {
+      if (fullStateDue || !compactMetersSupported) {
+        forceFullStateRead = false;
+        await _loadFullState();
+      } else {
+        try {
+          await _loadCompactMeters();
+        } catch (error) {
+          if (error && (error.status === 404 || error.status === 405)) {
+            compactMetersSupported = false;
+            forceFullStateRead = true;
+          } else {
+            throw error;
+          }
+        }
+      }
+      consecutiveReadFailures = 0;
+    } catch (error) {
+      const wasCancelledForHiddenPage = error && error.name === 'AbortError' && (document.hidden || !pageActive);
+      if (!wasCancelledForHiddenPage) {
+        consecutiveReadFailures += 1;
+        _foyerSetStatus(error && error.name === 'AbortError'
+          ? 'ATEM audio state request timed out. Retrying…'
+          : (error && error.message ? error.message : 'Could not load ATEM audio state'), 'danger');
+      }
+    } finally {
+      readInFlight = false;
+      const nextDelay = consecutiveReadFailures
+        ? _readBackoffDelay()
+        : (document.hidden ? HIDDEN_STATE_REFRESH_MS : (compactMetersSupported ? METER_REFRESH_MS : 1000));
+      _scheduleRead(nextDelay);
+    }
+  }
+
+  function _refreshStateNow(delayMs) {
+    forceFullStateRead = true;
+    _scheduleRead(delayMs);
   }
 
   function _updateLocalVolume(id, db) {
@@ -4602,6 +4774,7 @@ if (document.getElementById('foyer-audio-page')) {
     setTimeout(() => {
       root.removeAttribute('data-volume-dragging');
       root.removeAttribute('data-active-volume');
+      _refreshStateNow(500);
     }, 250);
   }
 
@@ -4697,12 +4870,14 @@ if (document.getElementById('foyer-audio-page')) {
           source.mixOption = muted ? 'off' : 'on';
         }
         _render();
+        _refreshStateNow(500);
       } else if (soloBtn) {
         const id = String(soloBtn.getAttribute('data-foyer-solo') || '');
         const enabled = !(monitorState.solo && String(monitorState.soloSource || '') === id);
         await _postAction('/api/atem/audio/solo', {source_id: id, enabled});
         monitorState = {...monitorState, solo: enabled, soloSource: enabled ? id : ''};
         _render();
+        _refreshStateNow(500);
       } else if (monitorToggle && canMonitor) {
         const field = String(monitorToggle.getAttribute('data-foyer-monitor-toggle') || '');
         if (!['enabled', 'dim'].includes(field)) return;
@@ -4710,13 +4885,36 @@ if (document.getElementById('foyer-audio-page')) {
         await _postAction('/api/atem/audio/monitor', {[field]: enabled});
         monitorState[field] = enabled;
         _renderMonitor();
+        _refreshStateNow(500);
       }
     } catch (err) {
       _foyerSetStatus(err && err.message ? err.message : 'Action failed', 'danger');
     }
   });
 
-  _loadState();
-  setInterval(() => _loadState({meterOnly: true}), METER_REFRESH_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      _clearReadTimer();
+      if (readController) readController.abort();
+      _scheduleRead(HIDDEN_STATE_REFRESH_MS);
+      return;
+    }
+    _refreshStateNow(0);
+  });
+
+  window.addEventListener('pagehide', () => {
+    pageActive = false;
+    _clearReadTimer();
+    if (readController) readController.abort();
+  });
+
+  window.addEventListener('pageshow', () => {
+    pageActive = true;
+    _refreshStateNow(0);
+  });
+
+  _refreshStateNow(0);
 }
+
+_initFoyerAudioPage();
 

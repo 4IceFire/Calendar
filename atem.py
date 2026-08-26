@@ -11,6 +11,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from device_snapshot import SharedSnapshotCache
+
 try:
     import PyATEMMax
 except Exception:  # pragma: no cover - optional dependency until installed
@@ -26,6 +28,7 @@ except Exception:  # pragma: no cover - optional at import time
 DEFAULT_PORT = 9910
 DEFAULT_TIMEOUT = 3.0
 MASTER_SOURCE_ID = "master"
+_AUDIO_STATE_FRESH_SECONDS = 0.75
 
 _FALLBACK_AUDIO_SOURCES = [
     {"id": "1", "source": 1, "label": "Input 1", "kind": "input"},
@@ -122,9 +125,18 @@ class AtemAudioClient:
         self.timeout = float(timeout or DEFAULT_TIMEOUT)
         self.debug = bool(debug)
         self._lock = threading.RLock()
+        self._meter_lock = threading.Lock()
         self._switcher = None
         self._connected = False
         self._meter_client = None
+        self._audio_snapshot = SharedSnapshotCache(
+            self.get_audio_state,
+            self._fallback_audio_state,
+            fresh_for=_AUDIO_STATE_FRESH_SECONDS,
+            retry_base=0.5,
+            retry_max=5.0,
+            thread_name="tdeck-atem-audio-state-refresh",
+        )
 
     def _build_switcher(self):
         if PyATEMMax is None:
@@ -141,8 +153,9 @@ class AtemAudioClient:
             sw = self._switcher
             self._switcher = None
             self._connected = False
-            meter_client = self._meter_client
-            self._meter_client = None
+            with self._meter_lock:
+                meter_client = self._meter_client
+                self._meter_client = None
             if meter_client is not None:
                 try:
                     meter_client.close()
@@ -192,18 +205,22 @@ class AtemAudioClient:
     def _ensure_metering(self) -> None:
         if AtemMeterClient is None:
             return
-        if self._meter_client is None:
-            self._meter_client = AtemMeterClient(self.host, self.port, timeout=self.timeout)
+        with self._meter_lock:
+            if self._meter_client is None:
+                self._meter_client = AtemMeterClient(self.host, self.port, timeout=self.timeout)
+            meter_client = self._meter_client
         try:
-            self._meter_client.start()
+            meter_client.start()
         except Exception:
             pass
 
     def _meter_levels(self) -> dict[str, Any] | None:
         try:
             self._ensure_metering()
-            if self._meter_client is not None:
-                return self._meter_client.get_levels()
+            with self._meter_lock:
+                meter_client = self._meter_client
+            if meter_client is not None:
+                return meter_client.get_levels()
         except Exception:
             pass
         return None
@@ -218,8 +235,10 @@ class AtemAudioClient:
             }
         try:
             self._ensure_metering()
-            if self._meter_client is not None:
-                return self._meter_client.status()
+            with self._meter_lock:
+                meter_client = self._meter_client
+            if meter_client is not None:
+                return meter_client.status()
         except Exception as e:
             return {
                 "enabled": False,
@@ -327,6 +346,90 @@ class AtemAudioClient:
             "raw": {"left": 0, "right": 0, "peakLeft": 0, "peakRight": 0},
         }
 
+    def _fallback_audio_state(self) -> dict[str, Any]:
+        sources: list[dict[str, Any]] = []
+        for source in self.fallback_sources():
+            row = dict(source)
+            row.update({
+                "volume": 0.0,
+                "muted": str(row.get("id")) != MASTER_SOURCE_ID,
+                "level": self._empty_level_payload(),
+            })
+            if str(row.get("id")) != MASTER_SOURCE_ID:
+                row["mixOption"] = "off"
+            sources.append(row)
+        return {
+            "ok": False,
+            "connected": False,
+            "host": self.host,
+            "port": self.port,
+            "sources": sources,
+            "monitor": {
+                "enabled": False,
+                "monitorAudio": False,
+                "dim": False,
+                "muted": True,
+                "volume": 0.0,
+                "solo": False,
+                "soloSource": "",
+            },
+            "metering": {
+                "enabled": False,
+                "connected": False,
+                "active": False,
+                "unavailableReason": "Waiting for the first ATEM snapshot",
+            },
+        }
+
+    def get_meter_snapshot(self) -> dict[str, Any]:
+        """Return the latest in-memory UDP levels without reading control state."""
+        levels = self._meter_levels() or {}
+        metering = self._meter_status()
+        updated_at = levels.get("updatedAt") if isinstance(levels, dict) else None
+        try:
+            age = max(0.0, time.time() - float(updated_at)) if updated_at is not None else None
+        except Exception:
+            age = None
+        active = bool(metering.get("active", False))
+        return {
+            "ok": active,
+            "connected": bool(metering.get("connected", False)),
+            "master": (levels.get("master") if isinstance(levels, dict) else None) or self._empty_level_payload(),
+            "monitor": (levels.get("monitor") if isinstance(levels, dict) else None) or self._empty_level_payload(),
+            "sources": dict(levels.get("sources") or {}) if isinstance(levels, dict) else {},
+            "metering": metering,
+            "sampledAt": updated_at,
+            "ageMs": int(round(age * 1000.0)) if age is not None else None,
+            "stale": not active,
+        }
+
+    def get_audio_state_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        """Return cached control state immediately with the latest UDP meters.
+
+        All callers share one background refresh.  This keeps the existing full
+        state response useful while preventing browser polling from multiplying
+        PyATEMMax reads and reconnect attempts.
+        """
+        payload = self._audio_snapshot.get(force_refresh=force_refresh)
+        meters = self.get_meter_snapshot()
+        meter_sources = meters.get("sources") if isinstance(meters.get("sources"), dict) else {}
+        sources = payload.get("sources") if isinstance(payload.get("sources"), list) else []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            source_id = str(source.get("id") or "")
+            if source_id == MASTER_SOURCE_ID:
+                source["level"] = meters.get("master") or self._empty_level_payload()
+            else:
+                source["level"] = meter_sources.get(source_id) or self._empty_level_payload()
+        payload["metering"] = meters.get("metering") or payload.get("metering") or {}
+        payload.setdefault("ok", bool(payload.get("connected", False)))
+        return payload
+
+    def request_audio_state_refresh(self) -> None:
+        """Invalidate control state after a command and schedule one read-back."""
+        self._audio_snapshot.invalidate(refresh=True)
+
     def get_audio_state(self) -> dict[str, Any]:
         def _read(sw: Any) -> dict[str, Any]:
             meter_levels = self._meter_levels() or {}
@@ -405,6 +508,7 @@ class AtemAudioClient:
                 sw.setAudioMixerInputVolume(int(source), db)
 
         self._with_switcher(_set)
+        self.request_audio_state_refresh()
 
     def set_mix_option(self, source_id: str, mix_option: str) -> None:
         source = str(source_id or "").strip()
@@ -422,6 +526,7 @@ class AtemAudioClient:
             sw.setAudioMixerInputMixOption(int(source), atem_option)
 
         self._with_switcher(_set)
+        self.request_audio_state_refresh()
 
     def set_mute(self, source_id: str, muted: bool) -> None:
         self.set_mix_option(source_id, "off" if muted else "on")
@@ -439,6 +544,7 @@ class AtemAudioClient:
                 sw.setAudioMixerMonitorSolo(False)
 
         self._with_switcher(_set)
+        self.request_audio_state_refresh()
 
     def set_monitor(self, *, enabled: bool | None = None, dim: bool | None = None, volume: float | None = None) -> None:
         def _set(sw: Any) -> None:
@@ -451,3 +557,4 @@ class AtemAudioClient:
                 sw.setAudioMixerMonitorVolume(db)
 
         self._with_switcher(_set)
+        self.request_audio_state_refresh()

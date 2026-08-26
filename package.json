@@ -1,0 +1,12 @@
+{
+  "name": "tdeck-calendar-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test",
+    "test:browser:list": "playwright test --list",
+    "test:browser:install": "playwright install"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.0"
+  }
+}

@@ -542,12 +542,16 @@ class ClockScheduler:
             return False
 
         url = f"http://127.0.0.1:{port}{path_norm}"
+        headers = {}
+        internal_token = str(os.environ.get("TDECK_INTERNAL_API_TOKEN") or "").strip()
+        if internal_token:
+            headers["Authorization"] = f"Bearer {internal_token}"
 
         try:
             if method == "GET":
-                resp = requests.request(method, url, timeout=timeout_s)
+                resp = requests.request(method, url, headers=headers, timeout=timeout_s)
             else:
-                resp = requests.request(method, url, json=body if body is not None else None, timeout=timeout_s)
+                resp = requests.request(method, url, json=body if body is not None else None, headers=headers, timeout=timeout_s)
 
             ok = 200 <= int(resp.status_code) < 300
             if not ok and self.debug:

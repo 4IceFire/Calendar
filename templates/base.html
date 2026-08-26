@@ -139,6 +139,12 @@
     </main>
 
     <script src="{{ static_asset('vendor/bootstrap/bootstrap.bundle.min.js') }}"></script>
+    <script src="{{ static_asset('api_client.js') }}"
+            data-csrf-token="{{ csrf_token() }}"></script>
+    <script src="{{ static_asset('client_telemetry.js') }}"
+            data-endpoint="/api/client-errors"
+            data-build-id="{{ build_id }}"
+            data-csrf-token="{{ csrf_token() }}"></script>
     <script>
       window.TDECK_UI = {
         messageTimeoutMs: {{ (message_timeout_ms|default(0))|tojson }}

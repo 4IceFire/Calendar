@@ -1,6 +1,8 @@
 (() => {
+  const setup = document.getElementById('hisense-setup')
   const tree = document.getElementById('hisense-tree')
   const alertBox = document.getElementById('hisense-alert')
+  const csrfToken = setup?.dataset.csrfToken || ''
   let config = {}
 
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({
@@ -19,8 +21,14 @@
   }
 
   const request = async (path, options = {}) => {
+    const hasBody = options.body !== undefined
     const response = await fetch(path, {
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      headers: {
+        Accept: 'application/json',
+        ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+        ...(hasBody && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        ...(options.headers || {}),
+      },
       ...options,
     })
     const payload = await response.json().catch(() => ({}))
@@ -102,6 +110,38 @@
     if (status.expectedOff) return 'text-muted'
     if (status.connected) return 'text-success'
     return status.lastError ? 'text-danger' : 'text-muted'
+  }
+
+  const preflightClass = (value) => ({
+    pass: 'text-bg-success',
+    warning: 'text-bg-warning',
+    fail: 'text-bg-danger',
+    skipped: 'text-bg-secondary',
+  })[value] || 'text-bg-secondary'
+
+  const preflightPanel = (report = null) => {
+    if (!report) {
+      return `<div class="tv-preflight mt-3 p-3 rounded border">
+        <div class="fw-semibold">Setup preflight</div>
+        <div class="small text-muted">Not run since the TV service started. This check is read-only.</div>
+      </div>`
+    }
+    const checks = (report.checks || []).map((check) => `
+      <li class="list-group-item d-flex flex-wrap align-items-start gap-2 px-0 py-2 bg-transparent">
+        <span class="badge ${preflightClass(check.status)} text-uppercase">${escapeHtml(check.status)}</span>
+        <span><span class="fw-semibold">${escapeHtml(check.label)}</span><br><span class="small text-muted">${escapeHtml(check.detail)}</span></span>
+      </li>`).join('')
+    const steps = (report.repairSteps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join('')
+    const tone = report.ready ? 'border-success' : (report.state === 'expected-off' ? 'border-secondary' : 'border-warning')
+    return `<div class="tv-preflight mt-3 p-3 rounded border ${tone}">
+      <div class="d-flex flex-wrap align-items-center gap-2">
+        <div class="fw-semibold">Setup preflight</div>
+        <span class="badge ${report.ready ? 'text-bg-success' : 'text-bg-secondary'}">${escapeHtml(report.state || 'unknown')}</span>
+      </div>
+      <div class="small mt-1">${escapeHtml(report.summary || '')}</div>
+      ${checks ? `<ul class="list-group list-group-flush mt-2">${checks}</ul>` : ''}
+      ${steps ? `<div class="small fw-semibold mt-2">Operator action</div><ol class="small mb-0 ps-3">${steps}</ol>` : ''}
+    </div>`
   }
 
   const healthSummary = (total, online, errors, off = 0) => {
@@ -186,7 +226,7 @@
         <div class="d-flex flex-wrap gap-2 mt-3">
           <button type="button" class="btn btn-sm btn-outline-secondary" data-action="tv-reconnect">Reconnect</button>
           <button type="button" class="btn btn-sm btn-outline-warning" data-action="tv-pairing-toggle">${pairingOpen ? 'Hide pairing' : 'Pair or repair'}</button>
-          <button type="button" class="btn btn-sm btn-outline-primary" data-action="tv-test">Test volume +</button>
+          <button type="button" class="btn btn-sm btn-outline-primary" data-action="tv-preflight">Run safe preflight</button>
         </div>
         <div class="tv-pairing mt-3 p-3 rounded border border-warning-subtle" ${pairingOpen ? '' : 'style="display:none"'}>
           <div class="small text-muted mb-3">
@@ -210,6 +250,7 @@
             </div>
           </div>
         </div>
+        ${preflightPanel(status.preflight)}
       </div>
     </div>`
   }
@@ -379,7 +420,10 @@
       method: 'PUT',
       body: JSON.stringify(payload),
     })
-    for (const row of tree.querySelectorAll('.hisense-tv')) row.dataset.saved = 'true'
+    for (const row of tree.querySelectorAll('.hisense-tv')) {
+      row.dataset.saved = 'true'
+      row.dataset.dirty = 'false'
+    }
     if (announce) notify('TV configuration saved. Connections have restarted.')
     if (reload) await load()
     return result
@@ -399,7 +443,8 @@
     rootList.insertAdjacentHTML('beforeend', tvCard({}, {}, '', true))
     setRootOpen(true)
     refreshGroupSelects()
-    const row = directTvRows(rootList).at(-1)
+    const rows = directTvRows(rootList)
+    const row = rows.length ? rows[rows.length - 1] : null
     row?.querySelector('.tv-name')?.focus()
   })
   document.getElementById('hisense-add-group').addEventListener('click', () => {
@@ -424,6 +469,7 @@
   tree.addEventListener('change', (event) => {
     if (!event.target.classList.contains('tv-group-select')) return
     const tvRow = event.target.closest('.hisense-tv')
+    tvRow.dataset.dirty = 'true'
     const groupId = event.target.value
     const destination = groupId
       ? [...tree.querySelectorAll(':scope > .hisense-group')]
@@ -441,6 +487,7 @@
   tree.addEventListener('input', (event) => {
     const tvRow = event.target.closest('.hisense-tv')
     if (!tvRow) return
+    tvRow.dataset.dirty = 'true'
     if (event.target.classList.contains('tv-name')) {
       const name = event.target.value.trim()
       tvRow.querySelector('.tv-title').textContent = name || 'New TV'
@@ -451,6 +498,25 @@
       }
     }
   })
+
+  const waitForPreflight = async (id, initialReport = null) => {
+    let report = initialReport
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      if (report && !['queued', 'running'].includes(report.state)) return report
+      await new Promise((resolve) => window.setTimeout(resolve, 500))
+      const state = await request(`/api/tvs/${encodeURIComponent(id)}/state`)
+      report = state.tv?.preflight || null
+    }
+    throw new Error('TV preflight did not finish within 30 seconds')
+  }
+
+  const runPreflight = async (id) => {
+    const result = await request(`/api/tvs/${encodeURIComponent(id)}/preflight`, {
+      method: 'POST',
+      body: '{}',
+    })
+    return waitForPreflight(id, result.preflight || null)
+  }
 
   tree.addEventListener('click', async (event) => {
     const button = event.target.closest('button[data-action]')
@@ -527,13 +593,24 @@
           'Pair this TV with the official VIDAA phone app first, then enter the phone UUID in Pair or repair.',
         )
       }
-      await saveConfiguration({ reload: false, announce: false })
+      if (tvRow.dataset.saved !== 'true' || tvRow.dataset.dirty === 'true') {
+        await saveConfiguration({ reload: false, announce: false })
+      }
       if (action === 'tv-reconnect') {
-        await request(`/api/tvs/${encodeURIComponent(id)}/reconnect`, {
-          method: 'POST',
-          body: '{}',
-        })
-        notify('Reconnect requested.')
+        let reconnectError = null
+        try {
+          await request(`/api/tvs/${encodeURIComponent(id)}/reconnect`, {
+            method: 'POST',
+            body: '{}',
+          })
+        } catch (error) {
+          reconnectError = error
+        }
+        const report = await runPreflight(id)
+        const reconnectMessage = reconnectError
+          ? `${friendlyError(reconnectError.message)} ${report.summary || ''}`.trim()
+          : (report.summary || 'Reconnect checked.')
+        notify(reconnectMessage, reconnectError ? 'warning' : (report.ready ? 'success' : 'warning'))
       } else if (action === 'tv-pair') {
         await request(`/api/tvs/${encodeURIComponent(id)}/pair/request`, {
           method: 'POST',
@@ -541,17 +618,23 @@
         })
         notify('Pairing request sent. Enter the four-digit PIN shown by the TV.')
       } else if (action === 'tv-submit-pin') {
-        await request(`/api/tvs/${encodeURIComponent(id)}/pair/submit`, {
-          method: 'POST',
-          body: JSON.stringify({ pin }),
-        })
-        notify('Pairing PIN submitted.')
-      } else if (action === 'tv-test') {
-        await request(`/api/tvs/${encodeURIComponent(id)}/volume`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'up' }),
-        })
-        notify('Volume test sent.')
+        let pairingError = null
+        try {
+          await request(`/api/tvs/${encodeURIComponent(id)}/pair/submit`, {
+            method: 'POST',
+            body: JSON.stringify({ pin }),
+          })
+        } catch (error) {
+          pairingError = error
+        }
+        const report = await runPreflight(id)
+        const pairingMessage = pairingError
+          ? `${friendlyError(pairingError.message)} ${report.summary || ''}`.trim()
+          : (report.summary || 'Pairing checked.')
+        notify(pairingMessage, pairingError ? 'danger' : (report.ready ? 'success' : 'warning'))
+      } else if (action === 'tv-preflight') {
+        const report = await runPreflight(id)
+        notify(report.summary || 'TV preflight finished.', report.ready ? 'success' : 'warning')
       } else {
         return
       }

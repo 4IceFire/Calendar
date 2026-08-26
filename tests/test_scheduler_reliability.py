@@ -345,7 +345,10 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertEqual(2, status["queued_triggers"])
         self.assertEqual("10AM Service", status["next_trigger_event"])
 
-        with patch.object(webui, "_probe_scheduler_status", return_value=status):
+        with (
+            patch.object(webui, "_auth_enabled", return_value=False),
+            patch.object(webui, "_probe_scheduler_status", return_value=status),
+        ):
             response = webui.app.test_client().get("/api/scheduler_status")
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.get_json()["healthy"])

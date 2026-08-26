@@ -14,6 +14,7 @@
   --digico-tint: #3478f6;
   overflow: visible;
   color: #f5f6fa;
+  background: linear-gradient(160deg, #191b20, #090a0c 70%);
   background:
     radial-gradient(circle at 80% -20%, color-mix(in srgb, var(--digico-tint) 30%, transparent), transparent 42%),
     linear-gradient(160deg, #191b20, #090a0c 70%);
@@ -86,7 +87,9 @@
   min-height: 5.25rem;
   padding: .9rem 1rem;
   color: #fff;
+  background: linear-gradient(135deg, #25354e, #15171b 74%);
   background: linear-gradient(135deg, color-mix(in srgb, var(--tile-tint) 52%, #181a1f), #15171b 74%);
+  border: 1px solid #566071;
   border: 1px solid color-mix(in srgb, var(--tile-tint) 70%, #fff 10%);
   border-radius: .85rem;
   box-shadow: inset 0 1px rgba(255, 255, 255, .08);
@@ -107,7 +110,9 @@
   margin: 0 0 .65rem;
   padding: .6rem .8rem;
   color: #fff;
+  background: linear-gradient(90deg, #25354e, rgba(255, 255, 255, .035));
   background: linear-gradient(90deg, color-mix(in srgb, var(--digico-tint) 28%, #1b1d22), rgba(255, 255, 255, .035));
+  border: 1px solid #4b4f59;
   border: 1px solid color-mix(in srgb, var(--digico-tint) 55%, #4b4f59);
   border-left: .3rem solid var(--digico-tint);
   border-radius: .6rem;
@@ -165,7 +170,7 @@
   text-transform: uppercase;
   transition: background-color .12s ease, border-color .12s ease, color .12s ease, transform .08s ease;
 }
-.digico-send-toggle.is-on { color: #fff; background: var(--digico-tint); border-color: color-mix(in srgb, var(--digico-tint), white 30%); }
+.digico-send-toggle.is-on { color: #fff; background: var(--digico-tint); border-color: #7ba7f8; border-color: color-mix(in srgb, var(--digico-tint), white 30%); }
 .digico-send-toggle.is-off { color: #ffb6b6; background: rgba(222, 62, 62, .12); border-color: rgba(239, 86, 86, .75); }
 .digico-send-toggle.is-loading { color: #9da3ad; background: rgba(255, 255, 255, .035); border-color: rgba(255, 255, 255, .12); }
 .digico-send-toggle:not(:disabled):active { transform: translateY(1px); }
@@ -215,10 +220,14 @@
 .digico-icon-select-preview svg, .digico-icon-option-image svg { width: 100%; height: 100%; }
 .digico-icon-dialog { width: min(38rem, calc(100vw - 2rem)); padding: 1.15rem; color: var(--bs-body-color); background: var(--bs-body-bg); border: 1px solid var(--bs-border-color); border-radius: .9rem; box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, .38); }
 .digico-icon-dialog::backdrop { background: rgba(0, 0, 0, .58); backdrop-filter: blur(3px); }
+.digico-icon-dialog-fallback { position: fixed; top: 50%; left: 50%; z-index: 1061; max-height: calc(100vh - 2rem); margin: 0; overflow: auto; transform: translate(-50%, -50%); }
+.digico-icon-dialog-backdrop { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 1060; background: rgba(0, 0, 0, .58); }
+.digico-icon-dialog-backdrop[hidden] { display: none; }
+.digico-dialog-open { overflow: hidden; }
 .digico-icon-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .35rem; }
 .digico-icon-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; }
 .digico-icon-option { display: grid; place-items: center; gap: .4rem; min-height: 5.4rem; padding: .65rem .4rem; color: var(--bs-body-color); background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color); border-radius: .7rem; font-size: .75rem; }
-.digico-icon-option:hover { border-color: var(--bs-primary); background: color-mix(in srgb, var(--bs-primary) 9%, var(--bs-tertiary-bg)); }
+.digico-icon-option:hover { border-color: var(--bs-primary); background: var(--bs-tertiary-bg); background: color-mix(in srgb, var(--bs-primary) 9%, var(--bs-tertiary-bg)); }
 .digico-icon-option.is-selected { color: var(--bs-primary-text-emphasis); background: var(--bs-primary-bg-subtle); border-color: var(--bs-primary); box-shadow: 0 0 0 1px var(--bs-primary); }
 .digico-icon-option-image { display: block; width: 2.1rem; height: 2.1rem; color: var(--bs-primary); }
 .digico-device-row { display: grid; grid-template-columns: auto minmax(8rem, 1fr) minmax(8rem, 1fr) 6rem auto auto auto; gap: .6rem; align-items: end; padding: .7rem; border: 1px solid var(--bs-border-color); border-radius: .7rem; }

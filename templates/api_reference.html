@@ -29,8 +29,8 @@
   .api-ref-markdown a:hover { text-decoration: underline; }
 </style>
 
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+<script src="{{ static_asset('vendor/marked/marked.min.js') }}"></script>
+<script src="{{ static_asset('vendor/dompurify/purify.min.js') }}"></script>
 <script>
   (function(){
     const outEl = document.getElementById('api-ref-render');
@@ -39,9 +39,16 @@
     // Use JSON encoding to avoid HTML-entity escaping (e.g. &#34;) corrupting the markdown.
     const md = {{ api_reference_content | tojson }};
 
-    // Configure marked for predictable output
+    // Rendering fails closed to plain text if either bundled dependency is unavailable.
+    if(!window.marked || typeof window.marked.parse !== 'function' ||
+       !window.DOMPurify || typeof window.DOMPurify.sanitize !== 'function'){
+      outEl.textContent = md;
+      return;
+    }
+
+    // Configure Marked for predictable output.
     try{
-      marked.setOptions({
+      window.marked.setOptions({
         gfm: true,
         breaks: false,
         mangle: false,
@@ -51,15 +58,14 @@
 
     let html = '';
     try{
-      html = marked.parse(md);
+      html = window.marked.parse(md);
     }catch(e){
-      html = '<pre style="white-space:pre-wrap"></pre>';
+      outEl.textContent = md;
+      return;
     }
 
-    // Sanitize HTML output (defense-in-depth)
-    const clean = (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function')
-      ? window.DOMPurify.sanitize(html, {USE_PROFILES: {html: true}})
-      : html;
+    // Sanitize all generated markup before inserting it into the document.
+    const clean = window.DOMPurify.sanitize(html, {USE_PROFILES: {html: true}});
 
     outEl.innerHTML = clean;
   })();

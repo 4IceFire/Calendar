@@ -5,7 +5,7 @@
 {% set config_active_tab = 'tvs' %}
 
 {% block content %}
-<div id="hisense-setup">
+<div id="hisense-setup" data-csrf-token="{{ csrf_token() }}">
   {% include '_config_tabs.html' %}
 
   <div id="hisense-alert"></div>
@@ -14,6 +14,7 @@
     <div>
       <h2 class="h5 mb-1">TV groups and order</h2>
       <div class="small text-muted">Each TV belongs to one group or Ungrouped. Use its dropdown to move it, and the arrow buttons to set its order inside that group.</div>
+      <div class="small text-muted mt-1">Run preflight for a read-only check of network, protocol, authentication, paired identity and TV state. It never changes power, volume, mute or source.</div>
     </div>
     <div class="d-flex flex-wrap gap-2">
       <button type="button" class="btn btn-outline-primary" id="hisense-add-group">New group</button>

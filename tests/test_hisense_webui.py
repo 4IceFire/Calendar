@@ -9,12 +9,34 @@ import webui
 class _Controller:
     def __init__(self):
         self.commands = []
+        self.preflight = None
 
     def status(self):
-        return {"id": "test-tv", "name": "Test TV", "connected": True, "power": "on", "volume": 20, "source": "HDMI1", "sources": []}
+        return {
+            "id": "test-tv", "name": "Test TV", "connected": True,
+            "power": "on", "volume": 20, "source": "HDMI1", "sources": [],
+            "preflight": self.preflight,
+        }
 
     def submit(self, action, value=None, wait=0):
         self.commands.append((action, value, wait))
+        if action == "preflight":
+            self.preflight = {
+                "tvId": "test-tv",
+                "state": "ready",
+                "ready": True,
+                "safe": True,
+                "summary": "TV passed authentication and read-only capability checks",
+                "checks": [{
+                    "id": "capability-read", "label": "Harmless state read",
+                    "status": "pass", "detail": "Authenticated state was read",
+                }],
+                "repairSteps": ["No operator action is required."],
+            }
+            return {
+                "ok": True, "accepted": True, "pending": False,
+                "preflight": self.preflight, "tv": self.status(),
+            }
         return {"ok": True, "accepted": True, "tv": self.status()}
 
 
@@ -97,6 +119,9 @@ class HisenseWebApiTests(unittest.TestCase):
             self.assertIn(b"root-health", script.data)
             self.assertIn(b"Off (intentional)", script.data)
             self.assertIn(b"data-expected-off", script.data)
+            self.assertIn(b"Run safe preflight", script.data)
+            self.assertIn(b"preflightPanel", script.data)
+            self.assertNotIn(b"Test volume +", script.data)
             self.assertNotIn(b"tv-auth-mode", script.data)
             self.assertNotIn(b"tv-profile", script.data)
             self.assertNotIn(b"Advanced identity", script.data)
@@ -116,6 +141,16 @@ class HisenseWebApiTests(unittest.TestCase):
             [(action, value) for action, value, _wait in self.manager.controller.commands],
             [("power_off", None), ("volume_set", 35), ("source", "HDMI2"), ("reconnect", None), ("power_off", None)],
         )
+
+    def test_setup_preflight_api_returns_structured_read_only_report(self):
+        response = self.client.post("/api/tvs/test-tv/preflight", json={})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        report = response.get_json()["preflight"]
+        self.assertTrue(report["ready"])
+        self.assertTrue(report["safe"])
+        self.assertEqual(report["checks"][0]["id"], "capability-read")
+        self.assertEqual(self.manager.controller.commands[-1][0], "preflight")
+        self.assertEqual(self.log_event.call_args.args[0], "hisense.preflight")
 
     def test_intentionally_off_tv_is_healthy_for_connectivity_logging(self):
         with patch.object(self.manager, "status", return_value={

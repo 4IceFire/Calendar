@@ -99,7 +99,7 @@
     root.style.setProperty('--digico-tint', aux.colour || '#3478f6');
     auxLabel.textContent = aux.label || `Aux ${aux.channel}`;
     const icon = iconSystem.normalize(aux.icon);
-    auxIcon.replaceChildren();
+    auxIcon.textContent = '';
     auxIcon.classList.toggle('d-none', !icon);
     if (icon) auxIcon.appendChild(iconSystem.create(icon, 'digico-current-icon-image'));
     auxChange.classList.remove('d-none');
@@ -112,7 +112,7 @@
   }
 
   function renderAuxPicker() {
-    auxGrid.replaceChildren();
+    auxGrid.textContent = '';
     const auxes = state.config ? (state.config.auxes || []) : [];
     if (!auxes.length) {
       const empty = document.createElement('div');
@@ -388,7 +388,7 @@
 
   function buildChannels(channels) {
     state.channelControls.clear();
-    channelGroups.replaceChildren();
+    channelGroups.textContent = '';
     const sections = [];
     const titleCounts = new Map();
     let section = null;

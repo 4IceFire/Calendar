@@ -55,6 +55,23 @@ pip install -r requirements.txt
 
 That’s it—there is no separate build step.
 
+### Web asset delivery
+
+Templates reference bundled CSS and JavaScript through `static_asset(...)`. TDeck
+computes a SHA-256 identity from each file's bytes and appends it to the URL, so a
+changed file always has a different address even when its timestamp and size are
+unchanged. Valid content-addressed assets are served with a one-year
+`public, immutable` policy; unversioned, missing, stale, or forged asset versions
+must revalidate. HTML is private and revalidated, while `/api/*` responses and live
+control state are never stored.
+
+A reverse proxy must preserve the `v` query parameter, `ETag`, `Cache-Control`, and
+`Vary: Accept-Encoding` headers. It must not apply its own cache to HTML or API
+responses. Do not add a service worker that caches control or device-state requests.
+Marked 12.0.2 and DOMPurify 3.2.6 are pinned under `static/vendor/`, including their
+upstream licenses and `THIRD_PARTY_NOTICES.md`; the API Reference therefore works
+without public internet access.
+
 ## Configuration
 
 The app reads `config.json` from the repo root.
@@ -66,6 +83,32 @@ Common keys:
 - `webserver_port`: Web UI port (default: `5000`)
 - `poll_interval`: seconds between file-change checks (default: `1.0`)
 - `debug`: enables more verbose logging/output
+
+### API security
+
+With authentication enabled, TDeck APIs are no longer anonymous merely because
+the caller is on the production LAN. Browser controls use the logged-in user's
+group permissions plus automatic same-origin CSRF protection. Companion,
+scheduled API triggers, and other automation use separately scoped Bearer
+service tokens whose plaintext is shown once and whose hashes and lifecycle
+metadata live in `auth.db`.
+
+Create a Companion token with:
+
+```powershell
+python cli.py service-tokens create "Companion Production" --scope read --scope timers --scope videohub --scope tvs --scope ccb --expires-in-days 365
+```
+
+Paste it into Companion's existing API-token field. If this TDeck instance uses
+scheduled API-call triggers, create a separate least-privilege token and set it
+as `TDECK_INTERNAL_API_TOKEN` in the environment of the account/service running
+TDeck. Never put plaintext tokens in `config.json`, event JSON, URLs, or logs.
+
+Use `python cli.py service-tokens list|rotate|revoke` for lifecycle management.
+Token creation supports `--allow-path`, `--tv-target`, `--videohub-output`,
+`--videohub-input`, `--videohub-preset`, and `--atem-source` constraints. See
+`API_REFERENCE.md` for the complete migration sequence, temporary expiring
+legacy flag, v1 endpoint aliases, limits, and scope semantics.
 
 DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
 
@@ -269,6 +312,30 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 `tests/digico_ui_harness.py` starts a self-contained simulated desk and TDeck site on `http://127.0.0.1:5057` for local browser checks. It does not write its changes to the production `config.json`.
+
+### Cross-browser page and failure tests
+
+The Playwright suite exercises Chromium, Firefox, WebKit, mobile Chromium and mobile WebKit. Routing and Record Audio use intercepted device-state responses, including outage/recovery and hidden-tab polling checks, and never issue live hardware-control commands. The general page smoke is read-only.
+
+Install the separate browser-test dependency and browser binaries on a development or CI machine:
+
+```powershell
+npm install
+npm run test:browser:install
+```
+
+Start an isolated local TDeck instance, then run:
+
+```powershell
+$env:TDECK_BASE_URL = "http://127.0.0.1:5000"
+$env:TDECK_USERNAME = "browser-test-user"       # only when auth is enabled
+$env:TDECK_PASSWORD = "set-this-in-a-CI-secret" # only when auth is enabled
+npm run test:browser
+```
+
+Use an account whose page grants match the pages being tested. Override the comma-separated smoke list with `TDECK_SMOKE_PATHS`. A non-loopback URL is rejected unless `TDECK_ALLOW_REMOTE_BROWSER_TESTS=1` is explicitly set; use that override only for an approved staging/test server, not the production control server. `TDECK_IGNORE_HTTPS_ERRORS=1` is available for a staging certificate that the test runner has not yet trusted.
+
+Browser `error` and `unhandledrejection` events are reported as rate-limited `client.error` warnings in the Activity Log. Reports contain only a sanitized message/stack, route, source path, browser User-Agent, build ID and correlation ID. Unknown payload fields, query strings and common secret values are discarded. Set `TDECK_BUILD_ID` to the deployed commit or release identifier so reports can be matched to a release; a local content-derived ID is used when it is unset.
 
 ## ProPresenter timers (optional)
 

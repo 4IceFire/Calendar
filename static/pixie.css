@@ -248,6 +248,7 @@ label.pixie-tile:hover {
   padding: 1rem;
   border: 1px solid rgba(127, 127, 127, .3);
   border-radius: 1rem;
+  background: var(--bs-body-bg);
   background: color-mix(in srgb, var(--bs-body-bg) 92%, transparent);
   box-shadow: 0 .5rem 1.5rem rgba(0, 0, 0, .2);
   backdrop-filter: blur(14px);
@@ -293,6 +294,7 @@ label.pixie-tile:hover {
   padding: .8rem 1rem;
   border: 1px solid rgba(127, 127, 127, .3);
   border-radius: .9rem;
+  background: var(--bs-body-bg);
   background: color-mix(in srgb, var(--bs-body-bg) 94%, transparent);
   box-shadow: 0 .5rem 1.5rem rgba(0, 0, 0, .18);
   backdrop-filter: blur(14px);

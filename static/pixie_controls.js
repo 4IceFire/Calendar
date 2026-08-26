@@ -481,9 +481,9 @@
   })
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && shouldPoll()) loadState({ refresh: true, quiet: true }).finally(schedulePoll)
+    if (!document.hidden && shouldPoll()) loadState({ refresh: true, quiet: true }).then(schedulePoll, schedulePoll)
     else schedulePoll()
   })
 
-  loadState().then(initialNavigation).finally(schedulePoll)
+  loadState().then(initialNavigation).then(schedulePoll, schedulePoll)
 })()

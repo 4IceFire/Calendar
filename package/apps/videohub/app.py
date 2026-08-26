@@ -158,6 +158,32 @@ class VideohubApp(AppBase):
         if monitoring:
             vh.route_video_outputs(routes=monitoring, monitoring=True)
 
+        # A TCP send only confirms that the command left TDeck.  Read primary
+        # routing back once so a successful API response means the VideoHub
+        # actually applied the complete preset.  One state dump verifies all
+        # outputs without multiplying device traffic per route.
+        if primary:
+            state = vh.get_state(fallback_count=40)
+            routing = state.get("routing") if isinstance(state, dict) else None
+            failed = []
+            for output_idx, input_idx in primary:
+                actual = None
+                if isinstance(routing, list) and output_idx < len(routing):
+                    try:
+                        actual = int(routing[output_idx]) - 1
+                    except Exception:
+                        actual = None
+                if actual != input_idx:
+                    failed.append({
+                        "output": output_idx + 1,
+                        "expectedInput": input_idx + 1,
+                        "actualInput": actual + 1 if actual is not None else None,
+                    })
+            if failed:
+                raise RuntimeError(
+                    f"VideoHub did not confirm {len(failed)} preset route(s): {failed}"
+                )
+
         return {
             "id": preset.id,
             "name": preset.name,

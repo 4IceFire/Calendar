@@ -178,6 +178,7 @@ class DigicoWebApiTests(unittest.TestCase):
             patch.object(webui, "_auth_enabled", return_value=True),
             patch.object(webui, "current_user", _AuthenticatedUser()),
             patch.object(webui, "can_access", return_value=True),
+            patch.object(webui, "_touch_current_user_session", return_value=True),
             patch.object(webui, "_effective_digico_aux_ids_for_user", return_value=["2"]),
             patch.object(webui, "_get_digico_client_from_config", return_value=self.mixer),
         ):
