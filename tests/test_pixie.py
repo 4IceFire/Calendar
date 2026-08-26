@@ -131,6 +131,16 @@ class PixieProtocolTests(unittest.TestCase):
         self.assertFalse(devices[1]["online"])
         self.assertTrue(devices[2]["online"])
 
+    def test_numeric_inventory_models_classify_switches_and_dimmers(self):
+        devices = pixie.normalize_devices([
+            {"id": 58, "name": "AUD 1 Cleaning RH", "type": 1, "stype": 7},
+            {"id": 67, "name": "AUD 1 Cleaning LH", "type": 1, "stype": 7},
+            {"id": 7, "name": "AUD 1 Foyer", "type": 22, "stype": 13},
+            {"id": 120, "name": "Control Room", "type": 23, "stype": 13},
+        ])
+        self.assertEqual([device["kind"] for device in devices], ["switch", "switch", "switch", "dimmer"])
+        self.assertEqual([device["model"] for device in devices], ["0107", "0107", "2213", "2313"])
+
     def test_cloud_online_lists_distinguish_online_and_offline_devices(self):
         payload = {
             "onlineList": {
@@ -307,6 +317,44 @@ class PixieProtocolTests(unittest.TestCase):
             with self.subTest(unsafe=unsafe):
                 with self.assertRaises(pixie.PixieError):
                     pixie.build_brightness_command_hex(unsafe, 50, 0x10)
+
+    def test_onoff_packets_use_the_switch_relay_opcode_and_physical_destination(self):
+        on_packet = bytes.fromhex(pixie.build_onoff_command_hex("58", True, 0x10))
+        off_packet = bytes.fromhex(pixie.build_onoff_command_hex("67", False, 0x11))
+        self.assertEqual(list(on_packet[:3]), [0x10, 0x09, 0x04])
+        self.assertEqual(on_packet[3:5], (1027).to_bytes(2, "little"))
+        self.assertEqual(int.from_bytes(on_packet[5:7], "little"), 58)
+        self.assertEqual(on_packet[7:10], bytes.fromhex("ed6969"))
+        self.assertEqual(on_packet[10], 1)
+        self.assertEqual(int.from_bytes(off_packet[5:7], "little"), 67)
+        self.assertEqual(off_packet[10], 0)
+        for unsafe in ("0", "32768", "65535", "not-an-id"):
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaises(pixie.PixieError):
+                    pixie.build_onoff_command_hex(unsafe, True, 0x12)
+
+    def test_control_session_paces_more_than_two_commands(self):
+        sent_at = []
+        clock = [10.0]
+
+        class _Socket:
+            def sendall(self, _payload):
+                sent_at.append(clock[0])
+
+        session = pixie.PixieControlSession("127.0.0.1", "net", "mesh", "mesh2")
+        session._socket = _Socket()
+        session._session_key = "session-key-123"
+        session._ready = True
+        with (
+            patch.object(pixie.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(pixie.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)),
+        ):
+            for device_id in ("1", "7", "55", "58"):
+                session.send({"device": device_id})
+
+        self.assertEqual(len(sent_at), 4)
+        for previous, current in zip(sent_at, sent_at[1:]):
+            self.assertGreaterEqual(current - previous, pixie.PIXIE_COMMAND_MIN_GAP)
 
     def test_gateway_advert_parser_is_passive_and_strict(self):
         self.assertEqual(

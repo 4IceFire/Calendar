@@ -39,6 +39,9 @@ PIXIE_INVENTORY_PORT = 53216
 PIXIE_REACHABILITY_INTERVAL = 1.0
 PIXIE_REACHABILITY_STALE_AFTER = 30.0
 PIXIE_COMMAND_FEEDBACK_GRACE = 4.0
+# The Gateway forwards local TCP commands onto a much slower Bluetooth mesh.
+# Leave enough time for it to drain one command before accepting the next.
+PIXIE_COMMAND_MIN_GAP = 0.15
 PIXIE_FLAG_DUAL_DATA = 0
 PIXIE_FLAG_SINGLE_DATA = 1
 PIXIE_FLAG_EACK = 2
@@ -512,11 +515,27 @@ def normalize_devices(values: Any) -> list[dict[str, Any]]:
         raw = target["raw"]
         nested = raw.get("state") if isinstance(raw.get("state"), dict) else {}
         model = _first_string(raw, ("model", "modelNo", "modelNumber", "productModel", "productID"))
+        device_type = _first_number(raw, ("type",))
+        device_subtype = _first_number(raw, ("stype",))
+        model_code = ""
+        if device_type is not None and device_subtype is not None:
+            model_code = f"{int(device_type):02d}{int(device_subtype):02d}"
+            if not model:
+                model = model_code
         type_text = _first_string(raw, ("deviceType", "type", "category", "kind")).lower()
         kind_text = f"{model} {type_text}".lower()
-        if re.search(r"switch|plug|socket|relay|amp|^swl|^ess|^sp023|^pc206dr", kind_text):
+        # Local inventory normally identifies hardware by numeric type/stype
+        # rather than a product name. These are the switch and dimmer models
+        # used by the Pixie app, including 0107 (ESS105/BT smart plug) and
+        # 2213 (SWL600BTAM switch).
+        known_switch_models = {"0107", "0208", "2113", "2211", "2212", "2213"}
+        known_dimmer_models = {
+            "2013", "2311", "2312", "2313", "2402", "2403", "2450", "2452",
+            "2550", "2552", "2650", "2702", "2704", "2750", "2850",
+        }
+        if model_code in known_switch_models or re.search(r"switch|plug|socket|relay|amp|^swl|^ess|^sp023|^pc206dr", kind_text):
             kind = "switch"
-        elif re.search(r"dimmer|light|rgb|strip|^sdd|^flp|^lt8915", kind_text) or _first_number(nested, ("br",)) is not None:
+        elif model_code in known_dimmer_models or re.search(r"dimmer|light|rgb|strip|^sdd|^flp|^lt8915", kind_text) or _first_number(nested, ("br",)) is not None:
             kind = "dimmer"
         else:
             kind = "unknown"
@@ -571,6 +590,16 @@ def build_brightness_command_hex(device_id: str, brightness_percent: int, counte
     return packet.hex()
 
 
+def build_onoff_command_hex(device_id: str, is_on: bool, counter: int) -> str:
+    """Build the captured ed6969 relay command used by Pixie switches/plugs."""
+    device_number = numeric_physical_device_id(device_id)
+    sequence = bytes([int(counter) & 0xFF, 0x09, 0x04])
+    source = struct.pack("<H", 1027)
+    destination = struct.pack("<H", device_number)
+    payload = bytes([1 if is_on else 0, 0]) + (b"\x00" * 8)
+    return (sequence + source + destination + bytes.fromhex("ed6969") + payload).hex()
+
+
 class PixieControlSession:
     """Authenticated persistent control socket with serialized writes."""
 
@@ -585,6 +614,7 @@ class PixieControlSession:
         self._ready = False
         self._stop = threading.Event()
         self._write_lock = threading.Lock()
+        self._last_command_sent_at: float | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._receiver_thread: threading.Thread | None = None
 
@@ -680,18 +710,30 @@ class PixieControlSession:
                 self._ready = False
                 return
 
-    def _write_payload(self, payload: Any, flag: int = PIXIE_FLAG_SINGLE_DATA) -> None:
+    def _write_payload(
+        self,
+        payload: Any,
+        flag: int = PIXIE_FLAG_SINGLE_DATA,
+        *,
+        command_min_gap: float = 0.0,
+    ) -> None:
         sock = self._socket
         if sock is None or not self._session_key:
             raise PixieError("Pixie local control socket is unavailable")
         envelope = base64.b64encode(encode_single_envelope(payload, self._session_key, flag))
         with self._write_lock:
+            if command_min_gap > 0 and self._last_command_sent_at is not None:
+                remaining = command_min_gap - (time.monotonic() - self._last_command_sent_at)
+                if remaining > 0:
+                    time.sleep(remaining)
             sock.sendall(envelope)
+            if command_min_gap > 0:
+                self._last_command_sent_at = time.monotonic()
 
     def send(self, payload: Any) -> None:
         if not self.is_ready:
             raise PixieError("Pixie local control session is not authenticated and ready")
-        self._write_payload(payload)
+        self._write_payload(payload, command_min_gap=PIXIE_COMMAND_MIN_GAP)
 
     def stop(self) -> None:
         self._ready = False
@@ -699,6 +741,7 @@ class PixieControlSession:
         sock = self._socket
         self._socket = None
         self._session_key = ""
+        self._last_command_sent_at = None
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -1110,6 +1153,30 @@ class PixieManager:
                 with self._lock:
                     device["brightness"] = level
                     device["on"] = level > 0
+                    self._recent_commands[device_id] = (level, time.monotonic())
+                succeeded.append(device_id)
+            except Exception as exc:
+                failed.append({"id": device_id, "error": str(exc)})
+        return {"ok": bool(succeeded) and not failed, "succeeded": succeeded, "failed": failed, "level": level}
+
+    def set_power(self, device_ids: list[str], is_on: bool) -> dict[str, Any]:
+        if self.mode != "control" or self._control is None or not self._control.is_ready:
+            raise PixieError("Pixie control is not enabled or the authenticated session is not ready")
+        level = 100 if bool(is_on) else 0
+        succeeded: list[str] = []
+        failed: list[dict[str, str]] = []
+        for device_id in [str(value) for value in device_ids]:
+            try:
+                device = self._device(device_id)
+                command_hex = build_onoff_command_hex(device_id, bool(is_on), self._next_counter())
+                payload = {
+                    "data": {"type": "bleData", "data": command_hex, "repeat": 0},
+                    "from": load_pixie_secrets(self.base_dir).username.strip() or "tdeck-local",
+                }
+                self._control.send(payload)
+                with self._lock:
+                    device["brightness"] = level
+                    device["on"] = bool(is_on)
                     self._recent_commands[device_id] = (level, time.monotonic())
                 succeeded.append(device_id)
             except Exception as exc:

@@ -18,6 +18,7 @@ class _AuthenticatedUser:
 class _FakePixieManager:
     def __init__(self):
         self.brightness_calls = []
+        self.power_calls = []
         self.scene_calls = []
         self.snapshot = {
             "available": True,
@@ -48,6 +49,10 @@ class _FakePixieManager:
     def set_brightness(self, device_ids, level):
         self.brightness_calls.append((list(device_ids), level))
         return {"ok": True, "succeeded": list(device_ids), "failed": [], "level": level}
+
+    def set_power(self, device_ids, is_on):
+        self.power_calls.append((list(device_ids), bool(is_on)))
+        return {"ok": True, "succeeded": list(device_ids), "failed": [], "level": 100 if is_on else 0}
 
     def activate_scene(self, scene_id):
         self.scene_calls.append(scene_id)
@@ -149,7 +154,8 @@ class PixieWebUiTests(unittest.TestCase):
                 json={"auditorium_id": "main", "device_ids": ["120", "233"], "level": 100, "final": True},
             )
             self.assertEqual(endpoint.status_code, 200)
-            self.assertEqual(self.manager.brightness_calls[-1], (["120", "233"], 100))
+            self.assertEqual(self.manager.brightness_calls[-1], (["120"], 100))
+            self.assertEqual(self.manager.power_calls[-1], (["233"], True))
             next(item for item in self.manager.snapshot["devices"] if item["id"] == "233")["online"] = False
             call_count = len(self.manager.brightness_calls)
             offline = self.client.post(

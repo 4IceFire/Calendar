@@ -8823,7 +8823,8 @@ def api_pixie_devices_brightness():
     is_final = bool(body.get('final', False))
     try:
         devices, requested = _pixie_authorized_devices(cfg, status, auditorium_id, raw_ids)
-        command_ids = []
+        dimmer_ids = []
+        on_off_ids = []
         skipped = []
         for device in devices:
             if device.get('online') is False:
@@ -8833,10 +8834,20 @@ def api_pixie_devices_brightness():
                 raise ValueError(f"{device.get('name')} has an unknown control type")
             if resolved_type == 'on_off' and level not in (0, 100):
                 skipped.append(device['id'])
+            elif resolved_type == 'on_off':
+                on_off_ids.append(device['id'])
             else:
-                command_ids.append(device['id'])
-        result = manager.set_brightness(command_ids, level) if command_ids else {
-            'ok': True, 'succeeded': [], 'failed': [], 'level': level,
+                dimmer_ids.append(device['id'])
+        command_results = []
+        if dimmer_ids:
+            command_results.append(manager.set_brightness(dimmer_ids, level))
+        if on_off_ids:
+            command_results.append(manager.set_power(on_off_ids, level == 100))
+        result = {
+            'ok': all(bool(item.get('ok')) for item in command_results),
+            'succeeded': [device_id for item in command_results for device_id in item.get('succeeded', [])],
+            'failed': [failure for item in command_results for failure in item.get('failed', [])],
+            'level': level,
         }
         result['skipped'] = skipped
         result['requested'] = requested
