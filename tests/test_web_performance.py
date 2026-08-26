@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import tempfile
 import threading
@@ -9,6 +10,50 @@ from pathlib import Path
 from unittest.mock import patch
 
 import webui
+
+
+class WebAssetDeliveryTests(unittest.TestCase):
+    def test_base_page_uses_bundled_versioned_assets(self):
+        response = webui.app.test_client().get('/login')
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        self.assertNotIn('cdn.jsdelivr.net', html)
+        for asset in (
+            'vendor/bootstrap/bootstrap.min.css',
+            'vendor/bootstrap/bootstrap.bundle.min.js',
+            'style.css',
+            'app.js',
+        ):
+            self.assertIn(f'/static/{asset}?v=', html)
+
+    def test_text_assets_are_compressed_and_cached(self):
+        client = webui.app.test_client()
+        path = '/static/vendor/bootstrap/bootstrap.min.css?v=test-version'
+        plain = client.get(path)
+        compressed = client.get(path, headers={'Accept-Encoding': 'gzip'})
+        try:
+            self.assertEqual(plain.status_code, 200)
+            self.assertEqual(compressed.status_code, 200)
+            self.assertEqual(compressed.headers.get('Content-Encoding'), 'gzip')
+            self.assertIn('Accept-Encoding', compressed.headers.get('Vary', ''))
+            self.assertIn('public', compressed.headers.get('Cache-Control', ''))
+            self.assertIn('max-age=31536000', compressed.headers.get('Cache-Control', ''))
+            self.assertIn('immutable', compressed.headers.get('Cache-Control', ''))
+            self.assertEqual(gzip.decompress(compressed.data), plain.data)
+            self.assertLess(len(compressed.data), len(plain.data) // 2)
+        finally:
+            plain.close()
+            compressed.close()
+
+    def test_html_is_compressed_for_supporting_clients(self):
+        client = webui.app.test_client()
+        plain = client.get('/login')
+        compressed = client.get('/login', headers={'Accept-Encoding': 'gzip'})
+
+        self.assertEqual(compressed.headers.get('Content-Encoding'), 'gzip')
+        self.assertEqual(gzip.decompress(compressed.data), plain.data)
+        self.assertLess(len(compressed.data), len(plain.data))
 
 
 class RequestIsolationTests(unittest.TestCase):

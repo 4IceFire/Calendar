@@ -35,5 +35,5 @@
 
 {% block scripts %}
 {{ super() }}
-<script src="{{ url_for('static', filename='hisense_setup.js') }}"></script>
+<script src="{{ static_asset('hisense_setup.js') }}"></script>
 {% endblock %}

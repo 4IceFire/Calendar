@@ -6,7 +6,7 @@
 
 {% block head_extra %}
 {{ super() }}
-<link rel="stylesheet" href="{{ url_for('static', filename='pixie.css') }}">
+<link rel="stylesheet" href="{{ static_asset('pixie.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -104,5 +104,5 @@
 
 {% block scripts %}
 {{ super() }}
-<script src="{{ url_for('static', filename='pixie_setup.js') }}"></script>
+<script src="{{ static_asset('pixie_setup.js') }}"></script>
 {% endblock %}

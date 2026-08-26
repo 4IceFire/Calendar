@@ -4,7 +4,7 @@
 {% set page_container_class = 'container-fluid tdeck-mixer-page' %}
 
 {% block head_extra %}
-  <link rel="stylesheet" href="/static/digico.css">
+  <link rel="stylesheet" href="{{ static_asset('digico.css') }}">
 {% endblock %}
 
 {% block page_actions %}
@@ -53,6 +53,6 @@
 {% endblock %}
 
 {% block scripts %}
-  <script src="/static/digico_icons.js"></script>
-  <script src="/static/digico_mixer.js"></script>
+  <script src="{{ static_asset('digico_icons.js') }}"></script>
+  <script src="{{ static_asset('digico_mixer.js') }}"></script>
 {% endblock %}

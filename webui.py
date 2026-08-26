@@ -1,5 +1,6 @@
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context
 import copy
+import gzip
 import io
 import logging
 import math
@@ -326,6 +327,97 @@ except Exception:
     utils = _StubUtils()
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
+
+_COMPRESSIBLE_MIMETYPES = {
+    'application/javascript',
+    'application/json',
+    'application/xml',
+    'image/svg+xml',
+    'text/css',
+    'text/html',
+    'text/javascript',
+    'text/plain',
+    'text/xml',
+}
+
+
+@app.template_global()
+def static_asset(filename: str) -> str:
+    """Return a cache-safe URL for a bundled static asset."""
+    asset_name = str(filename or '').lstrip('/\\')
+    version = '1'
+    try:
+        static_root = Path(str(app.static_folder or 'static')).resolve()
+        asset_path = (static_root / asset_name).resolve()
+        asset_path.relative_to(static_root)
+        stat = asset_path.stat()
+        version = f'{stat.st_mtime_ns:x}-{stat.st_size:x}'
+    except Exception:
+        pass
+    return url_for('static', filename=asset_name, v=version)
+
+
+@app.after_request
+def _optimize_web_response(response):
+    """Cache versioned assets and compress text sent to slower clients."""
+    try:
+        if (
+            response.status_code == 200
+            and (request.path or '').startswith('/static/')
+            and request.args.get('v')
+        ):
+            response.cache_control.no_cache = None
+            response.cache_control.public = True
+            response.cache_control.max_age = 31536000
+            response.cache_control.immutable = True
+
+        accepts_gzip = request.accept_encodings['gzip'] > 0
+        content_encoding = str(response.headers.get('Content-Encoding') or '').strip()
+        cache_control = str(response.headers.get('Cache-Control') or '').lower()
+        should_compress = (
+            accepts_gzip
+            and not content_encoding
+            and request.method != 'HEAD'
+            and response.status_code == 200
+            and 'no-transform' not in cache_control
+            and response.mimetype in _COMPRESSIBLE_MIMETYPES
+        )
+        streamed_body = None
+        if should_compress and response.direct_passthrough:
+            if (request.path or '').startswith('/static/'):
+                streamed_body = response.response
+                response.direct_passthrough = False
+            else:
+                should_compress = False
+        if should_compress:
+            try:
+                payload = response.get_data()
+            finally:
+                if streamed_body is not None and hasattr(streamed_body, 'close'):
+                    streamed_body.close()
+            if len(payload) >= 1024:
+                compressed = gzip.compress(payload, compresslevel=6)
+                if len(compressed) < len(payload):
+                    response.set_data(compressed)
+                    response.headers['Content-Encoding'] = 'gzip'
+                    response.headers['Vary'] = _append_vary_header(
+                        response.headers.get('Vary'),
+                        'Accept-Encoding',
+                    )
+                    etag, _weak = response.get_etag()
+                    if etag:
+                        response.set_etag(etag, weak=True)
+    except Exception:
+        # Response optimization must never prevent the actual page/API response.
+        pass
+    return response
+
+
+def _append_vary_header(current: str | None, value: str) -> str:
+    values = [part.strip() for part in str(current or '').split(',') if part.strip()]
+    if value.lower() not in {part.lower() for part in values}:
+        values.append(value)
+    return ', '.join(values)
 
 
 def _auth_cfg() -> dict:

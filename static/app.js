@@ -2057,7 +2057,9 @@ async function _timersAdjustAllPresets(sign) {
 
 function _timersApplyMutationResponse(data, {render = false} = {}) {
   const presets = Array.isArray(data && data.timer_presets) ? data.timer_presets : _timersReadPresetsFromUI();
-  const stagePreset = Number((data && data.stream_start_preset) ?? _timersReadStagePresetFromUI() ?? 0);
+  const responseStagePreset = data && data.stream_start_preset;
+  const selectedStagePreset = responseStagePreset == null ? _timersReadStagePresetFromUI() : responseStagePreset;
+  const stagePreset = Number(selectedStagePreset == null ? 0 : selectedStagePreset);
   _timersSetLastSaved(presets, stagePreset);
   if (render) {
     _timersRenderPresets(presets);
@@ -2177,6 +2179,14 @@ function _timersScheduleAutoSave({delayMs = 700, showStatus = false} = {}) {
 
 function _timersDrainMutationQueue() {
   if (_timersDrainPromise) return _timersDrainPromise;
+  function drainComplete(result) {
+    _timersDrainPromise = null;
+    return result;
+  }
+  function drainFailed(error) {
+    _timersDrainPromise = null;
+    throw error;
+  }
   _timersDrainPromise = (async () => {
     while (_timersMutationQueue.length) {
       const item = _timersMutationQueue.shift();
@@ -2202,9 +2212,7 @@ function _timersDrainMutationQueue() {
       }
     }
     return {ok: true};
-  })().finally(() => {
-    _timersDrainPromise = null;
-  });
+  })().then(drainComplete, drainFailed);
   return _timersDrainPromise;
 }
 
@@ -4013,7 +4021,7 @@ if (document.getElementById('companion-surfaces-config-page')) {
   }
 
   function _csScaleFromInput(value) {
-    const raw = String(value ?? '').trim();
+    const raw = String(value == null ? '' : value).trim();
     const number = Number(raw || 1);
     if (!Number.isFinite(number) || number <= 0) {
       throw new Error('Size must be greater than zero.');
