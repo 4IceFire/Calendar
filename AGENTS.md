@@ -107,6 +107,7 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 
 ## Auth Model Notes
 - UI pages are protected by group-based page access in the Web UI (`require_page` checks).
+- When authentication is enabled, signed-out pages must not render or poll the shared integration-status indicators. Keep the login form's standards-based username/current-password autocomplete hints so mobile password managers can recognize it.
 - Users can belong to multiple groups. A user's effective page permissions are the union of all non-admin groups they belong to.
 - The `Admin` group is the only protected full-access group. It grants every page and management permission and should remain non-deletable.
 - Legacy `roles` / `role_pages` data may still exist in `auth.db` only as a migration source. New permissions work should use `groups`, `group_pages`, and `user_groups`.

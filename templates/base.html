@@ -22,36 +22,38 @@
         </a>
 
         <div class="tdeck-nav-right">
-          <div class="tdeck-nav-status">
-            <div id="mobile-connection-indicator" class="tdeck-mobile-connection-status">
-              <span id="mobile-connection-dot" class="indicator-dot bg-danger"></span>
-              <span id="mobile-connection-label">Checking connections...</span>
+          {% if not auth_enabled or is_authenticated %}
+            <div class="tdeck-nav-status">
+              <div id="mobile-connection-indicator" class="tdeck-mobile-connection-status">
+                <span id="mobile-connection-dot" class="indicator-dot bg-danger"></span>
+                <span id="mobile-connection-label">Checking connections...</span>
+              </div>
+              <div id="companion-indicator" class="me-2">
+                <span id="companion-dot" class="indicator-dot bg-danger"></span>
+                <span id="companion-label">Checking...</span>
+              </div>
+              <div id="propresenter-indicator" class="me-2">
+                <span id="propresenter-dot" class="indicator-dot bg-danger"></span>
+                <span id="propresenter-label">ProPresenter: Checking...</span>
+              </div>
+              <div id="videohub-indicator" class="me-2">
+                <span id="videohub-dot" class="indicator-dot bg-danger"></span>
+                <span id="videohub-label">VideoHub: Checking...</span>
+              </div>
+              <div id="digico-indicator" class="me-2 d-none">
+                <span id="digico-dot" class="indicator-dot bg-danger"></span>
+                <span id="digico-label">DiGiCo: Checking...</span>
+              </div>
+              <div id="atem-indicator" class="me-2">
+                <span id="atem-dot" class="indicator-dot bg-danger"></span>
+                <span id="atem-label">Switcher: Checking...</span>
+              </div>
+              <div id="pixie-indicator" class="me-2">
+                <span id="pixie-dot" class="indicator-dot bg-danger"></span>
+                <span id="pixie-label">Pixie: Checking...</span>
+              </div>
             </div>
-            <div id="companion-indicator" class="me-2">
-              <span id="companion-dot" class="indicator-dot bg-danger"></span>
-              <span id="companion-label">Checking...</span>
-            </div>
-            <div id="propresenter-indicator" class="me-2">
-              <span id="propresenter-dot" class="indicator-dot bg-danger"></span>
-              <span id="propresenter-label">ProPresenter: Checking...</span>
-            </div>
-            <div id="videohub-indicator" class="me-2">
-              <span id="videohub-dot" class="indicator-dot bg-danger"></span>
-              <span id="videohub-label">VideoHub: Checking...</span>
-            </div>
-            <div id="digico-indicator" class="me-2 d-none">
-              <span id="digico-dot" class="indicator-dot bg-danger"></span>
-              <span id="digico-label">DiGiCo: Checking...</span>
-            </div>
-            <div id="atem-indicator" class="me-2">
-              <span id="atem-dot" class="indicator-dot bg-danger"></span>
-              <span id="atem-label">Switcher: Checking...</span>
-            </div>
-            <div id="pixie-indicator" class="me-2">
-              <span id="pixie-dot" class="indicator-dot bg-danger"></span>
-              <span id="pixie-label">Pixie: Checking...</span>
-            </div>
-          </div>
+          {% endif %}
 
           <div class="dropdown tdeck-account-dropdown">
             {% if not auth_enabled or can_access('page:console') %}

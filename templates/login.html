@@ -16,17 +16,17 @@
             <div class="alert alert-danger py-2">{{ error }}</div>
           {% endif %}
 
-          <form method="post" action="/login">
+          <form method="post" action="/login" autocomplete="on">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
             <input type="hidden" name="next" value="{{ next or '' }}">
 
             <div class="mb-3">
-              <label class="form-label">Username</label>
-              <input class="form-control" name="username" autocomplete="username" required>
+              <label class="form-label" for="login-username">Username</label>
+              <input class="form-control" id="login-username" name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="next" required>
             </div>
             <div class="mb-3">
-              <label class="form-label">Password</label>
-              <input class="form-control" name="password" type="password" autocomplete="current-password" required>
+              <label class="form-label" for="login-password">Password</label>
+              <input class="form-control" id="login-password" name="password" type="password" autocomplete="current-password" enterkeyhint="go" required>
             </div>
 
             <button class="btn btn-primary w-100" type="submit">Sign in</button>

@@ -166,10 +166,16 @@ async function updateStatusIndicators() {
   }
 }
 
-// initial check
-updateStatusIndicators();
-// refresh every 15s while the server keeps the backend snapshot warm in the background
-setInterval(updateStatusIndicators, 15000);
+const _hasStatusIndicators = !!(
+  document.getElementById('mobile-connection-indicator')
+  || document.getElementById('companion-indicator')
+  || document.getElementById('companion-dot-home')
+);
+if (_hasStatusIndicators) {
+  // Initial check, then refresh while the server keeps the backend snapshot warm.
+  updateStatusIndicators();
+  setInterval(updateStatusIndicators, 15000);
+}
 
 async function updateActivityLogAlertBadge() {
   const badge = document.getElementById('activity-log-alert-badge');
