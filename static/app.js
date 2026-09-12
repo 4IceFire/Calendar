@@ -327,6 +327,7 @@ function _initRoutingPage() {
   const inputStep = document.getElementById('routing-input-step');
   const outputStep = document.getElementById('routing-output-step');
   const btnChangeOutput = document.getElementById('routing-change-output');
+  const mediaChoice = document.getElementById('routing-media-choice');
   const confirmCopy = document.getElementById('routing-confirm-copy');
   const confirmModalEl = document.getElementById('routing-confirm-modal');
   const btnApply = document.getElementById('routing-apply');
@@ -438,13 +439,11 @@ function _initRoutingPage() {
       elInputs.appendChild(btn);
     });
 
-    if (root.dataset.mediaAvailable === 'true' && selectedOutput) {
-      const media = document.createElement('a');
-      media.id = 'routing-media-choice';
-      media.className = 'btn btn-outline-primary routing-choice';
-      media.textContent = 'Media';
-      media.href = '/media?output=' + encodeURIComponent(selectedOutput);
-      elInputs.appendChild(media);
+    if (mediaChoice) {
+      const showMedia = root.dataset.mediaAvailable === 'true' && Boolean(selectedOutput);
+      mediaChoice.classList.toggle('d-none', !showMedia);
+      if (showMedia) mediaChoice.href = '/media?output=' + encodeURIComponent(selectedOutput);
+      else mediaChoice.removeAttribute('href');
     }
 
     if (!inputs.length) {
@@ -514,6 +513,7 @@ function _initRoutingPage() {
   if (btnChangeOutput) btnChangeOutput.addEventListener('click', async () => {
     selectedOutput = null;
     selectedInput = null;
+    _renderInputs();
     await _switchRoutingStep(inputStep, outputStep);
     _renderOutputs();
     _renderCurrent();
