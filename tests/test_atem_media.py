@@ -26,8 +26,8 @@ def configuration():
 def state():
     return {"connected": True, "ready": True, "generation": 1, "product": "Fake ATEM",
             "videoMode": {"id": 13, "name": "N1080p5994", "width": 2, "height": 2},
-            "capabilities": {"players": 4, "stills": 64},
-            "players": [{"player": 1, "type": "still", "slot": 63}], "stills": [], "error": ""}
+            "capabilities": {"players": 4, "stills": 64, "auxes": 2}, "auxes": [{"aux": 1, "source": 1}, {"aux": 2, "source": 2}],
+            "players": [{"player": 1, "type": "still", "slot": 63, "fillSource": 3010}], "stills": [], "error": ""}
 
 
 class FakeLibrary:
@@ -51,6 +51,7 @@ class FakeBridge:
         self.requests = []
         self.on_load = None
         self.frame_path = None
+        self.load_data = None
 
     def start(self):
         self.callback({"event": "state", "state": self.current_state})
@@ -60,12 +61,16 @@ class FakeBridge:
         if operation == "snapshot":
             return copy.deepcopy(self.current_state)
         if operation == "load":
+            self.load_data = data
             self.frame_path = data["framePath"]
             assert Path(self.frame_path).read_bytes() == bytes(16)
             if self.on_load:
                 return self.on_load(data)
             self.callback({"event": "stage", "jobId": data["jobId"], "status": "uploading", "slot": 64})
             self.current_state["players"][0]["slot"] = 64
+            if data.get("aux"):
+                self.callback({"event": "stage", "jobId": data["jobId"], "status": "routing", "slot": 64})
+                self.current_state["auxes"][data["aux"] - 1]["source"] = 3010
             return {"confirmed": True, "slot": 64, "state": copy.deepcopy(self.current_state)}
         raise AssertionError(operation)
 
@@ -131,6 +136,74 @@ class MediaManagerTests(unittest.TestCase):
         for _ in range(5):
             self.assertFalse(manager.snapshot()["enabled"])
         self.assertEqual(self.bridges, [])
+
+    def test_mapping_pairs_validate_and_normalize_without_requiring_legacy_mapping(self):
+        cfg = configuration()
+        cfg["atem_media_destinations"][0].update(aux="2", videohub_input="7")
+        normalized = validate_media_config(cfg)["atem_media_destinations"][0]
+        self.assertEqual((normalized["aux"], normalized["videohub_input"]), (2, 7))
+        for mapping in ({"aux": 1}, {"videohub_input": 1}, {"aux": False, "videohub_input": 1},
+                        {"aux": 1, "videohub_input": 0}, {"aux": 1.5, "videohub_input": 2}):
+            with self.subTest(mapping=mapping), self.assertRaises(ValueError):
+                validate_media_config({"atem_media_destinations": [{"player": 1, "slots": [1, 2], **mapping}]})
+        for second in ({"aux": 1, "videohub_input": 8}, {"aux": 2, "videohub_input": 7}):
+            with self.subTest(second=second), self.assertRaises(ValueError):
+                validate_media_config({"atem_media_destinations": [
+                    {"player": 1, "slots": [1, 2], "aux": 1, "videohub_input": 7},
+                    {"player": 2, "slots": [3, 4], **second}]})
+        cfg["atem_media_destinations"][0].update(aux="", videohub_input="")
+        self.assertNotIn("aux", validate_media_config(cfg)["atem_media_destinations"][0])
+
+    def test_aux_load_passes_expected_state_and_requires_configured_mapping(self):
+        cfg = configuration()
+        cfg["atem_media_destinations"][0].update(aux=2, videohub_input=7)
+        manager, bridge = self.connected(cfg=cfg)
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            manager.load("image-1", 1, aux=1)
+        completed = []
+        manager.load("image-1", 1, aux=2, on_complete=completed.append)
+        eventually(lambda: completed)
+        self.assertEqual(completed[0]["status"], "succeeded")
+        self.assertEqual(completed[0]["aux"], 2)
+        self.assertEqual(completed[0]["generation"], 1)
+        self.assertEqual(bridge.load_data["expectedAux"], {"aux": 2, "source": 2})
+        self.assertEqual(manager.snapshot()["auxes"][1]["source"], 3010)
+
+    def test_aux_load_rejects_unknown_or_unsupported_hardware_before_upload(self):
+        cfg = configuration()
+        cfg["atem_media_destinations"][0].update(aux=2, videohub_input=7)
+        manager, bridge = self.connected(cfg=cfg)
+        states = [state(), state(), state()]
+        states[0]["capabilities"]["auxes"] = 1
+        states[1]["auxes"][1]["source"] = None
+        states[2]["players"][0]["fillSource"] = None
+        for current in states:
+            with self.subTest(current=current):
+                bridge.callback({"event": "state", "state": current})
+                with self.assertRaises(ValueError):
+                    manager.load("image-1", 1, aux=2)
+        self.assertEqual(bridge.requests, [])
+
+    def test_aux_load_rejects_unconfirmed_or_stale_route_completion(self):
+        cfg = configuration()
+        cfg["atem_media_destinations"][0].update(aux=2, videohub_input=7)
+        manager, bridge = self.connected(cfg=cfg)
+        def stale_aux(data):
+            confirmed = state()
+            confirmed["revision"] = 2
+            confirmed["players"][0]["slot"] = 64
+            confirmed["auxes"][1]["source"] = 3010
+            current = copy.deepcopy(confirmed)
+            current["revision"] = 3
+            current["auxes"][1]["source"] = 3
+            bridge.callback({"event": "state", "state": current})
+            return {"confirmed": True, "slot": 64, "state": confirmed}
+        bridge.on_load = stale_aux
+        completed = []
+        manager.load("image-1", 1, aux=2, on_complete=completed.append)
+        eventually(lambda: completed)
+        self.assertEqual(completed[0]["status"], "failed")
+        self.assertIn("routing changed", completed[0]["error"])
 
     def test_snapshot_starts_only_one_connection_and_never_loads_on_reconnect(self):
         manager, bridge = self.connected()
@@ -263,7 +336,10 @@ const { MediaWorker } = require('./atem_media_worker.cjs');
 class FakeAtem extends EventEmitter {
     constructor(scenario) {
         super(); this.scenario = scenario; this.calls = []; this.disconnected = false;
-        this.state = { info: { productIdentifier: 'Fake ATEM', capabilities: { mediaPlayers: 2 }, mediaPool: { stillCount: 64 } },
+        this.state = { info: { productIdentifier: 'Fake ATEM', capabilities: { mediaPlayers: 2, auxilliaries: 2 }, mediaPool: { stillCount: 64 } },
+            video: { auxilliaries: [1, 2] }, inputs: {
+                3010: { inputId: 3010, internalPortType: Enums.InternalPortType.MediaPlayerFill, sourceAvailability: Enums.SourceAvailability.Auxiliary },
+                3020: { inputId: 3020, internalPortType: Enums.InternalPortType.MediaPlayerFill, sourceAvailability: Enums.SourceAvailability.Auxiliary } },
             settings: { videoMode: Enums.VideoMode.P720p50 }, media: {
                 players: [{ sourceType: 1, stillIndex: 62, clipIndex: 0 }, { sourceType: 1, stillIndex: 0, clipIndex: 0 }],
                 stillPool: Array.from({length:64}, () => ({ isUsed: false, fileName: '', hash: '' })) } };
@@ -279,6 +355,9 @@ class FakeAtem extends EventEmitter {
         if (this.scenario === 'format-change') this.state.settings.videoMode = Enums.VideoMode.P1080p50;
         if (this.scenario === 'operator-change') this.state.media.players[0].stillIndex = 3;
         if (this.scenario === 'slot-taken') this.state.media.players[1].stillIndex = index;
+        if (this.scenario === 'aux-upload-change') this.state.video.auxilliaries[0] = 8;
+        if (this.scenario === 'aux-alias-during-upload') this.state.video.auxilliaries[1] = 3010;
+        if (this.scenario === 'aux-unknown-during-upload') this.state.video.auxilliaries[1] = undefined;
         this.state.media.stillPool[index] = { isUsed: true, fileName: 'Uploaded', hash: this.scenario === 'bad-hash' ? 'wrong' : encoded.hash };
         this.emit('stateChanged');
     }
@@ -286,6 +365,18 @@ class FakeAtem extends EventEmitter {
         this.calls.push(['select', index, props.stillIndex]);
         if (this.scenario === 'ack-without-readback') return;
         Object.assign(this.state.media.players[index], props);
+        if (this.scenario === 'aux-selection-change') this.state.video.auxilliaries[0] = 8;
+        if (this.scenario === 'aux-alias-during-selection') this.state.video.auxilliaries[1] = 3010;
+        this.emit('stateChanged');
+    }
+    async setAuxSource(source, bus) {
+        this.calls.push(['aux', bus, source]);
+        if (this.scenario === 'aux-ack-without-readback') return;
+        this.state.video.auxilliaries[bus] = source;
+        if (this.scenario === 'aux-other-source') this.state.video.auxilliaries[bus] = 8;
+        if (this.scenario === 'aux-player-change') this.state.media.players[0].stillIndex = 62;
+        if (this.scenario === 'aux-image-change') this.state.media.stillPool[63].hash = 'changed';
+        if (this.scenario === 'aux-reconnect') { this.emit('disconnected'); this.emit('connected'); }
         this.emit('stateChanged');
     }
 }
@@ -321,6 +412,58 @@ class FakeAtem extends EventEmitter {
         await worker.close();
         results.push(scenario);
     }
+    for (const scenario of ['aux-success', 'aux-already-routed', 'aux-unavailable', 'aux-unknown',
+        'aux-source-missing', 'aux-source-wrongtype', 'aux-source-unavailable', 'aux-preparation-change',
+        'aux-upload-change', 'aux-selection-change', 'aux-ack-without-readback', 'aux-player-change',
+        'aux-image-change', 'aux-other-source', 'aux-reconnect', 'aux-alias-existing',
+        'aux-other-unknown', 'aux-alias-during-upload', 'aux-alias-during-selection', 'aux-unknown-during-upload']) {
+        const atem = new FakeAtem(scenario), events = [];
+        const worker = new MediaWorker(atem, event => events.push(event), {
+            readFrame: async (_, length) => Buffer.alloc(length),
+            convert: () => ({ encodedData: Buffer.alloc(8), rawDataLength: 1280*720*4, isRleEncoded: true, hash: 'verified-hash' })
+        });
+        await worker.init({ host: 'fake-never-network', port: 9910 });
+        if (scenario === 'aux-already-routed') atem.state.video.auxilliaries[0] = 3010;
+        if (scenario === 'aux-unknown') atem.state.video.auxilliaries[0] = undefined;
+        if (scenario === 'aux-other-unknown') atem.state.video.auxilliaries[1] = undefined;
+        if (scenario === 'aux-alias-existing') atem.state.video.auxilliaries[1] = 3010;
+        if (scenario === 'aux-source-missing') delete atem.state.inputs[3010];
+        if (scenario === 'aux-source-wrongtype') atem.state.inputs[3010].internalPortType = Enums.InternalPortType.MediaPlayerKey;
+        if (scenario === 'aux-source-unavailable') atem.state.inputs[3010].sourceAvailability = 0;
+        const before = worker.snapshot();
+        assert.equal(before.capabilities.auxes, 2);
+        const request = { jobId: 'aux-test', player: 1, aux: scenario === 'aux-unavailable' ? 3 : 1,
+            expectedAux: before.auxes[0], expectedPlayer: before.players[0],
+            allowedSlots: [63,64], width: 1280, height: 720, videoModeId: Enums.VideoMode.P720p50,
+            generation: worker.generation, timeoutMs: 90, framePath: 'injected-test-frame', name: 'Test' };
+        if (scenario === 'aux-preparation-change') atem.state.video.auxilliaries[0] = 8;
+        if (scenario === 'aux-success' || scenario === 'aux-already-routed') {
+            const result = await worker.load(request);
+            assert.equal(result.confirmed, true);
+            assert.equal(result.state.auxes[0].source, 3010);
+            assert.equal(result.state.auxes[1].source, 2, 'other AUX remains unchanged');
+            assert.equal(result.state.players[1].slot, 1, 'other player remains unchanged');
+            const expectedCalls = [['upload',63], ['select',0,63]];
+            if (scenario === 'aux-success') expectedCalls.push(['aux',0,3010]);
+            assert.deepEqual(atem.calls, expectedCalls, 'AUX must wait for upload and player confirmation');
+            assert.deepEqual(events.filter(e=>e.event==='stage').map(e=>e.status), ['uploading','selecting','routing']);
+        } else {
+            await assert.rejects(worker.load(request));
+            if (['aux-unavailable','aux-unknown','aux-source-missing','aux-source-wrongtype','aux-source-unavailable',
+                'aux-preparation-change','aux-alias-existing','aux-other-unknown'].includes(scenario)) {
+                assert.equal(atem.calls.length, 0, 'invalid or changed AUX state must not upload');
+            }
+            if (['aux-upload-change','aux-selection-change','aux-alias-during-upload',
+                'aux-alias-during-selection','aux-unknown-during-upload'].includes(scenario)) {
+                assert.equal(atem.calls.filter(c=>c[0]==='aux').length, 0, 'AUX change must stop the job before routing');
+            }
+            if (['aux-alias-during-upload','aux-unknown-during-upload'].includes(scenario)) {
+                assert.equal(atem.calls.filter(c=>c[0]==='select').length, 0, 'unsafe AUX state must prevent player selection');
+            }
+        }
+        await worker.close();
+        results.push(scenario);
+    }
     process.stdout.write(JSON.stringify(results));
 })().catch(error => { console.error(error); process.exitCode=1; });
 """
@@ -337,7 +480,7 @@ class NodeMediaWorkerTests(unittest.TestCase):
                                 text=True, encoding="utf-8", timeout=30,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(json.loads(result.stdout)), 11)
+        self.assertEqual(len(json.loads(result.stdout)), 31)
 
     def _ipc_bridge(self, folder, scenario="success"):
         fake_code = NODE_TESTS.split("(async () => {")[0]
@@ -358,16 +501,17 @@ class NodeMediaWorkerTests(unittest.TestCase):
             bridge, events = self._ipc_bridge(folder)
             current = bridge.request("snapshot")
             self.assertTrue(current["ready"])
-            self.assertEqual(current["capabilities"], {"players": 2, "stills": 64})
+            self.assertEqual(current["capabilities"], {"players": 2, "stills": 64, "auxes": 2})
             frame = Path(folder) / "tdeck-atem-frame-test.rgba"
             frame.write_bytes(bytes(1280 * 720 * 4))
             result = bridge.request("load", {"jobId": "ipc-test", "player": 1, "allowedSlots": [63, 64],
                 "framePath": str(frame), "name": "Test image", "width": 1280, "height": 720,
-                "expectedPlayer": current["players"][0],
+                "expectedPlayer": current["players"][0], "aux": 1, "expectedAux": current["auxes"][0],
                 "generation": current["generation"], "videoModeId": current["videoMode"]["id"], "timeoutMs": 10000}, timeout=10)
             self.assertTrue(result["confirmed"])
             self.assertEqual(result["state"]["players"][0]["slot"], 64)
-            self.assertEqual([event["status"] for event in events if event["event"] == "stage"], ["uploading", "selecting"])
+            self.assertEqual(result["state"]["auxes"][0]["source"], 3010)
+            self.assertEqual([event["status"] for event in events if event["event"] == "stage"], ["uploading", "selecting", "routing"])
             bridge.close()
 
     def test_ipc_timeout_terminates_pending_worker(self):

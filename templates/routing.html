@@ -6,7 +6,9 @@
 {% block content %}
   <div id="routing-page"
        data-allowed-outputs='{{ allowed_outputs|tojson }}'
-       data-allowed-inputs='{{ allowed_inputs|tojson }}'>
+       data-allowed-inputs='{{ allowed_inputs|tojson }}'
+       data-media-available="{{ 'true' if media_available else 'false' }}"
+       data-media-notice="{{ media_notice|default('') }}">
     <div id="routing-status" class="mb-3"></div>
     <div class="routing-steps" aria-label="Routing steps">
       <section id="routing-output-step" class="card tdeck-soft routing-step" tabindex="-1">

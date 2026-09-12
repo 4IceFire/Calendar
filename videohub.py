@@ -343,6 +343,58 @@ class VideohubClient:
             "outputs": _to_list(outputs0),
         }
 
+    def get_routing_state_strict(self) -> dict[str, Any]:
+        """Fresh, complete routes for allocation; never invent missing routes.
+
+        Device counts and block termination follow Blackmagic's Ethernet v2.3:
+        https://documents.blackmagicdesign.com/DeveloperManuals/VideohubDeveloperInformation.pdf
+        """
+        text = self._recv_initial_state().replace('\r\n', '\n')
+        chunks = text.split('\n\n')
+        if chunks[-1].strip():
+            raise RuntimeError('VideoHub returned a truncated routing snapshot')
+        blocks = {}
+        # Only terminated blocks count. Anchoring to their boundary prevents a
+        # missing separator from merging DEVICE and ROUTING into valid-looking
+        # state, and rejects multiple/conflicting copies of either block.
+        for block in chunks[:-1]:
+            header, separator, body = block.lstrip('\n').partition('\n')
+            if header in ('VIDEOHUB DEVICE:', 'VIDEO OUTPUT ROUTING:'):
+                if header in blocks or not separator:
+                    raise RuntimeError('VideoHub returned duplicate or incomplete routing blocks')
+                blocks[header] = body
+        device, routes = blocks.get('VIDEOHUB DEVICE:'), blocks.get('VIDEO OUTPUT ROUTING:')
+        if device is None or routes is None:
+            raise RuntimeError('VideoHub did not provide a complete routing snapshot')
+        fields = {}
+        for line in device.splitlines():
+            key, separator, value = line.partition(':')
+            if not separator or not key or key in fields:
+                raise RuntimeError('VideoHub returned invalid or duplicate device fields')
+            fields[key] = value
+        if fields.get('Device present', '').strip() != 'true':
+            raise RuntimeError('VideoHub is unavailable')
+        try:
+            inputs = int(fields.get('Video inputs', '').strip())
+            outputs = int(fields.get('Video outputs', '').strip())
+        except (ValueError, TypeError):
+            raise RuntimeError('VideoHub did not report its port counts') from None
+        if not (0 < inputs <= 65536 and 0 < outputs <= 65536):
+            raise RuntimeError('VideoHub reported invalid port counts')
+        routing = {}
+        for line in routes.splitlines():
+            try:
+                out, source = (int(value) for value in line.split())
+            except ValueError:
+                raise RuntimeError('VideoHub reported an invalid route') from None
+            if out in routing or not (0 <= out < outputs and 0 <= source < inputs):
+                raise RuntimeError('VideoHub reported invalid or duplicate routes')
+            routing[out] = source + 1
+        if set(routing) != set(range(outputs)):
+            raise RuntimeError('VideoHub did not report every output route')
+        return {'input_count': inputs, 'output_count': outputs,
+                'routing': [routing[index] for index in range(outputs)]}
+
     def get_state(self, *, fallback_count: int = 40) -> dict[str, Any]:
         """Fetch labels and current routing snapshot from the device.
 

@@ -13,6 +13,15 @@ function playerKey(player) {
     return JSON.stringify([player && player.sourceType, player && player.stillIndex, player && player.clipIndex]);
 }
 
+function mediaFillSource(state, player) {
+    // Protocol source IDs identify player numbers; validate the switcher's
+    // actual input record and AUX availability before using that mapping.
+    const source = 3010 + (player - 1) * 10;
+    const input = state && state.inputs && state.inputs[source];
+    return input && input.inputId === source && input.internalPortType === Enums.InternalPortType.MediaPlayerFill
+        && (input.sourceAvailability & Enums.SourceAvailability.Auxiliary) ? source : null;
+}
+
 function videoModeName(modeId) {
     return String(Enums.VideoMode[modeId] || modeId).replace(/^[NP]/, '')
         .replace('4KHD', '2160').replace('8KHD', '4320')
@@ -81,6 +90,7 @@ class MediaWorker {
         const mode = modeId === undefined ? undefined : Util.getVideoModeInfo(modeId);
         const playerCount = Number(info.capabilities && info.capabilities.mediaPlayers) || 0;
         const stillCount = Number(info.mediaPool && info.mediaPool.stillCount) || 0;
+        const auxCount = Number(info.capabilities && info.capabilities.auxilliaries) || 0;
         const media = state && state.media || {};
         const players = Array.from({ length: playerCount }, (_, index) => {
             const player = (media.players || [])[index];
@@ -88,18 +98,23 @@ class MediaWorker {
                 : player && player.sourceType === Enums.MediaSourceType.Clip ? 'clip' : 'unknown';
             return { player: index + 1, type,
                 slot: player ? (type === 'clip' ? player.clipIndex : player.stillIndex) + 1 : null,
-                stillSlot: player && Number.isInteger(player.stillIndex) ? player.stillIndex + 1 : null };
+                stillSlot: player && Number.isInteger(player.stillIndex) ? player.stillIndex + 1 : null,
+                fillSource: mediaFillSource(state, index + 1) };
         });
         const stills = Array.from({ length: stillCount }, (_, index) => {
             const still = (media.stillPool || [])[index];
             return { slot: index + 1, used: !!(still && still.isUsed), name: still && still.fileName || '', known: !!still };
         });
         const connected = this.connected && !this.broken;
+        const auxes = Array.from({ length: auxCount }, (_, index) => {
+            const source = state && state.video && (state.video.auxilliaries || [])[index];
+            return { aux: index + 1, source: Number.isInteger(source) ? source : null };
+        });
         return { connected, ready: !!(connected && mode && playerCount && stillCount
                 && players.every(player => player.type !== 'unknown' && Number.isInteger(player.stillSlot))),
             product: info.productIdentifier || '',
             videoMode: mode ? { id: modeId, name: videoModeName(modeId), width: mode.width, height: mode.height } : null,
-            capabilities: { players: playerCount, stills: stillCount }, players, stills,
+            capabilities: { players: playerCount, stills: stillCount, auxes: auxCount }, players, stills, auxes,
             generation: this.generation, revision: this.revision, error: this.error };
     }
 
@@ -128,13 +143,36 @@ class MediaWorker {
             || snapshot.videoMode.height !== active.height) throw new Error('ATEM video format changed during the image load');
         const player = this.atem.state.media.players[active.player - 1];
         const desired = player && player.sourceType === Enums.MediaSourceType.Still && player.stillIndex === active.slot - 1;
-        if (playerKey(player) !== active.originalPlayer && !(active.phase === 'selecting' && desired)) {
+        if (playerKey(player) !== active.originalPlayer && !(active.phase !== 'uploading' && desired)) {
             throw new Error('The destination media player was changed by another operator');
+        }
+        if (active.phase === 'routing' && !desired) {
+            throw new Error('The destination media player changed before AUX routing was confirmed');
         }
         // Protect even a clip player's retained still selection: it may be put
         // back on air while an upload is in progress.
-        if (active.phase !== 'selecting' && this.atem.state.media.players.some(player => player && player.stillIndex === active.slot - 1)) {
+        if (active.phase === 'uploading' && this.atem.state.media.players.some(player => player && player.stillIndex === active.slot - 1)) {
             throw new Error('The reserved still slot is selected by a media player');
+        }
+        if (active.aux !== null) {
+            const aux = snapshot.auxes[active.aux - 1];
+            if (snapshot.capabilities.auxes !== active.auxCount
+                || snapshot.auxes.some(item => !Number.isInteger(item.source))) {
+                throw new Error('ATEM did not report every AUX source during the image load');
+            }
+            if (snapshot.auxes.some(item => item.aux !== active.aux && item.source === active.fillSource)) {
+                throw new Error('Another ATEM AUX is using this media player');
+            }
+            if (mediaFillSource(this.atem.state, active.player) !== active.fillSource || !aux
+                || (aux.source !== active.originalAux && !(active.phase === 'routing' && aux.source === active.fillSource))) {
+                throw new Error('The destination ATEM AUX was changed by another operator');
+            }
+        }
+        if (active.phase !== 'uploading' && active.uploadedHash) {
+            const still = this.atem.state.media.stillPool[active.slot - 1];
+            if (!still || !still.isUsed || still.hash !== active.uploadedHash) {
+                throw new Error('The uploaded still image changed before routing was confirmed');
+            }
         }
     }
 
@@ -178,11 +216,31 @@ class MediaWorker {
             || (Number.isInteger(expected.stillSlot) && expected.stillSlot !== current.stillSlot)) {
             throw new Error('The destination media player changed while preparing the image');
         }
+        const aux = message.aux === undefined || message.aux === null ? null : message.aux;
+        let originalAux = null, fillSource = null;
+        if (aux !== null) {
+            if (!Number.isInteger(aux) || aux < 1 || aux > state.capabilities.auxes) throw new Error('Configured ATEM AUX is unavailable');
+            if (state.auxes.some(item => !Number.isInteger(item.source))) {
+                throw new Error('ATEM has not reported every AUX source');
+            }
+            fillSource = current.fillSource;
+            if (!Number.isInteger(fillSource)) throw new Error('Media player fill source is unavailable for AUX routing');
+            if (state.auxes.some(item => item.aux !== aux && item.source === fillSource)) {
+                throw new Error('Another ATEM AUX is using this media player');
+            }
+            const expectedAux = message.expectedAux, currentAux = state.auxes[aux - 1];
+            if (!expectedAux || expectedAux.aux !== aux || !Number.isInteger(expectedAux.source)
+                || expectedAux.source !== currentAux.source) {
+                throw new Error('The destination ATEM AUX changed while preparing the image');
+            }
+            originalAux = currentAux.source;
+        }
         let abort;
         const aborted = new Promise((_, reject) => { abort = reject; });
         // Always observe abort rejection, including synchronous preparation failures.
         aborted.catch(() => {});
         const active = { slot, player: message.player, generation: this.generation,
+            aux, auxCount: state.capabilities.auxes, originalAux, fillSource, uploadedHash: null,
             videoModeId: state.videoMode.id, width: message.width, height: message.height,
             originalPlayer: playerKey(this.atem.state.media.players[message.player - 1]),
             phase: 'uploading', abort, aborted,
@@ -209,6 +267,7 @@ class MediaWorker {
             };
             await this.waitFor(active, matches, 'ATEM did not confirm the uploaded image');
             this.assertActive(active);
+            active.uploadedHash = encoded.hash;
             active.phase = 'selecting';
             stage('selecting');
             await Promise.race([this.atem.setMediaPlayerSource({ sourceType: Enums.MediaSourceType.Still,
@@ -218,6 +277,18 @@ class MediaWorker {
                 return matches() && player.sourceType === Enums.MediaSourceType.Still && player.stillIndex === slot - 1;
             }, 'ATEM did not confirm media player selection');
             this.assertActive(active);
+            if (aux !== null) {
+                active.phase = 'routing';
+                stage('routing');
+                // The upload/hash and player selection are already confirmed.
+                // Do not expose the AUX until every preceding stage succeeded.
+                if (originalAux !== fillSource) {
+                    await Promise.race([this.atem.setAuxSource(fillSource, aux - 1), aborted]);
+                }
+                await this.waitFor(active, () => this.atem.state.video.auxilliaries[aux - 1] === fillSource,
+                    'ATEM did not confirm AUX routing');
+                this.assertActive(active);
+            }
             const result = { confirmed: true, slot, state: this.snapshot() };
             this.publish();
             return result;

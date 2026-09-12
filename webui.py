@@ -2259,10 +2259,10 @@ def require_page(page_key: str, friendly_name: str):
 
 
 # Action grants use the existing group_pages storage and permission editor.
-# They grant no page by themselves; all media operations also require page:media.
+# They grant no page by themselves; Config separately authorizes library management.
 _register_page('page:media_upload', 'Media: Upload images')
 _register_page('page:media_manage', 'Media: Manage images and presets')
-_register_page('page:media_load', 'Media: Load ATEM players')
+_register_page('page:media_load', 'Media: Display images')
 
 
 def _get_group_by_name(name: str) -> sqlite3.Row | None:
@@ -3206,10 +3206,12 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
         return {'scope': 'admin', 'pages': ('page:config',), 'service_tokens': False}
     if p == '/api/config/atem-media':
         return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
-    if p == '/api/atem/media/state':
-        return {'scope': 'atem', 'pages': ('page:media', 'page:config'), 'service_tokens': False}
-    if p == '/api/media' or p.startswith('/api/media/') or p.startswith('/api/atem/media/'):
+    if p.startswith('/api/atem/media/'):
+        return {'scope': 'atem', 'pages': ('page:config',), 'service_tokens': False}
+    if p == '/api/media/display' or p.startswith('/api/media/display/'):
         return {'scope': 'atem', 'pages': ('page:media',), 'service_tokens': False}
+    if p == '/api/media' or p.startswith('/api/media/'):
+        return {'scope': 'atem', 'pages': ('page:media', 'page:config'), 'service_tokens': False}
     if p.startswith('/api/admin/'):
         return {'scope': 'admin', 'pages': ('page:admin',)}
     if p.startswith('/api/config') or p.startswith('/api/companion-surfaces-config'):
@@ -3829,8 +3831,14 @@ def _auth_gate():
     # Authorization for pages
     view_fn = app.view_functions.get(request.endpoint)
     page_key = getattr(view_fn, '_required_page_key', None) if view_fn else None
+    any_page_keys = getattr(view_fn, '_required_any_page_keys', ()) if view_fn else ()
     if p == '/account/password':
         return None
+    if any_page_keys:
+        if any(can_access(key) for key in any_page_keys):
+            return None
+        _audit('deny_page', f'pages={any_page_keys} path={p}')
+        return abort(403)
     if not page_key:
         _audit('deny_missing_page_key', f'endpoint={request.endpoint} path={p}')
         return abort(403)
@@ -6983,18 +6991,31 @@ def routing_page():
     except Exception:
         pass
 
-    return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs)
+    notice = ''
+    job_id = request.args.get('media_job', '')
+    if job_id and can_access('page:media'):
+        try:
+            job = _get_media_routing_manager().get_job(job_id)
+            if job.get('status') == 'succeeded' and (not allowed_outputs or job['output'] in allowed_outputs):
+                notice = 'Image displayed successfully.'
+        except (KeyError, ValueError):
+            pass
+    return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs,
+                           media_available=can_access('page:media'), media_notice=notice,
+                           hide_connection_status=True)
 
 
 _media_library_lock = threading.Lock()
 _media_operation_lock = threading.RLock()
 _media_library_instance = None
+_media_routing_instance = None
+_media_routing_lock = threading.Lock()
 _MEDIA_CONFIG_DEFAULTS = {
     'atem_media_enabled': False,
     'atem_media_node_path': '',
     'atem_media_destinations': [],
 }
-_MEDIA_ACTIVE_JOBS = {'queued', 'preparing', 'uploading', 'selecting'}
+_MEDIA_ACTIVE_JOBS = {'queued', 'preparing', 'uploading', 'selecting', 'loading', 'routing'}
 
 
 def _media_library_root() -> Path:
@@ -7022,6 +7043,10 @@ def _get_atem_media_manager():
 
 def _active_media_job():
     from atem_media import peek_atem_media_job
+    if _media_routing_instance is not None:
+        job = _media_routing_instance.active_job()
+        if job:
+            return job
     return peek_atem_media_job() or {}
 
 
@@ -7029,15 +7054,64 @@ def _serialize_media_configuration(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
         with _media_operation_lock:
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                return _api_json_error(409, 'busy', 'Wait for the current image display to finish before changing configuration.')
             return fn(*args, **kwargs)
     return wrapped
 
 
 def _media_permissions() -> dict[str, bool]:
     return {
-        action: bool(can_access('page:media') and can_access('page:media_' + action))
+        action: bool((can_access('page:config') and action in ('upload', 'manage'))
+                     or (can_access('page:media') and can_access('page:media_' + action)))
         for action in ('upload', 'manage', 'load')
     }
+
+
+def _media_display_allowed() -> bool:
+    return bool(can_access('page:routing') and can_access('page:media') and can_access('page:media_load'))
+
+
+def _media_output_access(output):
+    if isinstance(output, bool) or not isinstance(output, (str, int)) or not re.fullmatch(r'[1-9][0-9]*', str(output)):
+        raise ValueError('Choose an output in Routing first.')
+    output = int(output)
+    uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+    allowed_outputs, allowed_inputs = _effective_videohub_allowlists_for_user(uid)
+    if allowed_outputs and output not in allowed_outputs:
+        log_event('security.media.output_denied', 'Denied media access to an output',
+                  status='warning', details={'output': output})
+        abort(403)
+    return output, allowed_inputs
+
+
+def _media_page_context():
+    output, label = None, ''
+    if request.args.get('output'):
+        if not can_access('page:routing'):
+            abort(403)
+        try:
+            output, _ = _media_output_access(request.args['output'])
+        except ValueError:
+            abort(400)
+        state = _get_videohub_state_snapshot()
+        item = next((item for item in state.get('outputs', []) if item.get('number') == output), {})
+        label = str(item.get('label') or f'Output {output}')
+    permissions = _media_permissions()
+    # Config privileges are intentionally confined to the management page.
+    permissions['upload'] = bool(can_access('page:media') and can_access('page:media_upload'))
+    return {'media_permissions': permissions, 'output': output, 'output_label': label,
+            'can_display': bool(output and _media_display_allowed()), 'hide_connection_status': True}
+
+
+def _require_media_read(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not (can_access('page:media') or can_access('page:config')):
+            abort(403)
+        return fn(*args, **kwargs)
+    wrapped._required_any_page_keys = ('page:media', 'page:config')
+    return wrapped
 
 
 def _media_action_denied(action: str):
@@ -7065,31 +7139,143 @@ def _media_api_failure(action: str, error: Exception, status_code: int = 400):
     return jsonify({'ok': False, 'error': message}), status_code
 
 
+def _get_media_routing_manager(*, refresh=False):
+    from media_routing import MediaRoutingManager
+    from atem_media import get_atem_media_manager
+    global _media_routing_instance
+    with _media_routing_lock:
+        cfg = copy.deepcopy(utils.get_config())
+        config_key = json.dumps({key: value for key, value in cfg.items()
+                                if key.startswith(('atem_', 'videohub_'))}, sort_keys=True)
+        if (_media_routing_instance is None or
+                (refresh and getattr(_media_routing_instance, '_config_key', '') != config_key
+                 and not _media_routing_instance.active_job())):
+            def client():
+                if get_videohub_client_from_config is None:
+                    raise RuntimeError('VideoHub is unavailable')
+                vh = get_videohub_client_from_config(cfg, timeout=2.0)
+                if vh is None:
+                    raise ValueError('Media display has not been set up. Ask your team administrator.')
+                return vh
+
+            def route(output, input_):
+                vh = client()
+                vh.route_video_output(output=output - 1, input_=input_ - 1)
+                if not vh.verify_video_output_route(output=output - 1, input_=input_ - 1):
+                    raise RuntimeError('VideoHub did not confirm the selected output')
+                _invalidate_videohub_state_snapshot(output_idx=output - 1, input_idx=input_ - 1)
+
+            _media_routing_instance = MediaRoutingManager(
+                get_config=lambda: copy.deepcopy(cfg),
+                get_media_manager=lambda: get_atem_media_manager(cfg, _get_media_library()),
+                read_videohub=lambda: client().get_routing_state_strict(), route_videohub=route)
+            _media_routing_instance._config_key = config_key
+        return _media_routing_instance
+
+
+def _guard_videohub_write(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        from media_routing import video_routing_guard
+        from atem_media import BusyError
+        try:
+            with video_routing_guard():
+                return fn(*args, **kwargs)
+        except BusyError:
+            return _api_json_error(409, 'busy', 'An image is being displayed. Wait a moment and try again.')
+    return wrapped
+
+
+def _public_media_display_job(job):
+    # Operators need the outcome, not player, AUX, input assignments or diagnostics.
+    return {key: job.get(key) for key in ('id', 'mediaId', 'output', 'status', 'message', 'error')}
+
+
+@app.route('/api/media/display', methods=['POST'])
+def api_media_display():
+    from atem_media import BusyError, validate_media_config
+    if not _media_display_allowed():
+        return _media_action_denied('load')
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {'media_id', 'output'}:
+        return _api_json_error(400, 'invalid_request', 'Choose an image and an output.')
+    uid, username, display = _activity_current_actor()
+    actor = {'actor_user_id': uid, 'actor_username': username, 'actor_display': display,
+             'ip': _activity_request_ip(), 'request_path': request.path, 'source': 'web'}
+
+    def completed(job):
+        success = job.get('status') == 'succeeded'
+        log_event('media.display', f"{'Displayed image on' if success else 'Could not display image on'} output {job['output']}",
+                  status='success' if success else 'failure', target_type='videohub_output',
+                  target_id=job['output'], details=job, **actor)
+
+    try:
+        output, allowed_inputs = _media_output_access(data['output'])
+        with _media_operation_lock:
+            _get_media_library().get(data['media_id'])
+            cfg = validate_media_config(utils.get_config())
+            mappings = [item for item in cfg['atem_media_destinations'] if item.get('aux') and item.get('videohub_input')]
+            if mappings and allowed_inputs and not any(item['videohub_input'] in allowed_inputs for item in mappings):
+                log_event('security.media.input_denied', 'Denied media display without access to a mapped input',
+                          status='warning', details={'output': output})
+                return _api_json_error(403, 'forbidden', 'Your group does not have access to the media inputs. Ask your team administrator.')
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                raise BusyError('Another image is being displayed. Wait a moment and try again.')
+            job = _get_media_routing_manager(refresh=True).display(
+                data['media_id'], output, allowed_inputs=allowed_inputs, on_complete=completed)
+        log_event('media.display.queued', f'Queued an image for output {output}', status='info',
+                  target_type='videohub_output', target_id=output, details=job)
+        return jsonify({'ok': True, 'job': _public_media_display_job(job)}), 202
+    except BusyError as error:
+        return _media_api_failure('media.display', error, 409)
+    except (KeyError, ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('media.display', error)
+
+
+@app.route('/api/media/display/<job_id>')
+def api_media_display_job(job_id):
+    if not _media_display_allowed():
+        return _media_action_denied('load')
+    try:
+        job = _get_media_routing_manager().get_job(job_id)
+        _media_output_access(job['output'])
+        return jsonify({'ok': True, 'job': _public_media_display_job(job)})
+    except KeyError:
+        return _api_json_error(404, 'not_found', 'This display request is no longer available. Check the output before trying again.')
+
+
 @app.route('/media')
 @require_page('page:media', 'Media Library')
 def media_page():
-    return render_template(
-        'media.html', media_permissions=_media_permissions(),
-        can_configure_media=can_access('page:config'),
-    )
+    return render_template('media.html', **_media_page_context())
+
+
+@app.route('/media/upload')
+@require_page('page:media', 'Media Library')
+def media_upload_page():
+    if not can_access('page:media_upload'):
+        abort(403)
+    return render_template('media.html', upload_page=True, **_media_page_context())
 
 
 @app.route('/config/atem-media')
 @require_page('page:config', 'Config')
 def atem_media_setup_page():
-    return render_template('media.html', setup_only=True, config_active_tab='atem-media',
-                           media_permissions={'upload': False, 'manage': False, 'load': False},
+    permissions = _media_permissions()
+    permissions['load'] = bool(can_access('page:media') and can_access('page:media_load'))
+    return render_template('media_config.html', config_active_tab='atem-media',
+                           media_permissions=permissions,
                            can_configure_media=True)
 
 
 @app.route('/media/images/<media_id>.png')
-@require_page('page:media', 'Media Library')
+@_require_media_read
 def media_image(media_id: str):
     return _send_media_image(media_id, thumbnail=False)
 
 
 @app.route('/media/thumbnails/<media_id>.png')
-@require_page('page:media', 'Media Library')
+@_require_media_read
 def media_thumbnail(media_id: str):
     return _send_media_image(media_id, thumbnail=True)
 
@@ -7175,8 +7361,9 @@ def api_atem_media_state():
 
 
 @app.route('/api/atem/media/load', methods=['POST'])
+@_guard_videohub_write
 def api_atem_media_load():
-    if not _media_permissions()['load']:
+    if not (can_access('page:config') and _media_permissions()['load']):
         return _media_action_denied('load')
     from atem_media import BusyError
     data = request.get_json(silent=True)
@@ -7195,6 +7382,8 @@ def api_atem_media_load():
 
     try:
         with _media_operation_lock:
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                raise BusyError('Another image is being displayed. Wait for it to finish.')
             media_id = data.get('media_id')
             if not isinstance(media_id, str):
                 raise ValueError('Choose a saved image.')
@@ -11059,6 +11248,7 @@ def api_videohub_presets_lock(preset_id: int):
 
 
 @app.route('/api/videohub/presets/<int:preset_id>/apply', methods=['POST'])
+@_guard_videohub_write
 def api_videohub_presets_apply(preset_id: int):
     app_inst = _get_videohub_app()
     if app_inst is None or not hasattr(app_inst, 'apply_preset'):
@@ -13994,6 +14184,7 @@ def api_videohub_ping():
 
 
 @app.route('/api/videohub/route', methods=['POST'])
+@_guard_videohub_write
 def api_videohub_route():
     """Route an input to an output on the configured VideoHub.
 

@@ -17,22 +17,30 @@ and same-origin checks. Image numbers in configuration and responses are 1-based
 
 | Method and path | Access | Contract |
 | --- | --- | --- |
-| `GET /api/media` | Media Library | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, creation time, `url` and `thumbnail_url`. |
-| `POST /api/media/upload` | Library + Media upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. |
-| `PATCH /api/media/<id>` | Library + Media manage | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
-| `DELETE /api/media/<id>` | Library + Media manage | Removes the local image. An active load of it returns 409. Does not clear ATEM stills. |
-| `GET /api/atem/media/state` | Library or Config | Cached connection, detected format/capacity, configured destinations, players/stills and current/last `job`. An offline state is a successful HTTP read. |
-| `POST /api/atem/media/load` | Library + Media load | JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Poll state for terminal status; 202 means queued, not displayed. |
+| `GET /api/media` | Media Library or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, creation time, `url` and `thumbnail_url`. |
+| `POST /api/media/upload` | Config, or Library + Media upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
+| `PATCH /api/media/<id>` | Config, or Library + Media manage | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
+| `DELETE /api/media/<id>` | Config, or Library + Media manage | Removes the local image. An active display/load of it returns 409. Does not clear ATEM stills. |
+| `POST /api/media/display` | Routing + Library + Media display | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/AUX/input; overrides are rejected. |
+| `GET /api/media/display/<job_id>` | Routing + Library + Media display, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`. No hardware assignments or internal diagnostics. |
+| `GET /api/atem/media/state` | Config | Cached connection, detected format/capacity, configured destinations, players/stills/AUXes and current/last ATEM `job`. An offline state is a successful HTTP read. |
+| `POST /api/atem/media/load` | Config + Library + Media display | Administrative player test. JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Does not route a TV. |
 | `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path` and `atem_media_destinations`. |
-| `PUT /api/config/atem-media` | Config | Partial configuration object with those keys only. Executable-path changes additionally require Admin. Destinations are `{player,label,slots}` with two or more exclusive still slots per player. |
+| `PUT /api/config/atem-media` | Config | Partial configuration object with those keys only. Executable-path changes additionally require Admin. Destinations are `{player,label,slots,aux,videohub_input}` with at least two exclusive still slots. AUX and input must be supplied together; omitting both preserves a test-only player. All players/AUXes/inputs/slots must be distinct. |
 
-Job statuses are `queued`, `preparing`, `uploading`, `selecting`, `succeeded` and
-`failed`. Jobs include their ID, image ID/name, player, selected slot, timestamps
-and any error. Success requires image-hash and player readback. Jobs are serialized;
-a busy load or setup change returns 409. Validation returns 400, missing media 404,
-oversized requests 413, and storage/runtime failures 503. The image URLs require
-library access and return PNGs with private/no-store caching. No AUX or VideoHub
-routing is performed by these endpoints.
+Display statuses are `queued`, `preparing`, `loading`, `routing`, `succeeded`,
+`failed`; 202 only means queued. Completion requires image/hash, player, AUX and
+VideoHub readback. The player must not feed other outputs or another AUX. The
+200-second display deadline wraps a maximum 180-second ATEM transfer. Only recent
+32 job records are retained in memory; restart does not repeat requests. While a
+display owns routing, normal VideoHub route/preset writes and raw player tests
+return 409 immediately. External controllers are not part of that reservation.
+
+The existing ATEM test job also uses `uploading` and `selecting` statuses and
+includes player/slot details for Config. Library image URLs require Media Library
+or Config and return PNGs with private/no-store caching. Validation returns 400,
+missing media/jobs 404, oversized uploads 413 and storage/runtime failures 503.
+The existing `page:media_load` permission key is now labelled “Media: Display images”.
 
 ## API authentication and migration
 

@@ -48,33 +48,31 @@ class FixtureManager:
         self.started = 0
         self.callback = None
         self.lock = threading.Lock()
+        self.slots = {}
+        self.auxes = {}
+        self.timer = None
 
     def snapshot(self):
-        callback = None
-        completed = None
         with self.lock:
-            if self.job and self.job['status'] not in ('succeeded', 'failed'):
-                elapsed = time.monotonic() - self.started
-                self.job['status'] = 'uploading' if elapsed < .8 else 'succeeded'
-                if self.job['status'] == 'succeeded':
-                    completed = copy.deepcopy(self.job)
-                    callback, self.callback = self.callback, None
             config = self.get_config()
             state = {
                 'enabled': config['atem_media_enabled'], 'connected': config['atem_media_enabled'],
-                'product': 'ATEM 4 M/E Broadcast Studio 4K (fixture)',
+                'ready': config['atem_media_enabled'], 'generation': 1,
+                'product': 'Simulated ATEM',
                 'videoMode': {'name': '1080p60', 'width': 1920, 'height': 1080},
-                'capabilities': {'players': 4, 'stills': 64},
+                'capabilities': {'players': 4, 'stills': 64, 'auxes': 6},
                 'destinations': config['atem_media_destinations'],
-                'players': [{'player': item['player'], 'type': 'still', 'slot': item['slots'][0]}
+                'players': [{'player': item['player'], 'type': 'still',
+                             'slot': self.slots.get(item['player'], item['slots'][0]),
+                             'stillSlot': self.slots.get(item['player'], item['slots'][0]),
+                             'fillSource': 3000 + item['player'] * 10}
                             for item in config['atem_media_destinations']],
+                'auxes': [{'aux': number, 'source': self.auxes.get(number, 1)} for number in range(1, 7)],
                 'stills': [], 'job': copy.deepcopy(self.job), 'error': None,
             }
-        if callback:
-            callback(completed)
         return state
 
-    def load(self, media_id, player, on_complete=None):
+    def load(self, media_id, player, *, aux=None, on_complete=None):
         from atem_media import BusyError
         with self.lock:
             if self.job and self.job['status'] not in ('succeeded', 'failed'):
@@ -84,14 +82,55 @@ class FixtureManager:
             if destination is None:
                 raise ValueError('Choose a configured fixture player.')
             item = self.library.get(media_id)
+            current_slot = self.slots.get(player, destination['slots'][0])
+            slot = next(slot for slot in destination['slots'] if slot != current_slot)
             self.job = {
                 'id': uuid.uuid4().hex, 'mediaId': media_id, 'mediaName': item['name'],
-                'player': player, 'slot': destination['slots'][0], 'status': 'queued',
+                'player': player, 'slot': slot, 'status': 'uploading', 'aux': aux, 'generation': 1,
                 'error': None, 'createdAt': time.time(), 'updatedAt': time.time(),
             }
             self.started = time.monotonic()
             self.callback = on_complete
+            self.timer = threading.Timer(.8, self.complete)
+            self.timer.daemon = True
+            self.timer.start()
             return copy.deepcopy(self.job)
+
+    def complete(self):
+        with self.lock:
+            self.job['status'] = 'succeeded'
+            self.slots[self.job['player']] = self.job['slot']
+            if self.job.get('aux'):
+                self.auxes[self.job['aux']] = 3000 + self.job['player'] * 10
+            completed = copy.deepcopy(self.job)
+            callback, self.callback = self.callback, None
+        if callback:
+            callback(completed)
+
+    def close(self):
+        if self.timer:
+            self.timer.cancel()
+
+
+class FixtureVideoHub:
+    def __init__(self):
+        self.routing = [1, 2, 1]
+
+    def get_routing_state_strict(self):
+        return {'input_count': 8, 'output_count': 3, 'routing': list(self.routing)}
+
+    def snapshot(self, **_kwargs):
+        return {'ok': True, 'configured': True, 'stale': False, 'refreshing': False,
+                'inputs': [{'number': i, 'label': name} for i, name in enumerate(
+                    ['ProPresenter', 'Camera', 'Stage', 'Computer', 'Spare 1', 'Spare 2', 'Media A', 'Media B'], 1)],
+                'outputs': [{'number': i, 'label': name} for i, name in enumerate(['Foyer', 'Kids', 'Hall'], 1)],
+                'routing': list(self.routing)}
+
+    def route_video_output(self, *, output, input_, monitoring=False):
+        self.routing[output] = input_ + 1
+
+    def verify_video_output_route(self, *, output, input_):
+        return self.routing[output] == input_ + 1
 
 
 def main():
@@ -107,8 +146,8 @@ def main():
             'webserver_port': 5063, 'dark_mode': False, 'atem_ip': '192.0.2.1',
             'atem_media_enabled': True, 'atem_media_node_path': '',
             'atem_media_destinations': [
-                {'player': 2, 'label': 'Foyer', 'slots': [41, 42]},
-                {'player': 4, 'label': 'Kids', 'slots': [43, 44]},
+                {'player': 2, 'label': 'Media A', 'slots': [41, 42], 'aux': 1, 'videohub_input': 7},
+                {'player': 4, 'label': 'Media B', 'slots': [43, 44], 'aux': 2, 'videohub_input': 8},
             ],
         }
         config_path.write_text(json.dumps(config), encoding='utf-8')
@@ -148,17 +187,47 @@ def main():
         stack.enter_context(patch.object(webui, '_get_media_library', return_value=library))
         webui._init_auth_db()
         managers = {}
+        videohubs = {}
+        routing_managers = {}
         manager_lock = threading.Lock()
 
-        def get_manager():
+        def client_identity():
             identity = webui.session.get('_media_fixture_client')
             if not identity:
                 identity = uuid.uuid4().hex
                 webui.session['_media_fixture_client'] = identity
+            return identity
+
+        def get_manager():
+            identity = client_identity()
             with manager_lock:
                 return managers.setdefault(identity, FixtureManager(library, utils.get_config))
 
         stack.enter_context(patch.object(webui, '_get_atem_media_manager', side_effect=get_manager))
+
+        def get_videohub():
+            identity = client_identity()
+            with manager_lock:
+                return videohubs.setdefault(identity, FixtureVideoHub())
+
+        def get_routing_manager(**_kwargs):
+            from media_routing import MediaRoutingManager
+            identity = client_identity()
+            manager, videohub = get_manager(), get_videohub()
+            with manager_lock:
+                if identity not in routing_managers:
+                    routing_managers[identity] = MediaRoutingManager(
+                        get_config=utils.get_config, get_media_manager=lambda: manager,
+                        read_videohub=videohub.get_routing_state_strict,
+                        route_videohub=lambda output, input_: videohub.route_video_output(output=output - 1, input_=input_ - 1))
+                return routing_managers[identity]
+
+        stack.enter_context(patch.object(webui, '_get_media_routing_manager', side_effect=get_routing_manager))
+        stack.enter_context(patch.object(webui, '_active_media_job', side_effect=lambda:
+            get_routing_manager().active_job() or get_manager().snapshot().get('job') or {}))
+        stack.enter_context(patch.object(webui, '_get_videohub_state_snapshot', side_effect=lambda **kwargs: get_videohub().snapshot()))
+        stack.enter_context(patch.object(webui, '_get_videohub_client_from_config', side_effect=get_videohub))
+        stack.enter_context(patch.object(webui, '_invalidate_videohub_state_snapshot'))
 
         def blocked_route(**_kwargs):
             return webui.jsonify({'ok': False, 'error': 'This route is disabled in the isolated Media UI fixture.'}), 404
@@ -166,6 +235,8 @@ def main():
         allowed = {
             'static', 'media_page', 'media_image', 'media_thumbnail', 'api_media_list', 'api_media_upload',
             'api_media_edit', 'api_atem_media_state', 'api_atem_media_load', 'api_atem_media_config',
+            'routing_page', 'media_upload_page', 'api_media_display', 'api_media_display_job',
+            'api_videohub_state', 'api_videohub_labels', 'api_videohub_route',
         }
         # Endpoint names for image/setup routes can change without opening other
         # integrations: retain only the explicitly scoped Media URL rules.
@@ -194,9 +265,10 @@ def main():
 
         @webui.app.get('/__media_fixture__/readonly')
         def fixture_readonly():
-            return webui.render_template('media.html', media_permissions={'upload': False, 'manage': False, 'load': False}, can_configure_media=False)
+            return webui.render_template('media.html', media_permissions={'upload': False, 'manage': False, 'load': False},
+                                        output=1, output_label='Foyer', can_display=False, hide_connection_status=True)
 
-        print('Isolated Media UI fixture: http://127.0.0.1:5063/media', flush=True)
+        print('Isolated Media demo: http://127.0.0.1:5063/routing', flush=True)
         webui.app.run(host='127.0.0.1', port=5063, debug=False, use_reloader=False, threaded=True)
 
 

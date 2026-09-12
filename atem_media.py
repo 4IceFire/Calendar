@@ -1,6 +1,6 @@
 """Asynchronous ATEM still-media transport, independent of Record Audio.
 
-The private Node worker owns a separate connection and never changes routing.
+The private Node worker owns a separate connection and can select a reserved AUX.
 Only a user-requested job may upload/select media; reconnects only refresh state.
 """
 
@@ -57,7 +57,7 @@ def validate_media_config(cfg):
     destinations = result.get("atem_media_destinations", [])
     if not isinstance(destinations, list):
         raise ValueError("ATEM media destinations must be a list")
-    normalized, players, slots = [], set(), set()
+    normalized, players, slots, auxes, inputs = [], set(), set(), set(), set()
     for destination in destinations:
         if not isinstance(destination, dict):
             raise ValueError("Each ATEM media destination must be an object")
@@ -77,7 +77,22 @@ def validate_media_config(cfg):
         label = destination.get("label", "")
         if not isinstance(label, str):
             raise ValueError("Media destination label must be text")
-        normalized.append({"player": player, "label": label.strip()[:100] or f"Media Player {player}", "slots": reserved})
+        entry = {"player": player, "label": label.strip()[:100] or f"Media Player {player}", "slots": reserved}
+        aux, videohub_input = destination.get("aux"), destination.get("videohub_input")
+        has_aux, has_input = aux not in (None, ""), videohub_input not in (None, "")
+        if has_aux != has_input:
+            raise ValueError("Set both the ATEM AUX and VideoHub input, or leave both blank")
+        if has_aux:
+            aux = _positive_int(aux, "ATEM AUX")
+            videohub_input = _positive_int(videohub_input, "VideoHub input")
+            if aux in auxes:
+                raise ValueError("ATEM AUXes cannot be shared between media destinations")
+            if videohub_input in inputs:
+                raise ValueError("VideoHub inputs cannot be shared between media destinations")
+            auxes.add(aux)
+            inputs.add(videohub_input)
+            entry.update(aux=aux, videohub_input=videohub_input)
+        normalized.append(entry)
     result["atem_media_destinations"] = normalized
     return result
 
@@ -212,7 +227,7 @@ class AtemMediaManager:
         self._callback = None
         self._timer = None
         self._state = {"connected": False, "ready": False, "product": "", "videoMode": None,
-                       "capabilities": {"players": 0, "stills": 0}, "players": [], "stills": [],
+                       "capabilities": {"players": 0, "stills": 0, "auxes": 0}, "players": [], "stills": [], "auxes": [],
                        "generation": None, "revision": None, "error": ""}
 
     def snapshot(self):
@@ -263,7 +278,7 @@ class AtemMediaManager:
             elif message.get("event") == "stage":
                 if (self._job and self._job["id"] == message.get("jobId")
                         and self._job["status"] not in _TERMINAL
-                        and message.get("status") in {"uploading", "selecting"}):
+                        and message.get("status") in {"uploading", "selecting", "routing"}):
                     self._job.update(status=message["status"], slot=message.get("slot"), updatedAt=time.time())
             elif message.get("event") == "stopped":
                 self._state.update(connected=False, ready=False, error=str(message.get("error") or "ATEM media worker stopped")[:500])
@@ -272,7 +287,7 @@ class AtemMediaManager:
                 self._retry_at = time.monotonic() + min(30, 2 ** min(self._failures, 5))
 
     @staticmethod
-    def _check_state(state, destination):
+    def _check_state(state, destination, aux=None):
         if not state.get("connected") or not state.get("ready"):
             raise ValueError("ATEM media is not ready. Wait for a complete switcher connection.")
         capabilities = state.get("capabilities") or {}
@@ -280,12 +295,25 @@ class AtemMediaManager:
             raise ValueError("The configured media player is not available on this ATEM")
         if any(slot > int(capabilities.get("stills") or 0) for slot in destination["slots"]):
             raise ValueError("A reserved still slot exceeds this ATEM's media pool capacity")
+        if aux is not None:
+            if aux > int(capabilities.get("auxes") or 0):
+                raise ValueError("The configured AUX is not available on this ATEM")
+            current = next((item for item in state.get("auxes", []) if item.get("aux") == aux), None)
+            if not current or not isinstance(current.get("source"), int):
+                raise ValueError("ATEM AUX routing state is not ready")
+            player = next((item for item in state.get("players", []) if item.get("player") == destination["player"]), {})
+            if not isinstance(player.get("fillSource"), int) or player["fillSource"] < 1:
+                raise ValueError("This ATEM has not reported an available media player source for AUX routing")
 
-    def load(self, media_id, player, on_complete=None):
+    def load(self, media_id, player, *, aux=None, on_complete=None):
         player = _positive_int(player, "Media player")
         destination = next((item for item in self.cfg["atem_media_destinations"] if item["player"] == player), None)
         if destination is None:
             raise ValueError("This media player has not been configured for TDeck")
+        if aux is not None:
+            aux = _positive_int(aux, "ATEM AUX")
+            if destination.get("aux") != aux:
+                raise ValueError("This AUX has not been reserved for the selected media player")
         media = self.library.get(media_id)
         if not media:
             raise ValueError("The selected media item no longer exists")
@@ -294,13 +322,15 @@ class AtemMediaManager:
                 raise ValueError("ATEM media is disabled")
             if self._job and self._job["status"] not in _TERMINAL:
                 raise BusyError("Another image is loading. Wait for it to finish.")
-            self._check_state(self._state, destination)
+            self._check_state(self._state, destination, aux)
             if self._bridge is None:
                 raise ValueError("ATEM media is not connected")
             job = {"id": uuid.uuid4().hex, "mediaId": str(media_id),
                    "mediaName": str(media.get("name") or media.get("displayName") or media_id)[:200],
                    "player": player, "slot": None, "status": "queued", "error": "",
                    "createdAt": time.time(), "updatedAt": time.time()}
+            if aux is not None:
+                job["aux"] = aux
             self._job = job
             self._callback = on_complete
             result = copy.deepcopy(job)
@@ -309,7 +339,7 @@ class AtemMediaManager:
             self._timer = threading.Timer(self._job_timeout, self._expired, args=(job["id"], bridge))
             self._timer.daemon = True
             self._timer.start()
-            threading.Thread(target=self._run_job, args=(job["id"], destination, bridge, deadline),
+            threading.Thread(target=self._run_job, args=(job["id"], destination, bridge, deadline, aux),
                              name="tdeck-atem-media-load", daemon=True).start()
             return result
 
@@ -322,11 +352,11 @@ class AtemMediaManager:
             raise TimeoutError("Image load timed out; completion was not confirmed")
         return remaining
 
-    def _run_job(self, job_id, destination, bridge, deadline):
+    def _run_job(self, job_id, destination, bridge, deadline, aux=None):
         frame_path = None
         try:
             state = bridge.request("snapshot", timeout=min(10, self._remaining(job_id, deadline)))
-            self._check_state(state, destination)
+            self._check_state(state, destination, aux)
             with self._lock:
                 self._remaining(job_id, deadline)
                 self._job.update(status="preparing", updatedAt=time.time())
@@ -347,6 +377,7 @@ class AtemMediaManager:
             result = bridge.request("load", {"jobId": job_id, "player": destination["player"],
                 "allowedSlots": destination["slots"], "framePath": frame_path, "name": media_name,
                 "width": width, "height": height, "generation": state.get("generation"),
+                "aux": aux, "expectedAux": next((item for item in state.get("auxes", []) if item.get("aux") == aux), None),
                 "expectedPlayer": next((player for player in state.get("players", [])
                                         if player.get("player") == destination["player"]), None),
                 "videoModeId": mode.get("id"), "timeoutMs": max(1, int(remaining * 1000))}, timeout=remaining)
@@ -389,6 +420,15 @@ class AtemMediaManager:
                 if (self._bridge is not bridge or not self._state.get("connected")
                         or self._state.get("generation") != generation):
                     raise RuntimeError("ATEM connection changed before completion was confirmed")
+                aux = self._job.get("aux")
+                if aux is not None:
+                    player = next((item for item in self._state.get("players", []) if item.get("player") == self._job["player"]), {})
+                    current_aux = next((item for item in self._state.get("auxes", []) if item.get("aux") == aux), {})
+                    if (player.get("type") != "still" or player.get("slot") != slot
+                            or not isinstance(player.get("fillSource"), int)
+                            or current_aux.get("source") != player["fillSource"]):
+                        raise RuntimeError("ATEM media or AUX routing changed before completion was confirmed")
+                self._job["generation"] = generation
             self._job.update(status=status, error=error[:500], updatedAt=time.time())
             if slot is not None:
                 self._job["slot"] = slot

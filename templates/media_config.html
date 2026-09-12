@@ -1,0 +1,136 @@
+{% extends 'base.html' %}
+
+{% set page_title = 'Media setup' %}
+{% set page_subtitle = 'Choose available players and manage the images people can display.' %}
+{% set config_active_tab = 'atem-media' %}
+
+{% block head_extra %}
+<link rel="stylesheet" href="{{ static_asset('media.css') }}">
+{% endblock %}
+
+{% block content %}
+<div id="media-config-page" data-permissions='{{ media_permissions|tojson }}'>
+  {% include '_config_tabs.html' %}
+  <div id="media-message" class="d-none mb-3" role="status" aria-live="polite"></div>
+
+  <section class="card mb-3" aria-label="ATEM media connection">
+    <div class="card-body media-connection">
+      <div>
+        <div class="fw-semibold" id="media-connection-status" role="status">Checking ATEM media connection…</div>
+        <div class="small text-muted" id="media-connection-detail">Your image library is available independently of the switcher.</div>
+      </div>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="media-refresh-state">Refresh status</button>
+    </div>
+  </section>
+
+  <details id="media-setup" class="card mb-4" open>
+    <summary class="card-header">Available media players</summary>
+    <div class="card-body">
+      <p class="small text-muted">Choose the players available for displaying images. Reserve each player, its still slots, its AUX output and its connected VideoHub input exclusively for TDeck. Each player needs at least two still slots so a new image can upload before the player switches to it.</p>
+      <p class="small text-muted">The AUX output must be physically connected to the VideoHub input you enter below. People using Routing choose an image and a screen; TDeck chooses an available player and sends the image there.</p>
+      <p class="small" id="media-setup-capabilities">Switcher capabilities will appear when connected.</p>
+      <form id="media-setup-form">
+        <fieldset id="media-setup-fields" disabled>
+          <div class="form-check mb-3">
+            <input class="form-check-input" id="media-setup-enabled" type="checkbox">
+            <label class="form-check-label" for="media-setup-enabled">Enable media display</label>
+          </div>
+          <div id="media-destinations" class="d-flex flex-column gap-3"></div>
+          <button type="button" class="btn btn-sm btn-outline-primary mt-3" id="media-add-destination">Add media player</button>
+          <details class="media-disclosure mt-3">
+            <summary>Advanced setup</summary>
+            <label class="form-label mt-3" for="media-node-path">Node.js executable path <span class="text-muted">(optional)</span></label>
+            <input class="form-control" type="text" id="media-node-path" placeholder="Leave blank to find Node.js automatically" autocomplete="off">
+            <p class="form-text mb-0">This path is on the TDeck server. An explicit path can be used if Node.js is not in the server's PATH. Changing it requires Admin access.</p>
+          </details>
+          <button type="submit" class="btn btn-primary mt-3" id="media-save-setup">Save setup</button>
+        </fieldset>
+      </form>
+      <p class="small mt-3 mb-0" id="media-setup-status" role="status">Loading setup…</p>
+      <button type="button" class="btn btn-sm btn-outline-secondary mt-2 d-none" id="media-retry-setup">Retry setup</button>
+    </div>
+  </details>
+
+  <div class="media-workspace">
+    <section class="card media-library" aria-labelledby="media-library-title">
+      <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+          <h2 class="h5 mb-0" id="media-library-title">Image library <span class="text-muted small" id="media-count"></span></h2>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="media-refresh-library">Refresh library</button>
+        </div>
+        <p class="small text-muted mb-3">Add images for the routing media picker and prepare presets for recurring events.</p>
+        {% if media_permissions.upload %}
+        <details id="media-upload-panel" class="media-disclosure mb-3">
+          <summary>Add an image</summary>
+          <form id="media-upload-form" class="mt-3">
+            <label class="form-label" for="media-upload-file">Choose a photo or image</label>
+            <input class="form-control" id="media-upload-file" name="file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif" required aria-describedby="media-upload-help">
+            <div class="form-text" id="media-upload-help">JPEG, PNG, WebP, HEIC or HEIF, up to 20 MB and 40 megapixels. Images are fitted to the ATEM video format with black bars where needed, without cropping.</div>
+            <label class="form-label mt-3" for="media-upload-name">Image name <span class="text-muted">(optional)</span></label>
+            <input class="form-control" id="media-upload-name" name="name" type="text" maxlength="120" placeholder="For example, Mother's Day">
+            <button class="btn btn-primary mt-3" id="media-upload-button" type="submit">Upload to library</button>
+          </form>
+        </details>
+        {% endif %}
+        <div class="media-library-toolbar mb-3">
+          <div class="flex-grow-1">
+            <label class="visually-hidden" for="media-search">Search images</label>
+            <input class="form-control" id="media-search" type="search" placeholder="Search images…" autocomplete="off">
+          </div>
+          <div>
+            <label class="visually-hidden" for="media-filter">Image filter</label>
+            <select class="form-select" id="media-filter"><option value="all">All images</option><option value="presets">Presets</option></select>
+          </div>
+        </div>
+        <p class="text-muted small" id="media-library-status" role="status">Loading your image library…</p>
+        <div id="media-grid" class="media-grid" aria-label="Choose an image to manage" aria-busy="true"></div>
+      </div>
+    </section>
+
+    <section class="card media-selection" aria-labelledby="media-selection-title">
+      <div class="card-body">
+        <h2 class="h5 mb-3" id="media-selection-title">Manage image</h2>
+        <p class="text-muted" id="media-selection-empty">Select an image to preview it and edit its details.</p>
+        <div id="media-selection-content" class="d-none">
+          <div class="media-preview"><img id="media-preview-image" alt=""></div>
+          <h3 class="h6 mt-3 mb-1 media-wrap" id="media-selected-name"></h3>
+          <p class="small text-muted" id="media-selected-details"></p>
+          {% if media_permissions.manage %}
+          <form class="mt-3" id="media-edit-form">
+            <label class="form-label" for="media-edit-name">Image name</label>
+            <input class="form-control" id="media-edit-name" type="text" required maxlength="120">
+            <div class="form-check mt-3">
+              <input class="form-check-input" type="checkbox" id="media-edit-preset">
+              <label class="form-check-label" for="media-edit-preset">Save as a preset</label>
+            </div>
+            <div class="form-text">Presets are reusable images, such as Mother's Day, Father's Day or Team Night.</div>
+            <div class="d-flex flex-wrap gap-2 mt-3">
+              <button type="submit" id="media-save-image" class="btn btn-sm btn-outline-primary">Save details</button>
+              <button type="button" id="media-delete-image" class="btn btn-sm btn-outline-danger">Delete image</button>
+            </div>
+          </form>
+          {% endif %}
+        </div>
+        {% if media_permissions.load %}
+        <details class="media-disclosure mt-4" id="media-test-panel">
+          <summary>Test a media player</summary>
+          <div class="mt-3">
+            <label class="form-label" for="media-player">Media player</label>
+            <select class="form-select" id="media-player" disabled><option value="">Loading players…</option></select>
+            <p class="small text-muted mt-2 mb-2" id="media-player-detail"></p>
+            <p class="small mb-3">All TVs or outputs already using this media player will change together when the image loads.</p>
+            <button type="button" class="btn btn-outline-primary w-100" id="media-load-button" disabled>Load selected image</button>
+            <p class="form-text mb-0" id="media-load-help">Select an image and a configured media player.</p>
+          </div>
+        </details>
+        {% endif %}
+        <div id="media-job" class="d-none mt-3" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_asset('media_config.js') }}"></script>
+{% endblock %}

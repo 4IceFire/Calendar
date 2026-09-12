@@ -152,15 +152,20 @@ Starting `webui.py` starts the calendar scheduler automatically. Do not also run
 
 ## Media library and ATEM still players
 
-The **Media** page (`/media`) stores images on the TDeck server, lets permitted
-users mark reusable images as presets, and loads a selected image into a
-configured ATEM media player. This first stage controls stills and player
-selection. TV selection, AUX changes and VideoHub routing are future work.
+In **Routing**, choose an output, choose **Media**, then select an existing image
+or open **Upload an image**. Uploading saves the image to TDeck and displays it
+on the selected output. The page returns to the output list only after confirmed
+completion. If display fails, the saved image remains available for retry.
+The operator pages show images and progress; player assignments, connection
+status, presets and library management live in **Config → Media**.
 
 The signal path is: **TDeck library → ATEM still slot → media player → AUX →
 VideoHub → TV**. A still slot stores an image; a media player selects one slot.
-Every existing output using a player changes together when that player changes.
-Different simultaneous images need different players.
+TDeck automatically chooses a mapped player whose VideoHub input is unused by
+other outputs. It can replace the image on the selected output's own exclusive
+player. If every eligible player feeds another output, it refuses the request.
+Different simultaneous images need different players. Images are not shared
+across players automatically in this version.
 
 ### Windows setup
 
@@ -173,23 +178,26 @@ Different simultaneous images need different players.
    npm ci --omit=dev
    ```
 
-3. Restart TDeck and open **Config → ATEM Media** (`/config/atem-media`). The
+3. Restart TDeck and open **Config → Media** (`/config/atem-media`). The
    switcher address/port come from **Config → ATEM**. Uploads start disabled;
    there are no preselected players or still slots.
 4. Add each player that TDeck may control, give it a useful label, and reserve
    at least two distinct still slots per player. Slot lists cannot overlap.
-   Use ATEM's displayed numbering (player 1, still 1, etc.). Enable uploads and
-   save. An administrator can optionally specify the trusted server Node.js
+   Map each player's **ATEM AUX** to the **VideoHub input** physically connected
+   to that AUX. Players, AUXes, inputs and slot reservations must be distinct.
+   Use displayed numbering (player 1, still 1, AUX 1, input 1). Enable media
+   display and save. Existing players without AUX/input mappings remain usable
+   for Config testing, but cannot be selected automatically for TV display.
+   An administrator can optionally specify the trusted server Node.js
    executable in Advanced setup if PATH discovery is unavailable.
-5. In **Permissions → Groups**, grant **Media Library** for browsing, then
-   independently grant **Media: Upload images**, **Media: Manage images and
-   presets**, and/or **Media: Load ATEM players**. Action grants also require
-   Media Library access. Admin has full access; new media grants default off
-   for other groups. Config access controls setup, including a separate setup
-   page for users without library access.
-6. Open Media, upload an image, select it and choose a configured player. Use
-   **Load selected image** and wait for verified completion. Image details let
-   managers rename images and mark presets such as Mother's Day or Team Night.
+5. In **Permissions → Groups**, operators need **Routing**, **Media Library**
+   and **Media: Display images**. Add **Media: Upload images** if they may upload.
+   Their existing Routing allow-lists must permit the target output and at
+   least one mapped VideoHub input. Config access grants setup and image/preset
+   management even without a Media Library grant. Direct player testing also
+   requires Media Library + Media display access. Admin has full access.
+6. In Config → Media, add images and mark recurring graphics as presets, such as
+   Mother's Day or Team Night. Test the full operator flow through Routing.
 
 TDeck detects the connected ATEM's video mode and player/still counts, including
 the distinction between 1080p59.94 and 1080p60. Images keep their aspect ratio and
@@ -198,15 +206,22 @@ Supported uploads are JPEG, PNG, WebP, HEIC and HEIF, up to 20 MiB and 40
 megapixels. Animated files are rejected. Stored PNGs have corrected orientation,
 sRGB color and no embedded EXIF/location metadata.
 
-Reserve slots exclusively for TDeck in ATEM Software Control and other clients.
+Reserve the players, still slots, AUXes and their VideoHub inputs exclusively
+for TDeck. Do not use those players in ATEM program/keyers or unrelated AUXes.
 For each load, TDeck chooses an unselected reserved slot, waits for transfer and
 image-hash confirmation, then selects and verifies the player. It protects
 every player's retained still selection and refuses a load when no reserved
-slot is free. This is not an atomic transaction against other ATEM clients:
-do not edit reserved slots or the destination player during a load. A failed
-verification may follow a hardware change, so inspect the player state before
-retrying. Loads are serialized, have a three-minute deadline, and are never
-automatically repeated after reconnection or restart.
+slot is free. The display coordinator uses complete, fresh VideoHub routes to
+allocate a channel, confirms the player and AUX, then routes and verifies the
+selected output. Other TDeck web/API route and preset writes return a busy
+response while a display is running. ATEM transfers have a three-minute deadline;
+the complete display job has a 200-second deadline with bounded network calls.
+Requests are never automatically replayed after reconnection or restart.
+
+These steps are not an atomic transaction against external ATEM/VideoHub clients
+or separate CLI processes. Do not edit the reserved paths or target output during
+a display. A failed verification may follow a hardware change, so check the
+output before retrying. Actual ATEM/VideoHub compatibility still needs a live test.
 
 The library works while the ATEM is offline. Deleting a library image does not
 clear the copy already in the switcher. Images and `index.json` live together
@@ -222,11 +237,15 @@ No extra HTTP service, Companion action or manually launched helper is needed.
 Hardware compatibility still needs a controlled first test with your switcher's
 firmware and explicitly reserved players/slots; automated tests use fakes.
 
-For an isolated browser check, run `python tests/media_ui_harness.py`, then in
-another terminal set `TDECK_BASE_URL=http://127.0.0.1:5063` and run
-`npx playwright test tests/browser/media.spec.js --workers=1`. The fixture uses
-temporary storage, simulated devices and blocked outbound hardware traffic.
-Use `npm ci` (without `--omit=dev`) to install the browser-test tools.
+For a home demo, run `python tests/media_ui_harness.py` and open
+`http://127.0.0.1:5063/routing`. Choose Foyer, Media, then an image; the simulated
+display returns to the output list. Config → Media is available at
+`http://127.0.0.1:5063/config/atem-media`. Data resets when the demo stops, and
+outbound hardware traffic is blocked. The demo has no sign-in or real transfers.
+
+For browser checks, install tools with `npm ci`, run the demo, then in another
+terminal set `TDECK_BASE_URL=http://127.0.0.1:5063` and run
+`npx playwright test tests/browser/media.spec.js tests/browser/media_config.spec.js --workers=1`.
 
 ## DiGiCo Personal Mixes
 

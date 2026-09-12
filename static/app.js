@@ -334,6 +334,9 @@ function _initRoutingPage() {
   let state = { configured: false, inputs: [], outputs: [], routing: [] };
   let selectedOutput = null;
   let selectedInput = null;
+  let mediaNotice = root.dataset.mediaNotice || '';
+  const requestedOutput = Number(new URLSearchParams(window.location.search).get('output')) || null;
+  let restoredOutput = false;
 
   function _showRoutingStep(step) {
     if (!step) return;
@@ -390,6 +393,8 @@ function _initRoutingPage() {
       btn.textContent = _routingLabel(o);
       if (selectedOutput === n) btn.classList.add('active');
       btn.addEventListener('click', async () => {
+        mediaNotice = '';
+        _routingSetStatus('', '');
         selectedOutput = n;
         const curIn = _getCurrentInputForOutput(n);
         selectedInput = curIn;
@@ -432,6 +437,15 @@ function _initRoutingPage() {
       });
       elInputs.appendChild(btn);
     });
+
+    if (root.dataset.mediaAvailable === 'true' && selectedOutput) {
+      const media = document.createElement('a');
+      media.id = 'routing-media-choice';
+      media.className = 'btn btn-outline-primary routing-choice';
+      media.textContent = 'Media';
+      media.href = '/media?output=' + encodeURIComponent(selectedOutput);
+      elInputs.appendChild(media);
+    }
 
     if (!inputs.length) {
       const div = document.createElement('div');
@@ -512,14 +526,24 @@ function _initRoutingPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Unable to load VideoHub state');
       state = data;
+      if (!restoredOutput && requestedOutput) {
+        restoredOutput = true;
+        const accessible = _filterList(state.outputs, allowedOutputs);
+        if (accessible.some(item => Number(item.number) === requestedOutput)) {
+          selectedOutput = requestedOutput;
+          selectedInput = _getCurrentInputForOutput(selectedOutput);
+          outputStep.classList.add('d-none');
+          _showRoutingStep(inputStep);
+        }
+      }
       if (data.refreshing) {
-        _routingSetStatus('Loading the latest VideoHub state…', 'warn');
+        _routingSetStatus('Loading outputs…', 'warn');
       } else if (!data.configured) {
-        _routingSetStatus('VideoHub not configured (set videohub_ip). Showing fallback ports.', 'warn');
+        _routingSetStatus('Routing is not available yet. Ask your team administrator to complete setup.', 'warn');
       } else if (data.error) {
-        _routingSetStatus(`Could not refresh VideoHub: ${data.error}`, 'warn');
+        _routingSetStatus('Routing is temporarily unavailable. Please try again shortly.', 'warn');
       } else {
-        _routingSetStatus('', '');
+        _routingSetStatus(mediaNotice, mediaNotice ? 'ok' : '');
       }
       _renderOutputs();
       _renderInputs();

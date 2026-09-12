@@ -1,137 +1,61 @@
 {% extends 'base.html' %}
-
-{% set setup_only = setup_only|default(false) %}
-{% set page_title = 'ATEM Media Setup' if setup_only else 'Media' %}
-{% set page_subtitle = 'Reserve media players and still slots for TDeck.' if setup_only else 'Keep your images together and load them into an ATEM media player.' %}
-{% set config_active_tab = 'atem-media' %}
+{% set upload_page = upload_page|default(false) %}
+{% set page_title = 'Upload image' if upload_page else 'Media' %}
+{% set page_subtitle = ('Choose an image to display on ' ~ output_label ~ '.') if output and can_display else 'Choose an image from the library.' %}
 
 {% block head_extra %}
 <link rel="stylesheet" href="{{ static_asset('media.css') }}">
 {% endblock %}
 
 {% block content %}
-<div id="media-page" data-permissions='{{ media_permissions|tojson }}' data-setup-only="{{ 'true' if setup_only else 'false' }}">
-  {% if setup_only %}{% include '_config_tabs.html' %}{% endif %}
+<div id="media-page" class="media-operator" data-output="{{ output or '' }}" data-output-label="{{ output_label }}" data-can-display="{{ 'true' if can_display else 'false' }}" data-upload-page="{{ 'true' if upload_page else 'false' }}">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+    <a class="btn btn-outline-secondary media-return-link" id="media-back" href="{{ '/media' if upload_page else '/routing' }}{% if output %}?output={{ output }}{% endif %}">{{ 'Back to images' if upload_page else ('Back to inputs' if output else 'Choose an output') }}</a>
+    {% if not upload_page and media_permissions.upload %}
+    <a class="btn btn-primary media-return-link" id="media-upload-link" href="/media/upload{% if output %}?output={{ output }}{% endif %}">Upload image</a>
+    {% endif %}
+  </div>
   <div id="media-message" class="d-none mb-3" role="status" aria-live="polite"></div>
-  <section class="card mb-3" aria-label="ATEM media connection">
-    <div class="card-body media-connection">
-      <div>
-        <div class="fw-semibold" id="media-connection-status" role="status">Checking ATEM media connection…</div>
-        <div class="small text-muted" id="media-connection-detail">Your image library is available independently of the switcher.</div>
+  <section id="media-display-progress" class="card media-progress-card d-none mb-4" aria-live="polite" aria-label="Image display progress">
+    <div class="card-body d-flex flex-wrap align-items-center gap-3">
+      <img id="media-progress-image" class="media-progress-image" alt="">
+      <div class="media-progress-copy">
+        <h2 class="h6 mb-1" id="media-progress-name"></h2>
+        <p class="mb-0" id="media-progress-message" role="status"></p>
+        <button type="button" id="media-display-retry" class="btn btn-primary mt-3 d-none">Try again</button>
       </div>
-      <button type="button" class="btn btn-sm btn-outline-secondary" id="media-refresh-state">Refresh status</button>
     </div>
   </section>
 
-  {% if not setup_only %}
-  <div class="media-workspace">
-    <section class="card media-library" aria-labelledby="media-library-title">
-      <div class="card-body">
-        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-          <h2 class="h5 mb-0" id="media-library-title">Image library <span class="text-muted small" id="media-count"></span></h2>
-          <button type="button" class="btn btn-sm btn-outline-secondary" id="media-refresh-library">Refresh library</button>
-        </div>
-        {% if media_permissions.upload %}
-        <details id="media-upload-panel" class="media-disclosure mb-3">
-          <summary>Upload an image</summary>
-          <form id="media-upload-form" class="mt-3">
-            <label class="form-label" for="media-upload-file">Choose a photo or image</label>
-            <input class="form-control" id="media-upload-file" name="file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif" required aria-describedby="media-upload-help">
-            <div class="form-text" id="media-upload-help">JPEG, PNG, WebP, HEIC or HEIF, up to 20 MB and 40 megapixels. Images are fitted to the ATEM video format with black bars where needed, without cropping.</div>
-            <label class="form-label mt-3" for="media-upload-name">Image name <span class="text-muted">(optional)</span></label>
-            <input class="form-control" id="media-upload-name" name="name" type="text" maxlength="120" placeholder="For example, Mother's Day">
-            <button class="btn btn-primary mt-3" id="media-upload-button" type="submit">Upload to library</button>
-          </form>
-        </details>
-        {% endif %}
-        <div class="media-library-toolbar mb-3">
-          <div class="flex-grow-1">
-            <label class="visually-hidden" for="media-search">Search images</label>
-            <input class="form-control" id="media-search" type="search" placeholder="Search images…" autocomplete="off">
-          </div>
-          <div>
-            <label class="visually-hidden" for="media-filter">Image filter</label>
-            <select class="form-select" id="media-filter"><option value="all">All images</option><option value="presets">Presets</option></select>
-          </div>
-        </div>
-        <p class="text-muted small" id="media-library-status" role="status">Loading your image library…</p>
-        <div id="media-grid" class="media-grid" aria-label="Choose an image" aria-busy="true"></div>
-      </div>
-    </section>
-
-    <section class="card media-selection" aria-labelledby="media-selection-title">
-      <div class="card-body">
-        <h2 class="h5 mb-3" id="media-selection-title">Selected image</h2>
-        <p class="text-muted" id="media-selection-empty">Select an image from the library to preview it.</p>
-        <div id="media-selection-content" class="d-none">
-          <div class="media-preview"><img id="media-preview-image" alt=""></div>
-          <h3 class="h6 mt-3 mb-1 media-wrap" id="media-selected-name"></h3>
-          <p class="small text-muted" id="media-selected-details"></p>
-          {% if media_permissions.manage %}
-          <details class="media-disclosure mb-3" id="media-edit-panel">
-            <summary>Image details</summary>
-            <form class="mt-3" id="media-edit-form">
-              <label class="form-label" for="media-edit-name">Image name</label>
-              <input class="form-control" id="media-edit-name" type="text" required maxlength="120">
-              <div class="form-check mt-3">
-                <input class="form-check-input" type="checkbox" id="media-edit-preset">
-                <label class="form-check-label" for="media-edit-preset">Save as a preset</label>
-              </div>
-              <div class="form-text">Presets are reusable images, such as Mother's Day, Father's Day or Team Night.</div>
-              <div class="d-flex flex-wrap gap-2 mt-3">
-                <button type="submit" id="media-save-image" class="btn btn-sm btn-outline-primary">Save details</button>
-                <button type="button" id="media-delete-image" class="btn btn-sm btn-outline-danger">Delete image</button>
-              </div>
-            </form>
-          </details>
-          {% endif %}
-        </div>
-        {% if media_permissions.load %}
-        <div class="media-load-section pt-3 mt-3 border-top">
-          <h3 class="h6">Load into ATEM</h3>
-          <label class="form-label" for="media-player">Media player</label>
-          <select class="form-select" id="media-player" disabled><option value="">Loading players…</option></select>
-          <p class="small text-muted mt-2 mb-2" id="media-player-detail"></p>
-          <p class="small mb-3">All TVs or outputs already using this media player will change together when the image loads.</p>
-          <button type="button" class="btn btn-primary w-100" id="media-load-button" disabled>Load selected image</button>
-          <p class="form-text mb-0" id="media-load-help">Select an image and a configured media player.</p>
-        </div>
-        {% else %}
-        <p class="small text-muted pt-3 mt-3 border-top mb-0">Your group can browse this library. Loading images into ATEM requires the Media load permission.</p>
-        {% endif %}
-        <div id="media-job" class="d-none mt-3" role="status" aria-live="polite"></div>
-      </div>
-    </section>
-  </div>
-  {% endif %}
-
-  {% if can_configure_media %}
-  <details id="media-setup" class="card mt-4">
-    <summary class="card-header">ATEM media setup</summary>
-    <div class="card-body">
-      <p class="small text-muted">Choose the players and still slots reserved for TDeck. Each player needs at least two exclusive still slots so a new image can upload before the player switches to it. Reserve slots that are not used by other church graphics.</p>
-      <p class="small" id="media-setup-capabilities">Switcher capabilities will appear when connected.</p>
-      <form id="media-setup-form">
-        <fieldset id="media-setup-fields" disabled>
-          <div class="form-check mb-3">
-            <input class="form-check-input" id="media-setup-enabled" type="checkbox">
-            <label class="form-check-label" for="media-setup-enabled">Enable ATEM media uploads</label>
-          </div>
-          <div id="media-destinations" class="d-flex flex-column gap-3"></div>
-          <button type="button" class="btn btn-sm btn-outline-primary mt-3" id="media-add-destination">Add media player</button>
-          <details class="media-disclosure mt-3">
-            <summary>Advanced setup</summary>
-            <label class="form-label mt-3" for="media-node-path">Node.js executable path <span class="text-muted">(optional)</span></label>
-            <input class="form-control" type="text" id="media-node-path" placeholder="Leave blank to find Node.js automatically" autocomplete="off">
-            <p class="form-text mb-0">This path is on the TDeck server. An explicit path can be used if Node.js is not in the server's PATH.</p>
-          </details>
-          <button type="submit" class="btn btn-primary mt-3" id="media-save-setup">Save setup</button>
-        </fieldset>
+  {% if upload_page %}
+  <section class="card media-upload-card">
+    <div class="card-body p-3 p-sm-4">
+      <form id="media-upload-form">
+        <label class="form-label fw-semibold" for="media-upload-file">Choose a photo or image</label>
+        <input class="form-control" id="media-upload-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif" required aria-describedby="media-upload-help">
+        <p class="form-text" id="media-upload-help">JPEG, PNG, WebP or HEIC. Up to 20 MB.</p>
+        <div id="media-upload-preview" class="media-preview d-none mt-3"><img id="media-upload-preview-image" alt="Image preview"></div>
+        <label class="form-label mt-3" for="media-upload-name">Image name <span class="text-muted">(optional)</span></label>
+        <input class="form-control" id="media-upload-name" type="text" maxlength="120" placeholder="For example, Team Night">
+        <button class="btn btn-primary mt-4" id="media-upload-button" type="submit">{{ 'Upload and display' if can_display and output else 'Upload image' }}</button>
       </form>
-      <p class="small mt-3 mb-0" id="media-setup-status" role="status">Loading setup…</p>
-      <button type="button" class="btn btn-sm btn-outline-secondary mt-2 d-none" id="media-retry-setup">Retry setup</button>
     </div>
-  </details>
+  </section>
+  {% else %}
+  {% if not output %}<p class="text-muted">Choose an output in Routing to display an image. You can preview the library here.</p>{% elif not can_display %}<p class="text-muted">Select an image to preview it.</p>{% endif %}
+  <div class="media-library-toolbar mb-4">
+    <div class="flex-grow-1"><label class="visually-hidden" for="media-search">Search images</label><input class="form-control" id="media-search" type="search" placeholder="Search images…" autocomplete="off"></div>
+    <div><label class="visually-hidden" for="media-filter">Image filter</label><select class="form-select" id="media-filter"><option value="all">All images</option><option value="presets">Presets</option></select></div>
+  </div>
+  <p class="small text-muted" id="media-library-status" role="status">Loading images…</p>
+  <button type="button" id="media-library-retry" class="btn btn-outline-secondary d-none mb-3">Try again</button>
+  <div id="media-grid" class="media-grid" aria-label="Choose an image" aria-busy="true"></div>
+  <div class="modal fade" id="media-preview-modal" tabindex="-1" aria-labelledby="media-preview-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg"><div class="modal-content">
+      <div class="modal-header"><h2 class="modal-title fs-5" id="media-preview-title"></h2><button type="button" class="btn-close" id="media-preview-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body"><div class="media-preview"><img id="media-preview-image" alt=""></div></div>
+    </div></div>
+  </div>
   {% endif %}
 </div>
 {% endblock %}
