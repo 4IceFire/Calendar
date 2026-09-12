@@ -150,6 +150,84 @@ It reads `webserver_port` from `config.json` and prints the URL at startup.
 The Web UI also has controls to start/stop registered apps (including the calendar scheduler) from the browser.
 Starting `webui.py` starts the calendar scheduler automatically. Do not also run `cli.py start calendar` for the same installation; that would create a second scheduler process and can duplicate cues.
 
+## Media library and ATEM still players
+
+The **Media** page (`/media`) stores images on the TDeck server, lets permitted
+users mark reusable images as presets, and loads a selected image into a
+configured ATEM media player. This first stage controls stills and player
+selection. TV selection, AUX changes and VideoHub routing are future work.
+
+The signal path is: **TDeck library → ATEM still slot → media player → AUX →
+VideoHub → TV**. A still slot stores an image; a media player selects one slot.
+Every existing output using a player changes together when that player changes.
+Different simultaneous images need different players.
+
+### Windows setup
+
+1. Install the [Node.js 24 LTS runtime](https://nodejs.org/en/download) on the
+   TDeck server, with Node.js on the server account's PATH.
+2. In the Calendar folder, using TDeck's Python environment, run:
+
+   ```powershell
+   python -m pip install -r requirements.txt
+   npm ci --omit=dev
+   ```
+
+3. Restart TDeck and open **Config → ATEM Media** (`/config/atem-media`). The
+   switcher address/port come from **Config → ATEM**. Uploads start disabled;
+   there are no preselected players or still slots.
+4. Add each player that TDeck may control, give it a useful label, and reserve
+   at least two distinct still slots per player. Slot lists cannot overlap.
+   Use ATEM's displayed numbering (player 1, still 1, etc.). Enable uploads and
+   save. An administrator can optionally specify the trusted server Node.js
+   executable in Advanced setup if PATH discovery is unavailable.
+5. In **Permissions → Groups**, grant **Media Library** for browsing, then
+   independently grant **Media: Upload images**, **Media: Manage images and
+   presets**, and/or **Media: Load ATEM players**. Action grants also require
+   Media Library access. Admin has full access; new media grants default off
+   for other groups. Config access controls setup, including a separate setup
+   page for users without library access.
+6. Open Media, upload an image, select it and choose a configured player. Use
+   **Load selected image** and wait for verified completion. Image details let
+   managers rename images and mark presets such as Mother's Day or Team Night.
+
+TDeck detects the connected ATEM's video mode and player/still counts, including
+the distinction between 1080p59.94 and 1080p60. Images keep their aspect ratio and
+are centered on an opaque black frame; no automatic cropping or stretching.
+Supported uploads are JPEG, PNG, WebP, HEIC and HEIF, up to 20 MiB and 40
+megapixels. Animated files are rejected. Stored PNGs have corrected orientation,
+sRGB color and no embedded EXIF/location metadata.
+
+Reserve slots exclusively for TDeck in ATEM Software Control and other clients.
+For each load, TDeck chooses an unselected reserved slot, waits for transfer and
+image-hash confirmation, then selects and verifies the player. It protects
+every player's retained still selection and refuses a load when no reserved
+slot is free. This is not an atomic transaction against other ATEM clients:
+do not edit reserved slots or the destination player during a load. A failed
+verification may follow a hardware change, so inspect the player state before
+retrying. Loads are serialized, have a three-minute deadline, and are never
+automatically repeated after reconnection or restart.
+
+The library works while the ATEM is offline. Deleting a library image does not
+clear the copy already in the switcher. Images and `index.json` live together
+under `media_library/` beside the application on Windows, or `/data/media_library`
+when `/data` exists on Linux. Set `TDECK_MEDIA_DIR` in the server environment to
+use another durable folder. Back up this entire folder; the existing Config ZIP
+does not yet include the image library. Uploaded media stays out of Git.
+
+The media transport uses a TDeck-managed private Node child process with pinned
+[`atem-connection`](https://github.com/Sofie-Automation/sofie-atem-connection).
+Its transfer support is separate from the existing PyATEMMax audio integration.
+No extra HTTP service, Companion action or manually launched helper is needed.
+Hardware compatibility still needs a controlled first test with your switcher's
+firmware and explicitly reserved players/slots; automated tests use fakes.
+
+For an isolated browser check, run `python tests/media_ui_harness.py`, then in
+another terminal set `TDECK_BASE_URL=http://127.0.0.1:5063` and run
+`npx playwright test tests/browser/media.spec.js --workers=1`. The fixture uses
+temporary storage, simulated devices and blocked outbound hardware traffic.
+Use `npm ci` (without `--omit=dev`) to install the browser-test tools.
+
 ## DiGiCo Personal Mixes
 
 TDeck can act as the one remote device connected to a DiGiCo console while serving a separate browser mixer to multiple worship-team devices. The desk-side connection is standard OSC over UDP; browsers use TDeck's normal HTTP server and do not open their own desk sockets.

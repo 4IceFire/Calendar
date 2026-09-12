@@ -9,6 +9,31 @@ This document lists the HTTP API endpoints implemented by the Flask Web UI serve
 - Auth: authenticated browser session or scoped Bearer service token when `auth_enabled` is true
 - Format: JSON (unless otherwise noted)
 
+## Media library and ATEM players
+
+These endpoints are browser-session only, including their `/api/v1/...` aliases.
+Service tokens and scheduler calls are denied. Mutations require the usual CSRF
+and same-origin checks. Image numbers in configuration and responses are 1-based.
+
+| Method and path | Access | Contract |
+| --- | --- | --- |
+| `GET /api/media` | Media Library | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, creation time, `url` and `thumbnail_url`. |
+| `POST /api/media/upload` | Library + Media upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. |
+| `PATCH /api/media/<id>` | Library + Media manage | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
+| `DELETE /api/media/<id>` | Library + Media manage | Removes the local image. An active load of it returns 409. Does not clear ATEM stills. |
+| `GET /api/atem/media/state` | Library or Config | Cached connection, detected format/capacity, configured destinations, players/stills and current/last `job`. An offline state is a successful HTTP read. |
+| `POST /api/atem/media/load` | Library + Media load | JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Poll state for terminal status; 202 means queued, not displayed. |
+| `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path` and `atem_media_destinations`. |
+| `PUT /api/config/atem-media` | Config | Partial configuration object with those keys only. Executable-path changes additionally require Admin. Destinations are `{player,label,slots}` with two or more exclusive still slots per player. |
+
+Job statuses are `queued`, `preparing`, `uploading`, `selecting`, `succeeded` and
+`failed`. Jobs include their ID, image ID/name, player, selected slot, timestamps
+and any error. Success requires image-hash and player readback. Jobs are serialized;
+a busy load or setup change returns 409. Validation returns 400, missing media 404,
+oversized requests 413, and storage/runtime failures 503. The image URLs require
+library access and return PNGs with private/no-store caching. No AUX or VideoHub
+routing is performed by these endpoints.
+
 ## API authentication and migration
 
 TDeck applies an explicit, fail-closed policy to every `/api` endpoint when

@@ -16,6 +16,7 @@ calendar_triggers.json
 transcription_sender_ui.pid
 config_import_backups/
 videohub_room_images/
+media_library/
 hisense_certs/
 
 # Local Config/Event Files

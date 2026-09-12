@@ -8,5 +8,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.51.0"
+  },
+  "dependencies": {
+    "atem-connection": "3.10.2"
   }
 }

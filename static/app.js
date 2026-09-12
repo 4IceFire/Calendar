@@ -892,6 +892,7 @@ function _renderConfigGroups(cfg) {
 
   // Legacy keys that should not be edited anymore.
   const hiddenKeys = new Set([
+    'atem_media_enabled', 'atem_media_node_path', 'atem_media_destinations',
     'videohub_allowed_outputs',
     'videohub_allowed_inputs',
     // Managed by the dedicated DiGiCo Mixer setup page.
@@ -1071,6 +1072,19 @@ function _renderConfigGroups(cfg) {
         sub.appendChild(_renderConfigField(k, cfg[k]));
       }
       body.appendChild(sub);
+    }
+  }
+
+  const atemPanel = Array.from(panels.querySelectorAll('[data-group-id]'))
+    .find(p => String(p.dataset.groupId) === _groupIdFromTitle('ATEM'));
+  if (atemPanel) {
+    const body = atemPanel.querySelector('.card-body');
+    if (body) {
+      const mediaLink = document.createElement('a');
+      mediaLink.href = '/config/atem-media';
+      mediaLink.className = 'btn btn-outline-primary mt-3';
+      mediaLink.textContent = 'Media library and player setup';
+      body.appendChild(mediaLink);
     }
   }
 

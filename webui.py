@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import sys
 from collections import deque
+from functools import wraps
 import sqlite3
 import secrets
 import uuid
@@ -32,6 +33,7 @@ from api_security import (
 
 from werkzeug.serving import make_server
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
 import json
 import re
 from datetime import datetime, timedelta
@@ -2256,6 +2258,13 @@ def require_page(page_key: str, friendly_name: str):
     return _decorator
 
 
+# Action grants use the existing group_pages storage and permission editor.
+# They grant no page by themselves; all media operations also require page:media.
+_register_page('page:media_upload', 'Media: Upload images')
+_register_page('page:media_manage', 'Media: Manage images and presets')
+_register_page('page:media_load', 'Media: Load ATEM players')
+
+
 def _get_group_by_name(name: str) -> sqlite3.Row | None:
     conn = _db()
     try:
@@ -2453,7 +2462,7 @@ def _bootstrap_default_users_roles() -> None:
                     all_pages = ['page:home', *all_pages]
 
                 if not td_has:
-                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin')]
+                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin') and not k.startswith('page:media')]
                     _set_group_pages(td_group_id, td_pages)
                 if not sp_has:
                     sp_pages = [k for k in all_pages if k in ('page:home', 'page:timers')]
@@ -2955,6 +2964,7 @@ _PAGE_LANDING_PATHS = (
     ('page:videohub', '/videohub'),
     ('page:atem_audio', '/foyer-audio'),
     ('page:routing', '/routing'),
+    ('page:media', '/media'),
     ('page:pixie_controls', '/pixie'),
     ('page:digico_mixer', '/personal-mixes'),
     ('page:surface_controls', '/surface-controls'),
@@ -3019,6 +3029,8 @@ def _csrf_token() -> str:
 def _validate_csrf() -> bool:
     try:
         sent = request.form.get('_csrf') or request.headers.get('X-CSRF-Token')
+    except RequestEntityTooLarge:
+        raise
     except Exception:
         sent = None
     return bool(sent) and str(sent) == str(session.get('_csrf'))
@@ -3192,6 +3204,12 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
 
     if p.startswith('/api/config/service-tokens'):
         return {'scope': 'admin', 'pages': ('page:config',), 'service_tokens': False}
+    if p == '/api/config/atem-media':
+        return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
+    if p == '/api/atem/media/state':
+        return {'scope': 'atem', 'pages': ('page:media', 'page:config'), 'service_tokens': False}
+    if p == '/api/media' or p.startswith('/api/media/') or p.startswith('/api/atem/media/'):
+        return {'scope': 'atem', 'pages': ('page:media',), 'service_tokens': False}
     if p.startswith('/api/admin/'):
         return {'scope': 'admin', 'pages': ('page:admin',)}
     if p.startswith('/api/config') or p.startswith('/api/companion-surfaces-config'):
@@ -3413,7 +3431,7 @@ def _api_same_origin_request() -> bool:
 
 def _api_request_within_size_limit(path: str) -> tuple[bool, int]:
     cfg = _auth_cfg()
-    upload = path.startswith('/api/config/import/') or path.endswith('/background')
+    upload = path.startswith('/api/config/import/') or path.endswith('/background') or path == '/api/media/upload'
     key = 'api_upload_max_request_bytes' if upload else 'api_max_request_bytes'
     default_limit = 64 * 1024 * 1024 if upload else 2 * 1024 * 1024
     try:
@@ -3716,6 +3734,12 @@ def _api_security_gate():
 @app.before_request
 def _auth_gate():
     p = request.path or ''
+    if _api_normalized_path(p) == '/api/media/upload':
+        # Enforce streaming multipart size before authentication/CSRF accesses
+        # request.form, including bodies with no Content-Length header.
+        from media_library import MAX_UPLOAD_BYTES
+        _, upload_limit = _api_request_within_size_limit('/api/media/upload')
+        request.max_content_length = min(upload_limit, MAX_UPLOAD_BYTES + 1024 * 1024)
 
     # Only the in-process dispatcher can place this marker on Flask's request
     # context. It is not derived from an address, header, cookie, or payload.
@@ -3816,6 +3840,15 @@ def _auth_gate():
         return abort(403)
 
     return None
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def _request_entity_too_large(error):
+    if (request.path or '').startswith('/api/'):
+        _api_security_event('security.api.request_too_large', 'Rejected an oversized API request',
+                            details={'path': _api_normalized_path()})
+        return _api_json_error(413, 'request_too_large', 'The upload exceeds the request size limit.')
+    return error
 
 
 @app.route('/auth/ping', methods=['GET'])
@@ -6951,6 +6984,258 @@ def routing_page():
         pass
 
     return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs)
+
+
+_media_library_lock = threading.Lock()
+_media_operation_lock = threading.RLock()
+_media_library_instance = None
+_MEDIA_CONFIG_DEFAULTS = {
+    'atem_media_enabled': False,
+    'atem_media_node_path': '',
+    'atem_media_destinations': [],
+}
+_MEDIA_ACTIVE_JOBS = {'queued', 'preparing', 'uploading', 'selecting'}
+
+
+def _media_library_root() -> Path:
+    override = os.environ.get('TDECK_MEDIA_DIR', '').strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    if os.name != 'nt' and Path('/data').is_dir():
+        return Path('/data/media_library')
+    return Path(__file__).resolve().parent / 'media_library'
+
+
+def _get_media_library():
+    from media_library import MediaLibrary
+    global _media_library_instance
+    with _media_library_lock:
+        if _media_library_instance is None:
+            _media_library_instance = MediaLibrary(_media_library_root())
+        return _media_library_instance
+
+
+def _get_atem_media_manager():
+    from atem_media import get_atem_media_manager
+    return get_atem_media_manager(utils.get_config(), _get_media_library())
+
+
+def _active_media_job():
+    from atem_media import peek_atem_media_job
+    return peek_atem_media_job() or {}
+
+
+def _serialize_media_configuration(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _media_operation_lock:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def _media_permissions() -> dict[str, bool]:
+    return {
+        action: bool(can_access('page:media') and can_access('page:media_' + action))
+        for action in ('upload', 'manage', 'load')
+    }
+
+
+def _media_action_denied(action: str):
+    log_event('security.media.permission_denied', f'Denied media {action} without its group permission',
+              status='warning', details={'capability': 'page:media_' + action})
+    return _api_json_error(403, 'forbidden', f'This action requires the Media {action} permission.')
+
+
+def _media_item_payload(item: dict) -> dict:
+    return {
+        **item,
+        'url': url_for('media_image', media_id=item['id']),
+        'thumbnail_url': url_for('media_thumbnail', media_id=item['id']),
+    }
+
+
+def _media_api_failure(action: str, error: Exception, status_code: int = 400):
+    if isinstance(error, KeyError):
+        message, status_code = 'Image not found.', 404
+    elif isinstance(error, (OSError, RuntimeError)):
+        message, status_code = 'The media operation could not finish. Check the Activity Log.', 503
+    else:
+        message = str(error)
+    log_event(action, message, status='failure', details={'error': str(error)})
+    return jsonify({'ok': False, 'error': message}), status_code
+
+
+@app.route('/media')
+@require_page('page:media', 'Media Library')
+def media_page():
+    return render_template(
+        'media.html', media_permissions=_media_permissions(),
+        can_configure_media=can_access('page:config'),
+    )
+
+
+@app.route('/config/atem-media')
+@require_page('page:config', 'Config')
+def atem_media_setup_page():
+    return render_template('media.html', setup_only=True, config_active_tab='atem-media',
+                           media_permissions={'upload': False, 'manage': False, 'load': False},
+                           can_configure_media=True)
+
+
+@app.route('/media/images/<media_id>.png')
+@require_page('page:media', 'Media Library')
+def media_image(media_id: str):
+    return _send_media_image(media_id, thumbnail=False)
+
+
+@app.route('/media/thumbnails/<media_id>.png')
+@require_page('page:media', 'Media Library')
+def media_thumbnail(media_id: str):
+    return _send_media_image(media_id, thumbnail=True)
+
+
+def _send_media_image(media_id: str, *, thumbnail: bool):
+    try:
+        # Open while the operation lock is held so a concurrent deletion cannot
+        # substitute a missing path between validation and response creation.
+        with _media_operation_lock:
+            path = _get_media_library().path(media_id, thumbnail=thumbnail)
+            response = send_file(path, mimetype='image/png', conditional=True)
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+    except (KeyError, FileNotFoundError):
+        abort(404)
+
+
+@app.route('/api/media')
+def api_media_list():
+    try:
+        return jsonify({
+            'ok': True, 'items': [_media_item_payload(item) for item in _get_media_library().list()],
+            'permissions': _media_permissions(),
+        })
+    except (ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('media.library.read', error)
+
+
+@app.route('/api/media/upload', methods=['POST'])
+def api_media_upload():
+    if not _media_permissions()['upload']:
+        return _media_action_denied('upload')
+    upload = request.files.get('file')
+    if upload is None:
+        return _api_json_error(400, 'missing_file', 'Choose an image to upload.')
+    try:
+        item = _get_media_library().upload(upload.stream, upload.filename or '', request.form.get('name', ''))
+        log_event('media.image.upload', f"Uploaded image '{item['name']}'", status='success',
+                  target_type='media_image', target_id=item['id'], details=item)
+        return jsonify({'ok': True, 'item': _media_item_payload(item)}), 201
+    except (ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('media.image.upload', error)
+
+
+@app.route('/api/media/<media_id>', methods=['PATCH', 'DELETE'])
+def api_media_edit(media_id: str):
+    if not _media_permissions()['manage']:
+        return _media_action_denied('manage')
+    action = 'media.image.delete' if request.method == 'DELETE' else 'media.image.update'
+    try:
+        with _media_operation_lock:
+            library = _get_media_library()
+            existing = library.get(media_id)
+            if request.method == 'DELETE':
+                job = _active_media_job()
+                if job.get('status') in _MEDIA_ACTIVE_JOBS and job.get('mediaId') == media_id:
+                    return _api_json_error(409, 'busy', 'This image is being loaded. Wait for the job to finish.')
+                item = library.delete(media_id)
+            else:
+                data = request.get_json(silent=True)
+                if not isinstance(data, dict) or set(data) - {'name', 'preset'}:
+                    raise ValueError('Supply an image name and/or preset flag.')
+                preset = data.get('preset', existing['preset'])
+                if not isinstance(preset, bool):
+                    raise ValueError('Preset must be true or false.')
+                item = library.update(media_id, data.get('name', existing['name']), preset=preset)
+        verb = 'Deleted' if request.method == 'DELETE' else 'Updated'
+        log_event(action, f"{verb} image '{item['name']}'", status='success',
+                  target_type='media_image', target_id=media_id, details=item)
+        return jsonify({'ok': True, 'item': _media_item_payload(item)})
+    except (KeyError, ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure(action, error)
+
+
+@app.route('/api/atem/media/state')
+def api_atem_media_state():
+    try:
+        return jsonify({**_get_atem_media_manager().snapshot(), 'ok': True})
+    except (ValueError, OSError, RuntimeError) as error:
+        return jsonify({'ok': True, 'enabled': False, 'connected': False, 'destinations': [],
+                        'players': [], 'stills': [], 'job': None, 'error': str(error)})
+
+
+@app.route('/api/atem/media/load', methods=['POST'])
+def api_atem_media_load():
+    if not _media_permissions()['load']:
+        return _media_action_denied('load')
+    from atem_media import BusyError
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _api_json_error(400, 'invalid_request', 'Choose an image and a configured player.')
+    uid, username, display = _activity_current_actor()
+    actor = {'actor_user_id': uid, 'actor_username': username, 'actor_display': display,
+             'ip': _activity_request_ip(), 'request_path': request.path, 'source': 'web'}
+
+    def completed(job):
+        success = job.get('status') == 'succeeded'
+        summary = (f"Loaded '{job.get('mediaName', '')}' on ATEM Media Player {job.get('player')}"
+                   if success else f"Failed to load ATEM Media Player {job.get('player')}")
+        log_event('atem.media.load', summary, status='success' if success else 'failure',
+                  target_type='atem_media_player', target_id=job.get('player'), details=job, **actor)
+
+    try:
+        with _media_operation_lock:
+            media_id = data.get('media_id')
+            if not isinstance(media_id, str):
+                raise ValueError('Choose a saved image.')
+            _get_media_library().get(media_id)
+            job = _get_atem_media_manager().load(media_id, data.get('player'), on_complete=completed)
+        log_event('atem.media.load.queued', 'Queued image for ATEM media player', status='info',
+                  target_type='atem_media_player', target_id=job.get('player'), details=job)
+        return jsonify({'ok': True, 'job': job}), 202
+    except BusyError as error:
+        return _media_api_failure('atem.media.load', error, 409)
+    except (KeyError, ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('atem.media.load', error)
+
+
+@app.route('/api/config/atem-media', methods=['GET', 'PUT'])
+def api_atem_media_config():
+    from atem_media import validate_media_config
+    if request.method == 'GET':
+        cfg = utils.get_config()
+        return jsonify({'ok': True, 'config': {key: cfg.get(key, value) for key, value in _MEDIA_CONFIG_DEFAULTS.items()}})
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - set(_MEDIA_CONFIG_DEFAULTS):
+        return _api_json_error(400, 'invalid_request', 'Supply only ATEM media setup fields.')
+    try:
+        with _media_operation_lock:
+            job = _active_media_job()
+            if job.get('status') in _MEDIA_ACTIVE_JOBS:
+                return _api_json_error(409, 'busy', 'Wait for the current image load to finish before changing setup.')
+            cfg = validate_media_config({**utils.get_config(), **data})
+            if (cfg.get('atem_media_node_path', '') != utils.get_config().get('atem_media_node_path', '')
+                    and _auth_enabled() and not _can_manage_service_tokens_for_current_user()):
+                return _api_json_error(403, 'forbidden', 'Only an administrator may change the server Node.js executable.')
+            if not write_json(Path(utils.CONFIG_FILE).resolve(), cfg):
+                raise OSError('Could not save ATEM media configuration.')
+            utils.reload_config(force=True)
+        selected = {key: cfg.get(key, value) for key, value in _MEDIA_CONFIG_DEFAULTS.items()}
+        log_event('atem.media.config.update', 'Updated ATEM media setup', status='success',
+                  details={'enabled': selected['atem_media_enabled'], 'destinations': selected['atem_media_destinations']})
+        return jsonify({'ok': True, 'config': selected})
+    except (ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('atem.media.config.update', error)
 
 
 @app.route('/timers')
@@ -10222,6 +10507,7 @@ def api_get_config():
 
 
 @app.route('/api/config', methods=['POST'])
+@_serialize_media_configuration
 def api_set_config():
     if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
@@ -10244,7 +10530,9 @@ def api_set_config():
             old_port = 5000
 
         # merge provided values
-        cfg.update(new)
+        # Media setup is saved through its validated browser-only editor. The
+        # general Config form includes an older full snapshot of hidden keys.
+        cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS})
 
         # Legacy: global Routing allow-lists are no longer used (now per Access Level).
         cfg.pop('videohub_allowed_outputs', None)
