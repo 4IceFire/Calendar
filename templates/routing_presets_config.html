@@ -25,6 +25,7 @@
         <div class="media-preview mb-3 d-none" id="preset-config-preview"><img id="preset-config-image" alt="Preset image"></div>
         <label class="form-label" for="preset-output">VideoHub output</label><select class="form-select" id="preset-output"><option value="">Ask the user to choose</option></select>
         <p class="form-text">Leave this as “Ask the user to choose” for the normal Routing output picker. Fixed outputs still require the user's output and media-input permissions.</p>
+        <p class="form-text">Presets use the output's current media player, or reuse one already feeding other screens. All screens on that player receive the new image. If several players are eligible, their order in Config → Media breaks the tie.</p>
         <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="preset-enabled" checked><label class="form-check-label" for="preset-enabled">Enabled</label></div>
         <details class="media-disclosure mb-3" id="preset-actions-panel"><summary>Extra API actions <span class="text-muted">(optional)</span></summary>
           <p class="form-text mt-3">Actions run once, in order, after the image is confirmed on screen. If one fails, later actions stop. Completed actions are not undone. An API response may mean a device command was accepted and is still completing.</p>

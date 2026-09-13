@@ -186,7 +186,7 @@ class RoutingPresetWebTests(unittest.TestCase):
             self.assertEqual(self.client.post('/api/timers/apply', json={'preset': 1}, headers=self.headers).status_code, 403)
             response = self.apply(prepared)
             self.assertEqual(response.status_code, 202, response.get_json())
-            self.assertTrue(self.manager.display.call_args.kwargs['reuse_current_player'])
+            self.assertTrue(self.manager.display.call_args.kwargs['allow_shared_player'])
             self.assertEqual(self.calls, [])
             self.assertEqual(self.apply(prepared).status_code, 202)
             self.assertEqual(len(self.callbacks), 1)

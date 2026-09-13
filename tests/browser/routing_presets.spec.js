@@ -62,6 +62,36 @@ test('A preset without a destination uses the restricted Routing output picker',
   expect(errors).toEqual([]);
 });
 
+test('A preset updates a busy player, adds its output and can replace the shared photo again', async ({page, request}) => {
+  const errors = collectPageErrors(page);
+  // Foyer is the only allowed target; Kids and Hall already receive Media A.
+  expect((await request.post('/__permissions_fixture__/state', {data: {routing: [1, 7, 7]}})).ok()).toBe(true);
+  await asOperator(page);
+  await page.getByRole('button', {name: "Select Mother's Day", exact: true}).click();
+  await page.getByRole('button', {name: 'Confirm & apply', exact: true}).click();
+  await expect(page).toHaveURL(/\/routing\?preset_job=/);
+  const first = await (await request.get('/__permissions_fixture__/state')).json();
+  expect(first.routing).toEqual([7, 7, 7]);
+  expect(first.media_job.status).toBe('succeeded');
+  expect(first.media_job.mediaName).toBe('Welcome');
+  expect(first.actions).toEqual([{preset: 1}]);
+
+  await page.getByRole('link', {name: 'Presets', exact: true}).click();
+  await page.getByRole('button', {name: 'Select Team Night', exact: true}).click();
+  await expect(page.locator('#routing-outputs button')).toHaveCount(1);
+  await page.locator('#routing-outputs button').click();
+  await page.getByRole('button', {name: 'Confirm & apply', exact: true}).click();
+  await expect(page).toHaveURL(/\/routing\?preset_job=/);
+  const second = await (await request.get('/__permissions_fixture__/state')).json();
+  expect(second.routing).toEqual([7, 7, 7]);
+  expect(second.media_job.status).toBe('succeeded');
+  expect(second.media_job.mediaName).toBe('Team graphic');
+  expect(second.media_job.mediaId).not.toBe(first.media_job.mediaId);
+  expect(second.media_job.player).toBe(first.media_job.player);
+  expect(second.actions).toEqual([{preset: 1}]);
+  expect(errors).toEqual([]);
+});
+
 test('Admin configures a preset and assigns it from the group Routing tab', async ({page}, testInfo) => {
   const errors = collectPageErrors(page);
   await page.goto('/config/routing-presets');

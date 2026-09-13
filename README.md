@@ -209,8 +209,9 @@ other outputs. It can replace the image on the selected output's own exclusive
 player. If every eligible player feeds another output, it refuses the request.
 Different simultaneous images need different players. Images are not shared
 across players automatically in this version.
-Routing presets also allow updating the selected TV's current mapped player
-when it is shared; every screen already receiving that player changes together.
+Routing presets can also use a mapped player already feeding other TVs, updating
+its image and adding the selected TV to that feed. Every screen already
+receiving that player changes together.
 
 ### Windows setup
 
@@ -313,8 +314,11 @@ preset reuses that player and loads its selected image, even when other outputs
 share it. All screens receiving that player show the new image; the confirmation
 screen explains this. TDeck skips an unnecessary VideoHub write when the route
 is already correct, but still loads/verifies the image and reads back the route.
-Otherwise it chooses a free player. It never takes a player used only by other
-outputs. Selected-output and mapped-input permissions still apply, and changes
+If the TV does not already receive an eligible player, TDeck reuses an allowed
+player already feeding other outputs, or chooses an unused one if none are in
+use. The order of players in Config → Media breaks ties. It loads the image,
+then routes the chosen player to the preset's selected output while preserving
+the other output routes. Selected-output and mapped-input permissions still apply, and changes
 to the target or other receivers during the load prevent a successful result.
 
 After verified image display, extra actions run once in order with

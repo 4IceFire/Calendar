@@ -159,7 +159,8 @@ def main():
                     webui._routing_preset_runner = RoutingPresetRunner()
                     store = RoutingPresetStore(library.root)
                     image_id = library.list()[0]['id']
-                    choose = store.save({'name': 'Team Night', 'media_id': image_id, 'description': 'Show the team welcome image.'})
+                    team_image = library.upload(io.BytesIO(fixture_image('TEAM NIGHT', '#643956')), 'team.png', 'Team graphic')
+                    choose = store.save({'name': 'Team Night', 'media_id': team_image['id'], 'description': 'Show the team welcome image.'})
                     fixed = store.save({'name': "Mother's Day", 'media_id': image_id, 'output': 1,
                         'actions': [{'label': 'Start the welcome timer', 'method': 'POST', 'path': '/api/timers/apply', 'body': {'preset': 1}}]})
                     store.save({'name': 'Private preset', 'media_id': image_id, 'output': 2})
@@ -206,9 +207,18 @@ def main():
         def fixture_health():
             return webui.jsonify({'fixture': 'tdeck-routing-presets-ui' if presets_mode else ('tdeck-view-as-ui' if view_as_mode else 'tdeck-permissions-ui'), 'isolated': True})
 
-        @webui.app.get('/__permissions_fixture__/state')
+        @webui.app.route('/__permissions_fixture__/state', methods=['GET', 'POST'])
         def fixture_state():
-            return webui.jsonify(actions=media_fixture.get('actions', []))
+            if webui.request.method == 'POST':
+                data = webui.request.get_json(silent=True) or {}
+                routes = data.get('routing')
+                if (not presets_mode or not isinstance(routes, list) or len(routes) != 3
+                        or any(type(value) is not int or not 1 <= value <= 8 for value in routes)):
+                    return webui.jsonify(ok=False), 400
+                media_fixture['hub'].routing = list(routes)
+            return webui.jsonify(actions=media_fixture.get('actions', []),
+                routing=list(media_fixture['hub'].routing) if view_as_mode else [],
+                media_job=media_fixture['atem'].snapshot().get('job') if view_as_mode else None)
 
         webui.app.add_url_rule('/__permissions_fixture__/reset', 'fixture_reset', reset_fixture, methods=['POST'])
         if view_as_mode:

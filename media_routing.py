@@ -120,19 +120,19 @@ class MediaRoutingManager:
         self._jobs = OrderedDict()
         self._active_id = None
 
-    def display(self, media_id, output, allowed_inputs=None, on_complete=None, *, reuse_current_player=False):
+    def display(self, media_id, output, allowed_inputs=None, on_complete=None, *, allow_shared_player=False):
         """Queue a display; authorization for the target belongs to the caller.
 
-        Confirmed presets may reuse the target's existing mapped player even
-        when shared. Its other existing receivers then see the new still too.
+        Confirmed presets may update a player already feeding other outputs,
+        then route it to the target. Existing receivers see the new still too.
         """
         output = _port(output, "Output")
         if not isinstance(media_id, str) or not media_id.strip() or len(media_id) > 128:
             raise ValueError("Choose a saved image.")
         if allowed_inputs is not None and not isinstance(allowed_inputs, (list, tuple, set)):
             raise ValueError("Allowed inputs must be a list of port numbers")
-        if not isinstance(reuse_current_player, bool):
-            raise ValueError("Current player reuse must be true or false")
+        if not isinstance(allow_shared_player, bool):
+            raise ValueError("Shared player access must be true or false")
         allowed = {_port(source, "Allowed input") for source in (allowed_inputs or [])}
         if not VIDEO_ROUTING_LOCK.acquire(blocking=False):
             raise BusyError("An image or route is being applied. Please wait for it to finish.")
@@ -153,7 +153,7 @@ class MediaRoutingManager:
                 result = copy.deepcopy(job)
             deadline = time.monotonic() + self._job_timeout
             threading.Thread(target=self._run,
-                             args=(job_id, cfg, destinations, allowed, deadline, on_complete, reuse_current_player),
+                             args=(job_id, cfg, destinations, allowed, deadline, on_complete, allow_shared_player),
                              name="tdeck-media-display", daemon=True).start()
             return result
         except Exception:
@@ -199,7 +199,7 @@ class MediaRoutingManager:
         return result
 
     @staticmethod
-    def _choose(destinations, state, output, allowed, reuse_current_player=False):
+    def _choose(destinations, state, output, allowed, allow_shared_player=False):
         if output > state["output_count"]:
             raise _DisplayFailure("This output is unavailable. Return to Routing and choose another output.",
                                   "Requested output exceeds the device-reported output count")
@@ -211,13 +211,16 @@ class MediaRoutingManager:
             raise _DisplayFailure("No image source is available for your access. Ask an administrator for help.",
                                   "No configured media VideoHub input is allowed for this user")
         current = state["routing"][output - 1]
-        if reuse_current_player:
-            # Presets may deliberately update a shared existing feed. Never
-            # take a player feeding only other outputs, or bypass input grants.
+        used_elsewhere = {source for index, source in enumerate(state["routing"], 1) if index != output}
+        if allow_shared_player:
+            # A preset deliberately updates every receiver of its selected
+            # player. Prefer the target's player, then an existing feed, then
+            # an unused player. Config order breaks ties within each choice.
+            # Input grants have already filtered every candidate.
             existing = next((item for item in eligible if item["videohub_input"] == current), None)
             if existing:
                 return existing
-        used_elsewhere = {source for index, source in enumerate(state["routing"], 1) if index != output}
+            return next((item for item in eligible if item["videohub_input"] in used_elsewhere), eligible[0])
         free = [item for item in eligible if item["videohub_input"] not in used_elsewhere]
         if not free:
             raise _DisplayFailure("All image players are in use on other outputs. Ask an administrator for help.",
@@ -267,14 +270,14 @@ class MediaRoutingManager:
             raise _DisplayFailure("The image source changed. Check the output before trying again.",
                                   "ATEM connection or selected still changed after the media transfer")
 
-    def _run(self, job_id, cfg, destinations, allowed, deadline, on_complete, reuse_current_player):
+    def _run(self, job_id, cfg, destinations, allowed, deadline, on_complete, allow_shared_player):
         stage = "preparing"
         try:
             self._update(job_id, stage)
             job = self.get_job(job_id)
             output = job["output"]
             initial = self._read(deadline)
-            destination = self._choose(destinations, initial, output, allowed, reuse_current_player)
+            destination = self._choose(destinations, initial, output, allowed, allow_shared_player)
             self._update(job_id, stage, player=destination["player"],
                          videohubInput=destination["videohub_input"],
                          sharedOutputs=sorted(self._other_outputs(initial, destination["videohub_input"], output)))

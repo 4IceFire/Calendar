@@ -83,8 +83,11 @@ including a shared player: all existing receivers show the new image. Its
 confirmation covers that shared image change; only the selected output's route
 is considered for writing. When the route is already correct, the image is still
 loaded/verified and the route read back, without sending a redundant route write.
-If the target does not already receive an eligible player, free-player selection
-applies. Players used only by other outputs are never taken. The standalone
+If the target does not already receive an eligible player, reuse an allowed
+player already routed to another output, falling back to an unused player only
+when none are in use. Configured player order breaks ties. The preset loads the
+new image and then adds its selected output to that feed, preserving existing
+receiver routes. The standalone
 `/api/media/display` retains exclusive-player allocation and does not accept a
 shared-player override. Shared receiver details are retained in Activity Log,
 without expanding the public job response.
