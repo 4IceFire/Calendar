@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import subprocess
 import tempfile
@@ -108,6 +109,10 @@ class _NodeBridge:
         self._lock = threading.RLock()
         self._pending = {}
         self._closed = False
+        self._stderr_tail = ""
+        self._stderr_thread = None
+        self._reader_thread = None
+        self._failure = ""
 
     def start(self):
         configured = self.cfg.get("atem_media_node_path", "")
@@ -120,16 +125,54 @@ class _NodeBridge:
                 raise RuntimeError("ATEM media worker has closed")
             self._process = subprocess.Popen(
                 [str(executable), str(worker)], stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, encoding="utf-8", bufsize=1, cwd=str(worker.parent),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace", bufsize=1, cwd=str(worker.parent),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
-            threading.Thread(target=self._read, name="tdeck-atem-media-ipc", daemon=True).start()
-        self.request("init", {"host": self.cfg.get("atem_ip") or self.cfg.get("atem_host") or "127.0.0.1",
-                              "port": int(self.cfg.get("atem_port") or 9910)}, timeout=10)
+            self._stderr_thread = threading.Thread(target=self._read_stderr, name="tdeck-atem-media-errors", daemon=True)
+            self._reader_thread = threading.Thread(target=self._read, name="tdeck-atem-media-ipc", daemon=True)
+            self._stderr_thread.start()
+            self._reader_thread.start()
+        try:
+            self.request("init", {"host": self.cfg.get("atem_ip") or self.cfg.get("atem_host") or "127.0.0.1",
+                                  "port": int(self.cfg.get("atem_port") or 9910)}, timeout=10)
+        except RuntimeError:
+            # An import failure may exit before init is written. Let the reader
+            # collect its explanation before the manager closes this bridge.
+            if self._process.poll() is not None:
+                self._reader_thread.join(timeout=1)
+                if self._failure:
+                    raise RuntimeError(self._failure) from None
+            raise
+
+    def _read_stderr(self):
+        try:
+            while chunk := self._process.stderr.read(1024):
+                # Drain continuously, but never retain an unbounded crash/log stream.
+                with self._lock:
+                    self._stderr_tail = (self._stderr_tail + chunk)[-4096:]
+        except (OSError, ValueError):
+            pass
+
+    def _stopped_message(self, read_error=""):
+        code = self._process.poll()
+        prefix = "ATEM media worker stopped" + (f" (exit code {code})" if code is not None else "")
+        with self._lock:
+            tail = self._stderr_tail
+        tail = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", tail)
+        lines = [line.strip() for line in tail.splitlines() if line.strip()]
+        # Prefer the exception message over file paths, stack frames and Node's
+        # trailing version line. Detailed state is restricted to Config access.
+        detail = next((line for line in lines if re.match(r"\w*Error(?: \[[\w_]+\])?:", line)), "")
+        detail = detail or read_error or (lines[-1] if lines else "No error details were reported.")
+        detail = " ".join(detail.split())[:320]
+        hint = " Run npm ci --omit=dev in Calendar." if (
+            "Cannot find module" in detail or "MODULE_NOT_FOUND" in tail) else ""
+        return f"{prefix}: {detail}{hint}"[:500]
 
     def _read(self):
         process = self._process
+        read_error = ""
         try:
             for line in process.stdout:
                 if len(line) > 262144:
@@ -147,35 +190,55 @@ class _NodeBridge:
                         target.put(message)
                 elif "event" in message:
                     self.on_event(message)
-        except Exception:
-            pass
+        except Exception as error:
+            read_error = str(error)[:320]
         finally:
             with self._lock:
-                pending = list(self._pending.values())
                 intentional = self._closed
-            for target in pending:
-                target.put({"error": "ATEM media worker stopped before confirming completion"})
             if not intentional:
+                # stdout can close before the process exits. Stop it before
+                # waiting for stderr EOF so neither reader can block forever.
                 try:
-                    process.kill()
-                except OSError:
-                    pass
-                self.on_event({"event": "stopped", "error": "ATEM media worker stopped. Check Node.js and run npm ci in Calendar."})
+                    process.wait(timeout=0.2)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        process.kill()
+                        process.wait(timeout=1)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                self._stderr_thread.join(timeout=0.5)
+            with self._lock:
+                intentional = self._closed
+                failure = "ATEM media operation was interrupted" if intentional else self._stopped_message(read_error)
+                self._failure = failure
+                pending = list(self._pending.values())
+            for target in pending:
+                target.put({"error": failure})
+            if not intentional:
+                self.on_event({"event": "stopped", "error": failure})
 
     def request(self, operation, data=None, *, timeout=10):
         request_id = uuid.uuid4().hex
         result_queue = queue.Queue()
         with self._lock:
             process = self._process
-            if self._closed or process is None or process.poll() is not None:
-                raise RuntimeError("ATEM media worker is unavailable")
-            self._pending[request_id] = result_queue
-            try:
-                process.stdin.write(json.dumps({"id": request_id, "op": operation, **(data or {})}, ensure_ascii=True) + "\n")
-                process.stdin.flush()
-            except Exception:
-                self._pending.pop(request_id, None)
-                raise RuntimeError("Cannot communicate with the ATEM media worker") from None
+            if self._closed or process is None:
+                raise RuntimeError(self._failure or "ATEM media worker is unavailable")
+            exited = process.poll() is not None
+            if not exited:
+                self._pending[request_id] = result_queue
+                try:
+                    process.stdin.write(json.dumps({"id": request_id, "op": operation, **(data or {})}, ensure_ascii=True) + "\n")
+                    process.stdin.flush()
+                except Exception:
+                    self._pending.pop(request_id, None)
+                    raise RuntimeError("Cannot communicate with the ATEM media worker") from None
+        if exited:
+            # A child may crash between requests. Wait outside the IPC lock so
+            # its readers can finish capturing the error before cleanup begins.
+            if self._reader_thread is not None and self._reader_thread is not threading.current_thread():
+                self._reader_thread.join(timeout=1)
+            raise RuntimeError(self._failure or self._stopped_message())
         try:
             result = result_queue.get(timeout=max(0.01, timeout))
             if result.get("error"):
@@ -204,7 +267,10 @@ class _NodeBridge:
                 process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-            for stream in (process.stdin, process.stdout):
+            for reader in (self._reader_thread, self._stderr_thread):
+                if reader is not None and reader is not threading.current_thread():
+                    reader.join(timeout=1)
+            for stream in (process.stdin, process.stdout, process.stderr):
                 try:
                     stream.close()
                 except (AttributeError, OSError):

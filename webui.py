@@ -5116,6 +5116,7 @@ _videohub_state_cache = {
 _videohub_state_refresh_lock = threading.Lock()
 _videohub_state_refreshing = False
 _status_cache_lock = threading.Lock()
+_status_snapshot_refresh_lock = threading.Lock()
 _status_refresher_lock = threading.Lock()
 _status_refresher_started = False
 _STATUS_CACHE_TTL_SECONDS = 2.0
@@ -5317,17 +5318,16 @@ def _probe_atem_status(cfg: dict) -> dict:
     raw_connected = bool(connected)
     with _status_cache_lock:
         was_connected = bool(_atem_status_cache.get('connected', False))
-
-    if raw_connected:
-        _atem_probe_failures = 0
-    else:
-        _atem_probe_failures += 1
-        if was_connected and _atem_probe_failures < _ATEM_OFFLINE_AFTER_FAILURES:
-            connected = True
-            if detail:
-                detail = f"{detail} (missed probe {_atem_probe_failures}/{_ATEM_OFFLINE_AFTER_FAILURES})"
+        if raw_connected:
+            _atem_probe_failures = 0
         else:
-            connected = False
+            _atem_probe_failures += 1
+            if was_connected and _atem_probe_failures < _ATEM_OFFLINE_AFTER_FAILURES:
+                connected = True
+                if detail:
+                    detail = f"{detail} (missed probe {_atem_probe_failures}/{_ATEM_OFFLINE_AFTER_FAILURES})"
+            else:
+                connected = False
 
     return {
         'connected': bool(connected),
@@ -5447,7 +5447,9 @@ def _probe_scheduler_status(cfg: dict) -> dict:
     return status
 
 
-def _refresh_status_snapshot() -> dict:
+def _collect_status_snapshot() -> dict:
+    # The refresh lock covers probes, publication and transition logging so
+    # an older refresh cannot publish or log after a newer one.
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
     except Exception:
@@ -5508,17 +5510,59 @@ def _refresh_status_snapshot() -> dict:
     return payload
 
 
-def _get_status_snapshot() -> dict:
-    now = time.time()
+def _cached_status_snapshot() -> dict:
     with _status_cache_lock:
         payload = _status_snapshot_cache.get('payload')
-        ts = float(_status_snapshot_cache.get('ts', 0.0) or 0.0)
-
-    if isinstance(payload, dict):
-        if (now - ts) <= (_STATUS_REFRESH_INTERVAL_SECONDS * 2.0):
+        if isinstance(payload, dict):
             return payload
+        # The first browser request must also return without probing hardware.
+        return {
+            'ok': True,
+            'ts': 0.0,
+            **{service: {'connected': False, 'checked_at': None}
+               for service in _connectivity_last},
+            'scheduler': {'running': False, 'healthy': False, 'checked_at': None},
+        }
 
-    return _refresh_status_snapshot()
+
+def _refresh_status_snapshot(*, background: bool = False) -> dict:
+    # Browser requests and the periodic refresher share one in-flight probe.
+    # Never queue another refresh behind slow/disconnected hardware.
+    if not _status_snapshot_refresh_lock.acquire(blocking=False):
+        return _cached_status_snapshot()
+
+    def refresh():
+        try:
+            return _collect_status_snapshot()
+        finally:
+            _status_snapshot_refresh_lock.release()
+
+    if background:
+        def run_background():
+            try:
+                refresh()
+            except Exception:
+                app.logger.exception('Integration status refresh failed')
+
+        try:
+            threading.Thread(
+                target=run_background,
+                name='tdeck-integration-status-refresh',
+                daemon=True,
+            ).start()
+        except Exception:
+            _status_snapshot_refresh_lock.release()
+            raise
+        return _cached_status_snapshot()
+    return refresh()
+
+
+def _get_status_snapshot() -> dict:
+    payload = _cached_status_snapshot()
+    ts = float(payload.get('ts', 0.0) or 0.0)
+    if not ts or (time.time() - ts) > (_STATUS_REFRESH_INTERVAL_SECONDS * 2.0):
+        return _refresh_status_snapshot(background=True)
+    return payload
 
 
 def _status_refresher_loop() -> None:

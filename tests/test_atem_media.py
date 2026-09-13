@@ -469,6 +469,121 @@ class FakeAtem extends EventEmitter {
 """
 
 
+class NodeBridgeDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.node = shutil.which("node")
+        if not self.node:
+            self.skipTest("Install Node.js to run child-process diagnostics tests")
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+
+    def bridge(self, code):
+        worker = Path(self.folder.name) / "diagnostic-worker.cjs"
+        worker.write_text(code, encoding="utf-8")
+        events = []
+        bridge = _NodeBridge({"atem_media_node_path": self.node}, events.append, worker_path=worker)
+        self.addCleanup(bridge.close)
+        return bridge, events
+
+    def test_missing_package_reports_actual_startup_error_and_exit_code(self):
+        bridge, events = self.bridge("require('__tdeck_missing_dependency_for_test__');")
+        with self.assertRaisesRegex(RuntimeError, "Cannot find module '__tdeck_missing_dependency_for_test__'"):
+            bridge.start()
+        eventually(lambda: bool(events))
+        self.assertIn("exit code 1", events[-1]["error"])
+        self.assertIn("npm ci --omit=dev", events[-1]["error"])
+        self.assertLessEqual(len(events[-1]["error"]), 500)
+
+    def test_runtime_crash_is_returned_to_pending_request(self):
+        bridge, events = self.bridge("""
+            require('node:readline').createInterface({input: process.stdin}).on('line', line => {
+                const message = JSON.parse(line);
+                if (message.op === 'init') process.stdout.write(JSON.stringify({id: message.id, result: {}}) + '\\n');
+                else throw new TypeError('Test packet could not be decoded');
+            });
+        """)
+        bridge.start()
+        with self.assertRaisesRegex(RuntimeError, 'TypeError: Test packet could not be decoded'):
+            bridge.request("snapshot")
+        eventually(lambda: bool(events))
+        self.assertNotIn("npm ci", events[-1]["error"])
+        bridge.close()
+        self.assertFalse(bridge._reader_thread.is_alive())
+        self.assertFalse(bridge._stderr_thread.is_alive())
+
+    def test_large_stderr_is_drained_but_retained_diagnostic_is_bounded(self):
+        bridge, events = self.bridge("""
+            process.stderr.write('x'.repeat(150000) + '\\n', () => {
+                throw new Error('The actual startup failure');
+            });
+        """)
+        with self.assertRaisesRegex(RuntimeError, 'Error: The actual startup failure'):
+            bridge.start()
+        self.assertLessEqual(len(bridge._stderr_tail), 4096)
+        self.assertLessEqual(len(bridge._failure), 500)
+
+    def test_idle_crash_waits_for_reader_diagnostic_before_failing_next_request(self):
+        bridge, events = self.bridge("""
+            require('node:readline').createInterface({input: process.stdin}).on('line', line => {
+                const message = JSON.parse(line);
+                if (message.op === 'init') process.stdout.write(JSON.stringify({id: message.id, result: {}}) + '\\n');
+                else throw new Error('Idle worker crash');
+            });
+        """)
+        bridge.start()
+        reporting = threading.Event()
+        release = threading.Event()
+        done = threading.Event()
+        errors = []
+        real_join = bridge._stderr_thread.join
+
+        def delayed_join(timeout=None):
+            reporting.set()
+            release.wait(3)
+            real_join(timeout=timeout)
+
+        def request_after_exit():
+            try:
+                bridge.request("snapshot")
+            except RuntimeError as error:
+                errors.append(str(error))
+            finally:
+                done.set()
+
+        bridge._stderr_thread.join = delayed_join
+        reader = None
+        try:
+            # Trigger an idle crash: no IPC request is pending when it exits.
+            bridge._process.stdin.write('{"id":"crash","op":"crash"}\n')
+            bridge._process.stdin.flush()
+            bridge._process.wait(timeout=3)
+            self.assertTrue(reporting.wait(1))
+            reader = threading.Thread(target=request_after_exit)
+            reader.start()
+            self.assertFalse(done.wait(0.05))
+            release.set()
+            self.assertTrue(done.wait(2))
+            self.assertEqual(len(errors), 1)
+            self.assertIn('Error: Idle worker crash', errors[0])
+        finally:
+            release.set()
+            if reader is not None:
+                reader.join(timeout=2)
+            bridge.close()
+
+    def test_manager_preserves_startup_diagnostic_and_does_not_replay_work(self):
+        worker = Path(self.folder.name) / "manager-worker.cjs"
+        worker.write_text("throw new Error('Media startup failed for testing');", encoding="utf-8")
+        manager = AtemMediaManager(configuration(), FakeLibrary(), bridge_factory=lambda cfg, callback:
+            _NodeBridge({**cfg, "atem_media_node_path": self.node}, callback, worker_path=worker))
+        self.addCleanup(manager.close)
+        manager.snapshot()
+        eventually(lambda: 'Error: Media startup failed for testing' in manager.snapshot()["error"])
+        self.assertFalse(manager.snapshot()["connected"])
+        self.assertIsNone(manager.snapshot()["job"])
+        self.assertEqual(manager._failures, 1)
+
+
 class NodeMediaWorkerTests(unittest.TestCase):
     def setUp(self):
         self.node = shutil.which("node")

@@ -272,6 +272,22 @@ No extra HTTP service, Companion action or manually launched helper is needed.
 Hardware compatibility still needs a controlled first test with your switcher's
 firmware and explicitly reserved players/slots; automated tests use fakes.
 
+If Config reports that the media worker stopped, its status includes the exit
+code and a compact error from the worker when available. In the deployed
+Calendar folder, check the installed worker without connecting to hardware:
+
+```powershell
+node -e "require('./atem_media_worker.cjs'); console.log('Media worker imports OK')"
+```
+
+`Cannot find module 'atem-connection'` means the Node packages are missing from
+that installation. Run `npm ci --omit=dev` in the folder containing
+`atem_media_worker.cjs` and `package-lock.json`, then restart TDeck. Installing
+Node.js alone does not install these packages. If Python cannot import
+`media_library`, install `requirements.txt` using the Python environment that
+runs TDeck. Record Audio uses a separate connection; an audio connection timeout
+still needs checking even after the media dependencies are repaired.
+
 For a home demo, run `python tests/media_ui_harness.py` and open
 `http://127.0.0.1:5063/routing`. Choose Foyer, Media, then an image; the simulated
 display returns to the output list. Config → Media is available at
@@ -310,6 +326,7 @@ Operational notes:
 - Diagnostics show binding errors, discovery progress, last desk packet age, packet counts, relay traffic and OSC parse errors.
 - If a phone cannot load, verify it can open another TDeck page first, then check the DiGiCo diagnostics. A phone loading the page does not consume extra SD9 bandwidth; the backend shares one desk cache and UDP socket.
 - Permissions and Routing render from cached/fallback hardware metadata while slow ATEM or VideoHub refreshes run in background threads, preventing hardware timeouts from holding a page request open.
+- Integration status indicators share one background refresh across browsers and the periodic monitor, keeping the previous result while hardware checks run. ATEM is marked offline after three failed refreshes; additional browsers do not multiply probes or connection attempts.
 
 Relevant configuration keys:
 
