@@ -397,6 +397,10 @@ function _initRoutingPage() {
         mediaNotice = '';
         _routingSetStatus('', '');
         selectedOutput = n;
+        if (root.dataset.presetId) {
+          window.location.assign('/routing/presets?selected=' + encodeURIComponent(root.dataset.presetId) + '&output=' + encodeURIComponent(n));
+          return;
+        }
         const curIn = _getCurrentInputForOutput(n);
         selectedInput = curIn;
         await _switchRoutingStep(outputStep, inputStep);
@@ -3881,6 +3885,12 @@ function _initAccessLevelsPage() {
       tab.hidden = !!pageKey && !pageKeys.has(pageKey);
     });
     _selectPermissionTab(form, selected ? selected.getAttribute('data-permission-tab') : 'general');
+    form.querySelectorAll('[data-routing-media-upload]').forEach(row => {
+      row.hidden = !pageKeys.has('page:media');
+    });
+    form.querySelectorAll('[data-routing-preset-options]').forEach(row => {
+      row.hidden = !pageKeys.has('page:routing_presets');
+    });
 
     // Pixie devices remain subordinate to their auditorium and all-devices choice.
     form.querySelectorAll('[data-role="pixie-auditorium-block"]').forEach(block => {

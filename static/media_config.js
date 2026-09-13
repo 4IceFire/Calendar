@@ -86,7 +86,7 @@ function initializeMediaConfigPage() {
     }
     if (el('media-save-image')) {
       const disabled = editInFlight || !permissions.manage || !selectedItem();
-      ['media-save-image', 'media-delete-image', 'media-edit-name', 'media-edit-preset'].forEach(function(id) { el(id).disabled = disabled; });
+      ['media-save-image', 'media-delete-image', 'media-edit-name'].forEach(function(id) { el(id).disabled = disabled; });
     }
     if (!el('media-load-button')) return;
     const hasPlayers = !!(state && state.destinations && state.destinations.length);
@@ -109,9 +109,8 @@ function initializeMediaConfigPage() {
   function renderLibrary() {
     const grid = el('media-grid');
     const query = el('media-search').value.trim().toLowerCase();
-    const presetsOnly = el('media-filter').value === 'presets';
     const visibleItems = items.filter(function(item) {
-      return (!presetsOnly || item.preset) && String(item.name || '').toLowerCase().indexOf(query) !== -1;
+      return String(item.name || '').toLowerCase().indexOf(query) !== -1;
     });
     clear(grid);
     text(el('media-count'), '(' + items.length + ')');
@@ -121,7 +120,7 @@ function initializeMediaConfigPage() {
       tile.type = 'button';
       tile.dataset.mediaId = item.id;
       tile.setAttribute('aria-pressed', item.id === selectedId ? 'true' : 'false');
-      tile.setAttribute('aria-label', 'Select ' + item.name + (item.preset ? ', preset' : ''));
+      tile.setAttribute('aria-label', 'Select ' + item.name);
       const picture = node('img', 'media-tile-image');
       picture.src = item.thumbnail_url;
       picture.alt = '';
@@ -129,7 +128,6 @@ function initializeMediaConfigPage() {
       const caption = node('span', 'media-tile-caption');
       caption.appendChild(node('span', 'media-tile-name', item.name));
       caption.appendChild(node('span', 'media-tile-meta', item.width + ' × ' + item.height));
-      if (item.preset) caption.appendChild(node('span', 'media-tile-preset', 'Preset'));
       tile.appendChild(picture);
       tile.appendChild(caption);
       tile.addEventListener('click', function() { selectImage(item.id); });
@@ -154,10 +152,10 @@ function initializeMediaConfigPage() {
       el('media-preview-image').src = item.url;
       el('media-preview-image').alt = item.name;
       text(el('media-selected-name'), item.name);
-      text(el('media-selected-details'), item.width + ' × ' + item.height + ' · ' + formatBytes(item.size_bytes) + (item.preset ? ' · Preset' : ''));
+      text(el('media-selected-details'), item.width + ' × ' + item.height + ' · ' + formatBytes(item.size_bytes));
       if (el('media-edit-name')) {
         el('media-edit-name').value = item.name;
-        el('media-edit-preset').checked = !!item.preset;
+        el('media-create-preset').href = '/config/routing-presets?image=' + encodeURIComponent(item.id);
       }
     } else {
       el('media-preview-image').removeAttribute('src');
@@ -320,10 +318,9 @@ function initializeMediaConfigPage() {
       }
       el('media-upload-form').reset();
       el('media-search').value = '';
-      el('media-filter').value = 'all';
       renderLibrary();
       renderSelection();
-      message('Image added to the library. You can edit its name or save it as a preset.', 'success');
+      message('Image added to the library. You can edit its name or use it in a routing preset.', 'success');
     } catch (error) {
       message('Upload failed. ' + errorMessage(error), 'danger');
     } finally {
@@ -337,7 +334,7 @@ function initializeMediaConfigPage() {
     if (!item || editInFlight || !permissions.manage) return;
     const name = el('media-edit-name').value.trim();
     if (!name) { message('Enter a name for the image.', 'warning'); return; }
-    const body = { name: name, preset: el('media-edit-preset').checked };
+    const body = { name: name, preset: !!selectedItem().preset };
     editInFlight = true;
     updateControls();
     try {
@@ -533,7 +530,6 @@ function initializeMediaConfigPage() {
   }
 
   if (el('media-search')) el('media-search').addEventListener('input', renderLibrary);
-  if (el('media-filter')) el('media-filter').addEventListener('change', renderLibrary);
   if (el('media-refresh-library')) el('media-refresh-library').addEventListener('click', refreshLibrary);
   el('media-refresh-state').addEventListener('click', refreshState);
   if (el('media-upload-form')) el('media-upload-form').addEventListener('submit', uploadImage);

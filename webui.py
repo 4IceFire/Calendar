@@ -1025,9 +1025,40 @@ def _parse_group_allowlist_field(raw: str | None) -> list[int]:
     return _coerce_allow_list(s)
 
 
-def _set_group_videohub_allowlists(group_id: int, outputs_raw: str | None, inputs_raw: str | None) -> None:
-    outs = _parse_group_allowlist_field(outputs_raw)
-    ins = _parse_group_allowlist_field(inputs_raw)
+def _validate_routing_allowlist(raw, label: str) -> list[int]:
+    """Reject invalid restrictions instead of silently saving allow-all."""
+    value = raw
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or value.lower() in ('all', '*', 'inherit', 'default', 'global'):
+            return []
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = re.split(r'[,\s]+', value)
+    if isinstance(value, (int, str)) and not isinstance(value, bool):
+        value = [value]
+    if not isinstance(value, list) or any(
+        isinstance(item, bool) or not isinstance(item, (int, str))
+        or not re.fullmatch(r'[0-9]+', str(item).strip()) or int(item) <= 0
+        for item in value
+    ):
+        raise ValueError(f'{label}: enter positive port numbers such as 1 or 1,2,3. Leave blank or enter all for every port.')
+    return sorted({int(item) for item in value})
+
+
+def _validate_routing_group_fields(data) -> None:
+    for key, label in (('videohub_allowed_outputs_role', 'Allowed Outputs'),
+                       ('videohub_allowed_inputs_role', 'Allowed Inputs')):
+        if key in data:
+            _validate_routing_allowlist(data[key], label)
+
+
+def _set_group_videohub_allowlists(group_id: int, outputs_raw, inputs_raw) -> None:
+    outs = _validate_routing_allowlist(outputs_raw, 'Allowed Outputs')
+    ins = _validate_routing_allowlist(inputs_raw, 'Allowed Inputs')
     conn = _db()
     try:
         conn.execute(
@@ -1501,6 +1532,9 @@ def _user_allows_page(user_id: int | None, page_key: str) -> bool:
         return False
     if _user_is_admin(user_id):
         return True
+    for prerequisite in _PAGE_PREREQUISITES.get(page_key, ()):
+        if not _user_allows_page(user_id, prerequisite):
+            return False
     conn = _db()
     try:
         row = conn.execute(
@@ -1889,6 +1923,9 @@ def _activity_request_ip() -> str:
 
 
 def _activity_current_actor() -> tuple[int | None, str, str]:
+    if has_request_context() and isinstance(getattr(g, '_preset_actor', None), dict):
+        actor = g._preset_actor
+        return actor.get('actor_user_id'), actor.get('actor_username', ''), actor.get('actor_display', '')
     try:
         if has_request_context() and getattr(current_user, 'is_authenticated', False):
             uid = int(current_user.get_id())
@@ -1913,6 +1950,8 @@ def _activity_current_actor() -> tuple[int | None, str, str]:
 
 def capture_activity_actor() -> dict[str, Any]:
     """Capture both identities before dispatching a background action."""
+    if has_request_context() and isinstance(getattr(g, '_preset_actor', None), dict):
+        return dict(g._preset_actor)
     uid, username, display = _activity_current_actor()
     actor = {'actor_user_id': uid, 'actor_username': username, 'actor_display': display}
     if has_request_context():
@@ -2151,7 +2190,7 @@ def log_event(
     actor_name = str(actor_username if actor_username is not None else current_uname).strip()
     actor_label = str(actor_display if actor_display is not None else current_display).strip()
     if impersonation is None and has_request_context():
-        impersonation = getattr(g, '_view_as_context', None)
+        impersonation = (getattr(g, '_preset_actor', {}) or {}).get('impersonation') or getattr(g, '_view_as_context', None)
     if impersonation:
         actor_uid = impersonation['admin_id']
         actor_name = str(impersonation['admin_username'])
@@ -2312,9 +2351,15 @@ def require_page(page_key: str, friendly_name: str):
     return _decorator
 
 
-# Upload is a detail of Media access, stored with the existing group grants.
+# Media and upload are Routing options, stored with the existing group grants.
 # Legacy media_load/media_manage grants no longer authorize any action.
+_PAGE_PREREQUISITES = {
+    'page:media': ('page:routing',),
+    'page:media_upload': ('page:routing', 'page:media'),
+    'page:routing_presets': ('page:routing',),
+}
 _register_page('page:media_upload', 'Media: Upload images')
+_register_page('page:routing_presets', 'Routing: Presets')
 
 
 def _get_group_by_name(name: str) -> sqlite3.Row | None:
@@ -3017,7 +3062,8 @@ class _User(UserMixin):
                 self.idle_timeout_override = minutes
 
     def allows_page(self, page_key: str) -> bool:
-        return bool(self.is_admin_group or str(page_key) in self.page_keys)
+        required = {str(page_key), *_PAGE_PREREQUISITES.get(page_key, ())}
+        return bool(self.is_admin_group or required <= self.page_keys)
 
     def is_active(self) -> bool:
         return bool(self._active) and not bool(self.is_locked)
@@ -3320,7 +3366,7 @@ def _api_normalized_path(path: str | None = None) -> str:
 def _api_request_is_automation_principal() -> bool:
     try:
         principal = getattr(g, 'api_principal', None)
-        return isinstance(principal, dict) and principal.get('type') in ('service_token', 'scheduler')
+        return isinstance(principal, dict) and principal.get('type') in ('service_token', 'scheduler', 'routing_preset')
     except Exception:
         return False
 
@@ -3337,6 +3383,10 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
 
     if p.startswith('/api/config/service-tokens'):
         return {'scope': 'admin', 'pages': ('page:config',), 'service_tokens': False}
+    if p.startswith('/api/config/routing-presets'):
+        return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
+    if p.startswith('/api/routing/presets'):
+        return {'scope': 'videohub', 'pages': ('page:routing_presets',), 'service_tokens': False}
     if p == '/api/config/atem-media':
         return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
     if p.startswith('/api/atem/media/'):
@@ -4037,6 +4087,8 @@ def _auth_gate():
     # context. It is not derived from an address, header, cookie, or payload.
     if p.startswith('/api/') and isinstance(getattr(g, '_tdeck_scheduler_principal', None), dict):
         return _api_scheduler_internal_gate()
+    if getattr(g, '_routing_preset_dispatch', None) is _ROUTING_PRESET_DISPATCH:
+        return _api_routing_preset_internal_gate()
 
     if not _auth_enabled():
         return None
@@ -5979,6 +6031,11 @@ def admin_permissions_page():
                     is_admin_group = False
 
                 if not is_admin_group:
+                    if 'page:routing' in request.form.getlist('page_keys'):
+                        try:
+                            _validate_routing_group_fields(request.form)
+                        except ValueError as error:
+                            return _permissions_redirect('groups', str(error))
                     before_group = _group_settings_snapshot(gid)
                     if 'auth_idle_timeout_minutes_override_role' in request.form:
                         try:
@@ -5995,8 +6052,8 @@ def admin_permissions_page():
                     # Per-group Routing allow-lists (only update if routing page is selected)
                     try:
                         if 'page:routing' in [str(k) for k in keys]:
-                            outs_raw = request.form.get('videohub_allowed_outputs_role')
-                            ins_raw = request.form.get('videohub_allowed_inputs_role')
+                            outs_raw = request.form.get('videohub_allowed_outputs_role', before_group.get('videohub_allowed_outputs'))
+                            ins_raw = request.form.get('videohub_allowed_inputs_role', before_group.get('videohub_allowed_inputs'))
                             _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
                     except Exception:
                         pass
@@ -6181,7 +6238,7 @@ def admin_permissions_page():
         conn.close()
 
     pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()
-                    if k != 'page:media_upload'], key=lambda x: x[1].lower())
+                    if k not in ('page:media', 'page:media_upload', 'page:routing_presets')], key=lambda x: x[1].lower())
     group_to_pages: dict[int, set[str]] = {}
     for gp in group_pages or []:
         try:
@@ -6287,6 +6344,7 @@ def admin_permissions_page():
         groups=groups,
         pages=pages,
         group_to_pages=group_to_pages,
+        routing_presets=_routing_preset_catalog(),
         group_to_vh=group_to_vh,
         group_to_companion=group_to_companion,
         group_to_digico=group_to_digico,
@@ -6340,6 +6398,11 @@ def api_admin_group_update(group_id: int):
 
     # Admin groups are allow-all and not editable here.
     if not is_admin_group:
+        if 'page:routing' in (data.get('page_keys') or []):
+            try:
+                _validate_routing_group_fields(data)
+            except ValueError as error:
+                return jsonify({'ok': False, 'error': str(error)}), 400
         before_group = _group_settings_snapshot(gid)
         if 'auth_idle_timeout_minutes_override_role' in data:
             try:
@@ -6360,8 +6423,8 @@ def api_admin_group_update(group_id: int):
         try:
             keys_set = set([str(k) for k in (data.get('page_keys') or [])])
             if 'page:routing' in keys_set:
-                outs_raw = data.get('videohub_allowed_outputs_role')
-                ins_raw = data.get('videohub_allowed_inputs_role')
+                outs_raw = data.get('videohub_allowed_outputs_role', before_group.get('videohub_allowed_outputs'))
+                ins_raw = data.get('videohub_allowed_inputs_role', before_group.get('videohub_allowed_inputs'))
                 _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
         except Exception:
             pass
@@ -7383,13 +7446,9 @@ def routing_page():
     # Blank/NULL => allow all.
     allowed_outputs: list[int] = []
     allowed_inputs: list[int] = []
-    try:
-        if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
-            ro, ri = _effective_videohub_allowlists_for_user(int(current_user.get_id()))
-            allowed_outputs = ro
-            allowed_inputs = ri
-    except Exception:
-        pass
+    if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
+        # Never render unrestricted controls when permission lookup fails.
+        allowed_outputs, allowed_inputs = _effective_videohub_allowlists_for_user(int(current_user.get_id()))
 
     notice = ''
     job_id = request.args.get('media_job', '')
@@ -7400,8 +7459,21 @@ def routing_page():
                 notice = 'Image displayed successfully.'
         except (KeyError, ValueError):
             pass
+    selected_preset = None
+    if request.args.get('preset_job'):
+        finished = _routing_preset_runner.get(request.args['preset_job'])
+        if (finished and finished['status'] == 'succeeded' and finished['owner'] == _preset_owner()
+                and _routing_preset_allowed(finished['presetId'])
+                and (not allowed_outputs or finished['output'] in allowed_outputs)):
+            notice = 'Preset applied successfully.'
+    if request.args.get('preset'):
+        selected_preset = _routing_preset_for_user(request.args['preset'])
+        if selected_preset.get('output') is not None:
+            return redirect(url_for('routing_presets_page', selected=selected_preset['id']))
     return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs,
                            media_available=can_access('page:media'), media_notice=notice,
+                           presets_available=can_access('page:routing_presets'),
+                           selected_preset=selected_preset,
                            hide_connection_status=True)
 
 
@@ -7419,7 +7491,7 @@ _MEDIA_CONFIG_DEFAULTS = {
     'atem_media_node_path': '',
     'atem_media_destinations': [],
 }
-_MEDIA_ACTIVE_JOBS = {'queued', 'preparing', 'uploading', 'selecting', 'loading', 'routing'}
+_MEDIA_ACTIVE_JOBS = {'queued', 'preparing', 'uploading', 'selecting', 'loading', 'routing', 'actions'}
 
 
 def _admit_media_upload(principal_key: str):
@@ -7487,6 +7559,9 @@ def _get_atem_media_manager():
 
 def _active_media_job():
     from atem_media import peek_atem_media_job
+    preset_job = _routing_preset_runner.active_job()
+    if preset_job:
+        return preset_job
     if _media_routing_instance is not None:
         job = _media_routing_instance.active_job()
         if job:
@@ -7553,9 +7628,11 @@ def _require_media_read(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
         if not (can_access('page:media') or can_access('page:config')):
-            abort(403)
+            media_id = kwargs.get('media_id')
+            if not any(item['media_id'] == media_id for item in _visible_routing_presets()):
+                abort(403)
         return fn(*args, **kwargs)
-    wrapped._required_any_page_keys = ('page:media', 'page:config')
+    wrapped._required_any_page_keys = ('page:media', 'page:config', 'page:routing_presets')
     return wrapped
 
 
@@ -7692,6 +7769,288 @@ def api_media_display_job(job_id):
         return _api_json_error(404, 'not_found', 'This display request is no longer available. Check the output before trying again.')
 
 
+from routing_presets import RoutingPresetStore, RoutingPresetRunner, validate_action, validate_preset
+
+_routing_preset_runner = RoutingPresetRunner()
+_ROUTING_PRESET_DISPATCH = object()
+# Jobs are process-local. A restart must also invalidate old confirmations so
+# an execution lost from memory can never be retried as a fresh hardware action.
+_ROUTING_PRESET_CONFIRMATION_EPOCH = os.urandom(32).hex()
+
+
+def _get_routing_preset_store():
+    library = _get_media_library()
+    return RoutingPresetStore(library.root, library.list())
+
+
+def _routing_preset_catalog():
+    try:
+        return _get_routing_preset_store().list()
+    except (OSError, ValueError, TypeError):
+        # Other permission settings remain editable if media storage is offline.
+        return []
+
+
+def _routing_preset_allowed(identity):
+    return can_access('page:routing_presets') and can_access('preset:' + identity)
+
+
+def _visible_routing_presets():
+    if not can_access('page:routing_presets'):
+        return []
+    uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+    outputs, _ = _effective_videohub_allowlists_for_user(uid)
+    return [item for item in _get_routing_preset_store().list()
+            if item['enabled'] and _routing_preset_allowed(item['id'])
+            and (item['output'] is None or not outputs or item['output'] in outputs)]
+
+
+def _routing_preset_for_user(identity):
+    if not _routing_preset_allowed(str(identity)):
+        abort(403)
+    try:
+        item = _get_routing_preset_store().get(identity)
+    except ValueError:
+        abort(404)
+    if not item or not item['enabled']:
+        abort(404)
+    if item['output'] is not None:
+        _media_output_access(item['output'])
+    return item
+
+
+def _public_routing_preset(item):
+    return {**{key: item[key] for key in ('id', 'revision', 'name', 'description', 'output')},
+            'thumbnail_url': url_for('media_thumbnail', media_id=item['media_id'])}
+
+
+def _preset_action_permitted(action):
+    from urllib.parse import urlsplit
+    try:
+        action = validate_action(action)
+        path = urlsplit(action['path']).path
+        app.url_map.bind('localhost').match(path, method=action['method'])
+        policy = _api_policy(path, action['method'])
+        return bool(policy and policy.get('service_tokens') is not False
+                    and policy.get('scope') not in ('admin', 'config')
+                    and not _api_scheduler_path_denied(path))
+    except Exception:
+        return False
+
+
+def _api_routing_preset_internal_gate():
+    approved = getattr(g, '_approved_preset_action', {})
+    if (getattr(g, '_routing_preset_dispatch', None) is not _ROUTING_PRESET_DISPATCH
+            or not _preset_action_permitted(approved)):
+        return _api_json_error(403, 'forbidden', 'This preset action is not an operational API command.')
+    from urllib.parse import urlsplit
+    if request.path != urlsplit(approved['path']).path or request.method != approved['method']:
+        return _api_json_error(403, 'forbidden', 'The request does not match the saved preset action.')
+    within_limit, limit = _api_request_within_size_limit(_api_normalized_path())
+    if not within_limit:
+        return _api_json_error(413, 'request_too_large', f'Request body exceeds the {limit}-byte limit.')
+    g.api_principal = {'type': 'routing_preset', 'key': 'preset:' + g._routing_preset_id,
+                       'name': 'Routing preset'}
+    return None
+
+
+def _execute_routing_preset_action(action, preset, actor):
+    """Dispatch only an immutable saved action; no bearer token reaches a browser."""
+    ok, status = False, None
+    try:
+        if not _preset_action_permitted(action):
+            raise ValueError('Preset action is no longer permitted.')
+        kwargs = {'method': action['method']}
+        if action['method'] != 'GET' and action['body'] is not None:
+            kwargs['json'] = copy.deepcopy(action['body'])
+        with app.test_request_context(action['path'], **kwargs):
+            g._routing_preset_dispatch = _ROUTING_PRESET_DISPATCH
+            g._approved_preset_action = copy.deepcopy(action)
+            g._routing_preset_id = preset['id']
+            g._preset_actor = dict(actor)
+            response = app.full_dispatch_request()
+            status = response.status_code
+            payload = response.get_json(silent=True)
+            ok = 200 <= status < 300 and not (isinstance(payload, dict) and payload.get('ok') is False)
+    except Exception:
+        logging.getLogger('calendar').exception('Routing preset action failed')
+    log_event('routing.preset.action', f"{preset['name']}: {action['label']}",
+              status='success' if ok else 'failure', target_type='routing_preset', target_id=preset['id'],
+              details={'method': action['method'], 'path': action['path'].split('?')[0],
+                       'http_status': status, 'accepted': status == 202}, **actor)
+    return ok
+
+
+def _preset_owner():
+    import hashlib
+    uid = str(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else 'demo'
+    return hashlib.sha256((uid + ':' + _csrf_token()).encode()).hexdigest()
+
+
+def _preset_signer():
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(app.secret_key, salt='routing-preset-confirmation-v1:' + _ROUTING_PRESET_CONFIRMATION_EPOCH)
+
+
+def _preset_destination(item, requested_output):
+    if item['output'] is not None:
+        if requested_output is not None and requested_output != item['output']:
+            raise ValueError('This preset has a fixed output.')
+        requested_output = item['output']
+    output, inputs = _media_output_access(requested_output)
+    _get_media_library().get(item['media_id'])
+    from atem_media import validate_media_config
+    cfg = validate_media_config(utils.get_config())
+    mappings = [entry for entry in cfg['atem_media_destinations'] if entry.get('videohub_input')]
+    if not cfg['atem_media_enabled'] or not mappings:
+        raise ValueError('Image display is not configured. Ask an administrator to finish Media setup.')
+    if inputs and not any(entry['videohub_input'] in inputs for entry in mappings):
+        abort(403)
+    if not all(_preset_action_permitted(action) for action in item['actions']):
+        raise ValueError('This preset needs attention in Config before it can be used.')
+    return output, inputs
+
+
+@app.route('/config/routing-presets')
+@require_page('page:config', 'Config')
+def routing_presets_config_page():
+    return render_template('routing_presets_config.html', can_edit_presets=_can_manage_service_tokens_for_current_user())
+
+
+@app.route('/api/config/routing-presets', methods=['GET', 'POST'])
+@app.route('/api/config/routing-presets/<identity>', methods=['PUT', 'DELETE'])
+def api_routing_presets_config(identity=None):
+    if request.method != 'GET' and not _can_manage_service_tokens_for_current_user():
+        return _api_json_error(403, 'forbidden', 'Only administrators can configure routing presets and their approved actions.')
+    try:
+        with _media_operation_lock:
+            store = _get_routing_preset_store()
+            if request.method == 'GET':
+                return jsonify(ok=True, presets=store.list(),
+                               images=[_media_item_payload(item) for item in _get_media_library().list()],
+                               outputs=_get_videohub_state_snapshot().get('outputs', []))
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                return _api_json_error(409, 'busy', 'Wait for the current display or preset to finish.')
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                raise ValueError('Supply a preset configuration.')
+            data = dict(data)
+            revision = data.pop('revision', None)
+            if request.method == 'DELETE':
+                if data:
+                    raise ValueError('Supply only the preset revision to delete it.')
+                store.delete(identity, revision)
+                result = None
+            else:
+                data = validate_preset(data)
+                _get_media_library().get(data['media_id'])
+                if not all(_preset_action_permitted(action) for action in data['actions']):
+                    raise ValueError('Use existing operational TDeck API actions. Account, configuration and browser-only APIs cannot be delegated to a preset.')
+                result = store.save(data, identity, revision)
+        log_event('routing.preset.config', 'Deleted routing preset' if result is None else f"Saved routing preset '{result['name']}'",
+                  status='success', target_type='routing_preset', target_id=identity or result['id'],
+                  details={'action_count': len(result['actions']) if result else 0})
+        return jsonify(ok=True, preset=result), (201 if request.method == 'POST' else 200)
+    except KeyError:
+        return _api_json_error(404, 'not_found', 'The preset or its image is no longer available.')
+    except (ValueError, OSError) as error:
+        return _api_json_error(400, 'invalid_preset', str(error))
+
+
+@app.route('/routing/presets')
+@require_page('page:routing_presets', 'Routing: Presets')
+def routing_presets_page():
+    return render_template('routing_presets.html', hide_connection_status=True)
+
+
+@app.route('/api/routing/presets')
+def api_routing_presets_list():
+    try:
+        return jsonify(ok=True, presets=[_public_routing_preset(item) for item in _visible_routing_presets()])
+    except (OSError, ValueError) as error:
+        return _api_json_error(503, 'unavailable', 'Presets are unavailable. Ask an administrator to check their setup.')
+
+
+@app.route('/api/routing/presets/<identity>/prepare', methods=['POST'])
+def api_routing_preset_prepare(identity):
+    try:
+        item = _routing_preset_for_user(identity)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or set(data) - {'output', 'revision'}:
+            raise ValueError('Choose a preset and an output.')
+        if data.get('revision') != item['revision']:
+            return _api_json_error(409, 'changed', 'This preset changed. Refresh and select it again.')
+        output, _ = _preset_destination(item, data.get('output'))
+        import uuid
+        execution_id = uuid.uuid4().hex
+        token = _preset_signer().dumps({'preset': identity, 'revision': item['revision'], 'output': output,
+                                      'owner': _preset_owner(), 'execution': execution_id})
+        snapshot = _get_videohub_state_snapshot()
+        label = next((entry.get('label') for entry in snapshot.get('outputs', []) if entry.get('number') == output), None)
+        return jsonify(ok=True, confirmation_token=token, execution_id=execution_id, preset=_public_routing_preset(item),
+                       output=output, output_label=label or f'Output {output}', actions=[action['label'] for action in item['actions']])
+    except (KeyError, ValueError, OSError) as error:
+        return _api_json_error(400, 'invalid_preset', str(error))
+
+
+@app.route('/api/routing/presets/<identity>/apply', methods=['POST'])
+def api_routing_preset_apply(identity):
+    from itsdangerous import BadSignature
+    from atem_media import BusyError
+    try:
+        data = request.get_json(silent=True)
+        if (not isinstance(data, dict) or set(data) != {'confirmation_token'}
+                or not isinstance(data['confirmation_token'], str)):
+            raise ValueError('Confirm the preset before applying it.')
+        confirmed = _preset_signer().loads(data['confirmation_token'], max_age=300)
+        if confirmed['preset'] != identity or confirmed['owner'] != _preset_owner():
+            abort(403)
+        with _media_operation_lock:
+            item = _routing_preset_for_user(identity)
+            output, inputs = _preset_destination(item, confirmed['output'])
+            existing = _routing_preset_runner.get(confirmed['execution'])
+            if existing and existing['owner'] == confirmed['owner']:
+                return jsonify(ok=True, job=_public_routing_preset_job(existing)), 202
+            if confirmed['revision'] != item['revision']:
+                return _api_json_error(409, 'changed', 'This preset changed. Review it again before applying.')
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                raise BusyError('Another display or preset is running. Please wait.')
+            actor = capture_activity_actor()
+            def completed(job):
+                log_event('routing.preset.apply', f"{item['name']}: {job['message']}",
+                          status='success' if job['status'] == 'succeeded' else 'failure',
+                          target_type='routing_preset', target_id=identity,
+                          details={**_public_routing_preset_job(job), 'display_error': job.get('displayError', '')}, **actor)
+            manager = _get_media_routing_manager(refresh=True)
+            job = _routing_preset_runner.start(confirmed['execution'], item, output, confirmed['owner'],
+                display=lambda callback: manager.display(item['media_id'], output, allowed_inputs=inputs, on_complete=callback),
+                execute=lambda action: _execute_routing_preset_action(action, item, actor), completed=completed)
+        log_event('routing.preset.queued', f"Started preset '{item['name']}' on output {output}",
+                  status='info', target_type='routing_preset', target_id=identity)
+        return jsonify(ok=True, job=_public_routing_preset_job(job)), 202
+    except BadSignature:
+        return _api_json_error(400, 'expired', 'The confirmation expired. Select and confirm the preset again.')
+    except BusyError as error:
+        return _api_json_error(409, 'busy', str(error))
+    except (KeyError, ValueError, OSError, TypeError, RuntimeError) as error:
+        return _api_json_error(400, 'invalid_preset', str(error))
+
+
+def _public_routing_preset_job(job):
+    return {key: job.get(key) for key in ('id', 'presetId', 'name', 'output', 'status', 'message', 'imageDisplayed', 'actionsCompleted')}
+
+
+@app.route('/api/routing/presets/jobs/<identity>')
+def api_routing_preset_job(identity):
+    job = _routing_preset_runner.get(identity)
+    if not job:
+        return _api_json_error(404, 'not_found', 'The preset request is not available. Check the screen before applying it again.')
+    if job['owner'] != _preset_owner() or not _routing_preset_allowed(job['presetId']):
+        abort(403)
+    _media_output_access(job['output'])
+    return jsonify(ok=True, job=_public_routing_preset_job(job))
+
+
 @app.route('/media')
 @require_page('page:media', 'Media')
 def media_page():
@@ -7799,6 +8158,9 @@ def api_media_edit(media_id: str):
                 job = _active_media_job()
                 if job.get('status') in _MEDIA_ACTIVE_JOBS and job.get('mediaId') == media_id:
                     return _api_json_error(409, 'busy', 'This image is being loaded. Wait for the job to finish.')
+                preset_file = library.root / 'routing_presets.json'
+                if preset_file.exists() and any(preset['media_id'] == media_id for preset in _get_routing_preset_store().list()):
+                    return _api_json_error(409, 'in_use', 'This image is used by a routing preset. Change or delete that preset first.')
                 item = library.delete(media_id)
             else:
                 data = request.get_json(silent=True)

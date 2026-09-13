@@ -127,9 +127,16 @@ scope semantics.
 In **Permissions → Groups**, select a group and tick its page access. The tabs
 below show additional settings only for enabled pages. **General** contains the
 idle timeout. Turning off a page hides its tab while preserving its settings.
-The **Media** page checkbox permits selecting saved images; its **Media** tab
-has the separate **Allow uploading media** checkbox. Library and preset
-management remain under **Config → Media**.
+Enable **Routing**, then use its **Routing** tab to enable **Allow selecting
+media** and optionally **Allow uploading media**. Media access requires Routing;
+uploads additionally require media selection access. Existing saved grants are
+preserved, including when the Routing tab is hidden. Manage the image library in
+**Config → Media**, and saved routing presets in **Config → Routing presets**.
+For preset access, enable **Allow using presets** in the group's Routing tab and
+tick each preset that group may run. No selection means no presets; new presets
+are Admin-only until assigned. Preset access does not grant general media browsing
+or uploads. Grants combine across groups, and the normal output/media-input
+restrictions still apply.
 
 To test another user's experience, sign in with an account in the **Admin**
 group, open **Permissions → Users → select a user**, and choose **View as user**.
@@ -189,7 +196,8 @@ or open **Upload an image**. Uploading saves the image to TDeck and displays it
 on the selected output. The page returns to the output list only after confirmed
 completion. If display fails, the saved image remains available for retry.
 The operator pages show images and progress; player assignments, connection
-status, presets and library management live in **Config → Media**.
+status and library management live in **Config → Media**. Saved preset setup
+lives in **Config → Routing presets**.
 
 The signal path is: **TDeck library → ATEM still slot → media player → manually
 configured ATEM output/feed → VideoHub input → TV**. A still slot stores an image;
@@ -228,17 +236,23 @@ across players automatically in this version.
    setup save; existing VideoHub input mappings continue working.
    An administrator can optionally specify the trusted server Node.js
    executable in Advanced setup if PATH discovery is unavailable.
-5. In **Permissions → Groups**, operators need **Routing** and **Media** to
-   select and display saved images. In the group's **Media** tab, enable
+5. In **Permissions → Groups**, enable **Routing**. Inside the group's
+   **Routing** tab, enable **Allow selecting media**, then optionally
    **Allow uploading media** if they may add images.
    Their existing Routing allow-lists must permit the target output and at
-   least one mapped VideoHub input. Config access grants setup and image/preset
-   management even without a Media grant. Direct player testing also
-   requires Media access. Admin has full access. The old separate display and
-   image-management grants are no longer used; existing Media and upload grants
-   remain in place.
-6. In Config → Media, add images and mark recurring graphics as presets, such as
-   Mother's Day or Team Night. Test the full operator flow through Routing.
+   least one mapped VideoHub input. Config access grants setup and image
+   management even without a Media grant. Routing preset changes require Admin.
+   Direct player testing also
+   requires Routing and media selection access. Admin has full access. The old
+   separate display and image-management grants are no longer used; existing
+   Media and upload grants
+   remain in place but require Routing to take effect. Port access combines
+   across Routing-enabled groups; a separate Media-only group does not expand
+   it. Blank/all in any Routing group means unrestricted ports. Invalid port
+   entries are rejected without changing the saved permissions.
+6. In Config → Media, add images. For recurring graphics such as Mother's Day or
+   Team Night, create a preset in **Config → Routing presets** (or select an image
+   and choose **Create routing preset**). Test the operator flow through Routing.
 
 TDeck detects the connected ATEM's video mode and player/still counts, including
 the distinction between 1080p59.94 and 1080p60. Images keep their aspect ratio and
@@ -269,11 +283,54 @@ a display. A failed verification may follow a hardware change, so check the
 output before retrying. Actual ATEM/VideoHub compatibility still needs a live test.
 
 The library works while the ATEM is offline. Deleting a library image does not
-clear the copy already in the switcher. Images and `index.json` live together
+clear the copy already in the switcher. An image referenced by a routing preset
+cannot be deleted until that preset is changed or removed. Images and `index.json` live together
 under `media_library/` beside the application on Windows, or `/data/media_library`
 when `/data` exists on Linux. Set `TDECK_MEDIA_DIR` in the server environment to
 use another durable folder. Back up this entire folder; the existing Config ZIP
 does not yet include the image library. Uploaded media stays out of Git.
+
+### Routing presets
+
+An administrator creates a preset under **Config → Routing presets**, choosing
+its name, existing image and optional fixed VideoHub output. Leave the output as
+**Ask the user to choose** to use Routing's existing permitted-output picker.
+Add an optional description and ordered extra TDeck API actions, each with a
+friendly description, method, local `/api/` (or `/api/v1/`) path and optional JSON
+body, just like scheduler API actions. For example, a POST to `/api/timers/apply`
+with `{"preset": 1}` applies timer preset 1. Saving does not run anything.
+
+Operators choose **Routing → Presets**, select an assigned preset, choose an
+output if needed, and review the image, destination and action descriptions.
+Only **Confirm & apply** starts it. Fixed destinations must also be allowed by
+the operator's Routing permissions. Presets can be granted separately from
+general image browsing/uploading through **Permissions → Groups → Routing**.
+
+The image loads through the existing free-player selection and verified
+VideoHub routing. After that succeeds, extra actions run once in order with
+administrator-approved authority, even when the operator cannot access those
+controls directly. They use private in-process authentication, so no service
+token is needed or exposed to the browser. Actions use the scheduler's
+operational API boundary; account, setup, credential and browser-only endpoints
+cannot be delegated. Config users without protected Admin membership may view
+the preset editor but cannot change presets or their actions.
+
+If an action fails, later actions stop and the image/earlier actions remain
+applied. Some APIs acknowledge an asynchronous command before the device has
+finished. TDeck reports partial completion and never automatically replays the
+preset; check the result before confirming a new attempt. Confirmations expire
+after five minutes, are bound to the initiating session and saved preset
+revision, and become invalid when TDeck restarts. Permission checks run again
+when applying. Activity Log records the operator and any View as administrator.
+
+Preset definitions live in `routing_presets.json` inside the media library
+folder. Back up that folder together with `auth.db` to retain both presets and
+group assignments; Config ZIP does not include the media folder. Previous
+images marked as presets are imported once when this file is first created,
+with no fixed output or extra actions; assign their group access before use.
+Limits are 500 presets, 20 actions per preset and 32 KB per action body. One
+preset/display runs at a time. There is no startup or scheduled execution of
+routing presets.
 
 The media transport uses a TDeck-managed private Node child process with pinned
 [`atem-connection`](https://github.com/Sofie-Automation/sofie-atem-connection).
@@ -495,6 +552,18 @@ devices, run `python tests/permissions_ui_harness.py --view-as` instead. Open
 `TDECK_BASE_URL=http://127.0.0.1:5065` and run
 `npx playwright test tests/browser/view_as.spec.js --workers=1`. This mode uses
 temporary users/media and blocks outbound hardware traffic.
+
+For Routing presets, run `python tests/permissions_ui_harness.py --presets`.
+Open `http://127.0.0.1:5066/admin/users/2` with the same fixture-only admin
+credentials, or sign in as `media-operator` / `fixture-password` to test assigned
+presets without general Media access. This includes simulated image display and
+an authenticated local API action. From a second terminal:
+
+```powershell
+$env:TDECK_BASE_URL = "http://127.0.0.1:5066"
+npx playwright test tests/browser/routing_presets.spec.js --workers=1
+python -m unittest discover -s tests -p test_routing_presets.py -v
+```
 
 ### Cross-browser page and failure tests
 

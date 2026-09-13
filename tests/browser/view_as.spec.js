@@ -11,6 +11,7 @@ test.beforeEach(async ({page, request}) => {
   await page.getByLabel('Password', {exact: true}).fill('fixture-password');
   await page.getByRole('button', {name: 'Sign in', exact: true}).click();
   await expect(page).toHaveURL(/\/admin\/users\/2$/);
+  await expect(page.getByRole('button', {name: 'View as user', exact: true})).toBeVisible();
 });
 
 async function beginViewAs(page) {
@@ -77,3 +78,47 @@ test('A test user can upload and display media using their granted permissions',
   await expect(page).toHaveURL(/\/admin\/users\/2$/);
   expect(errors).toEqual([]);
 });
+
+for (const mode of ['view-as', 'sign-in']) {
+  test(`Single input/output restrictions survive a separate Media group (${mode})`, async ({page}, testInfo) => {
+    const errors = collectPageErrors(page);
+    await page.goto('/admin/permissions?tab=groups#role-68');
+    const form = page.locator('[data-role-form][data-role-id="68"]');
+    await form.getByRole('tab', {name: 'Routing', exact: true}).click();
+    for (const [field, value] of [['outputs', '26'], ['inputs', '13']]) {
+      const saved = page.waitForResponse(response => response.url().endsWith('/api/admin/groups/68')
+        && response.request().method() === 'POST'
+        && response.request().postDataJSON()[`videohub_allowed_${field}_role`] === value);
+      await form.locator(`input[name="videohub_allowed_${field}_role"]`).fill(value);
+      expect((await saved).ok()).toBe(true);
+    }
+    await page.route('**/api/videohub/state', route => route.fulfill({
+      contentType: 'application/json', body: JSON.stringify({ok: true, configured: true,
+        inputs: Array.from({length: 40}, (_, i) => ({number: i + 1, label: `Input ${i + 1}`})),
+        outputs: Array.from({length: 40}, (_, i) => ({number: i + 1, label: `Output ${i + 1}`})),
+        routing: Array.from({length: 40}, () => 13),
+      }),
+    }));
+    if (mode === 'view-as') {
+      await page.goto('/admin/users/2');
+      await beginViewAs(page);
+    } else {
+      await page.goto('/logout');
+      await page.goto('/login');
+      await page.getByLabel('Username', {exact: true}).fill('media-operator');
+      await page.getByLabel('Password', {exact: true}).fill('fixture-password');
+      await page.getByRole('button', {name: 'Sign in', exact: true}).click();
+      await expect(page).toHaveURL(/\/routing$/);
+    }
+    await expect(page.locator('#routing-outputs button')).toHaveText(['26: Output 26']);
+    await page.locator('#routing-outputs button').click();
+    await expect(page.locator('#routing-inputs button')).toHaveText(['13: Input 13']);
+    await expect(page.locator('#routing-media-choice')).toBeVisible();
+    await page.screenshot({path: testInfo.outputPath('single-routing-port.png'), fullPage: true});
+    await page.locator('#routing-media-choice').click();
+    await expect(page).toHaveURL(/\/media\?output=26$/);
+    await expect(page.getByRole('button', {name: 'Display Welcome', exact: true})).toBeVisible();
+    await expect(page.locator('#media-upload-link')).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+}

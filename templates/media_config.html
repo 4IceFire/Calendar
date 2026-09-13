@@ -59,7 +59,7 @@
           <h2 class="h5 mb-0" id="media-library-title">Image library <span class="text-muted small" id="media-count"></span></h2>
           <button type="button" class="btn btn-sm btn-outline-secondary" id="media-refresh-library">Refresh library</button>
         </div>
-        <p class="small text-muted mb-3">Add images for the routing media picker and prepare presets for recurring events.</p>
+        <p class="small text-muted mb-3">Add images for the routing media picker. Configure presets and their actions in Config → Routing presets.</p>
         {% if media_permissions.upload %}
         <details id="media-upload-panel" class="media-disclosure mb-3">
           <summary>Add an image</summary>
@@ -79,8 +79,7 @@
             <input class="form-control" id="media-search" type="search" placeholder="Search images…" autocomplete="off">
           </div>
           <div>
-            <label class="visually-hidden" for="media-filter">Image filter</label>
-            <select class="form-select" id="media-filter"><option value="all">All images</option><option value="presets">Presets</option></select>
+
           </div>
         </div>
         <p class="text-muted small" id="media-library-status" role="status">Loading your image library…</p>
@@ -100,11 +99,7 @@
           <form class="mt-3" id="media-edit-form">
             <label class="form-label" for="media-edit-name">Image name</label>
             <input class="form-control" id="media-edit-name" type="text" required maxlength="120">
-            <div class="form-check mt-3">
-              <input class="form-check-input" type="checkbox" id="media-edit-preset">
-              <label class="form-check-label" for="media-edit-preset">Save as a preset</label>
-            </div>
-            <div class="form-text">Presets are reusable images, such as Mother's Day, Father's Day or Team Night.</div>
+            <a class="btn btn-sm btn-outline-secondary mt-3" id="media-create-preset" href="/config/routing-presets">Create routing preset with this image</a>
             <div class="d-flex flex-wrap gap-2 mt-3">
               <button type="submit" id="media-save-image" class="btn btn-sm btn-outline-primary">Save details</button>
               <button type="button" id="media-delete-image" class="btn btn-sm btn-outline-danger">Delete image</button>

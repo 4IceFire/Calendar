@@ -178,6 +178,35 @@ class ViewAsUserTests(unittest.TestCase):
         self.assertEqual(self.start().status_code, 303)
         self.assertEqual(self.start(3).status_code, 409)
 
+    def test_separate_media_group_preserves_single_port_scope_in_both_login_modes(self):
+        self.execute("UPDATE groups SET videohub_allowed_outputs='[26]', videohub_allowed_inputs='[13]' WHERE id=2")
+        self.execute("DELETE FROM group_pages WHERE group_id=2 AND page_key IN ('page:media','page:media_upload')")
+        self.execute("INSERT INTO groups(id,name) VALUES(4,'Media only')")
+        self.execute("INSERT INTO group_pages(group_id,page_key) VALUES(4,'page:media')")
+        self.execute("INSERT INTO group_pages(group_id,page_key) VALUES(4,'page:media_upload')")
+        self.execute('INSERT INTO user_groups(user_id,group_id) VALUES(2,4)')
+        for view_as in (False, True):
+            with self.subTest(view_as=view_as):
+                self.sign_in(1 if view_as else 2)
+                if view_as:
+                    self.assertEqual(self.start().status_code, 303)
+                response = self.client.get('/routing')
+                self.assertEqual(response.status_code, 200)
+                html = response.get_data(as_text=True)
+                self.assertIn('data-allowed-outputs=\'[26]\'', html)
+                self.assertIn('data-allowed-inputs=\'[13]\'', html)
+                for path in ('/media?output=26', '/media/upload?output=26', '/api/media'):
+                    self.assertEqual(self.client.get(path).status_code, 200, path)
+                self.assertEqual(self.client.get('/media?output=1').status_code, 403)
+                for output, input_ in ((1, 13), (26, 1)):
+                    response = self.client.post('/api/videohub/route', json={'output': output, 'input': input_}, headers=self.headers())
+                    self.assertEqual(response.status_code, 403)
+        self.vh.route_video_output.assert_not_called()
+        # Removing the parent permission takes effect on the next request.
+        self.execute("DELETE FROM group_pages WHERE group_id=2 AND page_key='page:routing'")
+        for path in ('/media', '/media/upload', '/api/media'):
+            self.assertEqual(self.client.get(path).status_code, 403)
+
     def test_actions_apply_target_permissions_and_resource_limits(self):
         self.start()
         allowed = self.client.post('/api/media/upload', data={'file': (self.image(), 'test.png')}, headers=self.headers())

@@ -184,8 +184,7 @@ function initializeMediaPage() {
   function renderLibrary() {
     const grid = el('media-grid');
     const query = el('media-search').value.trim().toLowerCase();
-    const presetsOnly = el('media-filter').value === 'presets';
-    const visible = items.filter(function(item) { return (!presetsOnly || item.preset) && String(item.name || '').toLowerCase().indexOf(query) !== -1; });
+    const visible = items.filter(function(item) { return String(item.name || '').toLowerCase().indexOf(query) !== -1; });
     clear(grid);
     text(el('media-library-status'), visible.length ? (canDisplay ? 'Select an image to display it.' : 'Select an image to preview it.') : (items.length ? 'No images match your search.' : 'No images have been added yet.'));
     visible.forEach(function(item) {
@@ -193,14 +192,13 @@ function initializeMediaPage() {
       tile.type = 'button';
       tile.className = 'media-tile';
       tile.dataset.mediaId = item.id;
-      tile.setAttribute('aria-label', (canDisplay ? 'Display ' : 'Preview ') + item.name + (item.preset ? ', preset' : ''));
+      tile.setAttribute('aria-label', (canDisplay ? 'Display ' : 'Preview ') + item.name);
       const image = document.createElement('img');
       image.className = 'media-tile-image'; image.src = item.thumbnail_url; image.alt = ''; image.loading = 'lazy';
       const caption = document.createElement('span');
       caption.className = 'media-tile-caption';
       const name = document.createElement('span'); name.className = 'media-tile-name'; name.textContent = item.name;
       caption.appendChild(name);
-      if (item.preset) { const badge = document.createElement('span'); badge.className = 'media-tile-preset'; badge.textContent = 'Preset'; caption.appendChild(badge); }
       tile.appendChild(image); tile.appendChild(caption);
       tile.addEventListener('click', function() { if (!busy) { if (canDisplay) { uploaded = false; displayImage(item); } else previewImage(item); } });
       grid.appendChild(tile);
@@ -270,7 +268,6 @@ function initializeMediaPage() {
     changeUploadPreview();
   } else {
     el('media-search').addEventListener('input', renderLibrary);
-    el('media-filter').addEventListener('change', renderLibrary);
     el('media-library-retry').addEventListener('click', refreshLibrary);
     el('media-preview-close').addEventListener('click', closePreview);
     document.addEventListener('keydown', function(event) { if (event.key === 'Escape') closePreview(); });

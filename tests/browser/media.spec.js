@@ -33,7 +33,7 @@ function mockDisplay(page, options = {}) {
   return {ready, calls: () => calls, job: () => job};
 }
 
-test('Media picker stays simple and filters presets on desktop and mobile', async ({page}, testInfo) => {
+test('Media picker stays simple and searches images on desktop and mobile', async ({page}, testInfo) => {
   const errors = collectPageErrors(page);
   const hardwareRequests = [];
   page.on('request', request => { if (/\/api\/(atem\/media|config\/atem-media|status\/summary)/.test(new URL(request.url()).pathname)) hardwareRequests.push(request.url()); });
@@ -41,8 +41,8 @@ test('Media picker stays simple and filters presets on desktop and mobile', asyn
   await page.locator('#media-search').fill('welcome');
   await expect(page.locator('#media-grid .media-tile')).toHaveCount(1);
   await page.locator('#media-search').fill('');
-  await page.locator('#media-filter').selectOption('presets');
-  await expect(page.getByRole('button', {name: "Display Mother's Day, preset", exact: true})).toBeVisible();
+  await page.locator('#media-search').fill('Mother');
+  await expect(page.getByRole('button', {name: "Display Mother's Day", exact: true})).toBeVisible();
   await expect(page.getByRole('button', {name: 'Display Welcome', exact: true})).toHaveCount(0);
   for (const id of ['media-connection-status', 'media-setup', 'media-player', 'media-load-button', 'media-edit-form', 'media-upload-form']) await expect(page.locator('#' + id)).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);

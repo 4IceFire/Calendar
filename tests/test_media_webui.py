@@ -48,7 +48,7 @@ class MediaWebTests(unittest.TestCase):
             'atem_ip': '192.0.2.1', 'atem_media_enabled': False,
             'atem_media_destinations': [], 'atem_media_node_path': '',
         }
-        self.grants = {'page:media'}
+        self.grants = {'page:routing', 'page:media'}
         self.manager = Mock()
         self.manager.snapshot.return_value = {'enabled': False, 'connected': False, 'job': None, 'destinations': []}
         self.manager.load.return_value = {'id': 'job-1', 'mediaId': self.item['id'], 'mediaName': 'Welcome',
@@ -72,7 +72,7 @@ class MediaWebTests(unittest.TestCase):
             patch.object(webui, '_auth_cfg', side_effect=lambda: self.cfg),
             patch.object(webui, 'current_user', _User()),
             patch.object(webui, '_touch_current_user_session', return_value=True),
-            patch.object(webui, 'can_access', side_effect=lambda key: key in self.grants),
+            patch.object(webui, 'can_access', side_effect=lambda key: {key, *webui._PAGE_PREREQUISITES.get(key, ())} <= self.grants),
             patch.object(webui, '_get_media_library', return_value=self.library),
             patch.object(webui, '_get_atem_media_manager', return_value=self.manager),
             patch.object(webui, '_get_media_routing_manager', return_value=self.routing),
@@ -160,8 +160,8 @@ class MediaWebTests(unittest.TestCase):
         for path in ('/api/media/upload', '/api/v1/media/upload'):
             for grants, headers in (
                 ({'page:media'}, self.headers),
-                ({'page:media', 'page:media_upload'}, {**self.headers, 'Origin': 'https://untrusted.invalid'}),
-                ({'page:media', 'page:media_upload'}, {**self.headers, 'X-CSRF-Token': 'wrong'}),
+                ({'page:routing', 'page:media', 'page:media_upload'}, {**self.headers, 'Origin': 'https://untrusted.invalid'}),
+                ({'page:routing', 'page:media', 'page:media_upload'}, {**self.headers, 'X-CSRF-Token': 'wrong'}),
             ):
                 with self.subTest(path=path, grants=grants, headers=headers):
                     self.grants = grants

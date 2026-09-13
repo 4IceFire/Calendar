@@ -20,7 +20,7 @@ and same-origin checks. Image numbers in configuration and responses are 1-based
 | `GET /api/media` | Media or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, creation time, `url` and `thumbnail_url`. |
 | `POST /api/media/upload` | Config, or Media + upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
 | `PATCH /api/media/<id>` | Config | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
-| `DELETE /api/media/<id>` | Config | Removes the local image. An active display/load of it returns 409. Does not clear ATEM stills. |
+| `DELETE /api/media/<id>` | Config | Removes the local image. Active displays/loads and references from saved routing presets return 409. Does not clear ATEM stills. |
 | `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/input; overrides are rejected. ATEM output routing is never changed. |
 | `GET /api/media/display/<job_id>` | Routing + Media, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`. No hardware assignments or internal diagnostics. |
 | `GET /api/atem/media/state` | Config | Cached connection, detected format/capacity, configured destinations, players/stills/AUXes and current/last ATEM `job`. An offline state is a successful HTTP read. |
@@ -42,10 +42,49 @@ The existing ATEM test job also uses `uploading` and `selecting` statuses and
 includes player/slot details for Config. Library image URLs require Media
 or Config and return PNGs with private/no-store caching. Validation returns 400,
 missing media/jobs 404, oversized uploads 413 and storage/runtime failures 503.
-`page:media` permits browsing and selecting existing images. Optional
-`page:media_upload` is edited in the group's Media tab and requires Media access
-for operator uploads. The legacy `page:media_load` and `page:media_manage` keys
+`page:media` permits browsing and selecting existing images and requires
+`page:routing`. Both it and optional `page:media_upload` are edited inside the
+group's Routing tab; operator uploads require Routing + Media + upload access.
+Preset-only users may read image URLs only for their accessible saved routing
+presets, without gaining access to the full library. The `preset` image field is
+retained for legacy compatibility; new presets use the APIs below.
+The legacy `page:media_load` and `page:media_manage` keys
 are ignored; management now requires Config.
+
+## Routing presets
+
+These APIs and their v1 aliases require a browser session; even full-scope
+service tokens and the scheduler are denied. Writes enforce CSRF and same-origin
+checks. Operator access requires `page:routing`, `page:routing_presets`, an
+individual `preset:<id>` grant and permitted output/mapped media input. General
+Media access is not required. Grants are assigned in Permissions → Groups → Routing.
+
+| Method and path | Access | Contract |
+| --- | --- | --- |
+| `GET /api/config/routing-presets` | Config | `{ok, presets, images, outputs}` for the Config editor. |
+| `POST /api/config/routing-presets` | Config + Admin | Saves `{name, description, media_id, output, enabled, actions}`; `output: null` asks the user to choose. Returns `201 {ok, preset}` with immutable `id` and new `revision`. |
+| `PUT /api/config/routing-presets/<id>` | Config + Admin | Full preset configuration plus current `revision`; rejects stale edits. |
+| `DELETE /api/config/routing-presets/<id>` | Config + Admin | JSON `{revision}`. Active preset/display jobs block configuration writes with 409. |
+| `GET /api/routing/presets` | Routing + Presets | `{ok, presets}` filtered to enabled, assigned presets and permitted fixed outputs. Returns display fields and thumbnails, never API bodies. |
+| `POST /api/routing/presets/<id>/prepare` | Individual preset access | JSON `{revision, output}`. Validates setup/access and returns a signed `confirmation_token`, `execution_id`, preset, output label and action descriptions. Does not operate hardware. |
+| `POST /api/routing/presets/<id>/apply` | Individual preset access | JSON `{confirmation_token}` only. Returns `202 {ok, job}` after current access/setup checks. User-supplied actions or output overrides are rejected. |
+| `GET /api/routing/presets/jobs/<id>` | Initiating session + preset/output access | `{ok, job}` with `id`, `presetId`, `name`, `output`, `status`, `message`, `imageDisplayed`, `actionsCompleted`. |
+
+An action is `{label, method, path, body}`: a friendly label, GET/POST/PUT/PATCH/DELETE,
+existing local `/api/` or `/api/v1/` path, and optional JSON body (not for GET).
+Limits: 500 presets, 20 actions per preset, 32 KB per action body, 64 KB per preset.
+No external URLs or custom headers are accepted. Extra actions run through private
+in-process authentication after verified media display, with administrator-approved
+authority, irrespective of the operator's direct control grants. The scheduler's
+operational policy excludes account/configuration/credential/browser-only APIs.
+
+Confirmation tokens expire in five minutes and bind the session, preset revision,
+output and execution ID. They also expire on server restart. A retried confirmation
+cannot repeat an execution; poll its job after an uncertain apply response instead
+of submitting a new confirmation automatically. States are `loading`, `actions`,
+`succeeded`, `failed`. Actions run in order and stop at the first failure without
+rollback; a device API may accept a command asynchronously. Partial results remain
+visible in job status and Activity Log. No actions run on preset save or startup.
 
 ## Administrator user testing
 

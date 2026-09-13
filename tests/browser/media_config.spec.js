@@ -21,9 +21,9 @@ test('Media Config combines available players, library management and a collapse
   await openConfig(page);
   await expect(page.locator('#media-setup')).toHaveAttribute('open', '');
   await expect(page.locator('#media-test-panel')).not.toHaveAttribute('open', '');
-  await page.getByRole('button', {name: "Select Mother's Day, preset", exact: true}).click();
+  await page.getByRole('button', {name: "Select Mother's Day", exact: true}).click();
   await expect(page.locator('#media-edit-form')).toBeVisible();
-  await expect(page.locator('#media-edit-preset')).toBeChecked();
+  await expect(page.locator('#media-create-preset')).toHaveAttribute('href', /\/config\/routing-presets\?image=/);
   await expect(page.locator('#media-delete-image')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -31,7 +31,7 @@ test('Media Config combines available players, library management and a collapse
   expect(errors).toEqual([]);
 });
 
-test('Media Config uploads, renames, saves a preset and deletes it', async ({page, request}, testInfo) => {
+test('Media Config uploads, renames and deletes an image', async ({page, request}, testInfo) => {
   const errors = collectPageErrors(page);
   const name = '<img src=x onerror="window.mediaNameExecuted=true"> ' + testInfo.project.name + ' ' + Date.now();
   const renamed = name + ' updated';
@@ -46,14 +46,12 @@ test('Media Config uploads, renames, saves a preset and deletes it', async ({pag
   await expect(page.locator('#media-grid [onerror]')).toHaveCount(0);
   expect(await page.evaluate(() => window.mediaNameExecuted)).toBeUndefined();
   await page.locator('#media-edit-name').fill(renamed);
-  await page.locator('#media-edit-preset').check();
   await page.locator('#media-save-image').click();
   await expect(page.locator('#media-message')).toHaveText('Image details saved.');
   await page.reload();
   await page.locator('#media-search').fill(renamed);
-  await page.locator('#media-filter').selectOption('presets');
-  await page.getByRole('button', {name: 'Select ' + renamed + ', preset', exact: true}).click();
-  await expect(page.locator('#media-edit-preset')).toBeChecked();
+  await page.getByRole('button', {name: 'Select ' + renamed + '', exact: true}).click();
+  await expect(page.locator('#media-create-preset')).toHaveAttribute('href', /\/config\/routing-presets\?image=/);
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#media-delete-image').click();
   await expect(page.locator('#media-message')).toHaveText('Image deleted from the library.');
@@ -72,7 +70,7 @@ test('Config explains an upload rate limit without adding an image', async ({pag
     body: JSON.stringify({ok: false, error: 'rate_limited', message: 'Too many image uploads. Wait a minute and try again.'}),
   }));
   await page.locator('#media-upload-button').click();
-  await expect(page.locator('#media-message')).toHaveText('Too many image uploads. Wait a minute and try again.');
+  await expect(page.locator('#media-message')).toContainText('Too many image uploads. Wait a minute and try again.');
   await expect(page.locator('#media-upload-button')).toBeEnabled();
   await expect(page.locator('#media-grid .media-tile')).toHaveCount(initialCount);
 });

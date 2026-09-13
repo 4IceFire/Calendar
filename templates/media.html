@@ -45,7 +45,6 @@
   {% if not output %}<p class="text-muted">Choose an output in Routing to display an image. You can preview the library here.</p>{% elif not can_display %}<p class="text-muted">Select an image to preview it.</p>{% endif %}
   <div class="media-library-toolbar mb-4">
     <div class="flex-grow-1"><label class="visually-hidden" for="media-search">Search images</label><input class="form-control" id="media-search" type="search" placeholder="Search images…" autocomplete="off"></div>
-    <div><label class="visually-hidden" for="media-filter">Image filter</label><select class="form-select" id="media-filter"><option value="all">All images</option><option value="presets">Presets</option></select></div>
   </div>
   <p class="small text-muted" id="media-library-status" role="status">Loading images…</p>
   <button type="button" id="media-library-retry" class="btn btn-outline-secondary d-none mb-3">Try again</button>

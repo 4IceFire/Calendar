@@ -189,9 +189,6 @@
                                 <button type="button" class="nav-link active" role="tab" id="group-{{ g.id }}-tab-general"
                                   data-permission-tab="general" data-permission-page="" aria-controls="group-{{ g.id }}-panel-general"
                                   aria-selected="true" tabindex="0">General</button>
-                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-media"
-                                  data-permission-tab="media" data-permission-page="page:media" aria-controls="group-{{ g.id }}-panel-media"
-                                  aria-selected="false" tabindex="-1" {% if 'page:media' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Media</button>
                                 <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-digico"
                                   data-permission-tab="digico" data-permission-page="page:digico_mixer" aria-controls="group-{{ g.id }}-panel-digico"
                                   aria-selected="false" tabindex="-1" {% if 'page:digico_mixer' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Personal Mixes</button>
@@ -228,21 +225,6 @@
                               </div>
                             </div>
                           </section>
-                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-media" tabindex="0"
-                            data-permission-panel="media" aria-labelledby="group-{{ g.id }}-tab-media" hidden>
-                            <div class="row g-3">
-                              <div class="col-12">
-                                <div class="fw-semibold">Media uploads</div>
-                                <div class="small text-muted mb-3">Media access lets this group choose images from the media pool. Allow uploads if they should also add their own images.</div>
-                                <div class="form-check">
-                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:media_upload" id="group-{{ g.id }}-media-upload"
-                                    {% if 'page:media_upload' in group_to_pages.get(g.id, []) %}checked{% endif %}>
-                                  <label class="form-check-label" for="group-{{ g.id }}-media-upload">Allow uploading media</label>
-                                </div>
-                                <div class="form-text mt-2">Library and preset management is available from Config → Media.</div>
-                              </div>
-                            </div>
-                          </section>
                           <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-digico" tabindex="0"
                             data-permission-panel="digico" aria-labelledby="group-{{ g.id }}-tab-digico" hidden>
                             <div class="row g-3">
@@ -274,7 +256,7 @@
                             <div class="row g-3">
                               <div class="col-12">
                                 <div class="fw-semibold">Routing allow-lists (VideoHub)</div>
-                                <div class="small text-muted">Blank or <code>all</code> allows all.</div>
+                                <div class="small text-muted">Enter one port number, or several separated by commas. Blank or <code>all</code> allows all. Access combines across Routing-enabled groups; an unrestricted group grants every port. Admin always has full access.</div>
                               </div>
                               <div class="col-12 col-md-6">
                                 <label class="form-label" for="group-{{ g.id }}-routing-outputs">Allowed Outputs</label>
@@ -283,6 +265,45 @@
                               <div class="col-12 col-md-6">
                                 <label class="form-label" for="group-{{ g.id }}-routing-inputs">Allowed Inputs</label>
                                 <input class="form-control" name="videohub_allowed_inputs_role" id="group-{{ g.id }}-routing-inputs" value="{{ (group_to_vh.get(g.id).inputs if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-inputs">
+                              </div>
+                              <div class="col-12">
+                                <div class="fw-semibold mb-2">Media</div>
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:media" id="group-{{ g.id }}-media"
+                                    {% if 'page:media' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-media">Allow selecting media</label>
+                                </div>
+                                <div class="form-check mt-2" data-routing-media-upload {% if 'page:media' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>
+                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:media_upload" id="group-{{ g.id }}-media-upload"
+                                    {% if 'page:media_upload' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-media-upload">Allow uploading media</label>
+                                </div>
+                                <div class="form-text mt-2">Choose saved images from Routing for the allowed outputs. Display also requires access to a configured media player's VideoHub input. Uploading requires media selection access. Manage images in Config → Media and presets in Config → Routing presets.</div>
+                              </div>
+                              <div class="col-12">
+                                <div class="fw-semibold mb-2">Presets</div>
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:routing_presets" id="group-{{ g.id }}-presets"
+                                    {% if 'page:routing_presets' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-presets">Allow using presets</label>
+                                </div>
+                                <div data-routing-preset-options {% if 'page:routing_presets' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>
+                                  <p class="form-text">Select the presets this group may run. No selection means no presets. Each preset also requires access to its output and a media input. Saved extra actions run with the administrator's approved access.</p>
+                                  {% for preset in routing_presets %}
+                                  <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="page_keys" value="preset:{{ preset.id }}" id="group-{{ g.id }}-preset-{{ preset.id }}"
+                                      {% if ('preset:' ~ preset.id) in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                    <label class="form-check-label" for="group-{{ g.id }}-preset-{{ preset.id }}">{{ preset.name }}{% if not preset.enabled %} (disabled){% endif %}</label>
+                                  </div>
+                                  {% else %}<p class="small text-muted">Add presets in Config → Routing presets.</p>{% endfor %}
+                                  {% set listed_presets = routing_presets | map(attribute='id') | list %}
+                                  {% for key in group_to_pages.get(g.id, []) %}
+                                  {% if key.startswith('preset:') and key[7:] not in listed_presets %}
+                                  {# Preserve saved grants if the catalogue is temporarily unavailable. #}
+                                  <input type="checkbox" name="page_keys" value="{{ key }}" checked hidden>
+                                  {% endif %}
+                                  {% endfor %}
+                                </div>
                               </div>
                             </div>
                           </section>

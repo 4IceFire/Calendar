@@ -98,33 +98,36 @@ class GroupMediaPermissionTests(unittest.TestCase):
         self.assertTrue(response.get_json()['ok'])
         return set(webui._group_settings_snapshot(2)['page_keys'])
 
-    def test_editor_has_one_media_page_and_upload_in_its_detail_tab(self):
+    def test_media_and_upload_are_only_in_routing_detail_tab(self):
         webui._set_group_pages(2, ['page:media', 'page:media_upload', 'page:media_load', 'page:media_manage'])
         controls = self._editor().controls
         top_media = [attrs['value'] for attrs, parents in controls
                      if attrs.get('name') == 'page_keys' and attrs.get('value', '').startswith('page:media')
                      and any('group-page-access' in parent.get('class', '').split() for parent in parents)]
-        self.assertEqual(top_media, ['page:media'])
+        self.assertEqual(top_media, [])
+        media = [(attrs, parents) for attrs, parents in controls if attrs.get('value') == 'page:media']
+        self.assertEqual(len(media), 1)
+        self.assertTrue(any(parent.get('data-permission-panel') == 'routing' for parent in media[0][1]))
         uploads = [(attrs, parents) for attrs, parents in controls if attrs.get('value') == 'page:media_upload']
         self.assertEqual(len(uploads), 1)
         self.assertIn('checked', uploads[0][0])
-        self.assertTrue(any(parent.get('data-permission-panel') == 'media' for parent in uploads[0][1]))
+        self.assertTrue(any(parent.get('data-permission-panel') == 'routing' for parent in uploads[0][1]))
         self.assertFalse(any(attrs.get('value') in ('page:media_load', 'page:media_manage') for attrs, _ in controls))
 
     def test_hidden_upload_survives_page_changes_and_can_be_explicitly_revoked(self):
         webui._set_group_pages(2, ['page:media', 'page:media_upload', 'page:routing'])
         keys = set(self._editor().checked_pages())
-        keys.remove('page:media')
+        keys.remove('page:routing')
         keys.add('page:home')
         self.assertIn('page:media_upload', self._save(sorted(keys)))
         editor = self._editor()
-        media_tab = next(attrs for attrs, _ in editor.controls if attrs.get('data-permission-tab') == 'media')
+        media_tab = next(attrs for attrs, _ in editor.controls if attrs.get('data-permission-tab') == 'routing')
         upload = next(attrs for attrs, _ in editor.controls if attrs.get('value') == 'page:media_upload')
         self.assertIn('hidden', media_tab)
         self.assertIn('checked', upload)
         self.assertNotIn('disabled', upload)
         self.assertIn('page:media_upload', self._save(editor.checked_pages() + ['page:account']))
-        saved = self._save(self._editor().checked_pages() + ['page:media'])
+        saved = self._save(self._editor().checked_pages() + ['page:routing'])
         self.assertTrue({'page:media', 'page:media_upload'} <= saved)
         saved = self._save([key for key in saved if key != 'page:media_upload'])
         self.assertNotIn('page:media_upload', saved)
@@ -133,7 +136,7 @@ class GroupMediaPermissionTests(unittest.TestCase):
         self.assertEqual(snapshot['videohub_allowed_outputs'], [2])
         self.assertEqual(snapshot['videohub_allowed_inputs'], [5])
 
-    def test_form_save_preserves_upload_while_media_tab_is_hidden(self):
+    def test_form_save_preserves_upload_while_routing_tab_is_hidden(self):
         webui._set_group_pages(2, ['page:media_upload', 'page:account'])
         response = self.client.post('/admin/permissions', headers=self.headers, data={
             '_csrf': 'group-media-csrf', 'action': 'save_group', 'group_id': '2',
@@ -142,6 +145,100 @@ class GroupMediaPermissionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(set(webui._group_settings_snapshot(2)['page_keys']),
                          {'page:media_upload', 'page:account', 'page:home'})
+
+    def test_media_grants_alone_do_not_authorize_pages_images_or_apis(self):
+        for keys in (['page:media'], ['page:media', 'page:media_upload'],
+                     ['page:routing', 'page:media_upload']):
+            with self.subTest(keys=keys):
+                webui._set_group_pages(2, keys)
+                self.assertFalse(webui._user_allows_page(2, 'page:media'))
+                self.assertFalse(webui._user_allows_page(2, 'page:media_upload'))
+                with patch.object(webui, 'current_user', webui._User(webui._user_record(2))):
+                    for path in ('/media', '/media?output=2', '/media/upload', '/api/media',
+                                 '/api/v1/media', '/media/images/' + 'a' * 32 + '.png',
+                                 '/media/thumbnails/' + 'a' * 32 + '.png'):
+                        self.assertEqual(self.client.get(path).status_code, 403, path)
+                    for path in ('/api/media/upload', '/api/v1/media/upload', '/api/media/display'):
+                        self.assertEqual(self.client.post(path, headers=self.headers).status_code, 403, path)
+        self.library.list.assert_not_called()
+        self.library.upload.assert_not_called()
+
+    def test_single_input_output_save_render_and_server_enforcement(self):
+        keys = ['page:routing', 'page:media']
+        for raw_output, raw_input in (('2', '5'), ('[2]', '[5]'), (2, 5), ([2], [5])):
+            with self.subTest(output=raw_output, input=raw_input):
+                response = self.client.post('/api/admin/groups/2', headers=self.headers, json={
+                    'page_keys': keys, 'videohub_allowed_outputs_role': raw_output,
+                    'videohub_allowed_inputs_role': raw_input,
+                })
+                self.assertEqual(response.status_code, 200)
+                user = webui._User(webui._user_record(2))
+                self.assertEqual(user.videohub_allowed_outputs, [2])
+                self.assertEqual(user.videohub_allowed_inputs, [5])
+                with patch.object(webui, 'current_user', user):
+                    page = self.client.get('/routing')
+                    self.assertEqual(page.status_code, 200)
+                    self.assertIn('data-allowed-outputs=\'[2]\'', page.get_data(as_text=True))
+                    self.assertIn('data-allowed-inputs=\'[5]\'', page.get_data(as_text=True))
+                    with patch.dict(webui.app.view_functions, {key: lambda: webui.jsonify(ok=True) for key in ('api_videohub_route', 'api_v1__api_videohub_route')}):
+                        for path in ('/api/videohub/route', '/api/v1/videohub/route'):
+                            for output, input_, status in ((2, 5, 200), (1, 5, 403), (2, 1, 403)):
+                                result = self.client.post(path, headers=self.headers, json={'output': output, 'input': input_})
+                                self.assertEqual(result.status_code, status)
+                    self.assertEqual(self.client.get('/media?output=1').status_code, 403)
+        # A partial settings update must preserve the other restriction.
+        response = self.client.post('/api/admin/groups/2', headers=self.headers, json={
+            'page_keys': keys, 'videohub_allowed_inputs_role': '7',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(webui._group_settings_snapshot(2)['videohub_allowed_outputs'], [2])
+        self.assertEqual(webui._group_settings_snapshot(2)['videohub_allowed_inputs'], [7])
+
+    def test_invalid_routing_restriction_does_not_save_allow_all_or_other_changes(self):
+        keys = ['page:routing']
+        self._save(keys)
+        before = webui._group_settings_snapshot(2)
+        for raw in ('input 2', '2-4', '0', '-1', '2.5', '[2, false]', '2,bad', 'null', {}, True):
+            with self.subTest(raw=raw):
+                response = self.client.post('/api/admin/groups/2', headers=self.headers, json={
+                    'page_keys': keys + ['page:media'], 'videohub_allowed_outputs_role': raw,
+                    'videohub_allowed_inputs_role': '7',
+                })
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('Allowed Outputs', response.get_json()['error'])
+                self.assertEqual(webui._group_settings_snapshot(2), before)
+        response = self.client.post('/admin/permissions', headers=self.headers, data={
+            '_csrf': 'group-media-csrf', 'action': 'save_group', 'group_id': '2',
+            'page_keys': keys + ['page:media'], 'videohub_allowed_inputs_role': 'bad',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(webui._group_settings_snapshot(2), before)
+
+    def test_routing_lookup_failure_never_renders_unrestricted_controls(self):
+        self._save(['page:routing'])
+        with patch.object(webui, 'current_user', webui._User(webui._user_record(2))), \
+             patch.object(webui, '_effective_videohub_allowlists_for_user', side_effect=RuntimeError('Permission lookup failed')), \
+             patch.dict(webui.app.config, {'TESTING': True}):
+            with self.assertRaisesRegex(RuntimeError, 'Permission lookup failed'):
+                self.client.get('/routing')
+
+    def test_only_routing_groups_expand_port_access_and_admin_is_unrestricted(self):
+        self._save(['page:routing'])
+        conn = webui._db()
+        try:
+            conn.execute("INSERT INTO groups(id,name) VALUES (3,'Unrelated group')")
+            conn.execute('INSERT INTO user_groups(user_id,group_id) VALUES (2,3)')
+            conn.commit()
+        finally:
+            conn.close()
+        webui._set_group_pages(3, ['page:media'])
+        self.assertEqual(webui._User(webui._user_record(2)).videohub_allowed_outputs, [2])
+        webui._set_group_pages(3, ['page:routing'])
+        self.assertEqual(webui._User(webui._user_record(2)).videohub_allowed_outputs, [])
+        webui._set_group_videohub_allowlists(3, '3', '6')
+        self.assertEqual(webui._User(webui._user_record(2)).videohub_allowed_outputs, [2, 3])
+        self.assertEqual(webui._User(webui._user_record(2)).videohub_allowed_inputs, [5, 6])
+        self.assertEqual(webui._User(webui._user_record(1)).videohub_allowed_outputs, [])
 
     def test_stored_legacy_grants_do_not_authorize_media_or_management(self):
         for keys in (['page:routing', 'page:media_load', 'page:media_manage', 'page:media_upload'],

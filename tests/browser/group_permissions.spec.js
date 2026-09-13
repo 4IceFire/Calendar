@@ -29,29 +29,31 @@ async function saveChange(page, action) {
   return response.request().postDataJSON();
 }
 
-test('Media has one page grant and optional uploads in its detail tab', async ({page}) => {
+test('Routing contains media selection and subordinate upload options', async ({page}) => {
   const errors = collectPageErrors(page);
   const form = await openGroup(page);
-  const pageAccess = form.locator('.group-page-access');
-  await expect(pageAccess.locator('input[value^="page:media"]')).toHaveCount(1);
-  await expect(form.getByRole('tab', {name: 'Media', exact: true})).toBeVisible();
-  await expect(form.getByRole('checkbox', {name: 'Allow uploading media', exact: true})).toBeHidden();
-  await form.getByRole('tab', {name: 'Media', exact: true}).click();
+  await expect(form.locator('.group-page-access input[value^="page:media"]')).toHaveCount(0);
+  await expect(form.locator('[data-permission-tab="media"]')).toHaveCount(0);
+  await form.getByRole('tab', {name: 'Routing', exact: true}).click();
+  const media = pageGrant(form, 'media');
   const upload = pageGrant(form, 'media_upload');
+  await expect(media).toBeVisible();
+  await expect(upload).toBeVisible();
   const payload = await saveChange(page, () => upload.check());
   expect(payload.page_keys).toContain('page:media_upload');
-  expect(payload.page_keys).not.toContain('page:media_load');
-  expect(payload.page_keys).not.toContain('page:media_manage');
-
-  await saveChange(page, () => pageGrant(form, 'media').uncheck());
-  await expect(form.getByRole('tab', {name: 'Media', exact: true})).toBeHidden();
+  await saveChange(page, () => media.uncheck());
+  await expect(upload).toBeHidden();
+  await expect(upload).toBeChecked();
+  await saveChange(page, () => media.check());
+  await expect(upload).toBeVisible();
+  await saveChange(page, () => pageGrant(form, 'routing').uncheck());
+  await expect(form.getByRole('tab', {name: 'Routing', exact: true})).toBeHidden();
+  await expect(media).toBeHidden();
   await expect(form.getByRole('tab', {name: 'General', exact: true})).toHaveAttribute('aria-selected', 'true');
-  await expect(upload).toBeChecked();
   await page.reload();
-  await expect(upload).toBeChecked();
-  await expect(form.getByRole('tab', {name: 'Media', exact: true})).toBeHidden();
-  await saveChange(page, () => pageGrant(form, 'media').check());
-  await form.getByRole('tab', {name: 'Media', exact: true}).click();
+  await saveChange(page, () => pageGrant(form, 'routing').check());
+  await form.getByRole('tab', {name: 'Routing', exact: true}).click();
+  await expect(media).toBeChecked();
   await expect(upload).toBeChecked();
   expect(errors).toEqual([]);
 });
@@ -59,12 +61,12 @@ test('Media has one page grant and optional uploads in its detail tab', async ({
 test('Tabs expose enabled pages and support keyboard navigation and revocation', async ({page}) => {
   const errors = collectPageErrors(page);
   const form = await openGroup(page);
-  await expect(form.getByRole('tab')).toHaveText(['General', 'Media', 'Routing']);
+  await expect(form.getByRole('tab')).toHaveText(['General', 'Routing']);
   await expect(form.locator('[data-permission-panel="digico"]')).toBeHidden();
   const general = form.getByRole('tab', {name: 'General', exact: true});
   await general.focus();
   await page.keyboard.press('ArrowRight');
-  await expect(form.getByRole('tab', {name: 'Media', exact: true})).toBeFocused();
+  await expect(form.getByRole('tab', {name: 'Routing', exact: true})).toBeFocused();
   await page.keyboard.press('End');
   const routing = form.getByRole('tab', {name: 'Routing', exact: true});
   await expect(routing).toBeFocused();
@@ -136,10 +138,10 @@ test('All enabled detail tabs fit desktop and mobile without widening the page',
   for (const key of ['digico_mixer', 'videohub', 'surface_controls', 'pixie_controls', 'atem_audio']) {
     await saveChange(page, () => pageGrant(form, key).check());
   }
-  await expect(form.getByRole('tab')).toHaveText(['General', 'Media', 'Personal Mixes', 'Routing', 'VideoHub', 'Surface Controls', 'Pixie', 'Record Audio']);
+  await expect(form.getByRole('tab')).toHaveText(['General', 'Personal Mixes', 'Routing', 'VideoHub', 'Surface Controls', 'Pixie', 'Record Audio']);
   await form.getByRole('tab', {name: 'Record Audio', exact: true}).click();
   await expect(form.locator('[data-permission-panel="audio"]')).toBeVisible();
-  await form.getByRole('tab', {name: 'Media', exact: true}).click();
+  await form.getByRole('tab', {name: 'Routing', exact: true}).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   await page.screenshot({path: testInfo.outputPath('group-permissions.png'), fullPage: true});
   expect(errors).toEqual([]);
@@ -155,6 +157,7 @@ test('An auto-save error is shown and the next edit can save successfully', asyn
     }
     return route.continue();
   });
+  await form.getByRole('tab', {name: 'Routing', exact: true}).click();
   await pageGrant(form, 'media').uncheck();
   const error = page.locator('[data-role-panel][data-role-id="68"] [data-role-error]');
   await expect(error).toHaveText('Could not save this change.');
@@ -162,5 +165,6 @@ test('An auto-save error is shown and the next edit can save successfully', asyn
   await saveChange(page, () => pageGrant(form, 'media').check());
   await expect(error).toBeHidden();
   await page.reload();
+  await form.getByRole('tab', {name: 'Routing', exact: true}).click();
   await expect(pageGrant(form, 'media')).toBeChecked();
 });

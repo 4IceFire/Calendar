@@ -29,8 +29,11 @@ PROJECT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--view-as', action='store_true')
-    view_as_mode = parser.parse_args().view_as
-    port = 5065 if view_as_mode else 5064
+    parser.add_argument('--presets', action='store_true')
+    args = parser.parse_args()
+    presets_mode = args.presets
+    view_as_mode = args.view_as or presets_mode
+    port = 5066 if presets_mode else (5065 if view_as_mode else 5064)
     sys.path.insert(0, str(PROJECT))
     with tempfile.TemporaryDirectory(prefix='tdeck-permissions-ui-') as temporary, ExitStack() as stack:
         root = Path(temporary)
@@ -64,6 +67,11 @@ def main():
             import webui
 
         stack.enter_context(patch.object(webui, '_AUTH_DB_PATH', root / 'auth.db'))
+        # The group editor now reads the preset catalogue too. Keep every
+        # media read/write in this temporary fixture, including non-auth mode.
+        from media_library import MediaLibrary
+        fixture_library = MediaLibrary(root / 'initial-media')
+        stack.enter_context(patch.object(webui, '_get_media_library', return_value=fixture_library))
         if not view_as_mode:
             stack.enter_context(patch.object(webui, 'log_event', return_value=None))
         else:
@@ -98,7 +106,7 @@ def main():
             stack.enter_context(patch.object(webui, '_get_atem_media_manager', side_effect=lambda: media_fixture['atem']))
             stack.enter_context(patch.object(webui, '_get_media_routing_manager', side_effect=lambda **_kwargs: media_fixture['routing']))
             stack.enter_context(patch.object(webui, '_active_media_job', side_effect=lambda:
-                media_fixture['routing'].active_job() or media_fixture['atem'].snapshot().get('job') or {}))
+                webui._routing_preset_runner.active_job() or media_fixture['routing'].active_job() or media_fixture['atem'].snapshot().get('job') or {}))
             stack.enter_context(patch.object(webui, '_get_videohub_state_snapshot', side_effect=lambda **_kwargs: media_fixture['hub'].snapshot()))
             stack.enter_context(patch.object(webui, '_get_videohub_client_from_config', side_effect=lambda: media_fixture['hub']))
             stack.enter_context(patch.object(webui, '_invalidate_videohub_state_snapshot'))
@@ -129,7 +137,12 @@ def main():
                         (2, 'media-operator', webui.generate_password_hash('fixture-password'), 'Media Operator', 'operator@example.invalid'),
                     ])
                     conn.executemany('INSERT INTO user_groups(user_id,group_id) VALUES(?,?)', [(1, 1), (2, 68)])
-                    conn.execute("INSERT INTO group_pages(group_id,page_key) VALUES(68,'page:media_upload')")
+                    # Match sites with a separate legacy Media/upload group.
+                    conn.execute("INSERT INTO groups(id,name,is_admin) VALUES(70,'Media access',0)")
+                    conn.execute("DELETE FROM group_pages WHERE group_id=68 AND page_key='page:media'")
+                    conn.executemany('INSERT INTO group_pages(group_id,page_key) VALUES(70,?)',
+                                     [('page:media',), ('page:media_upload',)])
+                    conn.execute('INSERT INTO user_groups(user_id,group_id) VALUES(2,70)')
                     conn.execute("UPDATE groups SET videohub_allowed_outputs='[1]' WHERE id=68")
                 conn.commit()
             if view_as_mode:
@@ -141,6 +154,21 @@ def main():
                     read_videohub=hub.get_routing_state_strict,
                     route_videohub=lambda output, input_: hub.route_video_output(output=output - 1, input_=input_ - 1))
                 media_fixture.update(library=library, atem=atem, hub=hub, routing=routing)
+                if presets_mode:
+                    from routing_presets import RoutingPresetStore, RoutingPresetRunner
+                    webui._routing_preset_runner = RoutingPresetRunner()
+                    store = RoutingPresetStore(library.root)
+                    image_id = library.list()[0]['id']
+                    choose = store.save({'name': 'Team Night', 'media_id': image_id, 'description': 'Show the team welcome image.'})
+                    fixed = store.save({'name': "Mother's Day", 'media_id': image_id, 'output': 1,
+                        'actions': [{'label': 'Start the welcome timer', 'method': 'POST', 'path': '/api/timers/apply', 'body': {'preset': 1}}]})
+                    store.save({'name': 'Private preset', 'media_id': image_id, 'output': 2})
+                    media_fixture['actions'] = []
+                    with closing(webui._db()) as conn:
+                        conn.execute('DELETE FROM user_groups WHERE user_id=2 AND group_id=70')
+                        conn.executemany('INSERT INTO group_pages(group_id,page_key) VALUES(68,?)',
+                            [('page:routing_presets',), ('preset:' + choose['id'],), ('preset:' + fixed['id'],)])
+                        conn.commit()
             return webui.jsonify({'ok': True})
 
         with webui.app.app_context():
@@ -156,6 +184,10 @@ def main():
                 'media_page', 'media_upload_page', 'media_image', 'media_thumbnail',
                 'api_media_list', 'api_media_upload', 'api_media_display', 'api_media_display_job',
                 'routing_page', 'api_videohub_state', 'api_videohub_labels', 'atem_media_setup_page'})
+        if presets_mode:
+            allowed.update({'routing_presets_config_page', 'api_routing_presets_config', 'routing_presets_page',
+                            'api_routing_presets_list', 'api_routing_preset_prepare', 'api_routing_preset_apply',
+                            'api_routing_preset_job'})
         for endpoint in list(webui.app.view_functions):
             if endpoint not in allowed:
                 webui.app.view_functions[endpoint] = blocked_route
@@ -164,17 +196,26 @@ def main():
         })
         webui.app.view_functions['api_activity_log_alerts'] = lambda: webui.jsonify({'ok': True, 'count': 0})
         webui.app.view_functions['api_client_errors'] = lambda: webui.jsonify({'ok': True})
+        if presets_mode:
+            def timer_action():
+                media_fixture['actions'].append(webui.request.get_json())
+                return webui.jsonify(ok=True)
+            webui.app.view_functions['api_apply_timer_preset'] = timer_action
 
         @webui.app.get('/__permissions_fixture__/health')
         def fixture_health():
-            return webui.jsonify({'fixture': 'tdeck-view-as-ui' if view_as_mode else 'tdeck-permissions-ui', 'isolated': True})
+            return webui.jsonify({'fixture': 'tdeck-routing-presets-ui' if presets_mode else ('tdeck-view-as-ui' if view_as_mode else 'tdeck-permissions-ui'), 'isolated': True})
+
+        @webui.app.get('/__permissions_fixture__/state')
+        def fixture_state():
+            return webui.jsonify(actions=media_fixture.get('actions', []))
 
         webui.app.add_url_rule('/__permissions_fixture__/reset', 'fixture_reset', reset_fixture, methods=['POST'])
         if view_as_mode:
             # Only these fixture-control endpoints bypass auth in this isolated
             # process. Application pages/APIs keep the production auth gate.
             def fixture_control_gate():
-                if webui.request.endpoint in ('fixture_health', 'fixture_reset'):
+                if webui.request.endpoint in ('fixture_health', 'fixture_reset', 'fixture_state'):
                     return webui.app.view_functions[webui.request.endpoint]()
             webui.app.before_request_funcs[None].insert(0, fixture_control_gate)
             print(f'Isolated View as demo: http://127.0.0.1:{port}/admin/users/2 (fixture-admin / fixture-password)', flush=True)
