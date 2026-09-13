@@ -8019,10 +8019,12 @@ def api_routing_preset_apply(identity):
                 log_event('routing.preset.apply', f"{item['name']}: {job['message']}",
                           status='success' if job['status'] == 'succeeded' else 'failure',
                           target_type='routing_preset', target_id=identity,
-                          details={**_public_routing_preset_job(job), 'display_error': job.get('displayError', '')}, **actor)
+                          details={**_public_routing_preset_job(job), 'display_error': job.get('displayError', ''),
+                                   'shared_outputs': job.get('sharedOutputs', [])}, **actor)
             manager = _get_media_routing_manager(refresh=True)
             job = _routing_preset_runner.start(confirmed['execution'], item, output, confirmed['owner'],
-                display=lambda callback: manager.display(item['media_id'], output, allowed_inputs=inputs, on_complete=callback),
+                display=lambda callback: manager.display(item['media_id'], output, allowed_inputs=inputs,
+                                                         on_complete=callback, reuse_current_player=True),
                 execute=lambda action: _execute_routing_preset_action(action, item, actor), completed=completed)
         log_event('routing.preset.queued', f"Started preset '{item['name']}' on output {output}",
                   status='info', target_type='routing_preset', target_id=identity)

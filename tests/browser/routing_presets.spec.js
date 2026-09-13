@@ -32,6 +32,7 @@ test('Only assigned presets appear; a fixed preset confirms before image and API
   await expect(modal).toHaveCSS('opacity', '1');
   await expect(modal).toContainText('Foyer');
   await expect(modal).toContainText('Start the welcome timer');
+  await expect(modal).toContainText('Other screens using the same media player will also show this image.');
   expect((await (await request.get('/__permissions_fixture__/state')).json()).actions).toEqual([]);
   await page.screenshot({path: testInfo.outputPath('preset-confirmation.png'), fullPage: true, animations: 'disabled'});
   await modal.getByRole('button', {name: 'Cancel', exact: true}).click();
