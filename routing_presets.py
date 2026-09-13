@@ -193,6 +193,7 @@ class RoutingPresetRunner:
             with self._lock:
                 if job['status'] != 'loading':
                     return
+                job['sharedOutputs'] = list(outcome.get('sharedOutputs') or [])
                 if outcome.get('status') == 'succeeded':
                     job.update(status='actions', imageDisplayed=True, message='Finishing the preset…')
                 else:

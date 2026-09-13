@@ -621,6 +621,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(self._post_display().status_code, 202)
         self.assertEqual(self.routing.display.call_args.args, (self.item['id'], 1))
         self.assertEqual(self.routing.display.call_args.kwargs['allowed_inputs'], [6])
+        self.assertNotIn('reuse_current_player', self.routing.display.call_args.kwargs)
 
     def test_display_accepts_only_saved_image_and_target_not_player_overrides(self):
         self._allow_display()
@@ -628,7 +629,7 @@ class MediaWebTests(unittest.TestCase):
             with self.subTest(output=output):
                 self.assertEqual(self._post_display(output=output).status_code, 400)
         self.assertEqual(self._post_display(media_id='f' * 32).status_code, 404)
-        for extra in ({'player': 4}, {'input': 6}, {'aux': 2}):
+        for extra in ({'player': 4}, {'input': 6}, {'aux': 2}, {'reuse_current_player': True}):
             self.assertEqual(self._post_display(**extra).status_code, 400)
         self.routing.display.assert_not_called()
 

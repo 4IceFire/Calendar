@@ -120,13 +120,19 @@ class MediaRoutingManager:
         self._jobs = OrderedDict()
         self._active_id = None
 
-    def display(self, media_id, output, allowed_inputs=None, on_complete=None):
-        """Queue a display; authorization for the target belongs to the caller."""
+    def display(self, media_id, output, allowed_inputs=None, on_complete=None, *, reuse_current_player=False):
+        """Queue a display; authorization for the target belongs to the caller.
+
+        Confirmed presets may reuse the target's existing mapped player even
+        when shared. Its other existing receivers then see the new still too.
+        """
         output = _port(output, "Output")
         if not isinstance(media_id, str) or not media_id.strip() or len(media_id) > 128:
             raise ValueError("Choose a saved image.")
         if allowed_inputs is not None and not isinstance(allowed_inputs, (list, tuple, set)):
             raise ValueError("Allowed inputs must be a list of port numbers")
+        if not isinstance(reuse_current_player, bool):
+            raise ValueError("Current player reuse must be true or false")
         allowed = {_port(source, "Allowed input") for source in (allowed_inputs or [])}
         if not VIDEO_ROUTING_LOCK.acquire(blocking=False):
             raise BusyError("An image or route is being applied. Please wait for it to finish.")
@@ -147,7 +153,7 @@ class MediaRoutingManager:
                 result = copy.deepcopy(job)
             deadline = time.monotonic() + self._job_timeout
             threading.Thread(target=self._run,
-                             args=(job_id, cfg, destinations, allowed, deadline, on_complete),
+                             args=(job_id, cfg, destinations, allowed, deadline, on_complete, reuse_current_player),
                              name="tdeck-media-display", daemon=True).start()
             return result
         except Exception:
@@ -193,7 +199,7 @@ class MediaRoutingManager:
         return result
 
     @staticmethod
-    def _choose(destinations, state, output, allowed):
+    def _choose(destinations, state, output, allowed, reuse_current_player=False):
         if output > state["output_count"]:
             raise _DisplayFailure("This output is unavailable. Return to Routing and choose another output.",
                                   "Requested output exceeds the device-reported output count")
@@ -204,13 +210,23 @@ class MediaRoutingManager:
         if not eligible:
             raise _DisplayFailure("No image source is available for your access. Ask an administrator for help.",
                                   "No configured media VideoHub input is allowed for this user")
+        current = state["routing"][output - 1]
+        if reuse_current_player:
+            # Presets may deliberately update a shared existing feed. Never
+            # take a player feeding only other outputs, or bypass input grants.
+            existing = next((item for item in eligible if item["videohub_input"] == current), None)
+            if existing:
+                return existing
         used_elsewhere = {source for index, source in enumerate(state["routing"], 1) if index != output}
         free = [item for item in eligible if item["videohub_input"] not in used_elsewhere]
         if not free:
             raise _DisplayFailure("All image players are in use on other outputs. Ask an administrator for help.",
                                   "Every allowed media input is currently routed to another output")
-        current = state["routing"][output - 1]
         return next((item for item in free if item["videohub_input"] == current), free[0])
+
+    @staticmethod
+    def _other_outputs(state, source, output):
+        return {index for index, value in enumerate(state["routing"], 1) if index != output and value == source}
 
     def _check_unchanged(self, cfg, initial, current, destination, output):
         now, _ = _configuration(self._get_config())
@@ -221,7 +237,7 @@ class MediaRoutingManager:
                    or initial["input_count"] != current["input_count"]
                    or initial["output_count"] != current["output_count"]
                    or initial["routing"][output - 1] != current["routing"][output - 1]
-                   or any(value == source for index, value in enumerate(current["routing"], 1) if index != output))
+                   or self._other_outputs(current, source, output) != self._other_outputs(initial, source, output))
         if changed:
             raise _DisplayFailure("Routing changed while preparing your image. Check the output before trying again.",
                                   "Setup, the target route, or the allocated media input changed during display")
@@ -251,16 +267,17 @@ class MediaRoutingManager:
             raise _DisplayFailure("The image source changed. Check the output before trying again.",
                                   "ATEM connection or selected still changed after the media transfer")
 
-    def _run(self, job_id, cfg, destinations, allowed, deadline, on_complete):
+    def _run(self, job_id, cfg, destinations, allowed, deadline, on_complete, reuse_current_player):
         stage = "preparing"
         try:
             self._update(job_id, stage)
             job = self.get_job(job_id)
             output = job["output"]
             initial = self._read(deadline)
-            destination = self._choose(destinations, initial, output, allowed)
+            destination = self._choose(destinations, initial, output, allowed, reuse_current_player)
             self._update(job_id, stage, player=destination["player"],
-                         videohubInput=destination["videohub_input"])
+                         videohubInput=destination["videohub_input"],
+                         sharedOutputs=sorted(self._other_outputs(initial, destination["videohub_input"], output)))
             manager = self._get_media_manager()
             self._wait_ready(manager, deadline)
             self._check_unchanged(cfg, initial, self._read(deadline), destination, output)
@@ -294,18 +311,23 @@ class MediaRoutingManager:
                                       str(outcome.get("error") or "ATEM media was not confirmed"))
             stage = "routing"
             self._update(job_id, stage, mediaName=outcome.get("mediaName", ""))
-            self._check_unchanged(cfg, initial, self._read(deadline), destination, output)
+            current = self._read(deadline)
+            self._check_unchanged(cfg, initial, current, destination, output)
             self._check_media_selection(manager, outcome, destination)
             self._remaining(deadline)
-            self._route_videohub(output, destination["videohub_input"])
+            # An unchanged route says nothing about which still is selected.
+            # Always load/verify the requested image above; only skip the
+            # VideoHub write when this output already receives that player.
+            if current["routing"][output - 1] != destination["videohub_input"]:
+                self._route_videohub(output, destination["videohub_input"])
             final = self._read(deadline)
             if (final["output_count"] != initial["output_count"]
                     or final["input_count"] != initial["input_count"]
                     or final["routing"][output - 1] != destination["videohub_input"]
-                    or any(value == destination["videohub_input"]
-                           for index, value in enumerate(final["routing"], 1) if index != output)):
+                    or self._other_outputs(final, destination["videohub_input"], output)
+                    != self._other_outputs(initial, destination["videohub_input"], output)):
                 raise _DisplayFailure("The TV did not confirm the image. Check the output before trying again.",
-                                      "VideoHub final route readback did not confirm an exclusive target route")
+                                      "VideoHub final route readback did not confirm the target route and unchanged other receivers")
             self._check_media_selection(manager, outcome, destination)
             self._finish(job_id, "succeeded", on_complete)
         except Exception as error:

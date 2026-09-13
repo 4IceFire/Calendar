@@ -78,6 +78,17 @@ in-process authentication after verified media display, with administrator-appro
 authority, irrespective of the operator's direct control grants. The scheduler's
 operational policy excludes account/configuration/credential/browser-only APIs.
 
+Preset display reuses the selected output's existing allowed, configured player,
+including a shared player: all existing receivers show the new image. Its
+confirmation covers that shared image change; only the selected output's route
+is considered for writing. When the route is already correct, the image is still
+loaded/verified and the route read back, without sending a redundant route write.
+If the target does not already receive an eligible player, free-player selection
+applies. Players used only by other outputs are never taken. The standalone
+`/api/media/display` retains exclusive-player allocation and does not accept a
+shared-player override. Shared receiver details are retained in Activity Log,
+without expanding the public job response.
+
 Confirmation tokens expire in five minutes and bind the session, preset revision,
 output and execution ID. They also expire on server restart. A retried confirmation
 cannot repeat an execution; poll its job after an uncertain apply response instead

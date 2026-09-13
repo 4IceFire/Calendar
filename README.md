@@ -204,11 +204,13 @@ configured ATEM output/feed → VideoHub input → TV**. A still slot stores an 
 a media player selects one slot. TDeck updates the image/player and routes the
 VideoHub input to the chosen output. ATEM AUX/output routing stays under your
 manual control; no AUX assignment is needed in TDeck.
-TDeck automatically chooses a mapped player whose VideoHub input is unused by
+For ordinary Media selections, TDeck chooses a mapped player whose VideoHub input is unused by
 other outputs. It can replace the image on the selected output's own exclusive
 player. If every eligible player feeds another output, it refuses the request.
 Different simultaneous images need different players. Images are not shared
 across players automatically in this version.
+Routing presets also allow updating the selected TV's current mapped player
+when it is shared; every screen already receiving that player changes together.
 
 ### Windows setup
 
@@ -306,8 +308,16 @@ Only **Confirm & apply** starts it. Fixed destinations must also be allowed by
 the operator's Routing permissions. Presets can be granted separately from
 general image browsing/uploading through **Permissions → Groups → Routing**.
 
-The image loads through the existing free-player selection and verified
-VideoHub routing. After that succeeds, extra actions run once in order with
+If the selected TV already receives an allowed, configured media player, a
+preset reuses that player and loads its selected image, even when other outputs
+share it. All screens receiving that player show the new image; the confirmation
+screen explains this. TDeck skips an unnecessary VideoHub write when the route
+is already correct, but still loads/verifies the image and reads back the route.
+Otherwise it chooses a free player. It never takes a player used only by other
+outputs. Selected-output and mapped-input permissions still apply, and changes
+to the target or other receivers during the load prevent a successful result.
+
+After verified image display, extra actions run once in order with
 administrator-approved authority, even when the operator cannot access those
 controls directly. They use private in-process authentication, so no service
 token is needed or exposed to the browser. Actions use the scheduler's
