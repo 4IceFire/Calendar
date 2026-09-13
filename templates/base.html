@@ -11,7 +11,19 @@
   </head>
   <body>
     <a class="tdeck-skip-link" href="#main-content">Skip to main content</a>
-    <nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom tdeck-navbar">
+    {% if view_as %}
+      <div class="sticky-top">
+      <div id="view-as-banner" class="border-bottom bg-warning-subtle text-warning-emphasis px-3 py-2" role="status">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <div><strong>Viewing as {{ view_as.target_username }}</strong><span class="d-block small">Actions are live and use this user's permissions.</span></div>
+          <form method="post" action="{{ url_for('stop_view_as_user') }}" class="m-0">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-dark btn-sm">Return to admin</button>
+          </form>
+        </div>
+      </div>
+    {% endif %}
+    <nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom tdeck-navbar{% if view_as %} position-static{% endif %}">
       <div class="container-fluid">
         <button class="btn btn-sm btn-outline-secondary tdeck-menu-button" type="button" data-bs-toggle="offcanvas" data-bs-target="#tdeckMenu" aria-controls="tdeckMenu" aria-label="Open menu">
           <span class="navbar-toggler-icon" aria-hidden="true"></span>
@@ -22,7 +34,7 @@
         </a>
 
         <div class="tdeck-nav-right">
-          {% if not auth_enabled or is_authenticated %}
+          {% if (not auth_enabled or is_authenticated) and not hide_connection_status|default(false) %}
             <div class="tdeck-nav-status">
               <div id="mobile-connection-indicator" class="tdeck-mobile-connection-status">
                 <span id="mobile-connection-dot" class="indicator-dot bg-danger"></span>
@@ -99,6 +111,7 @@
         </div>
       </div>
     </nav>
+    {% if view_as %}</div>{% endif %}
 
     <div class="offcanvas offcanvas-start tdeck-side-menu" tabindex="-1" id="tdeckMenu" aria-labelledby="tdeckMenuLabel">
       <div class="offcanvas-header border-bottom">
@@ -114,7 +127,7 @@
           {% if not auth_enabled or can_access('page:calendar') %}<a class="nav-link{% if request.path.startswith('/calendar') %} active{% endif %}" href="/calendar">Schedule</a>{% endif %}
           {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub</a>{% endif %}
           {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Record Audio</a>{% endif %}
-          {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
+          {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') or request.path in ('/media', '/media/upload') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
           {% if not auth_enabled or can_access('page:pixie_controls') %}<a class="nav-link{% if request.path.startswith('/pixie') %} active{% endif %}" href="/pixie">Pixie Controls</a>{% endif %}
           {% if not auth_enabled or can_access('page:digico_mixer') %}<a class="nav-link{% if request.path.startswith('/personal-mixes') %} active{% endif %}" href="/personal-mixes">Personal Mixes</a>{% endif %}
           {% if not auth_enabled or can_access('page:surface_controls') %}<a class="nav-link{% if request.path.startswith('/surface-controls') %} active{% endif %}" href="/surface-controls">Surface Controls</a>{% endif %}
@@ -168,15 +181,26 @@
           let lastTouchSent = 0;
           let touchInFlight = false;
           let touchDebounce = null;
+          let redirectingToLogin = false;
+
+          function redirectToLogin(res){
+            if(redirectingToLogin || !res || !res.redirected || !res.url) return;
+            const loginUrl = new URL(res.url, window.location.href);
+            if(loginUrl.origin !== window.location.origin || loginUrl.pathname !== '/login') return;
+            loginUrl.searchParams.set('next', window.location.pathname + window.location.search + window.location.hash);
+            redirectingToLogin = true;
+            window.location.replace(loginUrl.toString());
+          }
 
           function sendTouch(){
             const now = Date.now();
             if(touchInFlight) return;
             if((now - lastTouchSent) < TOUCH_THROTTLE_MS) return;
             touchInFlight = true;
-            function touchComplete(){
+            function touchComplete(res){
               touchInFlight = false;
               lastTouchSent = now;
+              redirectToLogin(res);
             }
             fetch(TOUCH_URL, {cache: 'no-store'}).then(touchComplete, touchComplete);
           }
@@ -200,9 +224,7 @@
           async function ping(){
             try{
               const res = await fetch(PING_URL, {cache: 'no-store'});
-              if(res && res.redirected && res.url && res.url.indexOf('/login') !== -1){
-                window.location = res.url;
-              }
+              redirectToLogin(res);
             }catch(e){
               // ignore
             }

@@ -84,6 +84,15 @@ Common keys:
 - `poll_interval`: seconds between file-change checks (default: `1.0`)
 - `debug`: enables more verbose logging/output
 
+### User login lockout
+
+In **Permissions → Users**, open a user and use **Access → Automatic login lockout**
+to choose whether failed passwords can lock that account. Changes save automatically.
+Lockout starts enabled for existing and new users and uses the configured failed-login
+threshold. Turning it off prevents future automatic lockouts; administrators can still
+lock or disable the account manually. Use **Unlock account** to remove an existing lock.
+Changing the switch resets the failed-login counter.
+
 ### API security
 
 With authentication enabled, TDeck APIs are no longer anonymous merely because
@@ -112,6 +121,36 @@ an emergency/recovery and automation interface, but normal token management no
 longer requires the CLI. See `API_REFERENCE.md` for the complete migration
 sequence, temporary expiring legacy flag, v1 endpoint aliases, limits, and
 scope semantics.
+
+### Groups and testing user access
+
+In **Permissions → Groups**, select a group and tick its page access. The tabs
+below show additional settings only for enabled pages. **General** contains the
+idle timeout. Turning off a page hides its tab while preserving its settings.
+Enable **Routing**, then use its **Routing** tab to enable **Allow selecting
+media** and optionally **Allow uploading media**. Media access requires Routing;
+uploads additionally require media selection access. Existing saved grants are
+preserved, including when the Routing tab is hidden. Manage the image library in
+**Config → Media**, and saved routing presets in **Config → Routing presets**.
+For preset access, enable **Allow using presets** in the group's Routing tab and
+tick each preset that group may run. No selection means no presets; new presets
+are Admin-only until assigned. Preset access does not grant general media browsing
+or uploads. Grants combine across groups, and the normal output/media-input
+restrictions still apply.
+
+To test another user's experience, sign in with an account in the **Admin**
+group, open **Permissions → Users → select a user**, and choose **View as user**.
+The banner identifies the user being tested and provides **Return to admin**.
+Controls and uploads perform real actions with that user's current permissions.
+The Activity Log records the initiating administrator and the selected user,
+including completion of background media jobs. No target password is required,
+and the target's own sessions are unchanged.
+
+The target must be active, unlocked, and have completed any required password
+change. Account credentials cannot be changed while testing. Administrator
+session revocation or loss of Admin access ends the test; changes that invalidate
+the target's account also stop it. Switching identities refreshes the form
+security token, so reload any other TDeck tabs before using them.
 
 DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
 
@@ -150,6 +189,182 @@ It reads `webserver_port` from `config.json` and prints the URL at startup.
 The Web UI also has controls to start/stop registered apps (including the calendar scheduler) from the browser.
 Starting `webui.py` starts the calendar scheduler automatically. Do not also run `cli.py start calendar` for the same installation; that would create a second scheduler process and can duplicate cues.
 
+## Media library and ATEM still players
+
+In **Routing**, choose an output, choose **Media**, then select an existing image
+or open **Upload an image**. Uploading saves the image to TDeck and displays it
+on the selected output. The page returns to the output list only after confirmed
+completion. If display fails, the saved image remains available for retry.
+The operator pages show images and progress; player assignments, connection
+status and library management live in **Config → Media**. Saved preset setup
+lives in **Config → Routing presets**.
+
+The signal path is: **TDeck library → ATEM still slot → media player → manually
+configured ATEM output/feed → VideoHub input → TV**. A still slot stores an image;
+a media player selects one slot. TDeck updates the image/player and routes the
+VideoHub input to the chosen output. ATEM AUX/output routing stays under your
+manual control; no AUX assignment is needed in TDeck.
+TDeck automatically chooses a mapped player whose VideoHub input is unused by
+other outputs. It can replace the image on the selected output's own exclusive
+player. If every eligible player feeds another output, it refuses the request.
+Different simultaneous images need different players. Images are not shared
+across players automatically in this version.
+
+### Windows setup
+
+1. Install the [Node.js 24 LTS runtime](https://nodejs.org/en/download) on the
+   TDeck server, with Node.js on the server account's PATH.
+2. In the Calendar folder, using TDeck's Python environment, run:
+
+   ```powershell
+   python -m pip install -r requirements.txt
+   npm ci --omit=dev
+   ```
+
+3. Restart TDeck and open **Config → Media** (`/config/atem-media`). The
+   switcher address/port come from **Config → ATEM**. Uploads start disabled;
+   there are no preselected players or still slots.
+4. Add each player that TDeck may control, give it a useful label, and reserve
+   at least two distinct still slots per player. Slot lists cannot overlap.
+   Set the **VideoHub input** that already receives that media player's signal.
+   Set up the ATEM output routing and cabling manually. Players, inputs and
+   slot reservations must be distinct. Use displayed numbering (player 1,
+   still 1, input 1). Enable media display and save. Existing players without
+   a VideoHub input remain usable
+   for Config testing, but cannot be selected automatically for TV display.
+   Previously saved AUX assignments are ignored and removed on the next Media
+   setup save; existing VideoHub input mappings continue working.
+   An administrator can optionally specify the trusted server Node.js
+   executable in Advanced setup if PATH discovery is unavailable.
+5. In **Permissions → Groups**, enable **Routing**. Inside the group's
+   **Routing** tab, enable **Allow selecting media**, then optionally
+   **Allow uploading media** if they may add images.
+   Their existing Routing allow-lists must permit the target output and at
+   least one mapped VideoHub input. Config access grants setup and image
+   management even without a Media grant. Routing preset changes require Admin.
+   Direct player testing also
+   requires Routing and media selection access. Admin has full access. The old
+   separate display and image-management grants are no longer used; existing
+   Media and upload grants
+   remain in place but require Routing to take effect. Port access combines
+   across Routing-enabled groups; a separate Media-only group does not expand
+   it. Blank/all in any Routing group means unrestricted ports. Invalid port
+   entries are rejected without changing the saved permissions.
+6. In Config → Media, add images. For recurring graphics such as Mother's Day or
+   Team Night, create a preset in **Config → Routing presets** (or select an image
+   and choose **Create routing preset**). Test the operator flow through Routing.
+
+TDeck detects the connected ATEM's video mode and player/still counts, including
+the distinction between 1080p59.94 and 1080p60. Images keep their aspect ratio and
+are centered on an opaque black frame; no automatic cropping or stretching.
+Supported uploads are JPEG, PNG, WebP, HEIC and HEIF, up to 20 MiB and 40
+megapixels. Animated files are rejected. Stored PNGs have corrected orientation,
+sRGB color and no embedded EXIF/location metadata.
+
+Reserve player images and still slots for TDeck, and keep each configured
+VideoHub input receiving the corresponding player. You may share that player's
+signal through manually managed AUXes or other feeds. Changing the image also
+updates every destination already receiving that player. TDeck does not inspect
+or verify those manual signal paths; its free-player check covers only the
+configured VideoHub inputs and their current VideoHub output routes.
+For each load, TDeck chooses an unselected reserved slot, waits for transfer and
+image-hash confirmation, then selects and verifies the player. It protects
+every player's retained still selection and refuses a load when no reserved
+slot is free. The display coordinator uses complete, fresh VideoHub routes to
+allocate a channel, confirms the player, then routes and verifies the
+selected output. Other TDeck web/API route and preset writes return a busy
+response while a display is running. ATEM transfers have a three-minute deadline;
+the complete display job has a 200-second deadline with bounded network calls.
+Requests are never automatically replayed after reconnection or restart.
+
+These steps are not an atomic transaction against external ATEM/VideoHub clients
+or separate CLI processes. Do not change the player image, configured input feed or target output during
+a display. A failed verification may follow a hardware change, so check the
+output before retrying. Actual ATEM/VideoHub compatibility still needs a live test.
+
+The library works while the ATEM is offline. Deleting a library image does not
+clear the copy already in the switcher. An image referenced by a routing preset
+cannot be deleted until that preset is changed or removed. Images and `index.json` live together
+under `media_library/` beside the application on Windows, or `/data/media_library`
+when `/data` exists on Linux. Set `TDECK_MEDIA_DIR` in the server environment to
+use another durable folder. Back up this entire folder; the existing Config ZIP
+does not yet include the image library. Uploaded media stays out of Git.
+
+### Routing presets
+
+An administrator creates a preset under **Config → Routing presets**, choosing
+its name, existing image and optional fixed VideoHub output. Leave the output as
+**Ask the user to choose** to use Routing's existing permitted-output picker.
+Add an optional description and ordered extra TDeck API actions, each with a
+friendly description, method, local `/api/` (or `/api/v1/`) path and optional JSON
+body, just like scheduler API actions. For example, a POST to `/api/timers/apply`
+with `{"preset": 1}` applies timer preset 1. Saving does not run anything.
+
+Operators choose **Routing → Presets**, select an assigned preset, choose an
+output if needed, and review the image, destination and action descriptions.
+Only **Confirm & apply** starts it. Fixed destinations must also be allowed by
+the operator's Routing permissions. Presets can be granted separately from
+general image browsing/uploading through **Permissions → Groups → Routing**.
+
+The image loads through the existing free-player selection and verified
+VideoHub routing. After that succeeds, extra actions run once in order with
+administrator-approved authority, even when the operator cannot access those
+controls directly. They use private in-process authentication, so no service
+token is needed or exposed to the browser. Actions use the scheduler's
+operational API boundary; account, setup, credential and browser-only endpoints
+cannot be delegated. Config users without protected Admin membership may view
+the preset editor but cannot change presets or their actions.
+
+If an action fails, later actions stop and the image/earlier actions remain
+applied. Some APIs acknowledge an asynchronous command before the device has
+finished. TDeck reports partial completion and never automatically replays the
+preset; check the result before confirming a new attempt. Confirmations expire
+after five minutes, are bound to the initiating session and saved preset
+revision, and become invalid when TDeck restarts. Permission checks run again
+when applying. Activity Log records the operator and any View as administrator.
+
+Preset definitions live in `routing_presets.json` inside the media library
+folder. Back up that folder together with `auth.db` to retain both presets and
+group assignments; Config ZIP does not include the media folder. Previous
+images marked as presets are imported once when this file is first created,
+with no fixed output or extra actions; assign their group access before use.
+Limits are 500 presets, 20 actions per preset and 32 KB per action body. One
+preset/display runs at a time. There is no startup or scheduled execution of
+routing presets.
+
+The media transport uses a TDeck-managed private Node child process with pinned
+[`atem-connection`](https://github.com/Sofie-Automation/sofie-atem-connection).
+Its transfer support is separate from the existing PyATEMMax audio integration.
+No extra HTTP service, Companion action or manually launched helper is needed.
+Hardware compatibility still needs a controlled first test with your switcher's
+firmware and explicitly reserved players/slots; automated tests use fakes.
+
+If Config reports that the media worker stopped, its status includes the exit
+code and a compact error from the worker when available. In the deployed
+Calendar folder, check the installed worker without connecting to hardware:
+
+```powershell
+node -e "require('./atem_media_worker.cjs'); console.log('Media worker imports OK')"
+```
+
+`Cannot find module 'atem-connection'` means the Node packages are missing from
+that installation. Run `npm ci --omit=dev` in the folder containing
+`atem_media_worker.cjs` and `package-lock.json`, then restart TDeck. Installing
+Node.js alone does not install these packages. If Python cannot import
+`media_library`, install `requirements.txt` using the Python environment that
+runs TDeck. Record Audio uses a separate connection; an audio connection timeout
+still needs checking even after the media dependencies are repaired.
+
+For a home demo, run `python tests/media_ui_harness.py` and open
+`http://127.0.0.1:5063/routing`. Choose Foyer, Media, then an image; the simulated
+display returns to the output list. Config → Media is available at
+`http://127.0.0.1:5063/config/atem-media`. Data resets when the demo stops, and
+outbound hardware traffic is blocked. The demo has no sign-in or real transfers.
+
+For browser checks, install tools with `npm ci`, run the demo, then in another
+terminal set `TDECK_BASE_URL=http://127.0.0.1:5063` and run
+`npx playwright test tests/browser/media.spec.js tests/browser/media_config.spec.js --workers=1`.
+
 ## DiGiCo Personal Mixes
 
 TDeck can act as the one remote device connected to a DiGiCo console while serving a separate browser mixer to multiple worship-team devices. The desk-side connection is standard OSC over UDP; browsers use TDeck's normal HTTP server and do not open their own desk sockets.
@@ -178,6 +393,7 @@ Operational notes:
 - Diagnostics show binding errors, discovery progress, last desk packet age, packet counts, relay traffic and OSC parse errors.
 - If a phone cannot load, verify it can open another TDeck page first, then check the DiGiCo diagnostics. A phone loading the page does not consume extra SD9 bandwidth; the backend shares one desk cache and UDP socket.
 - Permissions and Routing render from cached/fallback hardware metadata while slow ATEM or VideoHub refreshes run in background threads, preventing hardware timeouts from holding a page request open.
+- Integration status indicators share one background refresh across browsers and the periodic monitor, keeping the previous result while hardware checks run. ATEM is marked offline after three failed refreshes; additional browsers do not multiply probes or connection attempts.
 
 Relevant configuration keys:
 
@@ -316,6 +532,39 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 `tests/digico_ui_harness.py` starts a self-contained simulated desk and TDeck site on `http://127.0.0.1:5057` for local browser checks. It does not write its changes to the production `config.json`.
 
+For group editor browser checks, run `python tests/permissions_ui_harness.py`.
+This uses a temporary database and simulated catalogs, with outbound hardware
+traffic blocked. Open `http://127.0.0.1:5064/admin/permissions?tab=groups` or, in a
+second terminal, run:
+
+```powershell
+$env:TDECK_BASE_URL = "http://127.0.0.1:5064"
+npx playwright test tests/browser/group_permissions.spec.js --workers=1
+```
+
+The test fixture marker is required before changing groups; use a unique
+`--output` directory if OneDrive holds an earlier test artifact open.
+
+To exercise View as user with real browser authentication and simulated media
+devices, run `python tests/permissions_ui_harness.py --view-as` instead. Open
+`http://127.0.0.1:5065/admin/users/2` and sign in with the fixture-only account
+`fixture-admin` / `fixture-password`. For automated checks, set
+`TDECK_BASE_URL=http://127.0.0.1:5065` and run
+`npx playwright test tests/browser/view_as.spec.js --workers=1`. This mode uses
+temporary users/media and blocks outbound hardware traffic.
+
+For Routing presets, run `python tests/permissions_ui_harness.py --presets`.
+Open `http://127.0.0.1:5066/admin/users/2` with the same fixture-only admin
+credentials, or sign in as `media-operator` / `fixture-password` to test assigned
+presets without general Media access. This includes simulated image display and
+an authenticated local API action. From a second terminal:
+
+```powershell
+$env:TDECK_BASE_URL = "http://127.0.0.1:5066"
+npx playwright test tests/browser/routing_presets.spec.js --workers=1
+python -m unittest discover -s tests -p test_routing_presets.py -v
+```
+
 ### Cross-browser page and failure tests
 
 The Playwright suite exercises Chromium, Firefox, WebKit, mobile Chromium and mobile WebKit. Routing and Record Audio use intercepted device-state responses, including outage/recovery and hidden-tab polling checks, and never issue live hardware-control commands. The general page smoke is read-only.
@@ -339,6 +588,8 @@ npm run test:browser
 Use an account whose page grants match the pages being tested. Override the comma-separated smoke list with `TDECK_SMOKE_PATHS`. A non-loopback URL is rejected unless `TDECK_ALLOW_REMOTE_BROWSER_TESTS=1` is explicitly set; use that override only for an approved staging/test server, not the production control server. `TDECK_IGNORE_HTTPS_ERRORS=1` is available for a staging certificate that the test runner has not yet trusted.
 
 Browser `error` and `unhandledrejection` events are reported as rate-limited `client.error` warnings in the Activity Log. Reports contain only a sanitized message/stack, route, source path, browser User-Agent, build ID and correlation ID. Unknown payload fields, query strings and common secret values are discarded. Set `TDECK_BUILD_ID` to the deployed commit or release identifier so reports can be matched to a release; a local content-derived ID is used when it is unset.
+
+Known failures from browser-injected reader, night-mode and wallet scripts (`__firefox__`, `DarkReader`, and the specific `window.ethereum.selectedAddress = undefined` error) are filtered before they create new Activity Log entries. The browser filter prevents these reports from using its error-report allowance; the server also filters reports from already-open pages. Errors pointing to TDeck's `/static/` scripts, unrelated errors and generic `Script error.` messages remain visible. Existing log history is retained. Run the isolated telemetry checks with `node --test tests/client_telemetry.test.cjs` and `python -m unittest discover -s tests -p "test_client_telemetry.py" -v`.
 
 ## ProPresenter timers (optional)
 

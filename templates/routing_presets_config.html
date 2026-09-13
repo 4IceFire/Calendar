@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+{% set page_title = 'Routing presets' %}
+{% set page_subtitle = 'Prepare images, destinations and actions for your team.' %}
+{% set config_active_tab = 'routing-presets' %}
+{% block head_extra %}<link rel="stylesheet" href="{{ static_asset('media.css') }}">{% endblock %}
+{% block content %}
+{% include '_config_tabs.html' %}
+<div id="routing-presets-config" data-can-edit="{{ 'true' if can_edit_presets else 'false' }}">
+  <div id="preset-config-message" role="status" aria-live="polite"></div>
+  {% if not can_edit_presets %}<p class="alert alert-info">Only administrators can change presets and approve their API actions.</p>{% endif %}
+  <div class="row g-3">
+    <section class="col-lg-4"><div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center mb-3"><h2 class="h5 mb-0">Presets</h2><button id="preset-new" type="button" class="btn btn-primary btn-sm" {% if not can_edit_presets %}disabled{% endif %}>New preset</button></div>
+      <div id="preset-config-list" class="list-group"></div>
+      <button id="preset-config-refresh" type="button" class="btn btn-outline-secondary mt-3">Refresh</button>
+      <p class="form-text mt-3 mb-0">Give each group access under Permissions → Groups → Routing. New presets are available to Admin until assigned to other groups.</p>
+    </div></section>
+    <section class="col-lg-8"><div class="card p-3">
+      <h2 class="h5" id="preset-editor-title">New preset</h2>
+      <form id="preset-editor"><fieldset id="preset-fields" disabled>
+        <label class="form-label" for="preset-name">Preset name</label><input class="form-control mb-3" id="preset-name" required maxlength="120" placeholder="For example, Mother's Day">
+        <label class="form-label" for="preset-description">Description <span class="text-muted">(optional)</span></label><textarea class="form-control mb-3" id="preset-description" rows="2" maxlength="400" placeholder="Explain what this preset does for the person confirming it."></textarea>
+        <label class="form-label" for="preset-image">Image</label><select class="form-select" id="preset-image" required></select>
+        <div class="form-text mb-3">Upload images in <a href="/config/atem-media">Config → Media</a>.</div>
+        <div class="media-preview mb-3 d-none" id="preset-config-preview"><img id="preset-config-image" alt="Preset image"></div>
+        <label class="form-label" for="preset-output">VideoHub output</label><select class="form-select" id="preset-output"><option value="">Ask the user to choose</option></select>
+        <p class="form-text">Leave this as “Ask the user to choose” for the normal Routing output picker. Fixed outputs still require the user's output and media-input permissions.</p>
+        <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="preset-enabled" checked><label class="form-check-label" for="preset-enabled">Enabled</label></div>
+        <details class="media-disclosure mb-3" id="preset-actions-panel"><summary>Extra API actions <span class="text-muted">(optional)</span></summary>
+          <p class="form-text mt-3">Actions run once, in order, after the image is confirmed on screen. If one fails, later actions stop. Completed actions are not undone. An API response may mean a device command was accepted and is still completing.</p>
+          <p class="form-text">Use the same method, /api/ path and JSON body as scheduler API actions. TDeck authenticates the saved actions internally; no API token is needed. Operators may run these approved actions even without direct control access. Account, configuration and browser-only APIs cannot be used here.</p>
+          <div id="preset-actions" class="d-flex flex-column gap-3"></div>
+          <button id="preset-add-action" type="button" class="btn btn-outline-primary btn-sm mt-3">Add action</button>
+        </details>
+        <div class="d-flex gap-2"><button id="preset-save" type="submit" class="btn btn-primary">Save preset</button><button id="preset-delete" type="button" class="btn btn-outline-danger d-none">Delete preset</button></div>
+      </fieldset></form>
+    </div></section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ static_asset('routing_presets_config.js') }}"></script>{% endblock %}

@@ -16,6 +16,7 @@ calendar_triggers.json
 transcription_sender_ui.pid
 config_import_backups/
 videohub_room_images/
+media_library/
 hisense_certs/
 
 # Local Config/Event Files
@@ -23,6 +24,7 @@ hisense_certs/
 !companion_surfaces.json
 !package.json
 !package-lock.json
+!tests/fixtures/client_error_noise.json
 pixie_secrets.json
 
 auth.db

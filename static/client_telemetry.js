@@ -28,6 +28,7 @@
   }
 
   function cleanPath(value) {
+    if (!value) return '';
     try {
       var parsed = new URL(String(value || ''), window.location.href);
       return stripSecrets(parsed.pathname || '/', 240);
@@ -59,8 +60,17 @@
     return true;
   }
 
+  function isBrowserNoise(report) {
+    // Keep errors with TDeck frames, even when their message resembles injected browser scripts.
+    if (report.source.indexOf('/static/') === 0 || report.stack.indexOf('/static/') !== -1) return false;
+    // Keep this narrow list in sync with the server and tests/fixtures/client_error_noise.json.
+    var match = /^(?:Uncaught )?(?:(?:ReferenceError|TypeError): )?(?:Can't find variable: (?:__firefox__|DarkReader)|(?:__firefox__|DarkReader) is not defined|undefined is not an object \(evaluating '(?:window\.__firefox__\.reader|window\.ethereum\.selectedAddress\s*=\s*undefined)'\))$/.exec(report.message);
+    return !!match && match[0] === report.message;
+  }
+
   function send(report) {
     if (!endpoint || typeof window.fetch !== 'function') return;
+    if (isBrowserNoise(report)) return;
     var signature = [report.kind, report.message, report.source, report.line, report.column].join('|');
     if (!canSend(signature)) return;
 

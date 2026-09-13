@@ -19,3 +19,5 @@ pyvidaa==2.1.0
 paho-mqtt==2.1.0
 PyYAML==6.0.3
 pycryptodome==3.23.0
+Pillow==12.3.0
+pillow-heif==1.7.0

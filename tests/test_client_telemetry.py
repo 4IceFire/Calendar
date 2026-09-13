@@ -109,6 +109,57 @@ class ClientTelemetryTests(unittest.TestCase):
         )
         self.assertEqual(oversized.status_code, 413)
 
+    def test_known_browser_noise_is_ignored_but_app_errors_are_logged(self):
+        fixtures = json.loads(
+            (Path(__file__).parent / "fixtures" / "client_error_noise.json").read_text(encoding="utf-8")
+        )
+        with patch.object(webui, "_CLIENT_ERROR_RATE_MAX", len(fixtures) * 2):
+            for kind in ("error", "unhandledrejection"):
+                for case in fixtures:
+                    with self.subTest(kind=kind, name=case["name"]):
+                        conn = webui._db()
+                        try:
+                            before = conn.execute("SELECT COUNT(*) FROM activity_log").fetchone()[0]
+                        finally:
+                            conn.close()
+                        response = self.client.post(
+                            "/api/client-errors",
+                            json={
+                                "kind": kind,
+                                "message": case["message"],
+                                "source": case["source"],
+                                "stack": case["stack"],
+                                "route": "/config/tvs",
+                            },
+                        )
+                        self.assertEqual(response.status_code, 202)
+                        self.assertEqual(bool(response.get_json().get("ignored")), case["ignored"])
+                        self.assertTrue(response.get_json()["requestId"])
+                        conn = webui._db()
+                        try:
+                            after = conn.execute("SELECT COUNT(*) FROM activity_log").fetchone()[0]
+                            if not case["ignored"]:
+                                row = conn.execute(
+                                    "SELECT action,status FROM activity_log ORDER BY id DESC LIMIT 1"
+                                ).fetchone()
+                                self.assertEqual(tuple(row), ("client.error", "warning"))
+                        finally:
+                            conn.close()
+                        self.assertEqual(after - before, 0 if case["ignored"] else 1)
+
+    def test_ignored_browser_reports_still_obey_request_checks(self):
+        report = {"message": "Can't find variable: DarkReader"}
+        cross_site = self.client.post(
+            "/api/client-errors", json=report, headers={"Origin": "https://attacker.invalid"}
+        )
+        self.assertEqual(cross_site.status_code, 403)
+        with patch.object(webui, "_CLIENT_ERROR_RATE_MAX", 1):
+            accepted = self.client.post("/api/client-errors", json=report)
+            limited = self.client.post("/api/client-errors", json=report)
+        self.assertEqual(accepted.status_code, 202)
+        self.assertTrue(accepted.get_json()["ignored"])
+        self.assertEqual(limited.status_code, 429)
+
     def test_server_rate_limit_is_per_client(self):
         with patch.object(webui, "_CLIENT_ERROR_RATE_MAX", 2):
             first = self.client.post("/api/client-errors", json={"message": "one"})

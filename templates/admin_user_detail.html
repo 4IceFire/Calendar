@@ -9,8 +9,20 @@
         <h1 class="h3 mb-1">{{ user_row.username }}</h1>
         <div class="text-muted small">User ID: {{ user_row.id }}</div>
       </div>
-      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_permissions_page', tab='users') }}#users">Back to users</a>
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        {% if can_view_as_user %}
+          <form method="post" action="{{ url_for('admin_view_as_user', user_id=user_row.id) }}" class="m-0">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="btn btn-primary btn-sm" type="submit"{% if not user_row.is_active or user_row.is_locked or user_row.force_password_change %} disabled{% endif %}>View as user</button>
+          </form>
+        {% endif %}
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_permissions_page', tab='users') }}#users">Back to users</a>
+      </div>
     </div>
+
+    {% if can_view_as_user %}
+      <p class="small text-muted">View as user lets you test their pages and perform actions with their permissions, then return to admin.{% if not user_row.is_active or user_row.is_locked or user_row.force_password_change %} This user must first be active, unlocked and have completed any required password change.{% endif %}</p>
+    {% endif %}
 
     {% if error %}
       <div class="alert alert-danger py-2">{{ error }}</div>
@@ -66,6 +78,7 @@
             <form method="post" data-user-detail-access-form="1">
               <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="update_access">
+              <input type="hidden" name="lockout_settings_present" value="1">
               <div class="d-flex flex-wrap gap-3 mb-3">
                 <div class="form-check form-switch">
                   <input class="form-check-input" type="checkbox" role="switch" name="is_active" id="user-active" {% if user_row.is_active %}checked{% endif %}>
@@ -81,7 +94,15 @@
               {% if user_row.is_locked %}
                 <div class="small text-muted mb-3">Locked at {{ user_row.locked_at or 'Unknown' }}{% if user_row.locked_reason %}: {{ user_row.locked_reason }}{% endif %}</div>
               {% endif %}
-              <div class="small text-muted mb-2">Failed login count: {{ user_row.failed_login_count or 0 }} of {{ lockout_attempts }}</div>
+              <div class="form-check form-switch mb-1">
+                <input class="form-check-input" type="checkbox" role="switch" name="lockout_enabled" id="user-lockout-enabled" aria-describedby="user-lockout-help" {% if user_row.lockout_enabled %}checked{% endif %}>
+                <label class="form-check-label" for="user-lockout-enabled">Automatic login lockout</label>
+              </div>
+              <div class="small text-muted mb-2" id="user-lockout-help">When enabled, locks this account after {{ lockout_attempts }} failed login attempts. Turning it off prevents future automatic lockouts. Admins can still lock the account manually.</div>
+              {% if user_row.is_locked %}
+                <div class="small text-muted mb-2">To remove the current lock, use Unlock account below.</div>
+              {% endif %}
+              <div class="small text-muted mb-3">Failed login count: <span data-user-failed-login-count>{{ user_row.failed_login_count or 0 }}</span></div>
 
               <label class="form-label">Groups</label>
               <input class="form-control form-control-sm mb-2" data-group-search="detail" placeholder="Search groups">
@@ -93,6 +114,7 @@
                   </div>
                 {% endfor %}
               </div>
+              <noscript><button class="btn btn-primary" type="submit">Save access</button></noscript>
             </form>
 
             <div class="d-flex flex-wrap gap-2 mt-3">

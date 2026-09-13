@@ -32,6 +32,7 @@ Notes
 - The app reads its port and host from `config.json` (`webserver_port`, `webserver_host`). The Dockerfile exposes port 5000 by default; make sure your `config.json` contains `webserver_port: 5000` or change the `ports` mapping accordingly.
 - Persisted files: the compose file mounts `config.json`, `events.json`, `timer_presets.json`, `videohub_presets.json`, and `auth.db` to keep settings and user accounts across restarts.
 - If you change Python dependencies, update `requirements.txt` and rebuild the image.
+- The image includes Node.js and the pinned production ATEM media dependency. Rebuild after media dependency changes; no extra helper container is needed. The Media library stores images and its index under `/data/media_library`, which must remain on a durable volume. Back up that folder separately from Config ZIP exports.
 - To run in production, consider using a process manager or reverse proxy (Nginx) and secure the host.
 
 Troubleshooting

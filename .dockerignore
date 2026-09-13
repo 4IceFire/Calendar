@@ -9,3 +9,6 @@ venv/
 .gitignore
 .DS_Store
 data/
+media_library/
+node_modules/
+test-results/

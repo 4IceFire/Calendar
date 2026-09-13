@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% set page_title = 'Presets' %}
+{% set page_subtitle = 'Choose a preset for your screen.' %}
+{% block head_extra %}<link rel="stylesheet" href="{{ static_asset('media.css') }}">{% endblock %}
+{% block content %}
+<div id="routing-presets-page">
+  <a class="btn btn-outline-secondary mb-3" href="/routing">Back to outputs</a>
+  <div id="preset-message" role="status" aria-live="polite"></div>
+  <div id="preset-progress" class="card p-3 mb-3 d-none" role="status" aria-live="polite"></div>
+  <label class="visually-hidden" for="preset-search">Search presets</label>
+  <input id="preset-search" type="search" class="form-control mb-3" placeholder="Search presets…">
+  <div id="preset-grid" class="media-grid" aria-label="Choose a preset" aria-busy="true"></div>
+  <button id="preset-refresh" class="btn btn-outline-secondary mt-3" type="button">Refresh presets</button>
+  <div class="modal fade" id="preset-confirm-modal" tabindex="-1" aria-labelledby="preset-confirm-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+      <div class="modal-header"><h2 class="modal-title fs-5" id="preset-confirm-title">Apply preset?</h2><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body">
+        <div class="media-preview mb-3"><img id="preset-confirm-image" alt=""></div>
+        <p id="preset-confirm-copy"></p><p id="preset-confirm-description" class="text-muted"></p>
+        <ul id="preset-confirm-actions"></ul>
+      </div>
+      <div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Cancel</button><button id="preset-confirm-apply" class="btn btn-primary" type="button">Confirm &amp; apply</button></div>
+    </div></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ static_asset('routing_presets.js') }}"></script>{% endblock %}

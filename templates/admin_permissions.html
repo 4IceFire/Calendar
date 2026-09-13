@@ -169,209 +169,282 @@
                         <input type="hidden" name="action" value="save_group">
                         <input type="hidden" name="group_id" value="{{ g.id }}">
 
-                        <div class="row">
+                        <div class="row group-page-access" aria-label="Page access">
                           {% for key, label in pages %}
                             <div class="col-md-6">
                               <div class="form-check">
-                                <input class="form-check-input" type="checkbox" name="page_keys" value="{{ key }}"
+                                <input class="form-check-input" type="checkbox" name="page_keys" value="{{ key }}" id="group-{{ g.id }}-{{ key|replace(':', '-') }}"
                                   {% if group_to_pages.get(g.id) and (key in group_to_pages.get(g.id)) %}checked{% endif %}>
-                                <label class="form-check-label">{{ label }}</label>
+                                <label class="form-check-label" for="group-{{ g.id }}-{{ key|replace(':', '-') }}">{{ label }}</label>
                               </div>
                             </div>
                           {% endfor %}
                         </div>
+                        <div class="form-text mt-2">Choose the pages this group can access. Additional settings appear below for enabled pages. Displaying media also uses this group’s Routing input and output access.</div>
 
-                        <hr class="my-3">
-                        <div class="row g-3">
-                          <div class="col-12">
-                            <div class="fw-semibold">Personal Mix AUX access (DiGiCo)</div>
-                            <div class="small text-muted">No selected AUXes means this group can mix every enabled AUX. Access is enforced by the TDeck API.</div>
-                          </div>
-                          {% if digico_auxes %}
-                            {% set selected_auxes = (group_to_digico.get(g.id).allowed_auxes if group_to_digico and group_to_digico.get(g.id) else []) %}
-                            {% for aux in digico_auxes %}
-                              {% set aux_id = aux.channel|string %}
-                              <div class="col-12 col-md-6">
-                                <div class="form-check">
-                                  <input class="form-check-input" type="checkbox" name="digico_allowed_auxes_role" value="{{ aux_id }}" data-role="digico-aux"
-                                    {% if selected_auxes and (aux_id in selected_auxes) %}checked{% endif %}>
-                                  <label class="form-check-label">{{ aux.label }} <span class="text-muted">(AUX {{ aux.channel }})</span></label>
-                                </div>
+                        <div class="group-permission-details mt-4">
+                          <div class="config-section-tabs group-permission-tabs">
+                            <div class="config-section-tabs-scroll">
+                              <div class="nav nav-tabs config-section-tabs-list" role="tablist" aria-label="{{ g.name }} permission settings">
+                                <button type="button" class="nav-link active" role="tab" id="group-{{ g.id }}-tab-general"
+                                  data-permission-tab="general" data-permission-page="" aria-controls="group-{{ g.id }}-panel-general"
+                                  aria-selected="true" tabindex="0">General</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-digico"
+                                  data-permission-tab="digico" data-permission-page="page:digico_mixer" aria-controls="group-{{ g.id }}-panel-digico"
+                                  aria-selected="false" tabindex="-1" {% if 'page:digico_mixer' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Personal Mixes</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-routing"
+                                  data-permission-tab="routing" data-permission-page="page:routing" aria-controls="group-{{ g.id }}-panel-routing"
+                                  aria-selected="false" tabindex="-1" {% if 'page:routing' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Routing</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-videohub"
+                                  data-permission-tab="videohub" data-permission-page="page:videohub" aria-controls="group-{{ g.id }}-panel-videohub"
+                                  aria-selected="false" tabindex="-1" {% if 'page:videohub' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>VideoHub</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-surfaces"
+                                  data-permission-tab="surfaces" data-permission-page="page:surface_controls" aria-controls="group-{{ g.id }}-panel-surfaces"
+                                  aria-selected="false" tabindex="-1" {% if 'page:surface_controls' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Surface Controls</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-pixie"
+                                  data-permission-tab="pixie" data-permission-page="page:pixie_controls" aria-controls="group-{{ g.id }}-panel-pixie"
+                                  aria-selected="false" tabindex="-1" {% if 'page:pixie_controls' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Pixie</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-audio"
+                                  data-permission-tab="audio" data-permission-page="page:atem_audio" aria-controls="group-{{ g.id }}-panel-audio"
+                                  aria-selected="false" tabindex="-1" {% if 'page:atem_audio' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Record Audio</button>
                               </div>
-                            {% endfor %}
-                          {% else %}
-                            <div class="col-12">
-                              <div class="text-muted small">No AUXes have been discovered yet. Configure and connect the desk from DiGiCo Setup, then return here.</div>
-                            </div>
-                          {% endif %}
-                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the Personal Mixes page permission.</div></div>
-                        </div>
-
-                        <hr class="my-3">
-                        <div class="row g-3">
-                          <div class="col-12">
-                            <div class="fw-semibold">Idle logout timeout override</div>
-                            <div class="small text-muted">Blank inherits global timeout. Use <code>0</code> to disable idle logout for this group.</div>
-                          </div>
-                          <div class="col-12 col-md-4">
-                            <label class="form-label">Override Minutes</label>
-                            <input class="form-control" type="text" name="auth_idle_timeout_minutes_override_role"
-                                   value="{{ g.auth_idle_timeout_minutes_override if g.auth_idle_timeout_minutes_override is not none else '' }}"
-                                   placeholder="inherit / 0 / 5">
-                          </div>
-                        </div>
-
-                        <hr class="my-3">
-                        <div class="row g-3">
-                          <div class="col-12">
-                            <div class="fw-semibold">Routing allow-lists (VideoHub)</div>
-                            <div class="small text-muted">Blank or <code>all</code> allows all.</div>
-                          </div>
-                          <div class="col-12 col-md-6">
-                            <label class="form-label">Allowed Outputs</label>
-                            <input class="form-control" name="videohub_allowed_outputs_role" value="{{ (group_to_vh.get(g.id).outputs if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-outputs">
-                          </div>
-                          <div class="col-12 col-md-6">
-                            <label class="form-label">Allowed Inputs</label>
-                            <input class="form-control" name="videohub_allowed_inputs_role" value="{{ (group_to_vh.get(g.id).inputs if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-inputs">
-                          </div>
-                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the Routing page permission.</div></div>
-                        </div>
-
-                        <hr class="my-3">
-                        <div class="row g-3">
-                          <div class="col-12">
-                            <div class="fw-semibold">VideoHub preset visibility</div>
-                            <div class="small text-muted">Blank or <code>all</code> allows all.</div>
-                          </div>
-                          <div class="col-12">
-                            <div class="form-check">
-                              <input class="form-check-input" type="checkbox" name="videohub_can_edit_presets_role" {% if group_to_vh.get(g.id) and group_to_vh.get(g.id).can_edit_presets %}checked{% endif %} data-role="vh-edit-presets">
-                              <label class="form-check-label">Allow editing presets and managing rooms</label>
                             </div>
                           </div>
-                          <div class="col-12 col-md-6">
-                            <label class="form-label">Allowed Preset IDs</label>
-                            <input class="form-control" name="videohub_allowed_presets_role" value="{{ (group_to_vh.get(g.id).presets if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-presets">
-                          </div>
-                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the VideoHub page permission.</div></div>
-                        </div>
-
-                        <hr class="my-3">
-                        <div class="row g-3">
-                          <div class="col-12">
-                            <div class="fw-semibold">Companion surface clicking</div>
-                            <div class="small text-muted">No selected surfaces means this group can click every configured surface.</div>
-                          </div>
-                          {% if companion_surfaces %}
-                            {% set selected_surfaces = (group_to_companion.get(g.id).click_surfaces if group_to_companion and group_to_companion.get(g.id) else []) %}
-                            {% for surface in companion_surfaces %}
-                              <div class="col-12 col-md-6">
-                                <div class="form-check">
-                                  <input class="form-check-input" type="checkbox" name="companion_click_surfaces_role" value="{{ surface.id }}"
-                                    {% if selected_surfaces and (surface.id in selected_surfaces) %}checked{% endif %}>
-                                  <label class="form-check-label">{{ surface.label }} <span class="text-muted">({{ surface.id }})</span></label>
-                                </div>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-general" tabindex="0"
+                            data-permission-panel="general" aria-labelledby="group-{{ g.id }}-tab-general">
+                            <div class="row g-3">
+                              <div class="col-12">
+                                <div class="fw-semibold">Idle logout timeout override</div>
+                                <div class="small text-muted">Blank inherits global timeout. Use <code>0</code> to disable idle logout for this group.</div>
                               </div>
-                            {% endfor %}
-                          {% else %}
-                            <div class="col-12">
-                              <div class="text-muted small">No Companion surfaces are configured.</div>
+                              <div class="col-12 col-md-4">
+                                <label class="form-label" for="group-{{ g.id }}-idle-timeout">Override Minutes</label>
+                                <input class="form-control" type="text" name="auth_idle_timeout_minutes_override_role" id="group-{{ g.id }}-idle-timeout"
+                                       value="{{ g.auth_idle_timeout_minutes_override if g.auth_idle_timeout_minutes_override is not none else '' }}"
+                                       placeholder="inherit / 0 / 5">
+                              </div>
                             </div>
-                          {% endif %}
-                        </div>
-
-                        <hr class="my-3">
-                        <div class="row g-3">
-                          <div class="col-12">
-                            <div class="fw-semibold">Pixie Controls access</div>
-                            <div class="small text-muted">Grant auditoriums first, then allow all devices or choose individual devices in that auditorium. Scenes are granted separately.</div>
-                          </div>
-                          {% set pixie_group = group_to_pixie.get(g.id) if group_to_pixie else none %}
-                          {% set selected_pixie_auditoriums = pixie_group.auditoriums if pixie_group else [] %}
-                          {% for auditorium in pixie_catalog.auditoriums %}
-                            {% set auditorium_selected = auditorium.id in selected_pixie_auditoriums %}
-                            {% set device_permission = pixie_group.devices.get(auditorium.id, '*') if pixie_group else '*' %}
-                            <div class="col-12 border rounded-3 p-3" data-role="pixie-auditorium-block" data-auditorium-id="{{ auditorium.id }}">
-                              <div class="form-check">
-                                <input class="form-check-input" type="checkbox" name="pixie_allowed_auditoriums_role" value="{{ auditorium.id }}"
-                                  data-role="pixie-auditorium" data-auditorium-id="{{ auditorium.id }}" {% if auditorium_selected %}checked{% endif %}>
-                                <label class="form-check-label fw-semibold">{{ auditorium.name }}</label>
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-digico" tabindex="0"
+                            data-permission-panel="digico" aria-labelledby="group-{{ g.id }}-tab-digico" hidden>
+                            <div class="row g-3">
+                              <div class="col-12">
+                                <div class="fw-semibold">Personal Mix AUX access (DiGiCo)</div>
+                                <div class="small text-muted">No selected AUXes means this group can mix every enabled AUX. Access is enforced by the TDeck API.</div>
                               </div>
-                              <div class="ms-4 mt-2" data-role="pixie-device-scope">
-                                <div class="form-check">
-                                  <input class="form-check-input" type="checkbox" name="pixie_all_devices_role" value="{{ auditorium.id }}"
-                                    data-role="pixie-all-devices" data-auditorium-id="{{ auditorium.id }}" {% if device_permission == '*' %}checked{% endif %}>
-                                  <label class="form-check-label">All devices, including devices added later</label>
-                                </div>
-                                {% for device in auditorium.devices %}
-                                  <div class="form-check ms-3">
-                                    <input class="form-check-input" type="checkbox" name="pixie_allowed_devices_role" value="{{ device.id }}"
-                                      data-role="pixie-device" data-auditorium-id="{{ auditorium.id }}"
-                                      {% if device_permission != '*' and device.id in device_permission %}checked{% endif %}>
-                                    <label class="form-check-label">{{ device.name }}</label>
+                              {% if digico_auxes %}
+                                {% set selected_auxes = (group_to_digico.get(g.id).allowed_auxes if group_to_digico and group_to_digico.get(g.id) else []) %}
+                                {% for aux in digico_auxes %}
+                                  {% set aux_id = aux.channel|string %}
+                                  <div class="col-12 col-md-6">
+                                    <div class="form-check">
+                                      <input class="form-check-input" type="checkbox" name="digico_allowed_auxes_role" id="group-{{ g.id }}-aux-{{ aux_id }}" value="{{ aux_id }}" data-role="digico-aux"
+                                        {% if selected_auxes and (aux_id in selected_auxes) %}checked{% endif %}>
+                                      <label class="form-check-label" for="group-{{ g.id }}-aux-{{ aux_id }}">{{ aux.label }} <span class="text-muted">(AUX {{ aux.channel }})</span></label>
+                                    </div>
                                   </div>
                                 {% endfor %}
-                                {% if not auditorium.devices %}<div class="small text-muted ms-3">No devices are assigned yet.</div>{% endif %}
+                              {% else %}
+                                <div class="col-12">
+                                  <div class="text-muted small">No AUXes have been discovered yet. Configure and connect the desk from DiGiCo Setup, then return here.</div>
+                                </div>
+                              {% endif %}
+                            </div>
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-routing" tabindex="0"
+                            data-permission-panel="routing" aria-labelledby="group-{{ g.id }}-tab-routing" hidden>
+                            <div class="row g-3">
+                              <div class="col-12">
+                                <div class="fw-semibold">Routing allow-lists (VideoHub)</div>
+                                <div class="small text-muted">Enter one port number, or several separated by commas. Blank or <code>all</code> allows all. Access combines across Routing-enabled groups; an unrestricted group grants every port. Admin always has full access.</div>
+                              </div>
+                              <div class="col-12 col-md-6">
+                                <label class="form-label" for="group-{{ g.id }}-routing-outputs">Allowed Outputs</label>
+                                <input class="form-control" name="videohub_allowed_outputs_role" id="group-{{ g.id }}-routing-outputs" value="{{ (group_to_vh.get(g.id).outputs if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-outputs">
+                              </div>
+                              <div class="col-12 col-md-6">
+                                <label class="form-label" for="group-{{ g.id }}-routing-inputs">Allowed Inputs</label>
+                                <input class="form-control" name="videohub_allowed_inputs_role" id="group-{{ g.id }}-routing-inputs" value="{{ (group_to_vh.get(g.id).inputs if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-inputs">
+                              </div>
+                              <div class="col-12">
+                                <div class="fw-semibold mb-2">Media</div>
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:media" id="group-{{ g.id }}-media"
+                                    {% if 'page:media' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-media">Allow selecting media</label>
+                                </div>
+                                <div class="form-check mt-2" data-routing-media-upload {% if 'page:media' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>
+                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:media_upload" id="group-{{ g.id }}-media-upload"
+                                    {% if 'page:media_upload' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-media-upload">Allow uploading media</label>
+                                </div>
+                                <div class="form-text mt-2">Choose saved images from Routing for the allowed outputs. Display also requires access to a configured media player's VideoHub input. Uploading requires media selection access. Manage images in Config → Media and presets in Config → Routing presets.</div>
+                              </div>
+                              <div class="col-12">
+                                <div class="fw-semibold mb-2">Presets</div>
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:routing_presets" id="group-{{ g.id }}-presets"
+                                    {% if 'page:routing_presets' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-presets">Allow using presets</label>
+                                </div>
+                                <div data-routing-preset-options {% if 'page:routing_presets' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>
+                                  <p class="form-text">Select the presets this group may run. No selection means no presets. Each preset also requires access to its output and a media input. Saved extra actions run with the administrator's approved access.</p>
+                                  {% for preset in routing_presets %}
+                                  <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="page_keys" value="preset:{{ preset.id }}" id="group-{{ g.id }}-preset-{{ preset.id }}"
+                                      {% if ('preset:' ~ preset.id) in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                    <label class="form-check-label" for="group-{{ g.id }}-preset-{{ preset.id }}">{{ preset.name }}{% if not preset.enabled %} (disabled){% endif %}</label>
+                                  </div>
+                                  {% else %}<p class="small text-muted">Add presets in Config → Routing presets.</p>{% endfor %}
+                                  {% set listed_presets = routing_presets | map(attribute='id') | list %}
+                                  {% for key in group_to_pages.get(g.id, []) %}
+                                  {% if key.startswith('preset:') and key[7:] not in listed_presets %}
+                                  {# Preserve saved grants if the catalogue is temporarily unavailable. #}
+                                  <input type="checkbox" name="page_keys" value="{{ key }}" checked hidden>
+                                  {% endif %}
+                                  {% endfor %}
+                                </div>
                               </div>
                             </div>
-                          {% else %}
-                            <div class="col-12 text-muted small">No auditoriums are configured. Create them in Config → Pixie.</div>
-                          {% endfor %}
-                          <div class="col-12 mt-3">
-                            <div class="fw-semibold mb-2">Scenes</div>
-                            {% set selected_pixie_scenes = pixie_group.scenes if pixie_group else [] %}
-                            <div class="row g-2">
-                              {% for scene in pixie_catalog.scenes %}
-                                <div class="col-12 col-md-6">
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-videohub" tabindex="0"
+                            data-permission-panel="videohub" aria-labelledby="group-{{ g.id }}-tab-videohub" hidden>
+                            <div class="row g-3">
+                              <div class="col-12">
+                                <div class="fw-semibold">VideoHub preset visibility</div>
+                                <div class="small text-muted">Blank or <code>all</code> allows all.</div>
+                              </div>
+                              <div class="col-12">
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="videohub_can_edit_presets_role" id="group-{{ g.id }}-videohub-edit" {% if group_to_vh.get(g.id) and group_to_vh.get(g.id).can_edit_presets %}checked{% endif %} data-role="vh-edit-presets">
+                                  <label class="form-check-label" for="group-{{ g.id }}-videohub-edit">Allow editing presets and managing rooms</label>
+                                </div>
+                              </div>
+                              <div class="col-12 col-md-6">
+                                <label class="form-label" for="group-{{ g.id }}-videohub-presets">Allowed Preset IDs</label>
+                                <input class="form-control" name="videohub_allowed_presets_role" id="group-{{ g.id }}-videohub-presets" value="{{ (group_to_vh.get(g.id).presets if group_to_vh and group_to_vh.get(g.id) else '') }}" placeholder="all / [1,2,3] / 1,2,3" data-role="vh-presets">
+                              </div>
+                            </div>
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-surfaces" tabindex="0"
+                            data-permission-panel="surfaces" aria-labelledby="group-{{ g.id }}-tab-surfaces" hidden>
+                            <div class="row g-3">
+                              <div class="col-12">
+                                <div class="fw-semibold">Companion surface clicking</div>
+                                <div class="small text-muted">No selected surfaces means this group can click every configured surface.</div>
+                              </div>
+                              {% if companion_surfaces %}
+                                {% set selected_surfaces = (group_to_companion.get(g.id).click_surfaces if group_to_companion and group_to_companion.get(g.id) else []) %}
+                                {% for surface in companion_surfaces %}
+                                  <div class="col-12 col-md-6">
+                                    <div class="form-check">
+                                      <input class="form-check-input" type="checkbox" name="companion_click_surfaces_role" id="group-{{ g.id }}-surface-{{ surface.id }}" value="{{ surface.id }}"
+                                        {% if selected_surfaces and (surface.id in selected_surfaces) %}checked{% endif %}>
+                                      <label class="form-check-label" for="group-{{ g.id }}-surface-{{ surface.id }}">{{ surface.label }} <span class="text-muted">({{ surface.id }})</span></label>
+                                    </div>
+                                  </div>
+                                {% endfor %}
+                              {% else %}
+                                <div class="col-12">
+                                  <div class="text-muted small">No Companion surfaces are configured.</div>
+                                </div>
+                              {% endif %}
+                            </div>
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-pixie" tabindex="0"
+                            data-permission-panel="pixie" aria-labelledby="group-{{ g.id }}-tab-pixie" hidden>
+                            <div class="row g-3">
+                              <div class="col-12">
+                                <div class="fw-semibold">Pixie Controls access</div>
+                                <div class="small text-muted">Grant auditoriums first, then allow all devices or choose individual devices in that auditorium. Scenes are granted separately.</div>
+                              </div>
+                              {% set pixie_group = group_to_pixie.get(g.id) if group_to_pixie else none %}
+                              {% set selected_pixie_auditoriums = pixie_group.auditoriums if pixie_group else [] %}
+                              {% for auditorium in pixie_catalog.auditoriums %}
+                                {% set auditorium_selected = auditorium.id in selected_pixie_auditoriums %}
+                                {% set device_permission = pixie_group.devices.get(auditorium.id, '*') if pixie_group else '*' %}
+                                <div class="col-12 border rounded-3 p-3" data-role="pixie-auditorium-block" data-auditorium-id="{{ auditorium.id }}">
                                   <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="pixie_allowed_scenes_role" value="{{ scene.id }}"
-                                      data-role="pixie-scene" {% if scene.id in selected_pixie_scenes %}checked{% endif %}>
-                                    <label class="form-check-label">{{ scene.name }}{% if not scene.enabled %} <span class="text-muted">(disabled)</span>{% endif %}</label>
+                                    <input class="form-check-input" type="checkbox" name="pixie_allowed_auditoriums_role" id="group-{{ g.id }}-auditorium-{{ auditorium.id }}" value="{{ auditorium.id }}"
+                                      data-role="pixie-auditorium" data-auditorium-id="{{ auditorium.id }}" {% if auditorium_selected %}checked{% endif %}>
+                                    <label class="form-check-label fw-semibold" for="group-{{ g.id }}-auditorium-{{ auditorium.id }}">{{ auditorium.name }}</label>
+                                  </div>
+                                  <div class="ms-4 mt-2" data-role="pixie-device-scope">
+                                    <div class="form-check">
+                                      <input class="form-check-input" type="checkbox" name="pixie_all_devices_role" id="group-{{ g.id }}-all-devices-{{ auditorium.id }}" value="{{ auditorium.id }}"
+                                        data-role="pixie-all-devices" data-auditorium-id="{{ auditorium.id }}" {% if device_permission == '*' %}checked{% endif %}>
+                                      <label class="form-check-label" for="group-{{ g.id }}-all-devices-{{ auditorium.id }}">All devices, including devices added later</label>
+                                    </div>
+                                    {% for device in auditorium.devices %}
+                                      <div class="form-check ms-3">
+                                        <input class="form-check-input" type="checkbox" name="pixie_allowed_devices_role" id="group-{{ g.id }}-device-{{ device.id }}" value="{{ device.id }}"
+                                          data-role="pixie-device" data-auditorium-id="{{ auditorium.id }}"
+                                          {% if device_permission != '*' and device.id in device_permission %}checked{% endif %}>
+                                        <label class="form-check-label" for="group-{{ g.id }}-device-{{ device.id }}">{{ device.name }}</label>
+                                      </div>
+                                    {% endfor %}
+                                    {% if not auditorium.devices %}<div class="small text-muted ms-3">No devices are assigned yet.</div>{% endif %}
                                   </div>
                                 </div>
                               {% else %}
-                                <div class="col-12 text-muted small">No scenes are configured.</div>
+                                <div class="col-12 text-muted small">No auditoriums are configured. Create them in Config → Pixie.</div>
                               {% endfor %}
-                            </div>
-                          </div>
-                          <div class="col-12"><div class="form-text">Editing is enabled only when this group has the Pixie Controls page permission.</div></div>
-                        </div>
-
-                        <hr class="my-3">
-                        <div class="row g-3">
-                          <div class="col-12">
-                            <div class="fw-semibold">Record Audio controls</div>
-                            <div class="small text-muted">Checked channels are visible on the Record Audio page. No checked channels means no audio controls.</div>
-                          </div>
-                          <div class="col-12">
-                            <div class="form-check">
-                              <input class="form-check-input" type="checkbox" name="atem_can_solo_audio_role"
-                                {% if group_to_atem.get(g.id) and group_to_atem.get(g.id).can_solo %}checked{% endif %}
-                                data-role="atem-audio-field">
-                              <label class="form-check-label">Allow headphone solo</label>
-                            </div>
-                          </div>
-                          <div class="col-12">
-                            <div class="form-check">
-                              <input class="form-check-input" type="checkbox" name="atem_can_monitor_audio_role"
-                                {% if group_to_atem.get(g.id) and group_to_atem.get(g.id).can_monitor %}checked{% endif %}
-                                data-role="atem-audio-field">
-                              <label class="form-check-label">Allow monitor controls</label>
-                            </div>
-                          </div>
-                          {% set selected_atem_sources = (group_to_atem.get(g.id).audio_sources if group_to_atem and group_to_atem.get(g.id) else []) %}
-                          {% for source in atem_audio_sources %}
-                            <div class="col-12 col-md-6">
-                              <div class="form-check">
-                                <input class="form-check-input" type="checkbox" name="atem_allowed_audio_sources_role" value="{{ source.id }}"
-                                  {% if selected_atem_sources and (source.id|string in selected_atem_sources) %}checked{% endif %}
-                                  data-role="atem-audio-field">
-                                <label class="form-check-label">{{ source.label }}{% if source.id != 'master' %} <span class="text-muted">({{ source.id }})</span>{% endif %}</label>
+                              <div class="col-12 mt-3">
+                                <div class="fw-semibold mb-2">Scenes</div>
+                                {% set selected_pixie_scenes = pixie_group.scenes if pixie_group else [] %}
+                                <div class="row g-2">
+                                  {% for scene in pixie_catalog.scenes %}
+                                    <div class="col-12 col-md-6">
+                                      <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="pixie_allowed_scenes_role" id="group-{{ g.id }}-scene-{{ scene.id }}" value="{{ scene.id }}"
+                                          data-role="pixie-scene" {% if scene.id in selected_pixie_scenes %}checked{% endif %}>
+                                        <label class="form-check-label" for="group-{{ g.id }}-scene-{{ scene.id }}">{{ scene.name }}{% if not scene.enabled %} <span class="text-muted">(disabled)</span>{% endif %}</label>
+                                      </div>
+                                    </div>
+                                  {% else %}
+                                    <div class="col-12 text-muted small">No scenes are configured.</div>
+                                  {% endfor %}
+                                </div>
                               </div>
                             </div>
-                          {% endfor %}
-                          <div class="col-12"><div class="form-text">Page access and channel access combine across a user's groups.</div></div>
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-audio" tabindex="0"
+                            data-permission-panel="audio" aria-labelledby="group-{{ g.id }}-tab-audio" hidden>
+                            <div class="row g-3">
+                              <div class="col-12">
+                                <div class="fw-semibold">Record Audio controls</div>
+                                <div class="small text-muted">Checked channels are visible on the Record Audio page. No checked channels means no audio controls.</div>
+                              </div>
+                              <div class="col-12">
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="atem_can_solo_audio_role" id="group-{{ g.id }}-audio-solo"
+                                    {% if group_to_atem.get(g.id) and group_to_atem.get(g.id).can_solo %}checked{% endif %}
+                                    data-role="atem-audio-field">
+                                  <label class="form-check-label" for="group-{{ g.id }}-audio-solo">Allow headphone solo</label>
+                                </div>
+                              </div>
+                              <div class="col-12">
+                                <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" name="atem_can_monitor_audio_role" id="group-{{ g.id }}-audio-monitor"
+                                    {% if group_to_atem.get(g.id) and group_to_atem.get(g.id).can_monitor %}checked{% endif %}
+                                    data-role="atem-audio-field">
+                                  <label class="form-check-label" for="group-{{ g.id }}-audio-monitor">Allow monitor controls</label>
+                                </div>
+                              </div>
+                              {% set selected_atem_sources = (group_to_atem.get(g.id).audio_sources if group_to_atem and group_to_atem.get(g.id) else []) %}
+                              {% for source in atem_audio_sources %}
+                                <div class="col-12 col-md-6">
+                                  <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="atem_allowed_audio_sources_role" id="group-{{ g.id }}-source-{{ source.id }}" value="{{ source.id }}"
+                                      {% if selected_atem_sources and (source.id|string in selected_atem_sources) %}checked{% endif %}
+                                      data-role="atem-audio-field">
+                                    <label class="form-check-label" for="group-{{ g.id }}-source-{{ source.id }}">{{ source.label }}{% if source.id != 'master' %} <span class="text-muted">({{ source.id }})</span>{% endif %}</label>
+                                  </div>
+                                </div>
+                              {% endfor %}
+                              <div class="col-12"><div class="form-text">Page access and channel access combine across a user's groups.</div></div>
+                            </div>
+                          </section>
                         </div>
                       </form>
                     {% endif %}

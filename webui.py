@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context, g
+from flask import Flask, Request, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context, g
 import copy
 import fnmatch
 import gzip
@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import sys
 from collections import deque
+from functools import wraps
 import sqlite3
 import secrets
 import uuid
@@ -32,6 +33,7 @@ from api_security import (
 
 from werkzeug.serving import make_server
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
 import json
 import re
 from datetime import datetime, timedelta
@@ -341,7 +343,25 @@ except Exception:
 
     utils = _StubUtils()
 
+class _TDeckRequest(Request):
+    def _get_file_stream(self, total_content_length, content_type, filename=None, content_length=None):
+        stream = super()._get_file_stream(total_content_length, content_type, filename, content_length)
+        if self.path in ('/api/media/upload', '/api/v1/media/upload'):
+            # A rejected multipart parse can fail before Werkzeug publishes
+            # request.files. Retain those partial streams for prompt cleanup.
+            self.__dict__.setdefault('_media_parser_streams', []).append(stream)
+        return stream
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            for stream in self.__dict__.pop('_media_parser_streams', []):
+                stream.close()
+
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
+app.request_class = _TDeckRequest
 
 _BUILD_ID_LOCK = threading.Lock()
 _BUILD_ID_CACHE: str | None = None
@@ -671,6 +691,7 @@ def _init_auth_db() -> None:
             ('email', 'TEXT'),
             ('full_name', 'TEXT'),
             ('is_locked', 'INTEGER NOT NULL DEFAULT 0'),
+            ('lockout_enabled', 'INTEGER NOT NULL DEFAULT 1'),
             ('locked_at', 'TEXT'),
             ('locked_reason', 'TEXT'),
             ('failed_login_count', 'INTEGER NOT NULL DEFAULT 0'),
@@ -1004,9 +1025,40 @@ def _parse_group_allowlist_field(raw: str | None) -> list[int]:
     return _coerce_allow_list(s)
 
 
-def _set_group_videohub_allowlists(group_id: int, outputs_raw: str | None, inputs_raw: str | None) -> None:
-    outs = _parse_group_allowlist_field(outputs_raw)
-    ins = _parse_group_allowlist_field(inputs_raw)
+def _validate_routing_allowlist(raw, label: str) -> list[int]:
+    """Reject invalid restrictions instead of silently saving allow-all."""
+    value = raw
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or value.lower() in ('all', '*', 'inherit', 'default', 'global'):
+            return []
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = re.split(r'[,\s]+', value)
+    if isinstance(value, (int, str)) and not isinstance(value, bool):
+        value = [value]
+    if not isinstance(value, list) or any(
+        isinstance(item, bool) or not isinstance(item, (int, str))
+        or not re.fullmatch(r'[0-9]+', str(item).strip()) or int(item) <= 0
+        for item in value
+    ):
+        raise ValueError(f'{label}: enter positive port numbers such as 1 or 1,2,3. Leave blank or enter all for every port.')
+    return sorted({int(item) for item in value})
+
+
+def _validate_routing_group_fields(data) -> None:
+    for key, label in (('videohub_allowed_outputs_role', 'Allowed Outputs'),
+                       ('videohub_allowed_inputs_role', 'Allowed Inputs')):
+        if key in data:
+            _validate_routing_allowlist(data[key], label)
+
+
+def _set_group_videohub_allowlists(group_id: int, outputs_raw, inputs_raw) -> None:
+    outs = _validate_routing_allowlist(outputs_raw, 'Allowed Outputs')
+    ins = _validate_routing_allowlist(inputs_raw, 'Allowed Inputs')
     conn = _db()
     try:
         conn.execute(
@@ -1480,6 +1532,9 @@ def _user_allows_page(user_id: int | None, page_key: str) -> bool:
         return False
     if _user_is_admin(user_id):
         return True
+    for prerequisite in _PAGE_PREREQUISITES.get(page_key, ()):
+        if not _user_allows_page(user_id, prerequisite):
+            return False
     conn = _db()
     try:
         row = conn.execute(
@@ -1796,6 +1851,20 @@ def _admin_update_user(conn: sqlite3.Connection, uid: int, group_ids: list[int],
     return True
 
 
+def _admin_set_user_lockout(conn: sqlite3.Connection, uid: int, enabled: bool) -> None:
+    # Start a fresh attempt window when the policy changes. Existing locks still
+    # require the explicit unlock action, including locks applied by an admin.
+    conn.execute(
+        """
+        UPDATE users
+        SET lockout_enabled=?,failed_login_count=0,last_failed_login_at=NULL,
+            updated_at=?,updated_by=?
+        WHERE id=? AND lockout_enabled!=?
+        """,
+        (int(enabled), _now_str(), _current_admin_user_id(), int(uid), int(enabled)),
+    )
+
+
 def _can_manage_videohub_rooms_for_current_user() -> bool:
     """Whether the current user should be allowed to access room management UI."""
     try:
@@ -1854,6 +1923,9 @@ def _activity_request_ip() -> str:
 
 
 def _activity_current_actor() -> tuple[int | None, str, str]:
+    if has_request_context() and isinstance(getattr(g, '_preset_actor', None), dict):
+        actor = g._preset_actor
+        return actor.get('actor_user_id'), actor.get('actor_username', ''), actor.get('actor_display', '')
     try:
         if has_request_context() and getattr(current_user, 'is_authenticated', False):
             uid = int(current_user.get_id())
@@ -1874,6 +1946,20 @@ def _activity_current_actor() -> tuple[int | None, str, str]:
     except Exception:
         pass
     return None, '', ''
+
+
+def capture_activity_actor() -> dict[str, Any]:
+    """Capture both identities before dispatching a background action."""
+    if has_request_context() and isinstance(getattr(g, '_preset_actor', None), dict):
+        return dict(g._preset_actor)
+    uid, username, display = _activity_current_actor()
+    actor = {'actor_user_id': uid, 'actor_username': username, 'actor_display': display}
+    if has_request_context():
+        actor.update(ip=_activity_request_ip(), request_path=_activity_request_path(), source='web')
+        context = getattr(g, '_view_as_context', None)
+        if context:
+            actor['impersonation'] = dict(context)
+    return actor
 
 
 def _activity_source_default() -> str:
@@ -2086,6 +2172,7 @@ def log_event(
     ip: str | None = None,
     request_path: str | None = None,
     ts: str | None = None,
+    impersonation: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Persist a structured activity event and publish it to the live buffer."""
 
@@ -2102,6 +2189,14 @@ def log_event(
     actor_uid = actor_user_id if actor_user_id is not None else current_uid
     actor_name = str(actor_username if actor_username is not None else current_uname).strip()
     actor_label = str(actor_display if actor_display is not None else current_display).strip()
+    if impersonation is None and has_request_context():
+        impersonation = (getattr(g, '_preset_actor', {}) or {}).get('impersonation') or getattr(g, '_view_as_context', None)
+    if impersonation:
+        actor_uid = impersonation['admin_id']
+        actor_name = str(impersonation['admin_username'])
+        actor_label = f"{actor_name} as {impersonation['target_username']}"
+        details = dict(details) if isinstance(details, dict) else {'context': details}
+        details['view_as'] = dict(impersonation)
     if not actor_label:
         if actor_name:
             actor_label = actor_name
@@ -2254,6 +2349,17 @@ def require_page(page_key: str, friendly_name: str):
         return fn
 
     return _decorator
+
+
+# Media and upload are Routing options, stored with the existing group grants.
+# Legacy media_load/media_manage grants no longer authorize any action.
+_PAGE_PREREQUISITES = {
+    'page:media': ('page:routing',),
+    'page:media_upload': ('page:routing', 'page:media'),
+    'page:routing_presets': ('page:routing',),
+}
+_register_page('page:media_upload', 'Media: Upload images')
+_register_page('page:routing_presets', 'Routing: Presets')
 
 
 def _get_group_by_name(name: str) -> sqlite3.Row | None:
@@ -2453,7 +2559,7 @@ def _bootstrap_default_users_roles() -> None:
                     all_pages = ['page:home', *all_pages]
 
                 if not td_has:
-                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin')]
+                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin') and not k.startswith('page:media')]
                     _set_group_pages(td_group_id, td_pages)
                 if not sp_has:
                     sp_pages = [k for k in all_pages if k in ('page:home', 'page:timers')]
@@ -2666,6 +2772,9 @@ def _create_user_session(row: sqlite3.Row) -> None:
 def _touch_current_user_session() -> bool:
     sid = str(session.get('_auth_session_id') or '').strip()
     uid = _current_admin_user_id()
+    context = getattr(g, '_view_as_context', None)
+    if context:
+        uid = int(context['admin_id'])
     if uid is None:
         return False
     if not sid:
@@ -2711,9 +2820,20 @@ def _record_login_failure(row: sqlite3.Row | None, username: str) -> None:
     locked_now = False
     conn = _db()
     try:
-        latest = conn.execute('SELECT failed_login_count,is_locked FROM users WHERE id=?', (int(row['id']),)).fetchone()
-        count = int((latest['failed_login_count'] if latest else row['failed_login_count']) or 0) + 1
-        lock_now = count >= threshold and not bool(int((latest['is_locked'] if latest else row['is_locked']) or 0))
+        # Serialize policy changes and failed attempts so a stale login record
+        # cannot lock an account after an administrator disables lockout.
+        conn.execute('BEGIN IMMEDIATE')
+        latest = conn.execute(
+            'SELECT failed_login_count,is_locked,lockout_enabled FROM users WHERE id=?',
+            (int(row['id']),),
+        ).fetchone()
+        count = int(latest['failed_login_count'] or 0) + 1 if latest else 1
+        lock_now = (
+            latest is not None
+            and bool(int(latest['lockout_enabled']))
+            and count >= threshold
+            and not bool(int(latest['is_locked'] or 0))
+        )
         if lock_now:
             conn.execute(
                 """
@@ -2942,7 +3062,8 @@ class _User(UserMixin):
                 self.idle_timeout_override = minutes
 
     def allows_page(self, page_key: str) -> bool:
-        return bool(self.is_admin_group or str(page_key) in self.page_keys)
+        required = {str(page_key), *_PAGE_PREREQUISITES.get(page_key, ())}
+        return bool(self.is_admin_group or required <= self.page_keys)
 
     def is_active(self) -> bool:
         return bool(self._active) and not bool(self.is_locked)
@@ -2955,6 +3076,7 @@ _PAGE_LANDING_PATHS = (
     ('page:videohub', '/videohub'),
     ('page:atem_audio', '/foyer-audio'),
     ('page:routing', '/routing'),
+    ('page:media', '/media'),
     ('page:pixie_controls', '/pixie'),
     ('page:digico_mixer', '/personal-mixes'),
     ('page:surface_controls', '/surface-controls'),
@@ -2980,6 +3102,41 @@ def _landing_page_for_user(user: _User) -> str:
     return '/account/password'
 
 
+def _login_destination(user: _User, next_url: str) -> str:
+    """Return an accessible UI page, never a background/auth endpoint."""
+    if user.force_password_change:
+        return url_for('account_password_page', force=1)
+
+    fallback = _landing_page_for_user(user)
+    try:
+        parsed = urlsplit(next_url)
+        path = unquote(parsed.path)
+        if (
+            parsed.scheme or parsed.netloc
+            or not next_url.startswith('/') or next_url.startswith('//')
+            or not path.startswith('/') or path.startswith('//')
+            or any(char == '\\' or ord(char) < 32 or ord(char) == 127 for char in unquote(next_url))
+            or path.startswith(('/api/', '/auth/', '/static/', '/media/'))
+        ):
+            return fallback
+        endpoint, _ = app.url_map.bind_to_environ(request.environ).match(path, method='GET')
+        view = app.view_functions.get(endpoint)
+        page_key = getattr(view, '_required_page_key', None)
+        if endpoint == 'account_password_page' or (page_key and user.allows_page(page_key)):
+            return next_url
+    except Exception:
+        pass
+    return fallback
+
+
+def _redirect_to_login(*, timeout: bool = False):
+    # Heartbeats are background fetches, not useful destinations after sign-in.
+    next_url = None
+    if request.path not in ('/login', '/logout', '/auth/ping', '/auth/touch'):
+        next_url = request.full_path if request.query_string else request.path
+    return redirect(url_for('login_page', next=next_url, timeout=1 if timeout else None))
+
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login_page'
@@ -2988,7 +3145,12 @@ login_manager.login_view = 'login_page'
 @login_manager.user_loader
 def _load_user(user_id: str):
     try:
-        row = _user_record(int(user_id))
+        context = getattr(g, '_view_as_context', None)
+        if session.get('_view_as') and not context:
+            # Never fall back to Admin for a request intended for the target.
+            return None
+        effective_id = context['target_id'] if context else int(user_id)
+        row = _user_record(int(effective_id))
         return _User(row) if row else None
     except Exception:
         return None
@@ -3018,7 +3180,16 @@ def _csrf_token() -> str:
 
 def _validate_csrf() -> bool:
     try:
-        sent = request.form.get('_csrf') or request.headers.get('X-CSRF-Token')
+        # Browser media uploads send their token in the header. Validate it
+        # without parsing an untrusted multipart body first; retain form-token
+        # support for callers that do not send the header.
+        header = request.headers.get('X-CSRF-Token')
+        if _api_normalized_path() == '/api/media/upload' and header is not None:
+            sent = header
+        else:
+            sent = request.form.get('_csrf') or header
+    except RequestEntityTooLarge:
+        raise
     except Exception:
         sent = None
     return bool(sent) and str(sent) == str(session.get('_csrf'))
@@ -3035,6 +3206,14 @@ _CLIENT_ERROR_SECRET_RE = re.compile(
 )
 _CLIENT_ERROR_BEARER_RE = re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._~+\-/]+=*')
 _CLIENT_ERROR_URL_QUERY_RE = re.compile(r'((?:https?://|/)[^\s?#]+)[?#][^\s]*')
+_CLIENT_ERROR_BROWSER_NOISE_RE = re.compile(
+    r"(?:Uncaught )?(?:(?:ReferenceError|TypeError): )?(?:"
+    r"Can't find variable: (?:__firefox__|DarkReader)"
+    r"|(?:__firefox__|DarkReader) is not defined"
+    r"|undefined is not an object \(evaluating '"
+    r"(?:window\.__firefox__\.reader|window\.ethereum\.selectedAddress\s*=\s*undefined)"
+    r"'\))"
+)
 
 
 def _client_error_text(value: Any, limit: int) -> str:
@@ -3134,6 +3313,17 @@ def _client_error_payload(raw: Any) -> dict[str, Any]:
     }
 
 
+def _client_error_is_browser_noise(report: dict[str, Any]) -> bool:
+    """Ignore known injected feature failures, preserving evidence of app code."""
+    # Keep in sync with static/client_telemetry.js and the shared test fixtures.
+    # Do not suppress generic "Script error." reports or all errors from Brave.
+    if str(report.get('source_path') or '').startswith('/static/'):
+        return False
+    if '/static/' in str(report.get('stack') or ''):
+        return False
+    return bool(_CLIENT_ERROR_BROWSER_NOISE_RE.fullmatch(str(report.get('message') or '')))
+
+
 @app.context_processor
 def _inject_auth():
     # Flask-Login's `is_authenticated` is a property in newer versions and a
@@ -3153,6 +3343,7 @@ def _inject_auth():
         'csrf_token': _csrf_token,
         'current_user': current_user,
         'is_authenticated': is_authed,
+        'view_as': getattr(g, '_view_as_context', None),
     }
 
 
@@ -3175,7 +3366,7 @@ def _api_normalized_path(path: str | None = None) -> str:
 def _api_request_is_automation_principal() -> bool:
     try:
         principal = getattr(g, 'api_principal', None)
-        return isinstance(principal, dict) and principal.get('type') in ('service_token', 'scheduler')
+        return isinstance(principal, dict) and principal.get('type') in ('service_token', 'scheduler', 'routing_preset')
     except Exception:
         return False
 
@@ -3192,6 +3383,18 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
 
     if p.startswith('/api/config/service-tokens'):
         return {'scope': 'admin', 'pages': ('page:config',), 'service_tokens': False}
+    if p.startswith('/api/config/routing-presets'):
+        return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
+    if p.startswith('/api/routing/presets'):
+        return {'scope': 'videohub', 'pages': ('page:routing_presets',), 'service_tokens': False}
+    if p == '/api/config/atem-media':
+        return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
+    if p.startswith('/api/atem/media/'):
+        return {'scope': 'atem', 'pages': ('page:config',), 'service_tokens': False}
+    if p == '/api/media/display' or p.startswith('/api/media/display/'):
+        return {'scope': 'atem', 'pages': ('page:media',), 'service_tokens': False}
+    if p == '/api/media' or p.startswith('/api/media/'):
+        return {'scope': 'atem', 'pages': ('page:media', 'page:config'), 'service_tokens': False}
     if p.startswith('/api/admin/'):
         return {'scope': 'admin', 'pages': ('page:admin',)}
     if p.startswith('/api/config') or p.startswith('/api/companion-surfaces-config'):
@@ -3413,7 +3616,7 @@ def _api_same_origin_request() -> bool:
 
 def _api_request_within_size_limit(path: str) -> tuple[bool, int]:
     cfg = _auth_cfg()
-    upload = path.startswith('/api/config/import/') or path.endswith('/background')
+    upload = path.startswith('/api/config/import/') or path.endswith('/background') or path == '/api/media/upload'
     key = 'api_upload_max_request_bytes' if upload else 'api_max_request_bytes'
     default_limit = 64 * 1024 * 1024 if upload else 2 * 1024 * 1024
     try:
@@ -3660,6 +3863,26 @@ def _api_security_gate():
             )
             return _api_json_error(403, 'forbidden', 'Your groups do not grant access to this API capability.')
         if request.method in _API_MUTATING_METHODS:
+            if normalized == '/api/media/upload':
+                # These checks must precede form-based CSRF validation, which
+                # can otherwise parse uploads from a read-only media account
+                # or an untrusted browser origin before rejecting them.
+                if not _media_permissions()['upload']:
+                    return _media_action_denied('upload')
+                if not _api_same_origin_request():
+                    _api_security_event(
+                        'security.api.origin_denied',
+                        'Rejected a browser API write from an untrusted origin',
+                        details={'user_id': user_id, 'path': normalized, 'method': request.method},
+                    )
+                    return _api_json_error(403, 'invalid_origin', 'The request Origin or Referer is not trusted.')
+                # Header tokens can be rejected before reserving capacity.
+                # Form tokens require parsing, so admission must precede
+                # their validation to bound even that work to one upload.
+                if request.headers.get('X-CSRF-Token') is None or _validate_csrf():
+                    admission_error = _admit_media_upload(f'user:{user_id}')
+                    if admission_error is not None:
+                        return admission_error
             if not _validate_csrf():
                 _api_security_event(
                     'security.api.csrf_denied',
@@ -3713,14 +3936,159 @@ def _api_security_gate():
     return None
 
 
+def _view_as_admin_record():
+    """Validate the original browser login, including revocation and authority."""
+    try:
+        uid = int(session.get('_user_id'))
+        sid = str(session.get('_auth_session_id') or '')
+        if not sid:
+            return None
+        conn = _db()
+        try:
+            row = conn.execute(
+                '''SELECT u.*,s.revoked_at,s.session_version AS login_version
+                   FROM users u JOIN user_sessions s ON s.user_id=u.id
+                   WHERE u.id=? AND s.id=?''', (uid, sid),
+            ).fetchone()
+        finally:
+            conn.close()
+        if (not row or row['revoked_at'] or not int(row['is_active'] or 0)
+                or int(row['is_locked'] or 0) or int(row['force_password_change'] or 0)
+                or int(row['login_version'] or 0) != int(row['session_version'] or 0)
+                or not _user_is_admin(uid)):
+            return None
+        cfg = _auth_cfg()
+        if _cfg_bool(cfg, 'auth_idle_timeout_enabled', True):
+            minutes = _effective_idle_timeout_override_minutes_for_user(uid)
+            if minutes is None:
+                minutes = _cfg_int(cfg, 'auth_idle_timeout_minutes', 2, min_value=1, max_value=1440)
+            last = int(session.get('_last_activity') or 0)
+            if minutes > 0 and last and time.time() - last > minutes * 60:
+                return None
+        return row
+    except Exception:
+        return None
+
+
+def _view_as_failure(status: int, message: str):
+    return render_template('view_as_error.html', page_title='View as user', error=message), status
+
+
+def _view_as_audit_context():
+    """Identify an interrupted test for audit without authorizing its request."""
+    try:
+        marker = session.get('_view_as') or {}
+        admin = _user_record(int(session.get('_user_id')))
+        target = _user_record(int(marker['target_id']))
+        if admin:
+            return {'admin_id': int(admin['id']), 'admin_username': str(admin['username']),
+                    'target_id': int(marker['target_id']),
+                    'target_username': str(target['username']) if target else 'Unavailable user'}
+    except Exception:
+        pass
+    return None
+
+
+def _view_as_end(admin, *, reason: str = 'returned') -> None:
+    marker = session.get('_view_as') or {}
+    context = getattr(g, '_view_as_context', None) or _view_as_audit_context()
+    log_event('user.view_as.stop', 'Ended View as user', status='info',
+              target_type='user', target_id=marker.get('target_id'),
+              details={'reason': reason}, impersonation=context)
+    session.pop('_view_as', None)
+    session['_csrf'] = secrets.token_hex(16)
+    # Keep the existing login/session row. Rotating CSRF prevents another tab
+    # with the target's controls from accidentally sending an Admin action.
+    g._view_as_context = None
+    login_manager._update_request_context_with_user(_User(admin))
+
+
+def _view_as_request_gate():
+    marker = session.get('_view_as')
+    transition = request.endpoint in ('admin_view_as_user', 'stop_view_as_user')
+    if not marker and not transition:
+        return None
+    if not _auth_enabled():
+        if marker:
+            log_event('user.view_as.stop', 'Ended View as user because authentication was disabled',
+                      status='warning', details={'reason': 'authentication_disabled'},
+                      impersonation=_view_as_audit_context())
+            logout_user()
+            session.clear()
+        return abort(403, description='View as user requires authentication to be enabled.')
+    if (request.headers.get('Authorization') or getattr(g, '_tdeck_scheduler_principal', None)):
+        return abort(403, description='View as user requires an administrator browser session.')
+    admin = _view_as_admin_record()
+    if not admin:
+        if marker:
+            log_event('user.view_as.stop', 'Ended View as user because administrator access expired',
+                      status='warning', details={'reason': 'administrator_unavailable'},
+                      impersonation=_view_as_audit_context())
+            logout_user()
+            session.clear()
+        return abort(403, description='A current login in the Admin group is required.')
+    g._view_as_admin = admin
+    if not marker:
+        if transition and (not _validate_csrf() or not _api_same_origin_request()):
+            return _view_as_failure(403, 'Reload the page and try again.')
+        return None
+    try:
+        if int(marker['admin_id']) != int(admin['id']):
+            raise ValueError('Administrator changed')
+        target = _user_record(int(marker['target_id']))
+        g._view_as_context = {
+            'admin_id': int(admin['id']), 'admin_username': str(admin['username']),
+            'target_id': int(marker['target_id']),
+            'target_username': str(target['username']) if target else 'Unavailable user',
+        }
+        target_valid = (
+            target is not None and int(target['is_active'] or 0)
+            and not int(target['is_locked'] or 0) and not int(target['force_password_change'] or 0)
+            and int(target['session_version'] or 0) == int(marker['target_version'])
+        )
+    except Exception:
+        target_valid = False
+    if transition and (not _validate_csrf() or not _api_same_origin_request()):
+        return _view_as_failure(403, 'Reload the page and try again.')
+    if not target_valid and request.endpoint != 'stop_view_as_user':
+        _view_as_end(admin, reason='target_unavailable')
+        if request.method in ('GET', 'HEAD') and not request.path.startswith('/api/'):
+            return redirect(url_for('admin_permissions_page', tab='users'))
+        return _api_json_error(409, 'view_as_ended', 'View as user ended because this account changed. Reload the page.')
+    if request.method in _API_MUTATING_METHODS and request.path in ('/account/password', '/login'):
+        log_event('user.view_as.credential_denied', 'Blocked a password or login change while viewing as a user', status='warning')
+        return abort(403, description='Return to admin before changing account credentials.')
+    return None
+
+
 @app.before_request
 def _auth_gate():
     p = request.path or ''
+    if _api_normalized_path(p) == '/api/media/upload':
+        # Enforce streaming multipart size before authentication/CSRF accesses
+        # request.form, including bodies with no Content-Length header.
+        from media_library import MAX_UPLOAD_BYTES
+        _, upload_limit = _api_request_within_size_limit('/api/media/upload')
+        request.max_content_length = min(upload_limit, MAX_UPLOAD_BYTES + 1024 * 1024)
+        # One image, its optional name and an optional form CSRF token. Keep
+        # parser buffering above Werkzeug's 64 KiB read size while bounding
+        # text fields and multipart headers independently of the image bytes.
+        request.max_form_parts = 3
+        request.max_form_memory_size = 128 * 1024
+
+    view_as_response = _view_as_request_gate()
+    if view_as_response is not None:
+        return view_as_response
+    if request.endpoint in ('admin_view_as_user', 'stop_view_as_user'):
+        # These transitions have their own stricter original-Admin boundary.
+        return None
 
     # Only the in-process dispatcher can place this marker on Flask's request
     # context. It is not derived from an address, header, cookie, or payload.
     if p.startswith('/api/') and isinstance(getattr(g, '_tdeck_scheduler_principal', None), dict):
         return _api_scheduler_internal_gate()
+    if getattr(g, '_routing_preset_dispatch', None) is _ROUTING_PRESET_DISPATCH:
+        return _api_routing_preset_internal_gate()
 
     if not _auth_enabled():
         return None
@@ -3729,11 +4097,12 @@ def _auth_gate():
     if p.startswith('/api/'):
         return _api_security_gate()
 
-    # Always allow static + login/logout assets/pages.
+    # Credential submissions must work even when an old session has expired.
+    # Authenticated login-page visits still need normal session validation.
     if (
         p.startswith('/static/')
         or p.startswith('/media/videohub_room_images/')
-        or p == '/login'
+        or (p == '/login' and (request.method == 'POST' or not current_user.is_authenticated))
         or p == '/logout'
     ):
         return None
@@ -3745,19 +4114,18 @@ def _auth_gate():
         pass
 
     if not getattr(current_user, 'is_authenticated', False):
-        nxt = request.full_path if request.query_string else request.path
-        return redirect(url_for('login_page', next=nxt))
+        return _redirect_to_login()
 
     try:
         if not _touch_current_user_session():
             _audit('logout_session_revoked', f'path={p}')
             logout_user()
             session.clear()
-            return redirect(url_for('login_page', next=p))
+            return _redirect_to_login()
     except Exception:
         logout_user()
         session.clear()
-        return redirect(url_for('login_page', next=p))
+        return _redirect_to_login()
 
     # Idle timeout
     now = int(time.time())
@@ -3771,7 +4139,10 @@ def _auth_gate():
                 pass
             logout_user()
             session.clear()
-            return redirect(url_for('login_page', timeout=1))
+            return _redirect_to_login(timeout=True)
+
+    if p == '/login':
+        return None
 
     # Don't let background heartbeat requests keep the session alive.
     if p != '/auth/ping':
@@ -3805,8 +4176,14 @@ def _auth_gate():
     # Authorization for pages
     view_fn = app.view_functions.get(request.endpoint)
     page_key = getattr(view_fn, '_required_page_key', None) if view_fn else None
+    any_page_keys = getattr(view_fn, '_required_any_page_keys', ()) if view_fn else ()
     if p == '/account/password':
         return None
+    if any_page_keys:
+        if any(can_access(key) for key in any_page_keys):
+            return None
+        _audit('deny_page', f'pages={any_page_keys} path={p}')
+        return abort(403)
     if not page_key:
         _audit('deny_missing_page_key', f'endpoint={request.endpoint} path={p}')
         return abort(403)
@@ -3816,6 +4193,15 @@ def _auth_gate():
         return abort(403)
 
     return None
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def _request_entity_too_large(error):
+    if (request.path or '').startswith('/api/'):
+        _api_security_event('security.api.request_too_large', 'Rejected an oversized API request',
+                            details={'path': _api_normalized_path()})
+        return _api_json_error(413, 'request_too_large', 'The upload exceeds the request size limit.')
+    return error
 
 
 @app.route('/auth/ping', methods=['GET'])
@@ -3853,6 +4239,10 @@ def api_client_errors():
     if not isinstance(raw_report, dict):
         return jsonify({'ok': False, 'error': 'invalid_report'}), 400
     report = _client_error_payload(raw_report)
+    # Also cover already-open pages running an older telemetry script. All
+    # authentication, origin, size and rate checks above still apply.
+    if _client_error_is_browser_noise(report):
+        return jsonify({'ok': True, 'ignored': True, 'requestId': report['correlation_id']}), 202
     try:
         log_event(
             'client.error',
@@ -4828,6 +5218,7 @@ _videohub_state_cache = {
 _videohub_state_refresh_lock = threading.Lock()
 _videohub_state_refreshing = False
 _status_cache_lock = threading.Lock()
+_status_snapshot_refresh_lock = threading.Lock()
 _status_refresher_lock = threading.Lock()
 _status_refresher_started = False
 _STATUS_CACHE_TTL_SECONDS = 2.0
@@ -5029,17 +5420,16 @@ def _probe_atem_status(cfg: dict) -> dict:
     raw_connected = bool(connected)
     with _status_cache_lock:
         was_connected = bool(_atem_status_cache.get('connected', False))
-
-    if raw_connected:
-        _atem_probe_failures = 0
-    else:
-        _atem_probe_failures += 1
-        if was_connected and _atem_probe_failures < _ATEM_OFFLINE_AFTER_FAILURES:
-            connected = True
-            if detail:
-                detail = f"{detail} (missed probe {_atem_probe_failures}/{_ATEM_OFFLINE_AFTER_FAILURES})"
+        if raw_connected:
+            _atem_probe_failures = 0
         else:
-            connected = False
+            _atem_probe_failures += 1
+            if was_connected and _atem_probe_failures < _ATEM_OFFLINE_AFTER_FAILURES:
+                connected = True
+                if detail:
+                    detail = f"{detail} (missed probe {_atem_probe_failures}/{_ATEM_OFFLINE_AFTER_FAILURES})"
+            else:
+                connected = False
 
     return {
         'connected': bool(connected),
@@ -5159,7 +5549,9 @@ def _probe_scheduler_status(cfg: dict) -> dict:
     return status
 
 
-def _refresh_status_snapshot() -> dict:
+def _collect_status_snapshot() -> dict:
+    # The refresh lock covers probes, publication and transition logging so
+    # an older refresh cannot publish or log after a newer one.
     try:
         cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
     except Exception:
@@ -5220,17 +5612,59 @@ def _refresh_status_snapshot() -> dict:
     return payload
 
 
-def _get_status_snapshot() -> dict:
-    now = time.time()
+def _cached_status_snapshot() -> dict:
     with _status_cache_lock:
         payload = _status_snapshot_cache.get('payload')
-        ts = float(_status_snapshot_cache.get('ts', 0.0) or 0.0)
-
-    if isinstance(payload, dict):
-        if (now - ts) <= (_STATUS_REFRESH_INTERVAL_SECONDS * 2.0):
+        if isinstance(payload, dict):
             return payload
+        # The first browser request must also return without probing hardware.
+        return {
+            'ok': True,
+            'ts': 0.0,
+            **{service: {'connected': False, 'checked_at': None}
+               for service in _connectivity_last},
+            'scheduler': {'running': False, 'healthy': False, 'checked_at': None},
+        }
 
-    return _refresh_status_snapshot()
+
+def _refresh_status_snapshot(*, background: bool = False) -> dict:
+    # Browser requests and the periodic refresher share one in-flight probe.
+    # Never queue another refresh behind slow/disconnected hardware.
+    if not _status_snapshot_refresh_lock.acquire(blocking=False):
+        return _cached_status_snapshot()
+
+    def refresh():
+        try:
+            return _collect_status_snapshot()
+        finally:
+            _status_snapshot_refresh_lock.release()
+
+    if background:
+        def run_background():
+            try:
+                refresh()
+            except Exception:
+                app.logger.exception('Integration status refresh failed')
+
+        try:
+            threading.Thread(
+                target=run_background,
+                name='tdeck-integration-status-refresh',
+                daemon=True,
+            ).start()
+        except Exception:
+            _status_snapshot_refresh_lock.release()
+            raise
+        return _cached_status_snapshot()
+    return refresh()
+
+
+def _get_status_snapshot() -> dict:
+    payload = _cached_status_snapshot()
+    ts = float(payload.get('ts', 0.0) or 0.0)
+    if not ts or (time.time() - ts) > (_STATUS_REFRESH_INTERVAL_SECONDS * 2.0):
+        return _refresh_status_snapshot(background=True)
+    return payload
 
 
 def _status_refresher_loop() -> None:
@@ -5395,9 +5829,9 @@ def login_page():
         pass
 
     next_url = request.args.get('next') or request.form.get('next') or ''
-    # Safety: only allow local redirects
-    if next_url and (next_url.startswith('http://') or next_url.startswith('https://') or '://' in next_url):
-        next_url = ''
+
+    if request.method in ('GET', 'HEAD') and current_user.is_authenticated:
+        return redirect(_login_destination(current_user, next_url))
 
     if request.method == 'POST':
         if not _validate_csrf():
@@ -5436,15 +5870,7 @@ def login_page():
         _create_user_session(refreshed)
         _audit('login_ok', f'username={username}')
 
-        if bool(int(refreshed['force_password_change'] or 0)):
-            return redirect(url_for('account_password_page', force=1))
-
-        redirect_target = next_url or '/'
-        requested_path = redirect_target.split('?', 1)[0].split('#', 1)[0]
-        if requested_path in ('', '/') and not user.allows_page('page:home'):
-            redirect_target = _landing_page_for_user(user)
-
-        return redirect(redirect_target)
+        return redirect(_login_destination(user, next_url))
 
     timeout = request.args.get('timeout')
     msg = 'You have been logged out due to inactivity.' if timeout else None
@@ -5605,6 +6031,11 @@ def admin_permissions_page():
                     is_admin_group = False
 
                 if not is_admin_group:
+                    if 'page:routing' in request.form.getlist('page_keys'):
+                        try:
+                            _validate_routing_group_fields(request.form)
+                        except ValueError as error:
+                            return _permissions_redirect('groups', str(error))
                     before_group = _group_settings_snapshot(gid)
                     if 'auth_idle_timeout_minutes_override_role' in request.form:
                         try:
@@ -5621,8 +6052,8 @@ def admin_permissions_page():
                     # Per-group Routing allow-lists (only update if routing page is selected)
                     try:
                         if 'page:routing' in [str(k) for k in keys]:
-                            outs_raw = request.form.get('videohub_allowed_outputs_role')
-                            ins_raw = request.form.get('videohub_allowed_inputs_role')
+                            outs_raw = request.form.get('videohub_allowed_outputs_role', before_group.get('videohub_allowed_outputs'))
+                            ins_raw = request.form.get('videohub_allowed_inputs_role', before_group.get('videohub_allowed_inputs'))
                             _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
                     except Exception:
                         pass
@@ -5806,7 +6237,8 @@ def admin_permissions_page():
     finally:
         conn.close()
 
-    pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()], key=lambda x: x[1].lower())
+    pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()
+                    if k not in ('page:media', 'page:media_upload', 'page:routing_presets')], key=lambda x: x[1].lower())
     group_to_pages: dict[int, set[str]] = {}
     for gp in group_pages or []:
         try:
@@ -5912,6 +6344,7 @@ def admin_permissions_page():
         groups=groups,
         pages=pages,
         group_to_pages=group_to_pages,
+        routing_presets=_routing_preset_catalog(),
         group_to_vh=group_to_vh,
         group_to_companion=group_to_companion,
         group_to_digico=group_to_digico,
@@ -5965,6 +6398,11 @@ def api_admin_group_update(group_id: int):
 
     # Admin groups are allow-all and not editable here.
     if not is_admin_group:
+        if 'page:routing' in (data.get('page_keys') or []):
+            try:
+                _validate_routing_group_fields(data)
+            except ValueError as error:
+                return jsonify({'ok': False, 'error': str(error)}), 400
         before_group = _group_settings_snapshot(gid)
         if 'auth_idle_timeout_minutes_override_role' in data:
             try:
@@ -5985,8 +6423,8 @@ def api_admin_group_update(group_id: int):
         try:
             keys_set = set([str(k) for k in (data.get('page_keys') or [])])
             if 'page:routing' in keys_set:
-                outs_raw = data.get('videohub_allowed_outputs_role')
-                ins_raw = data.get('videohub_allowed_inputs_role')
+                outs_raw = data.get('videohub_allowed_outputs_role', before_group.get('videohub_allowed_outputs'))
+                ins_raw = data.get('videohub_allowed_inputs_role', before_group.get('videohub_allowed_inputs'))
                 _set_group_videohub_allowlists(gid, outs_raw, ins_raw)
         except Exception:
             pass
@@ -6062,7 +6500,7 @@ def api_admin_group_update(group_id: int):
 @app.route('/api/admin/users/<int:user_id>', methods=['POST'])
 @require_page('page:admin', 'Admin')
 def api_admin_user_update(user_id: int):
-    """Auto-save user account status and group membership."""
+    """Auto-save user account status, login lockout, and group membership."""
     try:
         data = request.get_json(silent=True) or {}
     except Exception:
@@ -6079,6 +6517,12 @@ def api_admin_user_update(user_id: int):
                 group_ids.append(gid)
     is_active_raw = data.get('is_active', True)
     is_active = bool(is_active_raw) if isinstance(is_active_raw, bool) else (str(is_active_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
+    lockout_enabled = None
+    if 'lockout_enabled' in data:
+        lockout_raw = data['lockout_enabled']
+        if not isinstance(lockout_raw, bool):
+            return jsonify({'ok': False, 'error': 'Automatic login lockout must be true or false'}), 400
+        lockout_enabled = lockout_raw
 
     conn = _db()
     try:
@@ -6087,10 +6531,14 @@ def api_admin_user_update(user_id: int):
         if not ok:
             conn.rollback()
             return jsonify({'ok': False, 'error': 'Cannot remove or disable the last active admin user'}), 400
+        if lockout_enabled is not None:
+            _admin_set_user_lockout(conn, int(user_id), lockout_enabled)
         conn.commit()
         after = _user_access_snapshot(conn, int(user_id))
         group_changes = _group_snapshot_diff(before.get('groups') or [], after.get('groups') or [])
-        if before.get('is_active') != after.get('is_active') or group_changes.get('added_groups') or group_changes.get('removed_groups'):
+        if (before.get('is_active') != after.get('is_active')
+                or before.get('lockout_enabled') != after.get('lockout_enabled')
+                or group_changes.get('added_groups') or group_changes.get('removed_groups')):
             log_event(
                 'user.access.update',
                 f"Updated access for user '{after.get('username') or before.get('username') or user_id}'",
@@ -6102,12 +6550,13 @@ def api_admin_user_update(user_id: int):
                     'user_id': int(user_id),
                     'username': after.get('username') or before.get('username'),
                     'active': {'old': before.get('is_active'), 'new': after.get('is_active')},
+                    'lockout_enabled': {'old': before.get('lockout_enabled'), 'new': after.get('lockout_enabled')},
                     **group_changes,
                 },
             )
     finally:
         conn.close()
-    return jsonify({'ok': True})
+    return jsonify({'ok': True, 'lockout_enabled': after['lockout_enabled'], 'failed_login_count': after['failed_login_count']})
 
 
 def _generated_password() -> str:
@@ -6115,7 +6564,10 @@ def _generated_password() -> str:
 
 
 def _user_access_snapshot(conn: sqlite3.Connection, user_id: int) -> dict:
-    user = conn.execute('SELECT id,username,full_name,email,is_active FROM users WHERE id=?', (int(user_id),)).fetchone()
+    user = conn.execute(
+        'SELECT id,username,full_name,email,is_active,lockout_enabled,failed_login_count FROM users WHERE id=?',
+        (int(user_id),),
+    ).fetchone()
     groups = conn.execute(
         """
         SELECT g.id,g.name
@@ -6132,6 +6584,8 @@ def _user_access_snapshot(conn: sqlite3.Connection, user_id: int) -> dict:
         'full_name': str(user['full_name'] or '') if user else '',
         'email': str(user['email'] or '') if user else '',
         'is_active': bool(int(user['is_active'] or 0)) if user else False,
+        'lockout_enabled': bool(int(user['lockout_enabled'])) if user else True,
+        'failed_login_count': int(user['failed_login_count'] or 0) if user else 0,
         'groups': [{'id': int(g['id']), 'name': str(g['name'] or '')} for g in groups or []],
     }
 
@@ -6206,11 +6660,56 @@ def _admin_user_detail_context(user_id: int, error: str | None = None, message: 
         'min_len': _auth_min_password_length(),
         'lockout_attempts': _auth_lockout_failed_attempts(),
         'admin_email_rows': _admin_email_rows(),
+        'can_view_as_user': bool(_auth_enabled() and not session.get('_view_as')
+                                 and _user_is_admin(_current_admin_user_id())
+                                 and _current_admin_user_id() != int(user_id)),
         'generated_password': generated_password,
         'error': error,
         'message': message,
         'saved': str(request.args.get('saved') or '').strip(),
     }
+
+
+@app.post('/admin/users/<int:user_id>/view-as')
+def admin_view_as_user(user_id: int):
+    """Begin a per-browser test using the target's current permissions."""
+    if session.get('_view_as'):
+        return _view_as_failure(409, 'Return to admin before viewing as another user.')
+    admin = getattr(g, '_view_as_admin', None)
+    if admin is None:
+        return abort(403)
+    if int(admin['id']) == user_id:
+        return _view_as_failure(400, 'You are already signed in as this user.')
+    target = _user_record(user_id)
+    if target is None:
+        return abort(404)
+    if (not int(target['is_active'] or 0) or int(target['is_locked'] or 0)
+            or int(target['force_password_change'] or 0)):
+        return _view_as_failure(409, 'This user must be active, unlocked and have completed any required password change.')
+    session['_view_as'] = {'admin_id': int(admin['id']), 'target_id': user_id,
+                           'target_version': int(target['session_version'] or 0)}
+    session['_csrf'] = secrets.token_hex(16)
+    session['_last_activity'] = int(time.time())
+    g._view_as_context = {'admin_id': int(admin['id']), 'admin_username': str(admin['username']),
+                           'target_id': user_id, 'target_username': str(target['username'])}
+    effective_user = _User(target)
+    login_manager._update_request_context_with_user(effective_user)
+    log_event('user.view_as.start', f"Started View as user for '{target['username']}'", status='info',
+              target_type='user', target_id=user_id)
+    return redirect(_landing_page_for_user(effective_user), code=303)
+
+
+@app.post('/auth/view-as/stop')
+def stop_view_as_user():
+    admin = getattr(g, '_view_as_admin', None)
+    marker = session.get('_view_as')
+    if admin is None or not marker:
+        return _view_as_failure(409, 'View as user is not active.')
+    target_id = marker.get('target_id')
+    _view_as_end(admin)
+    if target_id and _user_record(int(target_id)):
+        return redirect(url_for('admin_user_detail_page', user_id=int(target_id)), code=303)
+    return redirect(url_for('admin_permissions_page', tab='users'), code=303)
 
 
 @app.route('/admin/users/<int:user_id>', methods=['GET', 'POST'])
@@ -6288,10 +6787,14 @@ def admin_user_detail_page(user_id: int):
                     (1 if is_active else 0, now, actor, int(user_id)),
                 )
                 _admin_replace_user_groups(conn, int(user_id), group_ids)
+                if request.form.get('lockout_settings_present') == '1':
+                    _admin_set_user_lockout(conn, int(user_id), request.form.get('lockout_enabled') == 'on')
                 conn.commit()
                 after = _user_access_snapshot(conn, int(user_id))
                 group_changes = _group_snapshot_diff(before.get('groups') or [], after.get('groups') or [])
-                if before.get('is_active') != after.get('is_active') or group_changes.get('added_groups') or group_changes.get('removed_groups'):
+                if (before.get('is_active') != after.get('is_active')
+                        or before.get('lockout_enabled') != after.get('lockout_enabled')
+                        or group_changes.get('added_groups') or group_changes.get('removed_groups')):
                     log_event(
                         'user.access.update',
                         f"Updated access for user '{after.get('username') or before.get('username') or user_id}'",
@@ -6303,6 +6806,7 @@ def admin_user_detail_page(user_id: int):
                             'user_id': int(user_id),
                             'username': after.get('username') or before.get('username'),
                             'active': {'old': before.get('is_active'), 'new': after.get('is_active')},
+                            'lockout_enabled': {'old': before.get('lockout_enabled'), 'new': after.get('lockout_enabled')},
                             **group_changes,
                         },
                     )
@@ -6942,15 +7446,815 @@ def routing_page():
     # Blank/NULL => allow all.
     allowed_outputs: list[int] = []
     allowed_inputs: list[int] = []
-    try:
-        if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
-            ro, ri = _effective_videohub_allowlists_for_user(int(current_user.get_id()))
-            allowed_outputs = ro
-            allowed_inputs = ri
-    except Exception:
-        pass
+    if _auth_enabled() and getattr(current_user, 'is_authenticated', False):
+        # Never render unrestricted controls when permission lookup fails.
+        allowed_outputs, allowed_inputs = _effective_videohub_allowlists_for_user(int(current_user.get_id()))
 
-    return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs)
+    notice = ''
+    job_id = request.args.get('media_job', '')
+    if job_id and can_access('page:media'):
+        try:
+            job = _get_media_routing_manager().get_job(job_id)
+            if job.get('status') == 'succeeded' and (not allowed_outputs or job['output'] in allowed_outputs):
+                notice = 'Image displayed successfully.'
+        except (KeyError, ValueError):
+            pass
+    selected_preset = None
+    if request.args.get('preset_job'):
+        finished = _routing_preset_runner.get(request.args['preset_job'])
+        if (finished and finished['status'] == 'succeeded' and finished['owner'] == _preset_owner()
+                and _routing_preset_allowed(finished['presetId'])
+                and (not allowed_outputs or finished['output'] in allowed_outputs)):
+            notice = 'Preset applied successfully.'
+    if request.args.get('preset'):
+        selected_preset = _routing_preset_for_user(request.args['preset'])
+        if selected_preset.get('output') is not None:
+            return redirect(url_for('routing_presets_page', selected=selected_preset['id']))
+    return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs,
+                           media_available=can_access('page:media'), media_notice=notice,
+                           presets_available=can_access('page:routing_presets'),
+                           selected_preset=selected_preset)
+
+
+_media_library_lock = threading.Lock()
+_media_operation_lock = threading.RLock()
+_media_upload_slot = threading.BoundedSemaphore(1)
+_media_upload_rate_lock = threading.Lock()
+_media_upload_rate_events: dict[str, deque[float]] = {}
+_MEDIA_UPLOADS_PER_MINUTE = 10
+_media_library_instance = None
+_media_routing_instance = None
+_media_routing_lock = threading.Lock()
+_MEDIA_CONFIG_DEFAULTS = {
+    'atem_media_enabled': False,
+    'atem_media_node_path': '',
+    'atem_media_destinations': [],
+}
+_MEDIA_ACTIVE_JOBS = {'queued', 'preparing', 'uploading', 'selecting', 'loading', 'routing', 'actions'}
+
+
+def _admit_media_upload(principal_key: str):
+    """Bound multipart parsing/decoding and attempts independently of controls."""
+    if getattr(g, '_media_upload_admitted', False):
+        return None
+    now = time.monotonic()
+    cutoff = now - 60.0
+    with _media_upload_rate_lock:
+        events = _media_upload_rate_events.setdefault(principal_key, deque())
+        while events and events[0] <= cutoff:
+            events.popleft()
+        if len(events) >= _MEDIA_UPLOADS_PER_MINUTE:
+            retry_after = max(1, int(61 - (now - events[0])))
+        else:
+            events.append(now)
+            retry_after = 0
+        if len(_media_upload_rate_events) > 2000:
+            stale = [key for key, values in _media_upload_rate_events.items() if not values or values[-1] <= cutoff]
+            for key in stale[:500]:
+                _media_upload_rate_events.pop(key, None)
+    if retry_after:
+        log_event('security.media.upload_rate_limited', 'Limited repeated image upload attempts', status='warning')
+        response = _api_json_error(429, 'rate_limited', 'Too many image uploads. Wait a minute and try again.',
+                                   retryAfter=retry_after)
+        response.headers['Retry-After'] = str(retry_after)
+        return response
+    if not _media_upload_slot.acquire(blocking=False):
+        response = _api_json_error(429, 'upload_busy', 'Another image is being uploaded. Try again shortly.', retryAfter=2)
+        response.headers['Retry-After'] = '2'
+        return response
+    g._media_upload_admitted = True
+    return None
+
+
+@app.teardown_request
+def _release_media_upload(_error=None):
+    if getattr(g, '_media_upload_admitted', False):
+        g._media_upload_admitted = False
+        _media_upload_slot.release()
+
+
+def _media_library_root() -> Path:
+    override = os.environ.get('TDECK_MEDIA_DIR', '').strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    if os.name != 'nt' and Path('/data').is_dir():
+        return Path('/data/media_library')
+    return Path(__file__).resolve().parent / 'media_library'
+
+
+def _get_media_library():
+    from media_library import MediaLibrary
+    global _media_library_instance
+    with _media_library_lock:
+        if _media_library_instance is None:
+            _media_library_instance = MediaLibrary(_media_library_root())
+        return _media_library_instance
+
+
+def _get_atem_media_manager():
+    from atem_media import get_atem_media_manager
+    return get_atem_media_manager(utils.get_config(), _get_media_library())
+
+
+def _active_media_job():
+    from atem_media import peek_atem_media_job
+    preset_job = _routing_preset_runner.active_job()
+    if preset_job:
+        return preset_job
+    if _media_routing_instance is not None:
+        job = _media_routing_instance.active_job()
+        if job:
+            return job
+    return peek_atem_media_job() or {}
+
+
+def _serialize_media_configuration(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _media_operation_lock:
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                return _api_json_error(409, 'busy', 'Wait for the current image display to finish before changing configuration.')
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def _media_permissions() -> dict[str, bool]:
+    return {
+        'upload': bool(can_access('page:config') or
+                       (can_access('page:media') and can_access('page:media_upload'))),
+        'manage': bool(can_access('page:config')),
+        'load': bool(can_access('page:media')),
+    }
+
+
+def _media_display_allowed() -> bool:
+    return bool(can_access('page:routing') and can_access('page:media'))
+
+
+def _media_output_access(output):
+    if isinstance(output, bool) or not isinstance(output, (str, int)) or not re.fullmatch(r'[1-9][0-9]*', str(output)):
+        raise ValueError('Choose an output in Routing first.')
+    output = int(output)
+    uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+    allowed_outputs, allowed_inputs = _effective_videohub_allowlists_for_user(uid)
+    if allowed_outputs and output not in allowed_outputs:
+        log_event('security.media.output_denied', 'Denied media access to an output',
+                  status='warning', details={'output': output})
+        abort(403)
+    return output, allowed_inputs
+
+
+def _media_page_context():
+    output, label = None, ''
+    if request.args.get('output'):
+        if not can_access('page:routing'):
+            abort(403)
+        try:
+            output, _ = _media_output_access(request.args['output'])
+        except ValueError:
+            abort(400)
+        state = _get_videohub_state_snapshot()
+        item = next((item for item in state.get('outputs', []) if item.get('number') == output), {})
+        label = str(item.get('label') or f'Output {output}')
+    permissions = _media_permissions()
+    # Config privileges are intentionally confined to the management page.
+    permissions['upload'] = bool(can_access('page:media') and can_access('page:media_upload'))
+    return {'media_permissions': permissions, 'output': output, 'output_label': label,
+            'can_display': bool(output and _media_display_allowed()), 'hide_connection_status': True}
+
+
+def _require_media_read(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not (can_access('page:media') or can_access('page:config')):
+            media_id = kwargs.get('media_id')
+            if not any(item['media_id'] == media_id for item in _visible_routing_presets()):
+                abort(403)
+        return fn(*args, **kwargs)
+    wrapped._required_any_page_keys = ('page:media', 'page:config', 'page:routing_presets')
+    return wrapped
+
+
+def _media_action_denied(action: str):
+    log_event('security.media.permission_denied', f'Denied media {action} without its group permission',
+              status='warning', details={'action': action})
+    message = {
+        'upload': 'Uploading images requires permission to upload media.',
+        'manage': 'Managing images and presets requires Config access.',
+        'load': 'Your permissions do not allow displaying images here.',
+    }.get(action, 'Your permissions do not allow this media action.')
+    return _api_json_error(403, 'forbidden', message)
+
+
+def _media_item_payload(item: dict) -> dict:
+    return {
+        **item,
+        'url': url_for('media_image', media_id=item['id']),
+        'thumbnail_url': url_for('media_thumbnail', media_id=item['id']),
+    }
+
+
+def _media_api_failure(action: str, error: Exception, status_code: int = 400):
+    if isinstance(error, KeyError):
+        message, status_code = 'Image not found.', 404
+    elif isinstance(error, (OSError, RuntimeError)):
+        message, status_code = 'The media operation could not finish. Check the Activity Log.', 503
+    else:
+        message = str(error)
+    log_event(action, message, status='failure', details={'error': str(error)})
+    return jsonify({'ok': False, 'error': message}), status_code
+
+
+def _get_media_routing_manager(*, refresh=False):
+    from media_routing import MediaRoutingManager
+    from atem_media import get_atem_media_manager
+    global _media_routing_instance
+    with _media_routing_lock:
+        cfg = copy.deepcopy(utils.get_config())
+        config_key = json.dumps({key: value for key, value in cfg.items()
+                                if key.startswith(('atem_', 'videohub_'))}, sort_keys=True)
+        if (_media_routing_instance is None or
+                (refresh and getattr(_media_routing_instance, '_config_key', '') != config_key
+                 and not _media_routing_instance.active_job())):
+            def client():
+                if get_videohub_client_from_config is None:
+                    raise RuntimeError('VideoHub is unavailable')
+                vh = get_videohub_client_from_config(cfg, timeout=2.0)
+                if vh is None:
+                    raise ValueError('Media display has not been set up. Ask your team administrator.')
+                return vh
+
+            def route(output, input_):
+                vh = client()
+                vh.route_video_output(output=output - 1, input_=input_ - 1)
+                if not vh.verify_video_output_route(output=output - 1, input_=input_ - 1):
+                    raise RuntimeError('VideoHub did not confirm the selected output')
+                _invalidate_videohub_state_snapshot(output_idx=output - 1, input_idx=input_ - 1)
+
+            _media_routing_instance = MediaRoutingManager(
+                get_config=lambda: copy.deepcopy(cfg),
+                get_media_manager=lambda: get_atem_media_manager(cfg, _get_media_library()),
+                read_videohub=lambda: client().get_routing_state_strict(), route_videohub=route)
+            _media_routing_instance._config_key = config_key
+        return _media_routing_instance
+
+
+def _guard_videohub_write(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        from media_routing import video_routing_guard
+        from atem_media import BusyError
+        try:
+            with video_routing_guard():
+                return fn(*args, **kwargs)
+        except BusyError:
+            return _api_json_error(409, 'busy', 'An image is being displayed. Wait a moment and try again.')
+    return wrapped
+
+
+def _public_media_display_job(job):
+    # Operators need the outcome, not player, AUX, input assignments or diagnostics.
+    return {key: job.get(key) for key in ('id', 'mediaId', 'output', 'status', 'message', 'error')}
+
+
+@app.route('/api/media/display', methods=['POST'])
+def api_media_display():
+    from atem_media import BusyError, validate_media_config
+    if not _media_display_allowed():
+        return _media_action_denied('load')
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {'media_id', 'output'}:
+        return _api_json_error(400, 'invalid_request', 'Choose an image and an output.')
+    actor = capture_activity_actor()
+
+    def completed(job):
+        success = job.get('status') == 'succeeded'
+        log_event('media.display', f"{'Displayed image on' if success else 'Could not display image on'} output {job['output']}",
+                  status='success' if success else 'failure', target_type='videohub_output',
+                  target_id=job['output'], details=job, **actor)
+
+    try:
+        output, allowed_inputs = _media_output_access(data['output'])
+        with _media_operation_lock:
+            _get_media_library().get(data['media_id'])
+            cfg = validate_media_config(utils.get_config())
+            mappings = [item for item in cfg['atem_media_destinations'] if item.get('videohub_input')]
+            if mappings and allowed_inputs and not any(item['videohub_input'] in allowed_inputs for item in mappings):
+                log_event('security.media.input_denied', 'Denied media display without access to a mapped input',
+                          status='warning', details={'output': output})
+                return _api_json_error(403, 'forbidden', 'Your group does not have access to the media inputs. Ask your team administrator.')
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                raise BusyError('Another image is being displayed. Wait a moment and try again.')
+            job = _get_media_routing_manager(refresh=True).display(
+                data['media_id'], output, allowed_inputs=allowed_inputs, on_complete=completed)
+        log_event('media.display.queued', f'Queued an image for output {output}', status='info',
+                  target_type='videohub_output', target_id=output, details=job)
+        return jsonify({'ok': True, 'job': _public_media_display_job(job)}), 202
+    except BusyError as error:
+        return _media_api_failure('media.display', error, 409)
+    except (KeyError, ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('media.display', error)
+
+
+@app.route('/api/media/display/<job_id>')
+def api_media_display_job(job_id):
+    if not _media_display_allowed():
+        return _media_action_denied('load')
+    try:
+        job = _get_media_routing_manager().get_job(job_id)
+        _media_output_access(job['output'])
+        return jsonify({'ok': True, 'job': _public_media_display_job(job)})
+    except KeyError:
+        return _api_json_error(404, 'not_found', 'This display request is no longer available. Check the output before trying again.')
+
+
+from routing_presets import RoutingPresetStore, RoutingPresetRunner, validate_action, validate_preset
+
+_routing_preset_runner = RoutingPresetRunner()
+_ROUTING_PRESET_DISPATCH = object()
+# Jobs are process-local. A restart must also invalidate old confirmations so
+# an execution lost from memory can never be retried as a fresh hardware action.
+_ROUTING_PRESET_CONFIRMATION_EPOCH = os.urandom(32).hex()
+
+
+def _get_routing_preset_store():
+    library = _get_media_library()
+    return RoutingPresetStore(library.root, library.list())
+
+
+def _routing_preset_catalog():
+    try:
+        return _get_routing_preset_store().list()
+    except (OSError, ValueError, TypeError):
+        # Other permission settings remain editable if media storage is offline.
+        return []
+
+
+def _routing_preset_allowed(identity):
+    return can_access('page:routing_presets') and can_access('preset:' + identity)
+
+
+def _visible_routing_presets():
+    if not can_access('page:routing_presets'):
+        return []
+    uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+    outputs, _ = _effective_videohub_allowlists_for_user(uid)
+    return [item for item in _get_routing_preset_store().list()
+            if item['enabled'] and _routing_preset_allowed(item['id'])
+            and (item['output'] is None or not outputs or item['output'] in outputs)]
+
+
+def _routing_preset_for_user(identity):
+    if not _routing_preset_allowed(str(identity)):
+        abort(403)
+    try:
+        item = _get_routing_preset_store().get(identity)
+    except ValueError:
+        abort(404)
+    if not item or not item['enabled']:
+        abort(404)
+    if item['output'] is not None:
+        _media_output_access(item['output'])
+    return item
+
+
+def _public_routing_preset(item):
+    return {**{key: item[key] for key in ('id', 'revision', 'name', 'description', 'output')},
+            'thumbnail_url': url_for('media_thumbnail', media_id=item['media_id'])}
+
+
+def _preset_action_permitted(action):
+    from urllib.parse import urlsplit
+    try:
+        action = validate_action(action)
+        path = urlsplit(action['path']).path
+        app.url_map.bind('localhost').match(path, method=action['method'])
+        policy = _api_policy(path, action['method'])
+        return bool(policy and policy.get('service_tokens') is not False
+                    and policy.get('scope') not in ('admin', 'config')
+                    and not _api_scheduler_path_denied(path))
+    except Exception:
+        return False
+
+
+def _api_routing_preset_internal_gate():
+    approved = getattr(g, '_approved_preset_action', {})
+    if (getattr(g, '_routing_preset_dispatch', None) is not _ROUTING_PRESET_DISPATCH
+            or not _preset_action_permitted(approved)):
+        return _api_json_error(403, 'forbidden', 'This preset action is not an operational API command.')
+    from urllib.parse import urlsplit
+    if request.path != urlsplit(approved['path']).path or request.method != approved['method']:
+        return _api_json_error(403, 'forbidden', 'The request does not match the saved preset action.')
+    within_limit, limit = _api_request_within_size_limit(_api_normalized_path())
+    if not within_limit:
+        return _api_json_error(413, 'request_too_large', f'Request body exceeds the {limit}-byte limit.')
+    g.api_principal = {'type': 'routing_preset', 'key': 'preset:' + g._routing_preset_id,
+                       'name': 'Routing preset'}
+    return None
+
+
+def _execute_routing_preset_action(action, preset, actor):
+    """Dispatch only an immutable saved action; no bearer token reaches a browser."""
+    ok, status = False, None
+    try:
+        if not _preset_action_permitted(action):
+            raise ValueError('Preset action is no longer permitted.')
+        kwargs = {'method': action['method']}
+        if action['method'] != 'GET' and action['body'] is not None:
+            kwargs['json'] = copy.deepcopy(action['body'])
+        with app.test_request_context(action['path'], **kwargs):
+            g._routing_preset_dispatch = _ROUTING_PRESET_DISPATCH
+            g._approved_preset_action = copy.deepcopy(action)
+            g._routing_preset_id = preset['id']
+            g._preset_actor = dict(actor)
+            response = app.full_dispatch_request()
+            status = response.status_code
+            payload = response.get_json(silent=True)
+            ok = 200 <= status < 300 and not (isinstance(payload, dict) and payload.get('ok') is False)
+    except Exception:
+        logging.getLogger('calendar').exception('Routing preset action failed')
+    log_event('routing.preset.action', f"{preset['name']}: {action['label']}",
+              status='success' if ok else 'failure', target_type='routing_preset', target_id=preset['id'],
+              details={'method': action['method'], 'path': action['path'].split('?')[0],
+                       'http_status': status, 'accepted': status == 202}, **actor)
+    return ok
+
+
+def _preset_owner():
+    import hashlib
+    uid = str(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else 'demo'
+    return hashlib.sha256((uid + ':' + _csrf_token()).encode()).hexdigest()
+
+
+def _preset_signer():
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(app.secret_key, salt='routing-preset-confirmation-v1:' + _ROUTING_PRESET_CONFIRMATION_EPOCH)
+
+
+def _preset_destination(item, requested_output):
+    if item['output'] is not None:
+        if requested_output is not None and requested_output != item['output']:
+            raise ValueError('This preset has a fixed output.')
+        requested_output = item['output']
+    output, inputs = _media_output_access(requested_output)
+    _get_media_library().get(item['media_id'])
+    from atem_media import validate_media_config
+    cfg = validate_media_config(utils.get_config())
+    mappings = [entry for entry in cfg['atem_media_destinations'] if entry.get('videohub_input')]
+    if not cfg['atem_media_enabled'] or not mappings:
+        raise ValueError('Image display is not configured. Ask an administrator to finish Media setup.')
+    if inputs and not any(entry['videohub_input'] in inputs for entry in mappings):
+        abort(403)
+    if not all(_preset_action_permitted(action) for action in item['actions']):
+        raise ValueError('This preset needs attention in Config before it can be used.')
+    return output, inputs
+
+
+@app.route('/config/routing-presets')
+@require_page('page:config', 'Config')
+def routing_presets_config_page():
+    return render_template('routing_presets_config.html', can_edit_presets=_can_manage_service_tokens_for_current_user())
+
+
+@app.route('/api/config/routing-presets', methods=['GET', 'POST'])
+@app.route('/api/config/routing-presets/<identity>', methods=['PUT', 'DELETE'])
+def api_routing_presets_config(identity=None):
+    if request.method != 'GET' and not _can_manage_service_tokens_for_current_user():
+        return _api_json_error(403, 'forbidden', 'Only administrators can configure routing presets and their approved actions.')
+    try:
+        with _media_operation_lock:
+            store = _get_routing_preset_store()
+            if request.method == 'GET':
+                return jsonify(ok=True, presets=store.list(),
+                               images=[_media_item_payload(item) for item in _get_media_library().list()],
+                               outputs=_get_videohub_state_snapshot().get('outputs', []))
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                return _api_json_error(409, 'busy', 'Wait for the current display or preset to finish.')
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                raise ValueError('Supply a preset configuration.')
+            data = dict(data)
+            revision = data.pop('revision', None)
+            if request.method == 'DELETE':
+                if data:
+                    raise ValueError('Supply only the preset revision to delete it.')
+                store.delete(identity, revision)
+                result = None
+            else:
+                data = validate_preset(data)
+                _get_media_library().get(data['media_id'])
+                if not all(_preset_action_permitted(action) for action in data['actions']):
+                    raise ValueError('Use existing operational TDeck API actions. Account, configuration and browser-only APIs cannot be delegated to a preset.')
+                result = store.save(data, identity, revision)
+        log_event('routing.preset.config', 'Deleted routing preset' if result is None else f"Saved routing preset '{result['name']}'",
+                  status='success', target_type='routing_preset', target_id=identity or result['id'],
+                  details={'action_count': len(result['actions']) if result else 0})
+        return jsonify(ok=True, preset=result), (201 if request.method == 'POST' else 200)
+    except KeyError:
+        return _api_json_error(404, 'not_found', 'The preset or its image is no longer available.')
+    except (ValueError, OSError) as error:
+        return _api_json_error(400, 'invalid_preset', str(error))
+
+
+@app.route('/routing/presets')
+@require_page('page:routing_presets', 'Routing: Presets')
+def routing_presets_page():
+    return render_template('routing_presets.html', hide_connection_status=True)
+
+
+@app.route('/api/routing/presets')
+def api_routing_presets_list():
+    try:
+        return jsonify(ok=True, presets=[_public_routing_preset(item) for item in _visible_routing_presets()])
+    except (OSError, ValueError) as error:
+        return _api_json_error(503, 'unavailable', 'Presets are unavailable. Ask an administrator to check their setup.')
+
+
+@app.route('/api/routing/presets/<identity>/prepare', methods=['POST'])
+def api_routing_preset_prepare(identity):
+    try:
+        item = _routing_preset_for_user(identity)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or set(data) - {'output', 'revision'}:
+            raise ValueError('Choose a preset and an output.')
+        if data.get('revision') != item['revision']:
+            return _api_json_error(409, 'changed', 'This preset changed. Refresh and select it again.')
+        output, _ = _preset_destination(item, data.get('output'))
+        import uuid
+        execution_id = uuid.uuid4().hex
+        token = _preset_signer().dumps({'preset': identity, 'revision': item['revision'], 'output': output,
+                                      'owner': _preset_owner(), 'execution': execution_id})
+        snapshot = _get_videohub_state_snapshot()
+        label = next((entry.get('label') for entry in snapshot.get('outputs', []) if entry.get('number') == output), None)
+        return jsonify(ok=True, confirmation_token=token, execution_id=execution_id, preset=_public_routing_preset(item),
+                       output=output, output_label=label or f'Output {output}', actions=[action['label'] for action in item['actions']])
+    except (KeyError, ValueError, OSError) as error:
+        return _api_json_error(400, 'invalid_preset', str(error))
+
+
+@app.route('/api/routing/presets/<identity>/apply', methods=['POST'])
+def api_routing_preset_apply(identity):
+    from itsdangerous import BadSignature
+    from atem_media import BusyError
+    try:
+        data = request.get_json(silent=True)
+        if (not isinstance(data, dict) or set(data) != {'confirmation_token'}
+                or not isinstance(data['confirmation_token'], str)):
+            raise ValueError('Confirm the preset before applying it.')
+        confirmed = _preset_signer().loads(data['confirmation_token'], max_age=300)
+        if confirmed['preset'] != identity or confirmed['owner'] != _preset_owner():
+            abort(403)
+        with _media_operation_lock:
+            item = _routing_preset_for_user(identity)
+            output, inputs = _preset_destination(item, confirmed['output'])
+            existing = _routing_preset_runner.get(confirmed['execution'])
+            if existing and existing['owner'] == confirmed['owner']:
+                return jsonify(ok=True, job=_public_routing_preset_job(existing)), 202
+            if confirmed['revision'] != item['revision']:
+                return _api_json_error(409, 'changed', 'This preset changed. Review it again before applying.')
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                raise BusyError('Another display or preset is running. Please wait.')
+            actor = capture_activity_actor()
+            def completed(job):
+                log_event('routing.preset.apply', f"{item['name']}: {job['message']}",
+                          status='success' if job['status'] == 'succeeded' else 'failure',
+                          target_type='routing_preset', target_id=identity,
+                          details={**_public_routing_preset_job(job), 'display_error': job.get('displayError', '')}, **actor)
+            manager = _get_media_routing_manager(refresh=True)
+            job = _routing_preset_runner.start(confirmed['execution'], item, output, confirmed['owner'],
+                display=lambda callback: manager.display(item['media_id'], output, allowed_inputs=inputs, on_complete=callback),
+                execute=lambda action: _execute_routing_preset_action(action, item, actor), completed=completed)
+        log_event('routing.preset.queued', f"Started preset '{item['name']}' on output {output}",
+                  status='info', target_type='routing_preset', target_id=identity)
+        return jsonify(ok=True, job=_public_routing_preset_job(job)), 202
+    except BadSignature:
+        return _api_json_error(400, 'expired', 'The confirmation expired. Select and confirm the preset again.')
+    except BusyError as error:
+        return _api_json_error(409, 'busy', str(error))
+    except (KeyError, ValueError, OSError, TypeError, RuntimeError) as error:
+        return _api_json_error(400, 'invalid_preset', str(error))
+
+
+def _public_routing_preset_job(job):
+    return {key: job.get(key) for key in ('id', 'presetId', 'name', 'output', 'status', 'message', 'imageDisplayed', 'actionsCompleted')}
+
+
+@app.route('/api/routing/presets/jobs/<identity>')
+def api_routing_preset_job(identity):
+    job = _routing_preset_runner.get(identity)
+    if not job:
+        return _api_json_error(404, 'not_found', 'The preset request is not available. Check the screen before applying it again.')
+    if job['owner'] != _preset_owner() or not _routing_preset_allowed(job['presetId']):
+        abort(403)
+    _media_output_access(job['output'])
+    return jsonify(ok=True, job=_public_routing_preset_job(job))
+
+
+@app.route('/media')
+@require_page('page:media', 'Media')
+def media_page():
+    return render_template('media.html', **_media_page_context())
+
+
+@app.route('/media/upload')
+@require_page('page:media', 'Media')
+def media_upload_page():
+    if not can_access('page:media_upload'):
+        abort(403)
+    return render_template('media.html', upload_page=True, **_media_page_context())
+
+
+@app.route('/config/atem-media')
+@require_page('page:config', 'Config')
+def atem_media_setup_page():
+    permissions = _media_permissions()
+    permissions['load'] = bool(can_access('page:media'))
+    return render_template('media_config.html', config_active_tab='atem-media',
+                           media_permissions=permissions,
+                           can_configure_media=True)
+
+
+@app.route('/media/images/<media_id>.png')
+@_require_media_read
+def media_image(media_id: str):
+    return _send_media_image(media_id, thumbnail=False)
+
+
+@app.route('/media/thumbnails/<media_id>.png')
+@_require_media_read
+def media_thumbnail(media_id: str):
+    return _send_media_image(media_id, thumbnail=True)
+
+
+def _send_media_image(media_id: str, *, thumbnail: bool):
+    try:
+        # Open while the operation lock is held so a concurrent deletion cannot
+        # substitute a missing path between validation and response creation.
+        with _media_operation_lock:
+            path = _get_media_library().path(media_id, thumbnail=thumbnail)
+            response = send_file(path, mimetype='image/png', conditional=True)
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+    except (KeyError, FileNotFoundError):
+        abort(404)
+
+
+@app.route('/api/media')
+def api_media_list():
+    try:
+        return jsonify({
+            'ok': True, 'items': [_media_item_payload(item) for item in _get_media_library().list()],
+            'permissions': _media_permissions(),
+        })
+    except (ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('media.library.read', error)
+
+
+@app.route('/api/media/upload', methods=['POST'])
+def api_media_upload():
+    if not _media_permissions()['upload']:
+        return _media_action_denied('upload')
+    # Normally admitted by the authenticated API gate, before CSRF parsing.
+    # Keep the resource bound when the site's global auth is disabled too.
+    principal_key = (f'user:{current_user.get_id()}' if getattr(current_user, 'is_authenticated', False)
+                     else f'address:{request.remote_addr or "unknown"}')
+    admission_error = _admit_media_upload(principal_key)
+    if admission_error is not None:
+        return admission_error
+    if request.mimetype != 'multipart/form-data':
+        return _api_json_error(400, 'invalid_upload', 'Upload one image using the image upload form.')
+    if (set(request.files) - {'file'} or len(request.files.getlist('file')) > 1
+            or set(request.form) - {'name', '_csrf'}
+            or any(len(request.form.getlist(key)) != 1 for key in request.form)):
+        return _api_json_error(400, 'invalid_upload', 'Upload one image with an optional image name.')
+    # Reject oversized metadata before image decoding even if whitespace
+    # normalization would turn the supplied name into a short valid name.
+    if any(len(value) > 1024 for value in request.form.values()):
+        return _api_json_error(400, 'invalid_upload', 'The image name or form token is too long.')
+    upload = request.files.get('file')
+    if upload is None:
+        return _api_json_error(400, 'missing_file', 'Choose an image to upload.')
+    try:
+        item = _get_media_library().upload(upload.stream, upload.filename or '', request.form.get('name', ''))
+        log_event('media.image.upload', f"Uploaded image '{item['name']}'", status='success',
+                  target_type='media_image', target_id=item['id'], details=item)
+        return jsonify({'ok': True, 'item': _media_item_payload(item)}), 201
+    except (ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('media.image.upload', error)
+
+
+@app.route('/api/media/<media_id>', methods=['PATCH', 'DELETE'])
+def api_media_edit(media_id: str):
+    if not _media_permissions()['manage']:
+        return _media_action_denied('manage')
+    action = 'media.image.delete' if request.method == 'DELETE' else 'media.image.update'
+    try:
+        with _media_operation_lock:
+            library = _get_media_library()
+            existing = library.get(media_id)
+            if request.method == 'DELETE':
+                job = _active_media_job()
+                if job.get('status') in _MEDIA_ACTIVE_JOBS and job.get('mediaId') == media_id:
+                    return _api_json_error(409, 'busy', 'This image is being loaded. Wait for the job to finish.')
+                preset_file = library.root / 'routing_presets.json'
+                if preset_file.exists() and any(preset['media_id'] == media_id for preset in _get_routing_preset_store().list()):
+                    return _api_json_error(409, 'in_use', 'This image is used by a routing preset. Change or delete that preset first.')
+                item = library.delete(media_id)
+            else:
+                data = request.get_json(silent=True)
+                if not isinstance(data, dict) or set(data) - {'name', 'preset'}:
+                    raise ValueError('Supply an image name and/or preset flag.')
+                preset = data.get('preset', existing['preset'])
+                if not isinstance(preset, bool):
+                    raise ValueError('Preset must be true or false.')
+                item = library.update(media_id, data.get('name', existing['name']), preset=preset)
+        verb = 'Deleted' if request.method == 'DELETE' else 'Updated'
+        log_event(action, f"{verb} image '{item['name']}'", status='success',
+                  target_type='media_image', target_id=media_id, details=item)
+        return jsonify({'ok': True, 'item': _media_item_payload(item)})
+    except (KeyError, ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure(action, error)
+
+
+@app.route('/api/atem/media/state')
+def api_atem_media_state():
+    try:
+        return jsonify({**_get_atem_media_manager().snapshot(), 'ok': True})
+    except (ValueError, OSError, RuntimeError) as error:
+        return jsonify({'ok': True, 'enabled': False, 'connected': False, 'destinations': [],
+                        'players': [], 'stills': [], 'job': None, 'error': str(error)})
+
+
+@app.route('/api/atem/media/load', methods=['POST'])
+@_guard_videohub_write
+def api_atem_media_load():
+    if not (can_access('page:config') and _media_permissions()['load']):
+        return _media_action_denied('load')
+    from atem_media import BusyError
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _api_json_error(400, 'invalid_request', 'Choose an image and a configured player.')
+    actor = capture_activity_actor()
+
+    def completed(job):
+        success = job.get('status') == 'succeeded'
+        summary = (f"Loaded '{job.get('mediaName', '')}' on ATEM Media Player {job.get('player')}"
+                   if success else f"Failed to load ATEM Media Player {job.get('player')}")
+        log_event('atem.media.load', summary, status='success' if success else 'failure',
+                  target_type='atem_media_player', target_id=job.get('player'), details=job, **actor)
+
+    try:
+        with _media_operation_lock:
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                raise BusyError('Another image is being displayed. Wait for it to finish.')
+            media_id = data.get('media_id')
+            if not isinstance(media_id, str):
+                raise ValueError('Choose a saved image.')
+            _get_media_library().get(media_id)
+            job = _get_atem_media_manager().load(media_id, data.get('player'), on_complete=completed)
+        log_event('atem.media.load.queued', 'Queued image for ATEM media player', status='info',
+                  target_type='atem_media_player', target_id=job.get('player'), details=job)
+        return jsonify({'ok': True, 'job': job}), 202
+    except BusyError as error:
+        return _media_api_failure('atem.media.load', error, 409)
+    except (KeyError, ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('atem.media.load', error)
+
+
+@app.route('/api/config/atem-media', methods=['GET', 'PUT'])
+def api_atem_media_config():
+    from atem_media import validate_media_config
+    if request.method == 'GET':
+        cfg = utils.get_config()
+        selected = {key: cfg.get(key, value) for key, value in _MEDIA_CONFIG_DEFAULTS.items()}
+        # Retain repairable raw setup values without exposing obsolete AUX mappings.
+        if isinstance(selected['atem_media_destinations'], list):
+            selected['atem_media_destinations'] = [
+                {key: value for key, value in item.items() if key != 'aux'} if isinstance(item, dict) else item
+                for item in selected['atem_media_destinations']]
+        return jsonify({'ok': True, 'config': selected})
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - set(_MEDIA_CONFIG_DEFAULTS):
+        return _api_json_error(400, 'invalid_request', 'Supply only ATEM media setup fields.')
+    try:
+        with _media_operation_lock:
+            job = _active_media_job()
+            if job.get('status') in _MEDIA_ACTIVE_JOBS:
+                return _api_json_error(409, 'busy', 'Wait for the current image load to finish before changing setup.')
+            cfg = validate_media_config({**utils.get_config(), **data})
+            if (cfg.get('atem_media_node_path', '') != utils.get_config().get('atem_media_node_path', '')
+                    and _auth_enabled() and not _can_manage_service_tokens_for_current_user()):
+                return _api_json_error(403, 'forbidden', 'Only an administrator may change the server Node.js executable.')
+            if not write_json(Path(utils.CONFIG_FILE).resolve(), cfg):
+                raise OSError('Could not save ATEM media configuration.')
+            utils.reload_config(force=True)
+        selected = {key: cfg.get(key, value) for key, value in _MEDIA_CONFIG_DEFAULTS.items()}
+        log_event('atem.media.config.update', 'Updated ATEM media setup', status='success',
+                  details={'enabled': selected['atem_media_enabled'], 'destinations': selected['atem_media_destinations']})
+        return jsonify({'ok': True, 'config': selected})
+    except (ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('atem.media.config.update', error)
 
 
 @app.route('/timers')
@@ -10222,6 +11526,7 @@ def api_get_config():
 
 
 @app.route('/api/config', methods=['POST'])
+@_serialize_media_configuration
 def api_set_config():
     if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
@@ -10244,7 +11549,9 @@ def api_set_config():
             old_port = 5000
 
         # merge provided values
-        cfg.update(new)
+        # Media setup is saved through its validated browser-only editor. The
+        # general Config form includes an older full snapshot of hidden keys.
+        cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS})
 
         # Legacy: global Routing allow-lists are no longer used (now per Access Level).
         cfg.pop('videohub_allowed_outputs', None)
@@ -10771,6 +12078,7 @@ def api_videohub_presets_lock(preset_id: int):
 
 
 @app.route('/api/videohub/presets/<int:preset_id>/apply', methods=['POST'])
+@_guard_videohub_write
 def api_videohub_presets_apply(preset_id: int):
     app_inst = _get_videohub_app()
     if app_inst is None or not hasattr(app_inst, 'apply_preset'):
@@ -13706,6 +15014,7 @@ def api_videohub_ping():
 
 
 @app.route('/api/videohub/route', methods=['POST'])
+@_guard_videohub_write
 def api_videohub_route():
     """Route an input to an output on the configured VideoHub.
 
