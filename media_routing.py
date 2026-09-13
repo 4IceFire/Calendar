@@ -77,17 +77,15 @@ def _configuration(cfg):
     if not normalized["atem_media_enabled"]:
         raise ValueError("Image display is not enabled. Ask an administrator to finish Media setup.")
     destinations = []
-    auxes, inputs = set(), set()
+    inputs = set()
     for item in normalized["atem_media_destinations"]:
-        if item.get("aux") is None and item.get("videohub_input") is None:
+        if item.get("videohub_input") is None:
             continue  # Existing players may remain available for Config testing.
-        aux = _port(item.get("aux"), "ATEM AUX")
         source = _port(item.get("videohub_input"), "VideoHub input")
-        if aux in auxes or source in inputs:
-            raise ValueError("Media destinations must have distinct AUXes and VideoHub inputs")
-        auxes.add(aux)
+        if source in inputs:
+            raise ValueError("Media destinations must have distinct VideoHub inputs")
         inputs.add(source)
-        destinations.append({**item, "aux": aux, "videohub_input": source})
+        destinations.append({**item, "videohub_input": source})
     if not destinations:
         raise ValueError("Image display is not configured. Ask an administrator to finish Media setup.")
     return normalized, destinations
@@ -105,7 +103,8 @@ class MediaRoutingManager:
     read_videohub() -> {input_count, output_count, routing: [1-based inputs]}.
     route_videohub(output, input) writes and verifies using 1-based port numbers.
     get_media_manager() returns the shared ATEM manager, whose load callback must
-    report success only after both the still and requested AUX are confirmed.
+    report success only after the still and player selection are confirmed.
+    ATEM output routing is managed manually outside TDeck.
     """
 
     def __init__(self, *, get_config, get_media_manager, read_videohub,
@@ -136,7 +135,7 @@ class MediaRoutingManager:
             cfg, destinations = _configuration(self._get_config())
             now = time.time()
             job = {"id": uuid.uuid4().hex, "mediaId": media_id, "output": output,
-                   "player": None, "aux": None, "videohubInput": None,
+                   "player": None, "videohubInput": None,
                    "status": "queued", "message": _MESSAGES["queued"], "error": "",
                    "createdAt": now, "updatedAt": now}
             job_id = job["id"]
@@ -240,45 +239,17 @@ class MediaRoutingManager:
             time.sleep(min(.05, max(.001, connection_deadline - time.monotonic())))
 
     @staticmethod
-    def _isolated_destinations(destinations, state):
-        count = (state.get('capabilities') or {}).get('auxes')
-        auxes = state.get('auxes') or []
-        if (isinstance(count, bool) or not isinstance(count, int) or count < 1
-                or len(auxes) != count or {item.get('aux') for item in auxes} != set(range(1, count + 1))
-                or any(isinstance(item.get('source'), bool) or not isinstance(item.get('source'), int) for item in auxes)):
-            raise _DisplayFailure('Image display is unavailable. Ask an administrator to check the connection.',
-                                  'ATEM did not provide complete AUX routing state')
-        players = {item.get('player'): item for item in state.get('players', [])}
-        safe = []
-        for destination in destinations:
-            source = players.get(destination['player'], {}).get('fillSource')
-            if (isinstance(source, int) and not isinstance(source, bool) and source > 0
-                    and destination['aux'] <= count
-                    and not any(item['aux'] != destination['aux'] and item['source'] == source for item in auxes)):
-                safe.append(destination)
-        if not safe:
-            raise _DisplayFailure('Available image players need attention in Config.',
-                                  'Every media player is unavailable or is also selected by another ATEM AUX')
-        return safe
-
-    @staticmethod
     def _check_media_selection(manager, outcome, destination):
         state = manager.snapshot()
         player = next((item for item in state.get("players", [])
                        if item.get("player") == destination["player"]), {})
-        aux = next((item for item in state.get("auxes", [])
-                    if item.get("aux") == destination["aux"]), {})
         if (not state.get("connected") or not state.get("ready")
                 or outcome.get("generation") is None
                 or state.get("generation") != outcome["generation"]
                 or player.get("type") != "still" or not outcome.get("slot")
-                or player.get("slot") != outcome["slot"]
-                or not isinstance(player.get("fillSource"), int)
-                or isinstance(player.get("fillSource"), bool)
-                or aux.get("source") != player.get("fillSource")):
+                or player.get("slot") != outcome["slot"]):
             raise _DisplayFailure("The image source changed. Check the output before trying again.",
-                                  "ATEM connection, selected still, or AUX changed after the media transfer")
-        MediaRoutingManager._isolated_destinations([destination], state)
+                                  "ATEM connection or selected still changed after the media transfer")
 
     def _run(self, job_id, cfg, destinations, allowed, deadline, on_complete):
         stage = "preparing"
@@ -288,16 +259,10 @@ class MediaRoutingManager:
             output = job["output"]
             initial = self._read(deadline)
             destination = self._choose(destinations, initial, output, allowed)
-            self._update(job_id, stage, player=destination["player"], aux=destination["aux"],
+            self._update(job_id, stage, player=destination["player"],
                          videohubInput=destination["videohub_input"])
             manager = self._get_media_manager()
             self._wait_ready(manager, deadline)
-            # Another AUX may still carry a player's fill even when that
-            # player's configured VideoHub input is free. Never change it.
-            isolated = self._isolated_destinations(destinations, manager.snapshot())
-            destination = self._choose(isolated, initial, output, allowed)
-            self._update(job_id, stage, player=destination['player'], aux=destination['aux'],
-                         videohubInput=destination['videohub_input'])
             self._check_unchanged(cfg, initial, self._read(deadline), destination, output)
             stage = "loading"
             self._update(job_id, stage)
@@ -314,20 +279,19 @@ class MediaRoutingManager:
                     outcome.update(copy.deepcopy(result))
                     completed.set()
 
-            manager.load(job["mediaId"], destination["player"], aux=destination["aux"],
-                         on_complete=media_completed)
+            manager.load(job["mediaId"], destination["player"], on_complete=media_completed)
             try:
                 if not completed.wait(self._remaining(deadline)):
                     raise TimeoutError("ATEM did not finish the display job before its deadline")
                 self._remaining(deadline)
             except TimeoutError:
-                # Closing fences late ATEM/AUX commands before releasing the
+                # Closing fences late ATEM commands before releasing the
                 # VideoHub reservation. The transport also has its own deadline.
                 manager.close()
                 raise
             if outcome.get("status") != "succeeded":
                 raise _DisplayFailure("The image could not be loaded. Please try again or ask an administrator.",
-                                      str(outcome.get("error") or "ATEM media or AUX was not confirmed"))
+                                      str(outcome.get("error") or "ATEM media was not confirmed"))
             stage = "routing"
             self._update(job_id, stage, mediaName=outcome.get("mediaName", ""))
             self._check_unchanged(cfg, initial, self._read(deadline), destination, output)

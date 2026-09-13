@@ -14,8 +14,8 @@ from media_routing import BusyError, MediaRoutingManager, VIDEO_ROUTING_LOCK, vi
 def configuration():
     return {"atem_media_enabled": True, "atem_ip": "192.0.2.1", "videohub_ip": "192.0.2.2",
             "atem_media_destinations": [
-                {"player": 2, "label": "A", "slots": [41, 42], "aux": 1, "videohub_input": 5},
-                {"player": 4, "label": "B", "slots": [43, 44], "aux": 2, "videohub_input": 6},
+                {"player": 2, "label": "A", "slots": [41, 42], "videohub_input": 5},
+                {"player": 4, "label": "B", "slots": [43, 44], "videohub_input": 6},
             ]}
 
 
@@ -32,16 +32,18 @@ class FakeMedia:
         self.aux_source = 3020
         self.second_aux_source = 3040
         self.aux_count = 2
+        self.selected_slot = 42
+        self.selected_type = "still"
 
     def snapshot(self):
         return {"enabled": True, "connected": self.ready, "ready": self.ready,
                 "generation": self.generation, "capabilities": {"auxes": self.aux_count},
-                "players": [{"player": 2, "type": "still", "slot": 42, "fillSource": 3020},
+                "players": [{"player": 2, "type": self.selected_type, "slot": self.selected_slot, "fillSource": 3020},
                             {"player": 4, "type": "still", "slot": 44, "fillSource": 3040}],
                 "auxes": [{"aux": 1, "source": self.aux_source}, {"aux": 2, "source": self.second_aux_source}]}
 
-    def load(self, media_id, player, *, aux=None, on_complete=None):
-        self.calls.append({"media_id": media_id, "player": player, "aux": aux})
+    def load(self, media_id, player, *, on_complete=None):
+        self.calls.append({"media_id": media_id, "player": player})
         self.callback = on_complete
         if self.before_complete:
             self.before_complete()
@@ -50,8 +52,6 @@ class FakeMedia:
         return {"id": "atem-job", "status": "queued"}
 
     def complete(self, status=None):
-        if self.calls[-1]['player'] == 4:
-            self.second_aux_source = 3040
         self.callback({"id": "atem-job", "status": status or ("failed" if self.failure else "succeeded"),
                        "error": self.failure, "mediaName": "Welcome", "generation": 1,
                        "slot": 42 if self.calls[-1]["player"] == 2 else 44})
@@ -106,17 +106,45 @@ class MediaRoutingTests(unittest.TestCase):
     def display(self, **options):
         return self.manager.display("image-1", 1, on_complete=self.completed, **options)
 
-    def test_success_requires_media_aux_and_full_videohub_readback(self):
+    def test_input_only_mapping_requires_media_and_full_videohub_readback(self):
         queued = self.display()
         self.assertEqual(queued["status"], "queued")
         result = self.wait()
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(self.media.calls, [{"media_id": "image-1", "player": 2, "aux": 1}])
+        self.assertEqual(self.media.calls, [{"media_id": "image-1", "player": 2}])
         self.assertEqual(self.routes, [(1, 5)])
         self.assertEqual(self.read_count, 4)
         self.assertEqual(result["videohubInput"], 5)
         self.assertEqual(result["mediaName"], "Welcome")
         self.assertEqual(len(result["id"]), 32)
+        self.assertNotIn("aux", result)
+
+    def test_saved_legacy_aux_mapping_keeps_its_videohub_input(self):
+        for destination in self.cfg["atem_media_destinations"]:
+            destination["aux"] = 1  # Old values are inert, even when duplicated.
+        self.display()
+        result = self.wait()
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(self.media.calls, [{"media_id": "image-1", "player": 2}])
+        self.assertEqual(self.routes, [(1, 5)])
+        self.assertNotIn("aux", result)
+
+    def test_no_videohub_mapping_rejects_display_without_loading(self):
+        for destination in self.cfg["atem_media_destinations"]:
+            destination.pop("videohub_input")
+        with self.assertRaisesRegex(ValueError, "not configured"):
+            self.display()
+        self.assertEqual(self.media.calls, [])
+        self.assertEqual(self.routes, [])
+        with video_routing_guard():
+            pass
+
+    def test_test_only_player_is_skipped_for_display(self):
+        self.cfg["atem_media_destinations"][0].pop("videohub_input")
+        self.display()
+        self.assertEqual(self.wait()["status"], "succeeded")
+        self.assertEqual(self.media.calls[0]["player"], 4)
+        self.assertEqual(self.routes, [(1, 6)])
 
     def test_existing_exclusive_target_player_is_preferred(self):
         self.state["routing"][0] = 6
@@ -139,26 +167,37 @@ class MediaRoutingTests(unittest.TestCase):
         self.assertEqual(self.media.calls, [])
         self.assertEqual(self.routes, [])
 
-    def test_player_selected_by_another_aux_is_skipped(self):
+    def test_player_shared_by_multiple_auxes_remains_eligible(self):
         self.media.second_aux_source = 3020
         self.state['routing'][2] = 6
         self.display()
-        self.assertEqual(self.wait()['status'], 'failed')
-        self.assertEqual(self.media.calls, [])
-        self.assertEqual(self.routes, [])
-        self.assertEqual(self.state['routing'][2], 6)
-
-    def test_another_isolated_player_is_selected_when_first_is_aliased(self):
-        self.media.second_aux_source = 3020
-        self.display()
         self.assertEqual(self.wait()['status'], 'succeeded')
-        self.assertEqual(self.media.calls[0]['player'], 4)
+        self.assertEqual(self.media.calls[0]['player'], 2)
+        self.assertEqual(self.routes, [(1, 5)])
+        self.assertEqual(self.state['routing'][2], 6)
+        self.assertEqual(self.media.second_aux_source, 3020)
 
-    def test_incomplete_aux_state_cannot_allocate_a_player(self):
+    def test_incomplete_aux_state_does_not_block_player_allocation(self):
         self.media.aux_count = 3
         self.display()
-        self.assertEqual(self.wait()['status'], 'failed')
-        self.assertEqual(self.media.calls, [])
+        self.assertEqual(self.wait()['status'], 'succeeded')
+        self.assertEqual(self.media.calls[0]['player'], 2)
+
+    def test_absent_aux_and_fill_source_state_does_not_block_display(self):
+        original_snapshot = self.media.snapshot
+
+        def snapshot():
+            state = original_snapshot()
+            state.pop("auxes")
+            state.pop("capabilities")
+            for player in state["players"]:
+                player.pop("fillSource")
+            return state
+
+        self.media.snapshot = snapshot
+        self.display()
+        self.assertEqual(self.wait()["status"], "succeeded")
+        self.assertEqual(self.routes, [(1, 5)])
 
     def test_shared_current_player_is_not_reused(self):
         self.state["routing"] = [5, 5, 6, 4]
@@ -229,7 +268,7 @@ class MediaRoutingTests(unittest.TestCase):
         self.assertIn("Routing changed", self.wait()["error"])
         self.assertEqual(self.routes, [])
 
-    def test_failed_media_or_aux_never_routes_and_hides_internal_error(self):
+    def test_failed_media_never_routes_and_hides_internal_error(self):
         self.media.failure = "Debug detail from 192.0.2.1 internal device path"
         self.display()
         result = self.wait()
@@ -244,11 +283,30 @@ class MediaRoutingTests(unittest.TestCase):
         self.assertEqual(self.wait()["status"], "failed")
         self.assertEqual(self.routes, [(1, 5)])
 
-    def test_observed_aux_change_after_load_prevents_videohub_write(self):
+    def test_manual_aux_change_after_load_does_not_block_videohub_write(self):
         self.media.before_complete = lambda: setattr(self.media, "aux_source", 1)
         self.display()
-        self.assertIn("source changed", self.wait()["error"])
-        self.assertEqual(self.routes, [])
+        self.assertEqual(self.wait()["status"], "succeeded")
+        self.assertEqual(self.routes, [(1, 5)])
+        self.assertEqual(self.media.aux_source, 1)
+
+    def test_changed_legacy_aux_configuration_does_not_interrupt_display(self):
+        self.cfg["atem_media_destinations"][0]["aux"] = 1
+        self.media.before_complete = lambda: self.cfg["atem_media_destinations"][0].__setitem__("aux", 2)
+        self.display()
+        self.assertEqual(self.wait()["status"], "succeeded")
+        self.assertEqual(self.routes, [(1, 5)])
+
+    def test_observed_still_or_player_type_change_after_load_blocks_route(self):
+        for field, value in (("selected_slot", 41), ("selected_type", "clip")):
+            with self.subTest(field=field):
+                self.done.clear()
+                self.media.selected_slot = 42
+                self.media.selected_type = "still"
+                self.media.before_complete = lambda: setattr(self.media, field, value)
+                self.display()
+                self.assertIn("source changed", self.wait()["error"])
+                self.assertEqual(self.routes, [])
 
     def test_observed_atem_reconnect_during_route_never_claims_success(self):
         self.after_route = lambda: setattr(self.media, "generation", 2)

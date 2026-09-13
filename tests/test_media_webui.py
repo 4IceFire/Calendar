@@ -56,7 +56,7 @@ class MediaWebTests(unittest.TestCase):
         self.routing.active_job.return_value = None
         self.display_job = {
             'id': 'a' * 32, 'mediaId': self.item['id'], 'output': 1, 'status': 'queued',
-            'message': 'Preparing your image…', 'error': '', 'player': 2, 'aux': 1,
+            'message': 'Preparing your image…', 'error': '', 'player': 2,
             'videohubInput': 5, 'internalError': 'Private device diagnostic',
         }
         self.routing.display.return_value = dict(self.display_job)
@@ -201,12 +201,17 @@ class MediaWebTests(unittest.TestCase):
 
     def test_load_returns_job_and_preserves_actor_for_terminal_log(self):
         self.grants.add('page:config')
+        self.cfg.update(atem_media_enabled=True, atem_media_destinations=[
+            {'player': 2, 'label': 'Test only', 'slots': [41, 42]},
+        ])
         page = self.client.get('/config/atem-media')
         self.assertEqual(page.status_code, 200)
         self.assertIn('id="media-load-button"', page.get_data(as_text=True))
         result = self.client.post('/api/atem/media/load', json={'media_id': self.item['id'], 'player': 2}, headers=self.headers)
         self.assertEqual(result.status_code, 202)
         self.assertEqual(result.get_json()['job']['status'], 'queued')
+        self.assertEqual(self.manager.load.call_args.args, (self.item['id'], 2))
+        self.assertEqual(set(self.manager.load.call_args.kwargs), {'on_complete'})
         callback = self.manager.load.call_args.kwargs['on_complete']
         callback({**self.manager.load.return_value, 'status': 'succeeded', 'slot': 5})
         event = self.events.call_args
@@ -232,18 +237,37 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/config/atem-media').status_code, 403)
         self.grants.add('page:config')
         payload = {'atem_media_enabled': True, 'atem_media_destinations': [
-            {'player': 2, 'label': 'Foyer', 'slots': [41, 42], 'aux': 1, 'videohub_input': 5},
-            {'player': 4, 'label': 'Kids', 'slots': [43, 44], 'aux': 2, 'videohub_input': 6},
+            {'player': 2, 'label': 'Foyer', 'slots': [41, 42], 'videohub_input': 5},
+            {'player': 4, 'label': 'Kids', 'slots': [43, 44], 'videohub_input': 6},
         ]}
         response = self.client.put('/api/config/atem-media', json=payload, headers=self.headers)
         self.assertEqual(response.status_code, 200, response.get_json())
         saved = json.loads(self.config_file.read_text())
         self.assertEqual(saved['atem_ip'], '192.0.2.1')
         self.assertEqual(saved['atem_media_destinations'][1]['player'], 4)
-        self.assertEqual(saved['atem_media_destinations'][1]['aux'], 2)
+        self.assertNotIn('aux', saved['atem_media_destinations'][1])
         self.assertEqual(saved['atem_media_destinations'][1]['videohub_input'], 6)
         payload['atem_media_destinations'][1]['slots'] = [42, 43]
         self.assertEqual(self.client.put('/api/config/atem-media', json=payload, headers=self.headers).status_code, 400)
+
+    def test_saving_legacy_setup_preserves_inputs_and_discards_auxes(self):
+        self.grants.add('page:config')
+        self.cfg.update(atem_media_enabled=True, atem_media_destinations=[
+            {'player': 2, 'label': 'Foyer', 'slots': [41, 42], 'aux': 1, 'videohub_input': 5},
+            {'player': 4, 'label': 'Kids', 'slots': [43, 44], 'aux': 1, 'videohub_input': 6},
+        ])
+        current = self.client.get('/api/config/atem-media')
+        self.assertEqual(current.status_code, 200)
+        destinations = current.get_json()['config']['atem_media_destinations']
+        self.assertEqual([item['videohub_input'] for item in destinations], [5, 6])
+        self.assertTrue(all('aux' not in item for item in destinations))
+        self.assertEqual(self.cfg['atem_media_destinations'][0]['aux'], 1)
+        self.assertFalse(self.config_file.exists())
+        response = self.client.put('/api/config/atem-media', json={'atem_media_enabled': True}, headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        saved = json.loads(self.config_file.read_text())['atem_media_destinations']
+        self.assertEqual([item['videohub_input'] for item in saved], [5, 6])
+        self.assertTrue(all('aux' not in item for item in saved))
 
     def test_service_tokens_and_scheduler_cannot_use_new_media_apis(self):
         token = api_security.create_service_token(self.db, name='ATEM', scopes=['atem', 'config'])['token']
@@ -316,8 +340,8 @@ class MediaWebTests(unittest.TestCase):
     def _allow_display(self):
         self.grants.update({'page:routing', 'page:media'})
         self.cfg.update(atem_media_enabled=True, atem_media_destinations=[
-            {'player': 2, 'label': 'A', 'slots': [41, 42], 'aux': 1, 'videohub_input': 5},
-            {'player': 4, 'label': 'B', 'slots': [43, 44], 'aux': 2, 'videohub_input': 6},
+            {'player': 2, 'label': 'A', 'slots': [41, 42], 'videohub_input': 5},
+            {'player': 4, 'label': 'B', 'slots': [43, 44], 'videohub_input': 6},
         ])
 
     def _post_display(self, **overrides):

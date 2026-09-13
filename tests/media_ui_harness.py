@@ -49,7 +49,6 @@ class FixtureManager:
         self.callback = None
         self.lock = threading.Lock()
         self.slots = {}
-        self.auxes = {}
         self.timer = None
 
     def snapshot(self):
@@ -60,19 +59,18 @@ class FixtureManager:
                 'ready': config['atem_media_enabled'], 'generation': 1,
                 'product': 'Simulated ATEM',
                 'videoMode': {'name': '1080p60', 'width': 1920, 'height': 1080},
-                'capabilities': {'players': 4, 'stills': 64, 'auxes': 6},
+                'capabilities': {'players': 4, 'stills': 64},
                 'destinations': config['atem_media_destinations'],
                 'players': [{'player': item['player'], 'type': 'still',
                              'slot': self.slots.get(item['player'], item['slots'][0]),
                              'stillSlot': self.slots.get(item['player'], item['slots'][0]),
                              'fillSource': 3000 + item['player'] * 10}
                             for item in config['atem_media_destinations']],
-                'auxes': [{'aux': number, 'source': self.auxes.get(number, 1)} for number in range(1, 7)],
                 'stills': [], 'job': copy.deepcopy(self.job), 'error': None,
             }
         return state
 
-    def load(self, media_id, player, *, aux=None, on_complete=None):
+    def load(self, media_id, player, *, on_complete=None):
         from atem_media import BusyError
         with self.lock:
             if self.job and self.job['status'] not in ('succeeded', 'failed'):
@@ -86,7 +84,7 @@ class FixtureManager:
             slot = next(slot for slot in destination['slots'] if slot != current_slot)
             self.job = {
                 'id': uuid.uuid4().hex, 'mediaId': media_id, 'mediaName': item['name'],
-                'player': player, 'slot': slot, 'status': 'uploading', 'aux': aux, 'generation': 1,
+                'player': player, 'slot': slot, 'status': 'uploading', 'generation': 1,
                 'error': None, 'createdAt': time.time(), 'updatedAt': time.time(),
             }
             self.started = time.monotonic()
@@ -100,8 +98,6 @@ class FixtureManager:
         with self.lock:
             self.job['status'] = 'succeeded'
             self.slots[self.job['player']] = self.job['slot']
-            if self.job.get('aux'):
-                self.auxes[self.job['aux']] = 3000 + self.job['player'] * 10
             completed = copy.deepcopy(self.job)
             callback, self.callback = self.callback, None
         if callback:
@@ -146,8 +142,8 @@ def main():
             'webserver_port': 5063, 'dark_mode': False, 'atem_ip': '192.0.2.1',
             'atem_media_enabled': True, 'atem_media_node_path': '',
             'atem_media_destinations': [
-                {'player': 2, 'label': 'Media A', 'slots': [41, 42], 'aux': 1, 'videohub_input': 7},
-                {'player': 4, 'label': 'Media B', 'slots': [43, 44], 'aux': 2, 'videohub_input': 8},
+                {'player': 2, 'label': 'Media A', 'slots': [41, 42], 'videohub_input': 7},
+                {'player': 4, 'label': 'Media B', 'slots': [43, 44], 'videohub_input': 8},
             ],
         }
         config_path.write_text(json.dumps(config), encoding='utf-8')

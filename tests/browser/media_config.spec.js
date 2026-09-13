@@ -59,10 +59,11 @@ test('Media Config uploads, renames, saves a preset and deletes it', async ({pag
   expect(errors).toEqual([]);
 });
 
-test('Media Config validates paired unique AUX connections and preserves unmapped players', async ({page}) => {
+test('Media Config saves only unique VideoHub inputs and preserves unmapped players', async ({page}) => {
   const errors = collectPageErrors(page);
   const baseConfig = {
     atem_media_enabled: true, atem_media_node_path: '', atem_media_destinations: [
+      // Previously saved AUX settings must disappear from the editor and save.
       {player: 2, label: 'Foyer', slots: [41, 42], aux: 1, videohub_input: 7},
       {player: 4, label: 'Kids', slots: [43, 44]},
     ],
@@ -74,32 +75,25 @@ test('Media Config validates paired unique AUX connections and preserves unmappe
   });
   await openConfig(page);
   const first = page.locator('#media-destinations .media-destination').nth(0);
-  await expect(first.locator('[data-field="aux"]')).toHaveValue('1');
+  await expect(page.locator('[data-field="aux"]')).toHaveCount(0);
+  await expect(page.getByLabel('ATEM AUX output', {exact: true})).toHaveCount(0);
   await expect(first.locator('[data-field="videohub_input"]')).toHaveValue('7');
   await page.locator('#media-add-destination').click();
   const added = page.locator('#media-destinations .media-destination').nth(2);
   await added.locator('[data-field="player"]').fill('3');
   await added.locator('[data-field="label"]').fill('Gallery');
   await added.locator('[data-field="slots"]').fill('45, 46');
-  await added.locator('[data-field="aux"]').fill('2');
-  await page.locator('#media-save-setup').click();
-  await expect(page.locator('#media-setup-status')).toContainText('Enter both an ATEM AUX output and a VideoHub input');
-  expect(saved).toBeNull();
   await added.locator('[data-field="videohub_input"]').fill('7');
   await page.locator('#media-save-setup').click();
   await expect(page.locator('#media-setup-status')).toContainText('VideoHub input 7 is listed more than once');
   expect(saved).toBeNull();
   await added.locator('[data-field="videohub_input"]').fill('8');
-  await added.locator('[data-field="aux"]').fill('1');
-  await page.locator('#media-save-setup').click();
-  await expect(page.locator('#media-setup-status')).toContainText('ATEM AUX 1 is listed more than once');
-  expect(saved).toBeNull();
-  await added.locator('[data-field="aux"]').fill('2');
   await page.locator('#media-save-setup').click();
   await expect(page.locator('#media-setup-status')).toContainText('Setup saved.');
   expect(saved.atem_media_destinations).toEqual([
-    ...baseConfig.atem_media_destinations,
-    {player: 3, label: 'Gallery', slots: [45, 46], aux: 2, videohub_input: 8},
+    {player: 2, label: 'Foyer', slots: [41, 42], videohub_input: 7},
+    {player: 4, label: 'Kids', slots: [43, 44]},
+    {player: 3, label: 'Gallery', slots: [45, 46], videohub_input: 8},
   ]);
   expect(errors).toEqual([]);
 });
@@ -111,7 +105,11 @@ test('Media Config keeps explicit player test control and verified completion', 
   await page.locator('#media-test-panel > summary').click();
   await page.locator('#media-player').selectOption('2');
   await expect(page.locator('#media-test-panel')).toContainText('All TVs or outputs already using this media player will change together');
+  const loadRequest = page.waitForRequest(request => new URL(request.url()).pathname === '/api/atem/media/load' && request.method() === 'POST');
   await page.locator('#media-load-button').click();
+  const body = (await loadRequest).postDataJSON();
+  expect(Object.keys(body).sort()).toEqual(['media_id', 'player']);
+  expect(body.player).toBe(2);
   await expect(page.locator('#media-load-button')).toBeDisabled();
   await expect(page.locator('#media-job')).toContainText('Welcome loaded into Media Player 2');
   await expect(page.locator('#media-load-button')).toBeEnabled();

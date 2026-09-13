@@ -51,12 +51,14 @@ test('Media picker stays simple and filters presets on desktop and mobile', asyn
   expect(errors).toEqual([]);
 });
 
-test('Selecting an existing image displays it and returns to the output list', async ({page}) => {
+test('A player with only a VideoHub input displays an existing image and returns to outputs', async ({page}) => {
   const errors = collectPageErrors(page);
   await openMedia(page, 2);
   const pending = page.waitForRequest(request => new URL(request.url()).pathname === '/api/media/display' && request.method() === 'POST');
   await page.getByRole('button', {name: 'Display Welcome', exact: true}).click();
-  expect((await pending).postDataJSON().output).toBe(2);
+  const body = (await pending).postDataJSON();
+  expect(body.output).toBe(2);
+  expect(Object.keys(body).sort()).toEqual(['media_id', 'output']);
   await expect(page).toHaveURL(/\/routing\?media_job=/);
   await expect(page.locator('#routing-output-step')).toBeVisible();
   await expect(page.locator('#routing-input-step')).toBeHidden();

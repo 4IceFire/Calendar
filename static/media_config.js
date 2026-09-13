@@ -217,7 +217,7 @@ function initializeMediaConfigPage() {
     text(status, label);
     text(el('media-connection-detail'), detail);
     const capabilities = state.capabilities || {};
-    text(el('media-setup-capabilities'), capabilities.players && capabilities.stills ? 'Connected switcher: ' + capabilities.players + ' media players, ' + capabilities.stills + ' still slots' + (capabilities.auxes ? ' and ' + capabilities.auxes + ' AUX outputs' : '') + '. Player and port numbers start at 1.' : 'Switcher capabilities will appear when connected. Player and port numbers start at 1.');
+    text(el('media-setup-capabilities'), capabilities.players && capabilities.stills ? 'Connected switcher: ' + capabilities.players + ' media players, ' + capabilities.stills + ' still slots. Player and port numbers start at 1.' : 'Switcher capabilities will appear when connected. Player and port numbers start at 1.');
     if (el('media-player')) {
       const select = el('media-player');
       const destinations = state.destinations || [];
@@ -407,7 +407,6 @@ function initializeMediaConfigPage() {
       { key: 'player', label: 'Media player number', type: 'number', value: values.player || '' },
       { key: 'label', label: 'Display name', type: 'text', value: values.label || '' },
       { key: 'slots', label: 'Reserved still slots', type: 'text', value: (values.slots || []).join(', ') },
-      { key: 'aux', label: 'ATEM AUX output', type: 'number', value: values.aux || '' },
       { key: 'videohub_input', label: 'VideoHub input', type: 'number', value: values.videohub_input || '' }
     ];
     definitions.forEach(function(definition) {
@@ -421,7 +420,7 @@ function initializeMediaConfigPage() {
       input.dataset.field = definition.key;
       input.value = definition.value;
       if (definition.key === 'player') { input.min = '1'; input.step = '1'; input.required = true; }
-      if (definition.key === 'aux' || definition.key === 'videohub_input') { input.min = '1'; input.step = '1'; input.placeholder = 'Not assigned'; }
+      if (definition.key === 'videohub_input') { input.min = '1'; input.step = '1'; input.placeholder = 'Not assigned'; }
       if (definition.key === 'label') input.maxLength = 100;
       if (definition.key === 'slots') { input.placeholder = 'Comma-separated slot numbers'; input.required = true; }
       field.appendChild(label);
@@ -429,7 +428,7 @@ function initializeMediaConfigPage() {
       fields.appendChild(field);
     });
     row.appendChild(fields);
-    row.appendChild(node('p', 'form-text mb-0 mt-2', 'Connect this ATEM AUX output by cable to the chosen VideoHub input. Leave both blank to use this player only for testing.'));
+    row.appendChild(node('p', 'form-text mb-0 mt-2', 'Choose the VideoHub input that already receives this media player. Leave it blank to use this player only for testing.'));
     const remove = node('button', 'btn btn-sm btn-outline-danger mt-3', 'Remove player');
     remove.type = 'button';
     remove.addEventListener('click', function() { row.parentNode.removeChild(row); });
@@ -462,14 +461,12 @@ function initializeMediaConfigPage() {
     const destinations = [];
     const players = {};
     const slots = {};
-    const auxOutputs = {};
     const videohubInputs = {};
     Array.prototype.forEach.call(el('media-destinations').children, function(row) {
       const playerText = row.querySelector('[data-field="player"]').value.trim();
       const slotText = row.querySelector('[data-field="slots"]').value.trim();
       const player = Number(playerText);
       const label = row.querySelector('[data-field="label"]').value.trim();
-      const auxText = row.querySelector('[data-field="aux"]').value.trim();
       const videohubText = row.querySelector('[data-field="videohub_input"]').value.trim();
       if (!/^\d+$/.test(playerText) || player < 1 || players[player]) throw new Error('Each destination needs a different media player number, starting at 1.');
       players[player] = true;
@@ -487,18 +484,13 @@ function initializeMediaConfigPage() {
       if (capabilities.players && player > capabilities.players) throw new Error('Media Player ' + player + ' is outside the connected switcher’s ' + capabilities.players + ' players.');
       if (capabilities.stills && numbers.some(function(slot) { return slot > capabilities.stills; })) throw new Error('A reserved still slot is outside the connected switcher’s ' + capabilities.stills + ' slots.');
       const destination = { player: player, label: label || 'Media Player ' + player, slots: numbers };
-      if (auxText || videohubText) {
-        if (!/^\d+$/.test(auxText) || Number(auxText) < 1 || !/^\d+$/.test(videohubText) || Number(videohubText) < 1) {
-          throw new Error('Enter both an ATEM AUX output and a VideoHub input as positive whole numbers, or leave both blank.');
+      if (videohubText) {
+        if (!/^\d+$/.test(videohubText) || Number(videohubText) < 1) {
+          throw new Error('Enter a VideoHub input as a positive whole number, or leave it blank for testing only.');
         }
-        const aux = Number(auxText);
         const videohubInput = Number(videohubText);
-        if (capabilities.auxes && aux > capabilities.auxes) throw new Error('ATEM AUX ' + aux + ' is outside the connected switcher’s ' + capabilities.auxes + ' AUX outputs.');
-        if (auxOutputs[aux]) throw new Error('ATEM AUX ' + aux + ' is listed more than once. Each player needs its own AUX output.');
         if (videohubInputs[videohubInput]) throw new Error('VideoHub input ' + videohubInput + ' is listed more than once. Each player needs its own VideoHub input.');
-        auxOutputs[aux] = true;
         videohubInputs[videohubInput] = true;
-        destination.aux = aux;
         destination.videohub_input = videohubInput;
       }
       destinations.push(destination);

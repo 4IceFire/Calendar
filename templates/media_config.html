@@ -26,8 +26,9 @@
   <details id="media-setup" class="card mb-4" open>
     <summary class="card-header">Available media players</summary>
     <div class="card-body">
-      <p class="small text-muted">Choose the players available for displaying images. Reserve each player, its still slots, its AUX output and its connected VideoHub input exclusively for TDeck. Each player needs at least two still slots so a new image can upload before the player switches to it.</p>
-      <p class="small text-muted">The AUX output must be physically connected to the VideoHub input you enter below. People using Routing choose an image and a screen; TDeck chooses an available player and sends the image there.</p>
+      <p class="small text-muted">Choose the players available for displaying images and reserve their still slots for TDeck. Each player needs at least two still slots so a new image can upload before the player switches to it.</p>
+      <p class="small text-muted">Set each VideoHub input to the feed that already carries that media player. Keep this feed set up manually on the ATEM. TDeck loads the image into an available player, then routes its VideoHub input to the selected screen.</p>
+      <p class="small text-muted">Any other feeds already using that media player will show its new image too.</p>
       <p class="small" id="media-setup-capabilities">Switcher capabilities will appear when connected.</p>
       <form id="media-setup-form">
         <fieldset id="media-setup-fields" disabled>

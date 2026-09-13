@@ -21,16 +21,18 @@ and same-origin checks. Image numbers in configuration and responses are 1-based
 | `POST /api/media/upload` | Config, or Media + upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
 | `PATCH /api/media/<id>` | Config | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
 | `DELETE /api/media/<id>` | Config | Removes the local image. An active display/load of it returns 409. Does not clear ATEM stills. |
-| `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/AUX/input; overrides are rejected. |
+| `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/input; overrides are rejected. ATEM output routing is never changed. |
 | `GET /api/media/display/<job_id>` | Routing + Media, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`. No hardware assignments or internal diagnostics. |
 | `GET /api/atem/media/state` | Config | Cached connection, detected format/capacity, configured destinations, players/stills/AUXes and current/last ATEM `job`. An offline state is a successful HTTP read. |
 | `POST /api/atem/media/load` | Config + Media | Administrative player test. JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Does not route a TV. |
-| `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path` and `atem_media_destinations`. |
-| `PUT /api/config/atem-media` | Config | Partial configuration object with those keys only. Executable-path changes additionally require Admin. Destinations are `{player,label,slots,aux,videohub_input}` with at least two exclusive still slots. AUX and input must be supplied together; omitting both preserves a test-only player. All players/AUXes/inputs/slots must be distinct. |
+| `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path` and `atem_media_destinations`. Obsolete destination `aux` values are omitted from the response without changing saved configuration. |
+| `PUT /api/config/atem-media` | Config | Partial configuration object with those keys only. Executable-path changes additionally require Admin. Destinations are `{player,label,slots,videohub_input}` with at least two exclusive still slots. Omitting the VideoHub input preserves a test-only player. Players, inputs and slots must be distinct. ATEM output routing is managed manually; legacy `aux` values are ignored and removed on save. |
 
 Display statuses are `queued`, `preparing`, `loading`, `routing`, `succeeded`,
-`failed`; 202 only means queued. Completion requires image/hash, player, AUX and
-VideoHub readback. The player must not feed other outputs or another AUX. The
+`failed`; 202 only means queued. Completion requires image/hash, player selection
+and VideoHub readback. The mapped VideoHub input must not feed other outputs.
+ATEM output routing and the feed into that input are maintained manually;
+destinations already sharing a media player also see its new image. The
 200-second display deadline wraps a maximum 180-second ATEM transfer. Only recent
 32 job records are retained in memory; restart does not repeat requests. While a
 display owns routing, normal VideoHub route/preset writes and raw player tests

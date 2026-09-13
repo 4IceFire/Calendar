@@ -7568,7 +7568,7 @@ def api_media_display():
         with _media_operation_lock:
             _get_media_library().get(data['media_id'])
             cfg = validate_media_config(utils.get_config())
-            mappings = [item for item in cfg['atem_media_destinations'] if item.get('aux') and item.get('videohub_input')]
+            mappings = [item for item in cfg['atem_media_destinations'] if item.get('videohub_input')]
             if mappings and allowed_inputs and not any(item['videohub_input'] in allowed_inputs for item in mappings):
                 log_event('security.media.input_denied', 'Denied media display without access to a mapped input',
                           status='warning', details={'output': output})
@@ -7755,7 +7755,13 @@ def api_atem_media_config():
     from atem_media import validate_media_config
     if request.method == 'GET':
         cfg = utils.get_config()
-        return jsonify({'ok': True, 'config': {key: cfg.get(key, value) for key, value in _MEDIA_CONFIG_DEFAULTS.items()}})
+        selected = {key: cfg.get(key, value) for key, value in _MEDIA_CONFIG_DEFAULTS.items()}
+        # Retain repairable raw setup values without exposing obsolete AUX mappings.
+        if isinstance(selected['atem_media_destinations'], list):
+            selected['atem_media_destinations'] = [
+                {key: value for key, value in item.items() if key != 'aux'} if isinstance(item, dict) else item
+                for item in selected['atem_media_destinations']]
+        return jsonify({'ok': True, 'config': selected})
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or set(data) - set(_MEDIA_CONFIG_DEFAULTS):
         return _api_json_error(400, 'invalid_request', 'Supply only ATEM media setup fields.')

@@ -146,32 +146,15 @@ class MediaWorker {
         if (playerKey(player) !== active.originalPlayer && !(active.phase !== 'uploading' && desired)) {
             throw new Error('The destination media player was changed by another operator');
         }
-        if (active.phase === 'routing' && !desired) {
-            throw new Error('The destination media player changed before AUX routing was confirmed');
-        }
         // Protect even a clip player's retained still selection: it may be put
         // back on air while an upload is in progress.
         if (active.phase === 'uploading' && this.atem.state.media.players.some(player => player && player.stillIndex === active.slot - 1)) {
             throw new Error('The reserved still slot is selected by a media player');
         }
-        if (active.aux !== null) {
-            const aux = snapshot.auxes[active.aux - 1];
-            if (snapshot.capabilities.auxes !== active.auxCount
-                || snapshot.auxes.some(item => !Number.isInteger(item.source))) {
-                throw new Error('ATEM did not report every AUX source during the image load');
-            }
-            if (snapshot.auxes.some(item => item.aux !== active.aux && item.source === active.fillSource)) {
-                throw new Error('Another ATEM AUX is using this media player');
-            }
-            if (mediaFillSource(this.atem.state, active.player) !== active.fillSource || !aux
-                || (aux.source !== active.originalAux && !(active.phase === 'routing' && aux.source === active.fillSource))) {
-                throw new Error('The destination ATEM AUX was changed by another operator');
-            }
-        }
         if (active.phase !== 'uploading' && active.uploadedHash) {
             const still = this.atem.state.media.stillPool[active.slot - 1];
             if (!still || !still.isUsed || still.hash !== active.uploadedHash) {
-                throw new Error('The uploaded still image changed before routing was confirmed');
+                throw new Error('The uploaded still image changed before media selection was confirmed');
             }
         }
     }
@@ -216,31 +199,14 @@ class MediaWorker {
             || (Number.isInteger(expected.stillSlot) && expected.stillSlot !== current.stillSlot)) {
             throw new Error('The destination media player changed while preparing the image');
         }
-        const aux = message.aux === undefined || message.aux === null ? null : message.aux;
-        let originalAux = null, fillSource = null;
-        if (aux !== null) {
-            if (!Number.isInteger(aux) || aux < 1 || aux > state.capabilities.auxes) throw new Error('Configured ATEM AUX is unavailable');
-            if (state.auxes.some(item => !Number.isInteger(item.source))) {
-                throw new Error('ATEM has not reported every AUX source');
-            }
-            fillSource = current.fillSource;
-            if (!Number.isInteger(fillSource)) throw new Error('Media player fill source is unavailable for AUX routing');
-            if (state.auxes.some(item => item.aux !== aux && item.source === fillSource)) {
-                throw new Error('Another ATEM AUX is using this media player');
-            }
-            const expectedAux = message.expectedAux, currentAux = state.auxes[aux - 1];
-            if (!expectedAux || expectedAux.aux !== aux || !Number.isInteger(expectedAux.source)
-                || expectedAux.source !== currentAux.source) {
-                throw new Error('The destination ATEM AUX changed while preparing the image');
-            }
-            originalAux = currentAux.source;
-        }
+        // AUX/output routing is configured at the ATEM by the site. Even legacy
+        // IPC fields must never cause this worker to change or reserve an AUX.
         let abort;
         const aborted = new Promise((_, reject) => { abort = reject; });
         // Always observe abort rejection, including synchronous preparation failures.
         aborted.catch(() => {});
         const active = { slot, player: message.player, generation: this.generation,
-            aux, auxCount: state.capabilities.auxes, originalAux, fillSource, uploadedHash: null,
+            uploadedHash: null,
             videoModeId: state.videoMode.id, width: message.width, height: message.height,
             originalPlayer: playerKey(this.atem.state.media.players[message.player - 1]),
             phase: 'uploading', abort, aborted,
@@ -277,18 +243,6 @@ class MediaWorker {
                 return matches() && player.sourceType === Enums.MediaSourceType.Still && player.stillIndex === slot - 1;
             }, 'ATEM did not confirm media player selection');
             this.assertActive(active);
-            if (aux !== null) {
-                active.phase = 'routing';
-                stage('routing');
-                // The upload/hash and player selection are already confirmed.
-                // Do not expose the AUX until every preceding stage succeeded.
-                if (originalAux !== fillSource) {
-                    await Promise.race([this.atem.setAuxSource(fillSource, aux - 1), aborted]);
-                }
-                await this.waitFor(active, () => this.atem.state.video.auxilliaries[aux - 1] === fillSource,
-                    'ATEM did not confirm AUX routing');
-                this.assertActive(active);
-            }
             const result = { confirmed: true, slot, state: this.snapshot() };
             this.publish();
             return result;

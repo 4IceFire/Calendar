@@ -191,8 +191,11 @@ completion. If display fails, the saved image remains available for retry.
 The operator pages show images and progress; player assignments, connection
 status, presets and library management live in **Config → Media**.
 
-The signal path is: **TDeck library → ATEM still slot → media player → AUX →
-VideoHub → TV**. A still slot stores an image; a media player selects one slot.
+The signal path is: **TDeck library → ATEM still slot → media player → manually
+configured ATEM output/feed → VideoHub input → TV**. A still slot stores an image;
+a media player selects one slot. TDeck updates the image/player and routes the
+VideoHub input to the chosen output. ATEM AUX/output routing stays under your
+manual control; no AUX assignment is needed in TDeck.
 TDeck automatically chooses a mapped player whose VideoHub input is unused by
 other outputs. It can replace the image on the selected output's own exclusive
 player. If every eligible player feeds another output, it refuses the request.
@@ -215,11 +218,14 @@ across players automatically in this version.
    there are no preselected players or still slots.
 4. Add each player that TDeck may control, give it a useful label, and reserve
    at least two distinct still slots per player. Slot lists cannot overlap.
-   Map each player's **ATEM AUX** to the **VideoHub input** physically connected
-   to that AUX. Players, AUXes, inputs and slot reservations must be distinct.
-   Use displayed numbering (player 1, still 1, AUX 1, input 1). Enable media
-   display and save. Existing players without AUX/input mappings remain usable
+   Set the **VideoHub input** that already receives that media player's signal.
+   Set up the ATEM output routing and cabling manually. Players, inputs and
+   slot reservations must be distinct. Use displayed numbering (player 1,
+   still 1, input 1). Enable media display and save. Existing players without
+   a VideoHub input remain usable
    for Config testing, but cannot be selected automatically for TV display.
+   Previously saved AUX assignments are ignored and removed on the next Media
+   setup save; existing VideoHub input mappings continue working.
    An administrator can optionally specify the trusted server Node.js
    executable in Advanced setup if PATH discovery is unavailable.
 5. In **Permissions → Groups**, operators need **Routing** and **Media** to
@@ -241,20 +247,24 @@ Supported uploads are JPEG, PNG, WebP, HEIC and HEIF, up to 20 MiB and 40
 megapixels. Animated files are rejected. Stored PNGs have corrected orientation,
 sRGB color and no embedded EXIF/location metadata.
 
-Reserve the players, still slots, AUXes and their VideoHub inputs exclusively
-for TDeck. Do not use those players in ATEM program/keyers or unrelated AUXes.
+Reserve player images and still slots for TDeck, and keep each configured
+VideoHub input receiving the corresponding player. You may share that player's
+signal through manually managed AUXes or other feeds. Changing the image also
+updates every destination already receiving that player. TDeck does not inspect
+or verify those manual signal paths; its free-player check covers only the
+configured VideoHub inputs and their current VideoHub output routes.
 For each load, TDeck chooses an unselected reserved slot, waits for transfer and
 image-hash confirmation, then selects and verifies the player. It protects
 every player's retained still selection and refuses a load when no reserved
 slot is free. The display coordinator uses complete, fresh VideoHub routes to
-allocate a channel, confirms the player and AUX, then routes and verifies the
+allocate a channel, confirms the player, then routes and verifies the
 selected output. Other TDeck web/API route and preset writes return a busy
 response while a display is running. ATEM transfers have a three-minute deadline;
 the complete display job has a 200-second deadline with bounded network calls.
 Requests are never automatically replayed after reconnection or restart.
 
 These steps are not an atomic transaction against external ATEM/VideoHub clients
-or separate CLI processes. Do not edit the reserved paths or target output during
+or separate CLI processes. Do not change the player image, configured input feed or target output during
 a display. A failed verification may follow a hardware change, so check the
 output before retrying. Actual ATEM/VideoHub compatibility still needs a live test.
 

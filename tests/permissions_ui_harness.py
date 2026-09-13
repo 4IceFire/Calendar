@@ -43,7 +43,7 @@ def main():
             config.update(auth_idle_timeout_enabled=False, atem_ip='192.0.2.1',
                           atem_media_enabled=True, atem_media_node_path='',
                           atem_media_destinations=[{'player': 2, 'label': 'Media A', 'slots': [41, 42],
-                                                    'aux': 1, 'videohub_input': 7}])
+                                                    'videohub_input': 7}])
         config_path = root / 'config.json'
         config_path.write_text(json.dumps(config), encoding='utf-8')
         for operation in ('connect', 'connect_ex', 'sendto'):
