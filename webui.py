@@ -1878,6 +1878,18 @@ def _activity_current_actor() -> tuple[int | None, str, str]:
     return None, '', ''
 
 
+def capture_activity_actor() -> dict[str, Any]:
+    """Capture both identities before dispatching a background action."""
+    uid, username, display = _activity_current_actor()
+    actor = {'actor_user_id': uid, 'actor_username': username, 'actor_display': display}
+    if has_request_context():
+        actor.update(ip=_activity_request_ip(), request_path=_activity_request_path(), source='web')
+        context = getattr(g, '_view_as_context', None)
+        if context:
+            actor['impersonation'] = dict(context)
+    return actor
+
+
 def _activity_source_default() -> str:
     path = _activity_request_path()
     if path.startswith('/api/'):
@@ -2088,6 +2100,7 @@ def log_event(
     ip: str | None = None,
     request_path: str | None = None,
     ts: str | None = None,
+    impersonation: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Persist a structured activity event and publish it to the live buffer."""
 
@@ -2104,6 +2117,14 @@ def log_event(
     actor_uid = actor_user_id if actor_user_id is not None else current_uid
     actor_name = str(actor_username if actor_username is not None else current_uname).strip()
     actor_label = str(actor_display if actor_display is not None else current_display).strip()
+    if impersonation is None and has_request_context():
+        impersonation = getattr(g, '_view_as_context', None)
+    if impersonation:
+        actor_uid = impersonation['admin_id']
+        actor_name = str(impersonation['admin_username'])
+        actor_label = f"{actor_name} as {impersonation['target_username']}"
+        details = dict(details) if isinstance(details, dict) else {'context': details}
+        details['view_as'] = dict(impersonation)
     if not actor_label:
         if actor_name:
             actor_label = actor_name
@@ -2258,11 +2279,9 @@ def require_page(page_key: str, friendly_name: str):
     return _decorator
 
 
-# Action grants use the existing group_pages storage and permission editor.
-# They grant no page by themselves; Config separately authorizes library management.
+# Upload is a detail of Media access, stored with the existing group grants.
+# Legacy media_load/media_manage grants no longer authorize any action.
 _register_page('page:media_upload', 'Media: Upload images')
-_register_page('page:media_manage', 'Media: Manage images and presets')
-_register_page('page:media_load', 'Media: Display images')
 
 
 def _get_group_by_name(name: str) -> sqlite3.Row | None:
@@ -2675,6 +2694,9 @@ def _create_user_session(row: sqlite3.Row) -> None:
 def _touch_current_user_session() -> bool:
     sid = str(session.get('_auth_session_id') or '').strip()
     uid = _current_admin_user_id()
+    context = getattr(g, '_view_as_context', None)
+    if context:
+        uid = int(context['admin_id'])
     if uid is None:
         return False
     if not sid:
@@ -2998,7 +3020,12 @@ login_manager.login_view = 'login_page'
 @login_manager.user_loader
 def _load_user(user_id: str):
     try:
-        row = _user_record(int(user_id))
+        context = getattr(g, '_view_as_context', None)
+        if session.get('_view_as') and not context:
+            # Never fall back to Admin for a request intended for the target.
+            return None
+        effective_id = context['target_id'] if context else int(user_id)
+        row = _user_record(int(effective_id))
         return _User(row) if row else None
     except Exception:
         return None
@@ -3165,6 +3192,7 @@ def _inject_auth():
         'csrf_token': _csrf_token,
         'current_user': current_user,
         'is_authenticated': is_authed,
+        'view_as': getattr(g, '_view_as_context', None),
     }
 
 
@@ -3733,6 +3761,131 @@ def _api_security_gate():
     return None
 
 
+def _view_as_admin_record():
+    """Validate the original browser login, including revocation and authority."""
+    try:
+        uid = int(session.get('_user_id'))
+        sid = str(session.get('_auth_session_id') or '')
+        if not sid:
+            return None
+        conn = _db()
+        try:
+            row = conn.execute(
+                '''SELECT u.*,s.revoked_at,s.session_version AS login_version
+                   FROM users u JOIN user_sessions s ON s.user_id=u.id
+                   WHERE u.id=? AND s.id=?''', (uid, sid),
+            ).fetchone()
+        finally:
+            conn.close()
+        if (not row or row['revoked_at'] or not int(row['is_active'] or 0)
+                or int(row['is_locked'] or 0) or int(row['force_password_change'] or 0)
+                or int(row['login_version'] or 0) != int(row['session_version'] or 0)
+                or not _user_is_admin(uid)):
+            return None
+        cfg = _auth_cfg()
+        if _cfg_bool(cfg, 'auth_idle_timeout_enabled', True):
+            minutes = _effective_idle_timeout_override_minutes_for_user(uid)
+            if minutes is None:
+                minutes = _cfg_int(cfg, 'auth_idle_timeout_minutes', 2, min_value=1, max_value=1440)
+            last = int(session.get('_last_activity') or 0)
+            if minutes > 0 and last and time.time() - last > minutes * 60:
+                return None
+        return row
+    except Exception:
+        return None
+
+
+def _view_as_failure(status: int, message: str):
+    return render_template('view_as_error.html', page_title='View as user', error=message), status
+
+
+def _view_as_audit_context():
+    """Identify an interrupted test for audit without authorizing its request."""
+    try:
+        marker = session.get('_view_as') or {}
+        admin = _user_record(int(session.get('_user_id')))
+        target = _user_record(int(marker['target_id']))
+        if admin:
+            return {'admin_id': int(admin['id']), 'admin_username': str(admin['username']),
+                    'target_id': int(marker['target_id']),
+                    'target_username': str(target['username']) if target else 'Unavailable user'}
+    except Exception:
+        pass
+    return None
+
+
+def _view_as_end(admin, *, reason: str = 'returned') -> None:
+    marker = session.get('_view_as') or {}
+    context = getattr(g, '_view_as_context', None) or _view_as_audit_context()
+    log_event('user.view_as.stop', 'Ended View as user', status='info',
+              target_type='user', target_id=marker.get('target_id'),
+              details={'reason': reason}, impersonation=context)
+    session.pop('_view_as', None)
+    session['_csrf'] = secrets.token_hex(16)
+    # Keep the existing login/session row. Rotating CSRF prevents another tab
+    # with the target's controls from accidentally sending an Admin action.
+    g._view_as_context = None
+    login_manager._update_request_context_with_user(_User(admin))
+
+
+def _view_as_request_gate():
+    marker = session.get('_view_as')
+    transition = request.endpoint in ('admin_view_as_user', 'stop_view_as_user')
+    if not marker and not transition:
+        return None
+    if not _auth_enabled():
+        if marker:
+            log_event('user.view_as.stop', 'Ended View as user because authentication was disabled',
+                      status='warning', details={'reason': 'authentication_disabled'},
+                      impersonation=_view_as_audit_context())
+            logout_user()
+            session.clear()
+        return abort(403, description='View as user requires authentication to be enabled.')
+    if (request.headers.get('Authorization') or getattr(g, '_tdeck_scheduler_principal', None)):
+        return abort(403, description='View as user requires an administrator browser session.')
+    admin = _view_as_admin_record()
+    if not admin:
+        if marker:
+            log_event('user.view_as.stop', 'Ended View as user because administrator access expired',
+                      status='warning', details={'reason': 'administrator_unavailable'},
+                      impersonation=_view_as_audit_context())
+            logout_user()
+            session.clear()
+        return abort(403, description='A current login in the Admin group is required.')
+    g._view_as_admin = admin
+    if not marker:
+        if transition and (not _validate_csrf() or not _api_same_origin_request()):
+            return _view_as_failure(403, 'Reload the page and try again.')
+        return None
+    try:
+        if int(marker['admin_id']) != int(admin['id']):
+            raise ValueError('Administrator changed')
+        target = _user_record(int(marker['target_id']))
+        g._view_as_context = {
+            'admin_id': int(admin['id']), 'admin_username': str(admin['username']),
+            'target_id': int(marker['target_id']),
+            'target_username': str(target['username']) if target else 'Unavailable user',
+        }
+        target_valid = (
+            target is not None and int(target['is_active'] or 0)
+            and not int(target['is_locked'] or 0) and not int(target['force_password_change'] or 0)
+            and int(target['session_version'] or 0) == int(marker['target_version'])
+        )
+    except Exception:
+        target_valid = False
+    if transition and (not _validate_csrf() or not _api_same_origin_request()):
+        return _view_as_failure(403, 'Reload the page and try again.')
+    if not target_valid and request.endpoint != 'stop_view_as_user':
+        _view_as_end(admin, reason='target_unavailable')
+        if request.method in ('GET', 'HEAD') and not request.path.startswith('/api/'):
+            return redirect(url_for('admin_permissions_page', tab='users'))
+        return _api_json_error(409, 'view_as_ended', 'View as user ended because this account changed. Reload the page.')
+    if request.method in _API_MUTATING_METHODS and request.path in ('/account/password', '/login'):
+        log_event('user.view_as.credential_denied', 'Blocked a password or login change while viewing as a user', status='warning')
+        return abort(403, description='Return to admin before changing account credentials.')
+    return None
+
+
 @app.before_request
 def _auth_gate():
     p = request.path or ''
@@ -3742,6 +3895,13 @@ def _auth_gate():
         from media_library import MAX_UPLOAD_BYTES
         _, upload_limit = _api_request_within_size_limit('/api/media/upload')
         request.max_content_length = min(upload_limit, MAX_UPLOAD_BYTES + 1024 * 1024)
+
+    view_as_response = _view_as_request_gate()
+    if view_as_response is not None:
+        return view_as_response
+    if request.endpoint in ('admin_view_as_user', 'stop_view_as_user'):
+        # These transitions have their own stricter original-Admin boundary.
+        return None
 
     # Only the in-process dispatcher can place this marker on Flask's request
     # context. It is not derived from an address, header, cookie, or payload.
@@ -5847,7 +6007,8 @@ def admin_permissions_page():
     finally:
         conn.close()
 
-    pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()], key=lambda x: x[1].lower())
+    pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()
+                    if k != 'page:media_upload'], key=lambda x: x[1].lower())
     group_to_pages: dict[int, set[str]] = {}
     for gp in group_pages or []:
         try:
@@ -6247,11 +6408,56 @@ def _admin_user_detail_context(user_id: int, error: str | None = None, message: 
         'min_len': _auth_min_password_length(),
         'lockout_attempts': _auth_lockout_failed_attempts(),
         'admin_email_rows': _admin_email_rows(),
+        'can_view_as_user': bool(_auth_enabled() and not session.get('_view_as')
+                                 and _user_is_admin(_current_admin_user_id())
+                                 and _current_admin_user_id() != int(user_id)),
         'generated_password': generated_password,
         'error': error,
         'message': message,
         'saved': str(request.args.get('saved') or '').strip(),
     }
+
+
+@app.post('/admin/users/<int:user_id>/view-as')
+def admin_view_as_user(user_id: int):
+    """Begin a per-browser test using the target's current permissions."""
+    if session.get('_view_as'):
+        return _view_as_failure(409, 'Return to admin before viewing as another user.')
+    admin = getattr(g, '_view_as_admin', None)
+    if admin is None:
+        return abort(403)
+    if int(admin['id']) == user_id:
+        return _view_as_failure(400, 'You are already signed in as this user.')
+    target = _user_record(user_id)
+    if target is None:
+        return abort(404)
+    if (not int(target['is_active'] or 0) or int(target['is_locked'] or 0)
+            or int(target['force_password_change'] or 0)):
+        return _view_as_failure(409, 'This user must be active, unlocked and have completed any required password change.')
+    session['_view_as'] = {'admin_id': int(admin['id']), 'target_id': user_id,
+                           'target_version': int(target['session_version'] or 0)}
+    session['_csrf'] = secrets.token_hex(16)
+    session['_last_activity'] = int(time.time())
+    g._view_as_context = {'admin_id': int(admin['id']), 'admin_username': str(admin['username']),
+                           'target_id': user_id, 'target_username': str(target['username'])}
+    effective_user = _User(target)
+    login_manager._update_request_context_with_user(effective_user)
+    log_event('user.view_as.start', f"Started View as user for '{target['username']}'", status='info',
+              target_type='user', target_id=user_id)
+    return redirect(_landing_page_for_user(effective_user), code=303)
+
+
+@app.post('/auth/view-as/stop')
+def stop_view_as_user():
+    admin = getattr(g, '_view_as_admin', None)
+    marker = session.get('_view_as')
+    if admin is None or not marker:
+        return _view_as_failure(409, 'View as user is not active.')
+    target_id = marker.get('target_id')
+    _view_as_end(admin)
+    if target_id and _user_record(int(target_id)):
+        return redirect(url_for('admin_user_detail_page', user_id=int(target_id)), code=303)
+    return redirect(url_for('admin_permissions_page', tab='users'), code=303)
 
 
 @app.route('/admin/users/<int:user_id>', methods=['GET', 'POST'])
@@ -7062,14 +7268,15 @@ def _serialize_media_configuration(fn):
 
 def _media_permissions() -> dict[str, bool]:
     return {
-        action: bool((can_access('page:config') and action in ('upload', 'manage'))
-                     or (can_access('page:media') and can_access('page:media_' + action)))
-        for action in ('upload', 'manage', 'load')
+        'upload': bool(can_access('page:config') or
+                       (can_access('page:media') and can_access('page:media_upload'))),
+        'manage': bool(can_access('page:config')),
+        'load': bool(can_access('page:media')),
     }
 
 
 def _media_display_allowed() -> bool:
-    return bool(can_access('page:routing') and can_access('page:media') and can_access('page:media_load'))
+    return bool(can_access('page:routing') and can_access('page:media'))
 
 
 def _media_output_access(output):
@@ -7116,8 +7323,13 @@ def _require_media_read(fn):
 
 def _media_action_denied(action: str):
     log_event('security.media.permission_denied', f'Denied media {action} without its group permission',
-              status='warning', details={'capability': 'page:media_' + action})
-    return _api_json_error(403, 'forbidden', f'This action requires the Media {action} permission.')
+              status='warning', details={'action': action})
+    message = {
+        'upload': 'Uploading images requires permission to upload media.',
+        'manage': 'Managing images and presets requires Config access.',
+        'load': 'Your permissions do not allow displaying images here.',
+    }.get(action, 'Your permissions do not allow this media action.')
+    return _api_json_error(403, 'forbidden', message)
 
 
 def _media_item_payload(item: dict) -> dict:
@@ -7199,9 +7411,7 @@ def api_media_display():
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or set(data) != {'media_id', 'output'}:
         return _api_json_error(400, 'invalid_request', 'Choose an image and an output.')
-    uid, username, display = _activity_current_actor()
-    actor = {'actor_user_id': uid, 'actor_username': username, 'actor_display': display,
-             'ip': _activity_request_ip(), 'request_path': request.path, 'source': 'web'}
+    actor = capture_activity_actor()
 
     def completed(job):
         success = job.get('status') == 'succeeded'
@@ -7245,13 +7455,13 @@ def api_media_display_job(job_id):
 
 
 @app.route('/media')
-@require_page('page:media', 'Media Library')
+@require_page('page:media', 'Media')
 def media_page():
     return render_template('media.html', **_media_page_context())
 
 
 @app.route('/media/upload')
-@require_page('page:media', 'Media Library')
+@require_page('page:media', 'Media')
 def media_upload_page():
     if not can_access('page:media_upload'):
         abort(403)
@@ -7262,7 +7472,7 @@ def media_upload_page():
 @require_page('page:config', 'Config')
 def atem_media_setup_page():
     permissions = _media_permissions()
-    permissions['load'] = bool(can_access('page:media') and can_access('page:media_load'))
+    permissions['load'] = bool(can_access('page:media'))
     return render_template('media_config.html', config_active_tab='atem-media',
                            media_permissions=permissions,
                            can_configure_media=True)
@@ -7369,9 +7579,7 @@ def api_atem_media_load():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return _api_json_error(400, 'invalid_request', 'Choose an image and a configured player.')
-    uid, username, display = _activity_current_actor()
-    actor = {'actor_user_id': uid, 'actor_username': username, 'actor_display': display,
-             'ip': _activity_request_ip(), 'request_path': request.path, 'source': 'web'}
+    actor = capture_activity_actor()
 
     def completed(job):
         success = job.get('status') == 'succeeded'

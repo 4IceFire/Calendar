@@ -100,7 +100,8 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         payload = result.get_json()
         self.assertEqual(payload['items'][0]['name'], 'Welcome')
-        self.assertFalse(any(payload['permissions'].values()))
+        self.assertFalse(payload['permissions']['upload'])
+        self.assertFalse(payload['permissions']['manage'])
         for url_key in ('url', 'thumbnail_url'):
             with self.client.get(payload['items'][0][url_key]) as image:
                 self.assertEqual(image.status_code, 200)
@@ -114,7 +115,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertIn('media.js', response.get_data(as_text=True))
         self.manager.snapshot.assert_not_called()
 
-    def test_browse_permission_does_not_grant_writes(self):
+    def test_media_permission_does_not_grant_upload_management_or_raw_load(self):
         for method, path, kwargs in (
             ('post', '/api/media/upload', {'data': {'file': (_image(), 'test.png')}}),
             ('patch', '/api/media/' + self.item['id'], {'json': {'name': 'Renamed'}}),
@@ -127,11 +128,22 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(len(self.library.list()), 1)
         self.manager.load.assert_not_called()
 
-    def test_action_permission_alone_does_not_grant_library_or_images(self):
-        self.grants = {'page:media_upload', 'page:media_manage', 'page:media_load'}
-        for path in ('/api/media', '/api/atem/media/state', '/api/v1/media',
-                     '/media/images/' + self.item['id'] + '.png'):
-            self.assertEqual(self.client.get(path).status_code, 403)
+    def test_upload_or_legacy_action_permissions_cannot_replace_media_access(self):
+        for grants in ({'page:media_upload'}, {'page:media_manage', 'page:media_load'},
+                       {'page:routing', 'page:media_upload', 'page:media_manage', 'page:media_load'}):
+            with self.subTest(grants=grants):
+                self.grants = grants
+                for path in ('/media', '/media/upload', '/api/media', '/api/atem/media/state',
+                             '/api/v1/media', '/media/images/' + self.item['id'] + '.png',
+                             '/media/thumbnails/' + self.item['id'] + '.png'):
+                    self.assertEqual(self.client.get(path).status_code, 403)
+                upload = self.client.post('/api/media/upload', data={'file': (_image(), 'test.png')},
+                                          headers=self.headers)
+                self.assertEqual(upload.status_code, 403)
+                self.assertEqual(self._post_display().status_code, 403)
+        self.assertEqual(len(self.library.list()), 1)
+        self.routing.display.assert_not_called()
+        self.manager.load.assert_not_called()
 
     def test_upload_requires_csrf_and_same_origin(self):
         self.grants.add('page:media_upload')
@@ -140,7 +152,7 @@ class MediaWebTests(unittest.TestCase):
             self.assertEqual(result.status_code, 403)
         self.assertEqual(len(self.library.list()), 1)
 
-    def test_upload_names_and_presets_can_be_managed_separately(self):
+    def test_upload_grant_saves_images_but_only_config_can_edit_presets_or_delete(self):
         self.grants.add('page:media_upload')
         result = self.client.post('/api/media/upload', data={'file': (_image(), 'event.png'), 'name': "Mother's Day"},
                                   headers=self.headers)
@@ -148,7 +160,18 @@ class MediaWebTests(unittest.TestCase):
         item = result.get_json()['item']
         self.assertEqual(item['name'], "Mother's Day")
         self.assertFalse(item['preset'])
+        self.assertEqual(self.client.patch('/api/media/' + item['id'], json={'preset': True},
+                                           headers=self.headers).status_code, 403)
+        self.assertEqual(self.client.delete('/api/media/' + item['id'], headers=self.headers).status_code, 403)
+        # Old saved management grants must not restore operator-side management.
         self.grants.add('page:media_manage')
+        for changes in ({'name': 'Renamed'}, {'preset': True}):
+            self.assertEqual(self.client.patch('/api/media/' + item['id'], json=changes,
+                                               headers=self.headers).status_code, 403)
+        self.assertEqual(self.client.delete('/api/media/' + item['id'], headers=self.headers).status_code, 403)
+        self.assertEqual(self.library.get(item['id'])['name'], "Mother's Day")
+        self.assertFalse(self.library.get(item['id'])['preset'])
+        self.grants = {'page:config'}
         edited = self.client.patch('/api/media/' + item['id'], json={'preset': True}, headers=self.headers)
         self.assertEqual(edited.status_code, 200)
         self.assertTrue(edited.get_json()['item']['preset'])
@@ -156,7 +179,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(self.client.get(item['thumbnail_url']).status_code, 404)
 
     def test_invalid_upload_and_edit_are_rejected(self):
-        self.grants.update({'page:media_upload', 'page:media_manage'})
+        self.grants.add('page:config')
         result = self.client.post('/api/media/upload', data={'file': (io.BytesIO(b'not an image'), 'fake.png')}, headers=self.headers)
         self.assertEqual(result.status_code, 400)
         for payload in ([], {'preset': 'false'}, {'unknown': True}, {'name': ''}, {'name': 17}):
@@ -177,7 +200,10 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(result.status_code, 413)
 
     def test_load_returns_job_and_preserves_actor_for_terminal_log(self):
-        self.grants.update({'page:config', 'page:media_load'})
+        self.grants.add('page:config')
+        page = self.client.get('/config/atem-media')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('id="media-load-button"', page.get_data(as_text=True))
         result = self.client.post('/api/atem/media/load', json={'media_id': self.item['id'], 'player': 2}, headers=self.headers)
         self.assertEqual(result.status_code, 202)
         self.assertEqual(result.get_json()['job']['status'], 'queued')
@@ -190,13 +216,13 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(event.kwargs['status'], 'success')
 
     def test_unknown_image_never_reaches_hardware(self):
-        self.grants.update({'page:config', 'page:media_load'})
+        self.grants.add('page:config')
         result = self.client.post('/api/atem/media/load', json={'media_id': 'f' * 32, 'player': 2}, headers=self.headers)
         self.assertEqual(result.status_code, 404)
         self.manager.load.assert_not_called()
 
     def test_busy_job_cannot_be_deleted_or_reconfigured(self):
-        self.grants.update({'page:media_manage', 'page:config'})
+        self.grants.add('page:config')
         self.manager.snapshot.return_value['job'] = {'mediaId': self.item['id'], 'status': 'uploading'}
         self.assertEqual(self.client.delete('/api/media/' + self.item['id'], headers=self.headers).status_code, 409)
         self.assertEqual(self.client.put('/api/config/atem-media', json={'atem_media_enabled': True}, headers=self.headers).status_code, 409)
@@ -246,7 +272,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(len(self.library.list()), 1)
 
     def test_invalid_old_setup_can_be_repaired_without_constructing_manager(self):
-        self.grants.update({'page:config', 'page:media_manage'})
+        self.grants.add('page:config')
         self.cfg['atem_media_destinations'] = 'invalid imported value'
         with patch.object(webui, '_get_atem_media_manager', side_effect=AssertionError('Must not construct a manager')):
             response = self.client.put('/api/config/atem-media', json={'atem_media_destinations': []}, headers=self.headers)
@@ -288,7 +314,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertFalse(self.config_file.exists())
 
     def _allow_display(self):
-        self.grants.update({'page:routing', 'page:media', 'page:media_load'})
+        self.grants.update({'page:routing', 'page:media'})
         self.cfg.update(atem_media_enabled=True, atem_media_destinations=[
             {'player': 2, 'label': 'A', 'slots': [41, 42], 'aux': 1, 'videohub_input': 5},
             {'player': 4, 'label': 'B', 'slots': [43, 44], 'aux': 2, 'videohub_input': 6},
@@ -306,16 +332,50 @@ class MediaWebTests(unittest.TestCase):
         self.manager.load.assert_not_called()
         self.assertEqual(self._post_display().status_code, 202)
 
-    def test_display_requires_all_three_grants_for_writes_and_job_reads(self):
+    def test_display_requires_routing_and_media_for_writes_and_job_reads(self):
         self._allow_display()
-        required = {'page:routing', 'page:media', 'page:media_load'}
+        required = {'page:routing', 'page:media'}
         for missing in required:
             with self.subTest(missing=missing):
-                self.grants = required - {missing}
+                self.grants = (required - {missing}) | {'page:media_load', 'page:media_manage'}
                 self.assertEqual(self._post_display().status_code, 403)
                 self.assertEqual(self.client.get('/api/media/display/' + self.display_job['id']).status_code, 403)
         self.routing.display.assert_not_called()
         self.routing.get_job.assert_not_called()
+
+    def test_media_and_routing_select_from_pool_without_upload_or_legacy_load_grants(self):
+        self._allow_display()
+        self.assertEqual(self.grants, {'page:media', 'page:routing'})
+        response = self.client.get('/media?output=1')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-can-display="true"', response.get_data(as_text=True))
+        self.assertNotIn('href="/media/upload', response.get_data(as_text=True))
+        self.assertEqual(self.client.get('/api/media').status_code, 200)
+        self.assertEqual(self._post_display().status_code, 202)
+        self.assertEqual(self.client.get('/api/media/display/' + self.display_job['id']).status_code, 200)
+        self.assertEqual(self.client.get('/media/upload?output=1').status_code, 403)
+        upload = self.client.post('/api/media/upload', data={'file': (_image(), 'test.png')}, headers=self.headers)
+        self.assertEqual(upload.status_code, 403)
+        self.assertEqual(self.client.delete('/api/media/' + self.item['id'], headers=self.headers).status_code, 403)
+        self.assertEqual(len(self.library.list()), 1)
+
+    def test_config_management_does_not_add_upload_controls_to_operator_page(self):
+        self._allow_display()
+        self.grants.add('page:config')
+        page = self.client.get('/media?output=1')
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn('id="media-upload-link"', page.get_data(as_text=True))
+        self.assertEqual(self.client.get('/media/upload?output=1').status_code, 403)
+        self.grants.add('page:media_upload')
+        page = self.client.get('/media?output=1')
+        self.assertIn('id="media-upload-link"', page.get_data(as_text=True))
+        self.assertEqual(self.client.get('/media/upload?output=1').status_code, 200)
+
+    def test_config_with_legacy_load_cannot_test_players_without_media_permission(self):
+        self.grants = {'page:config', 'page:media_load', 'page:media_manage'}
+        self.assertEqual(self.client.post('/api/atem/media/load', json={'media_id': self.item['id'], 'player': 2},
+                                          headers=self.headers).status_code, 403)
+        self.manager.load.assert_not_called()
 
     def test_display_checks_output_and_mapped_input_before_enqueueing(self):
         self._allow_display()

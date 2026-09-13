@@ -1237,6 +1237,32 @@ html[data-bs-theme="dark"] .timer-stage-card{
   overflow:hidden;
 }
 
+/* Group detail tabs retain hidden field values while keeping the editor compact. */
+#access-levels-page [hidden]{
+  display:none!important;
+}
+#access-levels-page .group-permission-details{
+  min-width:0;
+}
+#access-levels-page .group-permission-tabs{
+  margin-inline:0;
+}
+#access-levels-page .group-permission-tabs .config-section-tabs-scroll{
+  padding-inline:0;
+}
+#access-levels-page .group-permission-panel{
+  padding:.25rem 0 .5rem;
+  min-width:0;
+}
+#access-levels-page .group-permission-tabs .nav-link:focus-visible,
+#access-levels-page .group-permission-panel:focus-visible{
+  outline:2px solid var(--bs-primary);
+  outline-offset:-2px;
+}
+#access-levels-page .group-page-access .form-check{
+  padding-block:.12rem;
+}
+
 @media (max-width:575.98px){
   .config-section-tabs{
     margin-inline:-.75rem;

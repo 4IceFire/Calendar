@@ -3794,7 +3794,7 @@ function _initAccessLevelsPage() {
 
   function _setSelectedRole(roleId, { persist = true, updateHash = true } = {}) {
     const id = String(roleId || '').trim();
-    if (!id) return;
+    if (!id || !_rolePanelById(id)) return;
 
     // mark list selection
     roleItems.forEach(item => {
@@ -3818,7 +3818,8 @@ function _initAccessLevelsPage() {
 
   // Init selection
   const initialId = _readSelectedRoleFromHash() || _readSelectedRoleFromStorage() || (roleItems[0] ? String(roleItems[0].getAttribute('data-role-id')) : null);
-  if (initialId) _setSelectedRole(initialId, { persist: true, updateHash: false });
+  const initialPanel = _rolePanelById(initialId) || rolePanels[0];
+  if (initialPanel) _setSelectedRole(initialPanel.getAttribute('data-role-id'), { persist: true, updateHash: false });
 
   // Clicking a role selects it
   if (roleList) {
@@ -3842,58 +3843,55 @@ function _initAccessLevelsPage() {
   const _saveInFlight = new Map();
   const _saveQueued = new Map();
 
+  function _selectPermissionTab(form, key, { focus = false } = {}) {
+    const tabs = Array.from(form.querySelectorAll('[data-permission-tab]'));
+    const selected = tabs.find(tab => tab.getAttribute('data-permission-tab') === key && !tab.hidden)
+      || tabs.find(tab => !tab.hidden);
+    if (!selected) return;
+    const selectedKey = selected.getAttribute('data-permission-tab');
+    tabs.forEach(tab => {
+      const active = tab === selected;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.tabIndex = active ? 0 : -1;
+    });
+    form.querySelectorAll('[data-permission-panel]').forEach(section => {
+      section.hidden = section.getAttribute('data-permission-panel') !== selectedKey;
+    });
+    if (focus) {
+      selected.focus();
+      selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }
+
   function _applyRoleFieldState(panel) {
     if (!panel) return;
     const form = panel.querySelector('form[data-role-form]');
     if (!form) return;
-    const routingCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:routing"]');
-    const videohubCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:videohub"]');
-    const digicoCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:digico_mixer"]');
-    const atemCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:atem_audio"]');
-    const pixieCb = form.querySelector('input[type="checkbox"][name="page_keys"][value="page:pixie_controls"]');
-    const outEl = form.querySelector('[data-role="vh-outputs"]');
-    const inEl = form.querySelector('[data-role="vh-inputs"]');
-    const presetsEl = form.querySelector('[data-role="vh-presets"]');
-    const editPresetsEl = form.querySelector('[data-role="vh-edit-presets"]');
-    const digicoAuxEls = Array.from(form.querySelectorAll('[data-role="digico-aux"]'));
-    const atemFields = Array.from(form.querySelectorAll('[data-role="atem-audio-field"]'));
-    const pixieScenes = Array.from(form.querySelectorAll('[data-role="pixie-scene"]'));
-    if (routingCb && outEl && inEl) {
-      const routingEnabled = !!routingCb.checked;
-      outEl.disabled = !routingEnabled;
-      inEl.disabled = !routingEnabled;
-    }
-    if (videohubCb && (presetsEl || editPresetsEl)) {
-      const videohubEnabled = !!videohubCb.checked;
-      if (presetsEl) presetsEl.disabled = !videohubEnabled;
-      if (editPresetsEl) editPresetsEl.disabled = !videohubEnabled;
-    }
-    if (digicoCb) {
-      for (const el of digicoAuxEls) el.disabled = !digicoCb.checked;
-    }
-    if (atemCb && atemFields.length) {
-      const atemEnabled = !!atemCb.checked;
-      atemFields.forEach(el => {
-        el.disabled = !atemEnabled;
+    const pageKeys = new Set(Array.from(form.querySelectorAll('input[name="page_keys"]:checked')).map(cb => cb.value));
+    const selected = form.querySelector('[data-permission-tab][aria-selected="true"]');
+    // Hiding a page's settings must never clear its saved restrictions or uploads.
+    form.querySelectorAll('[data-permission-tab]').forEach(tab => {
+      const pageKey = tab.getAttribute('data-permission-page');
+      tab.hidden = !!pageKey && !pageKeys.has(pageKey);
+    });
+    _selectPermissionTab(form, selected ? selected.getAttribute('data-permission-tab') : 'general');
+
+    // Pixie devices remain subordinate to their auditorium and all-devices choice.
+    form.querySelectorAll('[data-role="pixie-auditorium-block"]').forEach(block => {
+      const auditorium = block.querySelector('[data-role="pixie-auditorium"]');
+      const allDevices = block.querySelector('[data-role="pixie-all-devices"]');
+      const auditoriumEnabled = !!(auditorium && auditorium.checked);
+      if (allDevices) allDevices.disabled = !auditoriumEnabled;
+      block.querySelectorAll('[data-role="pixie-device"]').forEach(field => {
+        const useIndividualDevices = auditoriumEnabled && !(allDevices && allDevices.checked);
+        field.disabled = !useIndividualDevices;
+        const row = field.closest('.form-check');
+        if (row) row.hidden = !useIndividualDevices;
       });
-    }
-    if (pixieCb) {
-      const pixieEnabled = !!pixieCb.checked;
-      form.querySelectorAll('[data-role="pixie-auditorium-block"]').forEach(block => {
-        const auditorium = block.querySelector('[data-role="pixie-auditorium"]');
-        const allDevices = block.querySelector('[data-role="pixie-all-devices"]');
-        const deviceFields = Array.from(block.querySelectorAll('[data-role="pixie-device"]'));
-        if (auditorium) auditorium.disabled = !pixieEnabled;
-        const auditoriumEnabled = pixieEnabled && !!(auditorium && auditorium.checked);
-        if (allDevices) allDevices.disabled = !auditoriumEnabled;
-        deviceFields.forEach(field => {
-          field.disabled = !auditoriumEnabled || !!(allDevices && allDevices.checked);
-        });
-        const scope = block.querySelector('[data-role="pixie-device-scope"]');
-        if (scope) scope.classList.toggle('opacity-50', !auditoriumEnabled);
-      });
-      pixieScenes.forEach(field => { field.disabled = !pixieEnabled; });
-    }
+      const scope = block.querySelector('[data-role="pixie-device-scope"]');
+      if (scope) scope.hidden = !auditoriumEnabled;
+    });
   }
 
   function _roleReadPayload(panel) {
@@ -4009,6 +4007,24 @@ function _initAccessLevelsPage() {
     if (!form) return;
     const roleId = String(form.getAttribute('data-role-id') || '').trim();
     if (!roleId) return;
+
+    form.querySelectorAll('[data-permission-tab]').forEach(tab => {
+      tab.addEventListener('click', () => {
+        _selectPermissionTab(form, tab.getAttribute('data-permission-tab'));
+      });
+      tab.addEventListener('keydown', event => {
+        const tabs = Array.from(form.querySelectorAll('[data-permission-tab]')).filter(item => !item.hidden);
+        const index = tabs.indexOf(tab);
+        let next = index;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        _selectPermissionTab(form, tabs[next].getAttribute('data-permission-tab'), { focus: true });
+      });
+    });
 
     // Checkboxes save quickly
     form.querySelectorAll('input[type="checkbox"]').forEach(cb => {

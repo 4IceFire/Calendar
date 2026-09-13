@@ -9,8 +9,20 @@
         <h1 class="h3 mb-1">{{ user_row.username }}</h1>
         <div class="text-muted small">User ID: {{ user_row.id }}</div>
       </div>
-      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_permissions_page', tab='users') }}#users">Back to users</a>
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        {% if can_view_as_user %}
+          <form method="post" action="{{ url_for('admin_view_as_user', user_id=user_row.id) }}" class="m-0">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="btn btn-primary btn-sm" type="submit"{% if not user_row.is_active or user_row.is_locked or user_row.force_password_change %} disabled{% endif %}>View as user</button>
+          </form>
+        {% endif %}
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_permissions_page', tab='users') }}#users">Back to users</a>
+      </div>
     </div>
+
+    {% if can_view_as_user %}
+      <p class="small text-muted">View as user lets you test their pages and perform actions with their permissions, then return to admin.{% if not user_row.is_active or user_row.is_locked or user_row.force_password_change %} This user must first be active, unlocked and have completed any required password change.{% endif %}</p>
+    {% endif %}
 
     {% if error %}
       <div class="alert alert-danger py-2">{{ error }}</div>

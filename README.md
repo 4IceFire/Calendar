@@ -113,6 +113,29 @@ longer requires the CLI. See `API_REFERENCE.md` for the complete migration
 sequence, temporary expiring legacy flag, v1 endpoint aliases, limits, and
 scope semantics.
 
+### Groups and testing user access
+
+In **Permissions → Groups**, select a group and tick its page access. The tabs
+below show additional settings only for enabled pages. **General** contains the
+idle timeout. Turning off a page hides its tab while preserving its settings.
+The **Media** page checkbox permits selecting saved images; its **Media** tab
+has the separate **Allow uploading media** checkbox. Library and preset
+management remain under **Config → Media**.
+
+To test another user's experience, sign in with an account in the **Admin**
+group, open **Permissions → Users → select a user**, and choose **View as user**.
+The banner identifies the user being tested and provides **Return to admin**.
+Controls and uploads perform real actions with that user's current permissions.
+The Activity Log records the initiating administrator and the selected user,
+including completion of background media jobs. No target password is required,
+and the target's own sessions are unchanged.
+
+The target must be active, unlocked, and have completed any required password
+change. Account credentials cannot be changed while testing. Administrator
+session revocation or loss of Admin access ends the test; changes that invalidate
+the target's account also stop it. Switching identities refreshes the form
+security token, so reload any other TDeck tabs before using them.
+
 DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
 
 Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Normal setup only asks for a TV name, stable IP address, and the TV's MAC address. Saving automatically enables the service, while the backend handles polling, reconnects, protocol/authentication detection, and selection of installed legacy/current VIDAA support files.
@@ -190,12 +213,15 @@ across players automatically in this version.
    for Config testing, but cannot be selected automatically for TV display.
    An administrator can optionally specify the trusted server Node.js
    executable in Advanced setup if PATH discovery is unavailable.
-5. In **Permissions → Groups**, operators need **Routing**, **Media Library**
-   and **Media: Display images**. Add **Media: Upload images** if they may upload.
+5. In **Permissions → Groups**, operators need **Routing** and **Media** to
+   select and display saved images. In the group's **Media** tab, enable
+   **Allow uploading media** if they may add images.
    Their existing Routing allow-lists must permit the target output and at
    least one mapped VideoHub input. Config access grants setup and image/preset
-   management even without a Media Library grant. Direct player testing also
-   requires Media Library + Media display access. Admin has full access.
+   management even without a Media grant. Direct player testing also
+   requires Media access. Admin has full access. The old separate display and
+   image-management grants are no longer used; existing Media and upload grants
+   remain in place.
 6. In Config → Media, add images and mark recurring graphics as presets, such as
    Mother's Day or Team Night. Test the full operator flow through Routing.
 
@@ -412,6 +438,27 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 `tests/digico_ui_harness.py` starts a self-contained simulated desk and TDeck site on `http://127.0.0.1:5057` for local browser checks. It does not write its changes to the production `config.json`.
+
+For group editor browser checks, run `python tests/permissions_ui_harness.py`.
+This uses a temporary database and simulated catalogs, with outbound hardware
+traffic blocked. Open `http://127.0.0.1:5064/admin/permissions?tab=groups` or, in a
+second terminal, run:
+
+```powershell
+$env:TDECK_BASE_URL = "http://127.0.0.1:5064"
+npx playwright test tests/browser/group_permissions.spec.js --workers=1
+```
+
+The test fixture marker is required before changing groups; use a unique
+`--output` directory if OneDrive holds an earlier test artifact open.
+
+To exercise View as user with real browser authentication and simulated media
+devices, run `python tests/permissions_ui_harness.py --view-as` instead. Open
+`http://127.0.0.1:5065/admin/users/2` and sign in with the fixture-only account
+`fixture-admin` / `fixture-password`. For automated checks, set
+`TDECK_BASE_URL=http://127.0.0.1:5065` and run
+`npx playwright test tests/browser/view_as.spec.js --workers=1`. This mode uses
+temporary users/media and blocks outbound hardware traffic.
 
 ### Cross-browser page and failure tests
 

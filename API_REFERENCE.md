@@ -17,14 +17,14 @@ and same-origin checks. Image numbers in configuration and responses are 1-based
 
 | Method and path | Access | Contract |
 | --- | --- | --- |
-| `GET /api/media` | Media Library or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, creation time, `url` and `thumbnail_url`. |
-| `POST /api/media/upload` | Config, or Library + Media upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
-| `PATCH /api/media/<id>` | Config, or Library + Media manage | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
-| `DELETE /api/media/<id>` | Config, or Library + Media manage | Removes the local image. An active display/load of it returns 409. Does not clear ATEM stills. |
-| `POST /api/media/display` | Routing + Library + Media display | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/AUX/input; overrides are rejected. |
-| `GET /api/media/display/<job_id>` | Routing + Library + Media display, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`. No hardware assignments or internal diagnostics. |
+| `GET /api/media` | Media or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, creation time, `url` and `thumbnail_url`. |
+| `POST /api/media/upload` | Config, or Media + upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
+| `PATCH /api/media/<id>` | Config | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
+| `DELETE /api/media/<id>` | Config | Removes the local image. An active display/load of it returns 409. Does not clear ATEM stills. |
+| `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/AUX/input; overrides are rejected. |
+| `GET /api/media/display/<job_id>` | Routing + Media, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`. No hardware assignments or internal diagnostics. |
 | `GET /api/atem/media/state` | Config | Cached connection, detected format/capacity, configured destinations, players/stills/AUXes and current/last ATEM `job`. An offline state is a successful HTTP read. |
-| `POST /api/atem/media/load` | Config + Library + Media display | Administrative player test. JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Does not route a TV. |
+| `POST /api/atem/media/load` | Config + Media | Administrative player test. JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Does not route a TV. |
 | `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path` and `atem_media_destinations`. |
 | `PUT /api/config/atem-media` | Config | Partial configuration object with those keys only. Executable-path changes additionally require Admin. Destinations are `{player,label,slots,aux,videohub_input}` with at least two exclusive still slots. AUX and input must be supplied together; omitting both preserves a test-only player. All players/AUXes/inputs/slots must be distinct. |
 
@@ -37,10 +37,30 @@ display owns routing, normal VideoHub route/preset writes and raw player tests
 return 409 immediately. External controllers are not part of that reservation.
 
 The existing ATEM test job also uses `uploading` and `selecting` statuses and
-includes player/slot details for Config. Library image URLs require Media Library
+includes player/slot details for Config. Library image URLs require Media
 or Config and return PNGs with private/no-store caching. Validation returns 400,
 missing media/jobs 404, oversized uploads 413 and storage/runtime failures 503.
-The existing `page:media_load` permission key is now labelled “Media: Display images”.
+`page:media` permits browsing and selecting existing images. Optional
+`page:media_upload` is edited in the group's Media tab and requires Media access
+for operator uploads. The legacy `page:media_load` and `page:media_manage` keys
+are ignored; management now requires Config.
+
+## Administrator user testing
+
+`POST /admin/users/<id>/view-as` starts an interactive browser view using the
+target's current page and resource permissions. `POST /auth/view-as/stop`
+returns to the initiating administrator. These are HTML form routes with 303
+redirects, not token APIs; both require same-origin requests, a valid `_csrf`
+form token, and a current login in the protected Admin group. Nested testing
+is rejected. The target must be active, unlocked, and not awaiting a password
+change. Each transition rotates CSRF.
+
+The original login/session remains in place. The selected user's own sessions
+are unchanged. Target permission checks apply to API calls and uploads, which
+perform real actions; account credential changes are blocked. The server checks
+administrator authority/session and target account/session version on each
+request. Invalid target state ends testing without running the pending write.
+Activity events include both the administrator and target under `details.view_as`.
 
 ## API authentication and migration
 
