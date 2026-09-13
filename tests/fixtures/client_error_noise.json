@@ -1,0 +1,18 @@
+[
+  {"name": "Brave reader namespace", "message": "Can't find variable: __firefox__", "source": "", "stack": "", "ignored": true},
+  {"name": "Brave reader object", "message": "undefined is not an object (evaluating 'window.__firefox__.reader')", "source": "/config", "stack": "global code@user-script:1:2", "ignored": true},
+  {"name": "Brave wallet assignment", "message": "undefined is not an object (evaluating 'window.ethereum.selectedAddress = undefined')", "source": "/config/tvs", "stack": "", "ignored": true},
+  {"name": "Brave night mode", "message": "Can't find variable: DarkReader", "source": "", "stack": "", "ignored": true},
+  {"name": "Chromium missing namespace", "message": "__firefox__ is not defined", "source": "", "stack": "", "ignored": true},
+  {"name": "Error prefix", "message": "Uncaught ReferenceError: DarkReader is not defined", "source": "", "stack": "", "ignored": true},
+  {"name": "TypeError prefix", "message": "TypeError: undefined is not an object (evaluating 'window.ethereum.selectedAddress=undefined')", "source": "", "stack": "", "ignored": true},
+  {"name": "Generic opaque error", "message": "Script error.", "source": "", "stack": "", "ignored": false},
+  {"name": "Real app ReferenceError", "message": "Can't find variable: elOutputs", "source": "/static/app.js", "stack": "", "ignored": false},
+  {"name": "Unhandled network failure", "message": "Failed to fetch", "source": "", "stack": "", "ignored": false},
+  {"name": "Matching name with app source", "message": "Can't find variable: DarkReader", "source": "/static/app.js", "stack": "", "ignored": false},
+  {"name": "Matching name with absolute app source", "message": "Can't find variable: __firefox__", "source": "https://tdeck.test/static/app.js?v=build", "stack": "", "ignored": false},
+  {"name": "Matching name with app stack", "message": "Can't find variable: __firefox__", "source": "", "stack": "load@http://tdeck.test/static/app.js:42:7", "ignored": false},
+  {"name": "Different wallet failure", "message": "undefined is not an object (evaluating 'window.ethereum.request')", "source": "", "stack": "", "ignored": false},
+  {"name": "Identifier mentioned in another error", "message": "Unable to save DarkReader preference", "source": "", "stack": "", "ignored": false},
+  {"name": "Known signature embedded in another error", "message": "Configuration failed: Can't find variable: DarkReader", "source": "", "stack": "", "ignored": false}
+]

@@ -84,6 +84,15 @@ Common keys:
 - `poll_interval`: seconds between file-change checks (default: `1.0`)
 - `debug`: enables more verbose logging/output
 
+### User login lockout
+
+In **Permissions → Users**, open a user and use **Access → Automatic login lockout**
+to choose whether failed passwords can lock that account. Changes save automatically.
+Lockout starts enabled for existing and new users and uses the configured failed-login
+threshold. Turning it off prevents future automatic lockouts; administrators can still
+lock or disable the account manually. Use **Unlock account** to remove an existing lock.
+Changing the switch resets the failed-login counter.
+
 ### API security
 
 With authentication enabled, TDeck APIs are no longer anonymous merely because
@@ -483,6 +492,8 @@ npm run test:browser
 Use an account whose page grants match the pages being tested. Override the comma-separated smoke list with `TDECK_SMOKE_PATHS`. A non-loopback URL is rejected unless `TDECK_ALLOW_REMOTE_BROWSER_TESTS=1` is explicitly set; use that override only for an approved staging/test server, not the production control server. `TDECK_IGNORE_HTTPS_ERRORS=1` is available for a staging certificate that the test runner has not yet trusted.
 
 Browser `error` and `unhandledrejection` events are reported as rate-limited `client.error` warnings in the Activity Log. Reports contain only a sanitized message/stack, route, source path, browser User-Agent, build ID and correlation ID. Unknown payload fields, query strings and common secret values are discarded. Set `TDECK_BUILD_ID` to the deployed commit or release identifier so reports can be matched to a release; a local content-derived ID is used when it is unset.
+
+Known failures from browser-injected reader, night-mode and wallet scripts (`__firefox__`, `DarkReader`, and the specific `window.ethereum.selectedAddress = undefined` error) are filtered before they create new Activity Log entries. The browser filter prevents these reports from using its error-report allowance; the server also filters reports from already-open pages. Errors pointing to TDeck's `/static/` scripts, unrelated errors and generic `Script error.` messages remain visible. Existing log history is retained. Run the isolated telemetry checks with `node --test tests/client_telemetry.test.cjs` and `python -m unittest discover -s tests -p "test_client_telemetry.py" -v`.
 
 ## ProPresenter timers (optional)
 

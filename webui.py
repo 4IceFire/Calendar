@@ -673,6 +673,7 @@ def _init_auth_db() -> None:
             ('email', 'TEXT'),
             ('full_name', 'TEXT'),
             ('is_locked', 'INTEGER NOT NULL DEFAULT 0'),
+            ('lockout_enabled', 'INTEGER NOT NULL DEFAULT 1'),
             ('locked_at', 'TEXT'),
             ('locked_reason', 'TEXT'),
             ('failed_login_count', 'INTEGER NOT NULL DEFAULT 0'),
@@ -1798,6 +1799,20 @@ def _admin_update_user(conn: sqlite3.Connection, uid: int, group_ids: list[int],
     return True
 
 
+def _admin_set_user_lockout(conn: sqlite3.Connection, uid: int, enabled: bool) -> None:
+    # Start a fresh attempt window when the policy changes. Existing locks still
+    # require the explicit unlock action, including locks applied by an admin.
+    conn.execute(
+        """
+        UPDATE users
+        SET lockout_enabled=?,failed_login_count=0,last_failed_login_at=NULL,
+            updated_at=?,updated_by=?
+        WHERE id=? AND lockout_enabled!=?
+        """,
+        (int(enabled), _now_str(), _current_admin_user_id(), int(uid), int(enabled)),
+    )
+
+
 def _can_manage_videohub_rooms_for_current_user() -> bool:
     """Whether the current user should be allowed to access room management UI."""
     try:
@@ -2742,9 +2757,20 @@ def _record_login_failure(row: sqlite3.Row | None, username: str) -> None:
     locked_now = False
     conn = _db()
     try:
-        latest = conn.execute('SELECT failed_login_count,is_locked FROM users WHERE id=?', (int(row['id']),)).fetchone()
-        count = int((latest['failed_login_count'] if latest else row['failed_login_count']) or 0) + 1
-        lock_now = count >= threshold and not bool(int((latest['is_locked'] if latest else row['is_locked']) or 0))
+        # Serialize policy changes and failed attempts so a stale login record
+        # cannot lock an account after an administrator disables lockout.
+        conn.execute('BEGIN IMMEDIATE')
+        latest = conn.execute(
+            'SELECT failed_login_count,is_locked,lockout_enabled FROM users WHERE id=?',
+            (int(row['id']),),
+        ).fetchone()
+        count = int(latest['failed_login_count'] or 0) + 1 if latest else 1
+        lock_now = (
+            latest is not None
+            and bool(int(latest['lockout_enabled']))
+            and count >= threshold
+            and not bool(int(latest['is_locked'] or 0))
+        )
         if lock_now:
             conn.execute(
                 """
@@ -3012,6 +3038,41 @@ def _landing_page_for_user(user: _User) -> str:
     return '/account/password'
 
 
+def _login_destination(user: _User, next_url: str) -> str:
+    """Return an accessible UI page, never a background/auth endpoint."""
+    if user.force_password_change:
+        return url_for('account_password_page', force=1)
+
+    fallback = _landing_page_for_user(user)
+    try:
+        parsed = urlsplit(next_url)
+        path = unquote(parsed.path)
+        if (
+            parsed.scheme or parsed.netloc
+            or not next_url.startswith('/') or next_url.startswith('//')
+            or not path.startswith('/') or path.startswith('//')
+            or any(char == '\\' or ord(char) < 32 or ord(char) == 127 for char in unquote(next_url))
+            or path.startswith(('/api/', '/auth/', '/static/', '/media/'))
+        ):
+            return fallback
+        endpoint, _ = app.url_map.bind_to_environ(request.environ).match(path, method='GET')
+        view = app.view_functions.get(endpoint)
+        page_key = getattr(view, '_required_page_key', None)
+        if endpoint == 'account_password_page' or (page_key and user.allows_page(page_key)):
+            return next_url
+    except Exception:
+        pass
+    return fallback
+
+
+def _redirect_to_login(*, timeout: bool = False):
+    # Heartbeats are background fetches, not useful destinations after sign-in.
+    next_url = None
+    if request.path not in ('/login', '/logout', '/auth/ping', '/auth/touch'):
+        next_url = request.full_path if request.query_string else request.path
+    return redirect(url_for('login_page', next=next_url, timeout=1 if timeout else None))
+
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login_page'
@@ -3074,6 +3135,14 @@ _CLIENT_ERROR_SECRET_RE = re.compile(
 )
 _CLIENT_ERROR_BEARER_RE = re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._~+\-/]+=*')
 _CLIENT_ERROR_URL_QUERY_RE = re.compile(r'((?:https?://|/)[^\s?#]+)[?#][^\s]*')
+_CLIENT_ERROR_BROWSER_NOISE_RE = re.compile(
+    r"(?:Uncaught )?(?:(?:ReferenceError|TypeError): )?(?:"
+    r"Can't find variable: (?:__firefox__|DarkReader)"
+    r"|(?:__firefox__|DarkReader) is not defined"
+    r"|undefined is not an object \(evaluating '"
+    r"(?:window\.__firefox__\.reader|window\.ethereum\.selectedAddress\s*=\s*undefined)"
+    r"'\))"
+)
 
 
 def _client_error_text(value: Any, limit: int) -> str:
@@ -3171,6 +3240,17 @@ def _client_error_payload(raw: Any) -> dict[str, Any]:
         # spoofable or accidentally sensitive arbitrary client field.
         'user_agent': _client_error_text(request.headers.get('User-Agent'), 400),
     }
+
+
+def _client_error_is_browser_noise(report: dict[str, Any]) -> bool:
+    """Ignore known injected feature failures, preserving evidence of app code."""
+    # Keep in sync with static/client_telemetry.js and the shared test fixtures.
+    # Do not suppress generic "Script error." reports or all errors from Brave.
+    if str(report.get('source_path') or '').startswith('/static/'):
+        return False
+    if '/static/' in str(report.get('stack') or ''):
+        return False
+    return bool(_CLIENT_ERROR_BROWSER_NOISE_RE.fullmatch(str(report.get('message') or '')))
 
 
 @app.context_processor
@@ -3915,11 +3995,12 @@ def _auth_gate():
     if p.startswith('/api/'):
         return _api_security_gate()
 
-    # Always allow static + login/logout assets/pages.
+    # Credential submissions must work even when an old session has expired.
+    # Authenticated login-page visits still need normal session validation.
     if (
         p.startswith('/static/')
         or p.startswith('/media/videohub_room_images/')
-        or p == '/login'
+        or (p == '/login' and (request.method == 'POST' or not current_user.is_authenticated))
         or p == '/logout'
     ):
         return None
@@ -3931,19 +4012,18 @@ def _auth_gate():
         pass
 
     if not getattr(current_user, 'is_authenticated', False):
-        nxt = request.full_path if request.query_string else request.path
-        return redirect(url_for('login_page', next=nxt))
+        return _redirect_to_login()
 
     try:
         if not _touch_current_user_session():
             _audit('logout_session_revoked', f'path={p}')
             logout_user()
             session.clear()
-            return redirect(url_for('login_page', next=p))
+            return _redirect_to_login()
     except Exception:
         logout_user()
         session.clear()
-        return redirect(url_for('login_page', next=p))
+        return _redirect_to_login()
 
     # Idle timeout
     now = int(time.time())
@@ -3957,7 +4037,10 @@ def _auth_gate():
                 pass
             logout_user()
             session.clear()
-            return redirect(url_for('login_page', timeout=1))
+            return _redirect_to_login(timeout=True)
+
+    if p == '/login':
+        return None
 
     # Don't let background heartbeat requests keep the session alive.
     if p != '/auth/ping':
@@ -4054,6 +4137,10 @@ def api_client_errors():
     if not isinstance(raw_report, dict):
         return jsonify({'ok': False, 'error': 'invalid_report'}), 400
     report = _client_error_payload(raw_report)
+    # Also cover already-open pages running an older telemetry script. All
+    # authentication, origin, size and rate checks above still apply.
+    if _client_error_is_browser_noise(report):
+        return jsonify({'ok': True, 'ignored': True, 'requestId': report['correlation_id']}), 202
     try:
         log_event(
             'client.error',
@@ -5596,9 +5683,9 @@ def login_page():
         pass
 
     next_url = request.args.get('next') or request.form.get('next') or ''
-    # Safety: only allow local redirects
-    if next_url and (next_url.startswith('http://') or next_url.startswith('https://') or '://' in next_url):
-        next_url = ''
+
+    if request.method in ('GET', 'HEAD') and current_user.is_authenticated:
+        return redirect(_login_destination(current_user, next_url))
 
     if request.method == 'POST':
         if not _validate_csrf():
@@ -5637,15 +5724,7 @@ def login_page():
         _create_user_session(refreshed)
         _audit('login_ok', f'username={username}')
 
-        if bool(int(refreshed['force_password_change'] or 0)):
-            return redirect(url_for('account_password_page', force=1))
-
-        redirect_target = next_url or '/'
-        requested_path = redirect_target.split('?', 1)[0].split('#', 1)[0]
-        if requested_path in ('', '/') and not user.allows_page('page:home'):
-            redirect_target = _landing_page_for_user(user)
-
-        return redirect(redirect_target)
+        return redirect(_login_destination(user, next_url))
 
     timeout = request.args.get('timeout')
     msg = 'You have been logged out due to inactivity.' if timeout else None
@@ -6264,7 +6343,7 @@ def api_admin_group_update(group_id: int):
 @app.route('/api/admin/users/<int:user_id>', methods=['POST'])
 @require_page('page:admin', 'Admin')
 def api_admin_user_update(user_id: int):
-    """Auto-save user account status and group membership."""
+    """Auto-save user account status, login lockout, and group membership."""
     try:
         data = request.get_json(silent=True) or {}
     except Exception:
@@ -6281,6 +6360,12 @@ def api_admin_user_update(user_id: int):
                 group_ids.append(gid)
     is_active_raw = data.get('is_active', True)
     is_active = bool(is_active_raw) if isinstance(is_active_raw, bool) else (str(is_active_raw).strip().lower() in ('1', 'true', 'yes', 'y', 'on'))
+    lockout_enabled = None
+    if 'lockout_enabled' in data:
+        lockout_raw = data['lockout_enabled']
+        if not isinstance(lockout_raw, bool):
+            return jsonify({'ok': False, 'error': 'Automatic login lockout must be true or false'}), 400
+        lockout_enabled = lockout_raw
 
     conn = _db()
     try:
@@ -6289,10 +6374,14 @@ def api_admin_user_update(user_id: int):
         if not ok:
             conn.rollback()
             return jsonify({'ok': False, 'error': 'Cannot remove or disable the last active admin user'}), 400
+        if lockout_enabled is not None:
+            _admin_set_user_lockout(conn, int(user_id), lockout_enabled)
         conn.commit()
         after = _user_access_snapshot(conn, int(user_id))
         group_changes = _group_snapshot_diff(before.get('groups') or [], after.get('groups') or [])
-        if before.get('is_active') != after.get('is_active') or group_changes.get('added_groups') or group_changes.get('removed_groups'):
+        if (before.get('is_active') != after.get('is_active')
+                or before.get('lockout_enabled') != after.get('lockout_enabled')
+                or group_changes.get('added_groups') or group_changes.get('removed_groups')):
             log_event(
                 'user.access.update',
                 f"Updated access for user '{after.get('username') or before.get('username') or user_id}'",
@@ -6304,12 +6393,13 @@ def api_admin_user_update(user_id: int):
                     'user_id': int(user_id),
                     'username': after.get('username') or before.get('username'),
                     'active': {'old': before.get('is_active'), 'new': after.get('is_active')},
+                    'lockout_enabled': {'old': before.get('lockout_enabled'), 'new': after.get('lockout_enabled')},
                     **group_changes,
                 },
             )
     finally:
         conn.close()
-    return jsonify({'ok': True})
+    return jsonify({'ok': True, 'lockout_enabled': after['lockout_enabled'], 'failed_login_count': after['failed_login_count']})
 
 
 def _generated_password() -> str:
@@ -6317,7 +6407,10 @@ def _generated_password() -> str:
 
 
 def _user_access_snapshot(conn: sqlite3.Connection, user_id: int) -> dict:
-    user = conn.execute('SELECT id,username,full_name,email,is_active FROM users WHERE id=?', (int(user_id),)).fetchone()
+    user = conn.execute(
+        'SELECT id,username,full_name,email,is_active,lockout_enabled,failed_login_count FROM users WHERE id=?',
+        (int(user_id),),
+    ).fetchone()
     groups = conn.execute(
         """
         SELECT g.id,g.name
@@ -6334,6 +6427,8 @@ def _user_access_snapshot(conn: sqlite3.Connection, user_id: int) -> dict:
         'full_name': str(user['full_name'] or '') if user else '',
         'email': str(user['email'] or '') if user else '',
         'is_active': bool(int(user['is_active'] or 0)) if user else False,
+        'lockout_enabled': bool(int(user['lockout_enabled'])) if user else True,
+        'failed_login_count': int(user['failed_login_count'] or 0) if user else 0,
         'groups': [{'id': int(g['id']), 'name': str(g['name'] or '')} for g in groups or []],
     }
 
@@ -6535,10 +6630,14 @@ def admin_user_detail_page(user_id: int):
                     (1 if is_active else 0, now, actor, int(user_id)),
                 )
                 _admin_replace_user_groups(conn, int(user_id), group_ids)
+                if request.form.get('lockout_settings_present') == '1':
+                    _admin_set_user_lockout(conn, int(user_id), request.form.get('lockout_enabled') == 'on')
                 conn.commit()
                 after = _user_access_snapshot(conn, int(user_id))
                 group_changes = _group_snapshot_diff(before.get('groups') or [], after.get('groups') or [])
-                if before.get('is_active') != after.get('is_active') or group_changes.get('added_groups') or group_changes.get('removed_groups'):
+                if (before.get('is_active') != after.get('is_active')
+                        or before.get('lockout_enabled') != after.get('lockout_enabled')
+                        or group_changes.get('added_groups') or group_changes.get('removed_groups')):
                     log_event(
                         'user.access.update',
                         f"Updated access for user '{after.get('username') or before.get('username') or user_id}'",
@@ -6550,6 +6649,7 @@ def admin_user_detail_page(user_id: int):
                             'user_id': int(user_id),
                             'username': after.get('username') or before.get('username'),
                             'active': {'old': before.get('is_active'), 'new': after.get('is_active')},
+                            'lockout_enabled': {'old': before.get('lockout_enabled'), 'new': after.get('lockout_enabled')},
                             **group_changes,
                         },
                     )

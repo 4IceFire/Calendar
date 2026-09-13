@@ -3667,6 +3667,7 @@ function _initAdminUserDetailPage() {
     if (!accessForm) return null;
     return {
       is_active: !!(accessForm.querySelector('input[name="is_active"]') || {}).checked,
+      lockout_enabled: !!(accessForm.querySelector('input[name="lockout_enabled"]') || {}).checked,
       group_ids: Array.from(accessForm.querySelectorAll('input[name="group_ids"]:checked')).map(cb => String(cb.value)),
     };
   }
@@ -3690,6 +3691,10 @@ function _initAdminUserDetailPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data || !data.ok) throw new Error((data && data.error) ? data.error : 'Save failed');
       _detailSetAccessMessage('saved', 'Saved');
+      const failedLoginCount = root.querySelector('[data-user-failed-login-count]');
+      if (failedLoginCount && typeof data.failed_login_count === 'number') {
+        failedLoginCount.textContent = String(data.failed_login_count);
+      }
       return true;
     } catch (e) {
       _detailSetAccessMessage('error', String(e.message || e));

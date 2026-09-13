@@ -24,6 +24,7 @@ hisense_certs/
 !companion_surfaces.json
 !package.json
 !package-lock.json
+!tests/fixtures/client_error_noise.json
 pixie_secrets.json
 
 auth.db

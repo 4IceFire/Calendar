@@ -33,6 +33,7 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
   - `npm install`
   - `npm run test:browser:install`
   - `npm run test:browser`
+- Isolated browser telemetry regression checks: `node --test tests/client_telemetry.test.cjs` and `python -m unittest discover -s tests -p "test_client_telemetry.py" -v`. Shared message fixtures live in `tests/fixtures/client_error_noise.json`; keep browser/server classification consistent.
 
 ## Coding Style & Naming Conventions
 - Python: 4-space indentation, PEP 8-style naming. Use `snake_case` for functions/vars, `CapWords` for classes, `UPPER_CASE` for constants.
@@ -68,6 +69,7 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Preserve compatibility fallbacks checked by `tests/test_frontend_compatibility.py`: avoid untranspiled `Array.at()`, `Promise.finally()`, and `replaceChildren()`; retain the `<dialog>` fallback and CSS fallbacks where used.
 - `static/api_client.js` must load before telemetry and page scripts. It adds CSRF only to same-origin mutating `/api/*` requests and must not modify external fetches.
 - `static/client_telemetry.js` reports sanitized `error` and `unhandledrejection` events to `/api/client-errors`. Keep field allow-listing, truncation, query removal, secret redaction, authentication, CSRF/origin checks, and rate limiting intact.
+- Suppress only the exact known injected reader (`__firefox__`), night-mode (`DarkReader`), and wallet (`window.ethereum.selectedAddress = undefined`) failures in both browser telemetry and server ingestion. Filter before browser dedupe/rate accounting; server filtering remains after request security/rate checks so already-open pages are covered. Preserve reports with `/static/` source/stack evidence and generic `Script error.` reports. Do not suppress all Brave errors or prevent their normal browser-console reporting.
 
 ## Static Assets and Response Caching
 - `static_asset(...)` uses a SHA-256 digest of file bytes, not mtime/size. Only a URL with the current 64-character `v` digest is `public, max-age=31536000, immutable`; missing, stale, forged, or unversioned assets must revalidate.
@@ -114,7 +116,10 @@ This repo contains TDeck, a Python app for scheduling service cues, controlling 
 - Legacy `roles` / `role_pages` data may still exist in `auth.db` only as a migration source. New permissions work should use `groups`, `group_pages`, and `user_groups`.
 - User management lives on `/admin/permissions` for browsing/creating users and groups, and `/admin/users/<id>` for per-user profile, access, security, sessions, and activity management.
 - Account security state lives on the `users` table: email/full name, active/locked status, failed login count, force-password-change flag, password timestamps, and session version.
+- `users.lockout_enabled` defaults to `1` for existing and new users. The per-user Access panel under Permissions autosaves this switch through `/api/admin/users/<id>`; an omitted API field or legacy access form preserves the policy. Failed passwords are always counted/audited, but only enabled accounts lock automatically and revoke sessions at the configured threshold. Read the current policy and count in one write transaction. Policy changes reset the failure counter; existing locks require the explicit Unlock account action, and manual locks/disabled accounts remain enforced. Record policy changes in the `user.access.update` Activity Log event.
 - Logged-in sessions are tracked in `user_sessions`; revoking sessions or forcing password changes should use that table/session-version flow.
+- Login return destinations must resolve to an accessible local UI page; auth helpers, login/logout, API/static/media resources, and external URLs fall back to the user's permitted landing page. Preserve required password changes before other destinations.
+- Authenticated GET/HEAD visits to `/login` validate revocation and idle expiry before redirecting; credential POSTs must still work with an expired old session. Background `/auth/ping` and `/auth/touch` URLs must never become login return destinations; the browser supplies the actual page (including query/hash).
 - When authentication is enabled, every `/api` route is fail-closed through `_api_policy`. Any new API route must receive an explicit scope/page policy or it remains denied.
 - Browser API calls use the logged-in session. Reads require the associated page capability; writes additionally require CSRF and a trusted same-origin `Origin`/`Referer`. Resource-specific server checks remain mandatory for VideoHub ports/presets/editing, ATEM sources/solo/monitor, DiGiCo AUXes, Pixie resources, and similar allow-lists.
 - Automation uses scoped Bearer service tokens from `api_security.py`. Only token hashes are stored in `auth.db`; support expiry, revocation, atomic rotation, last-used metadata, and optional path/TV/VideoHub/ATEM constraints.

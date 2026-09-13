@@ -181,15 +181,26 @@
           let lastTouchSent = 0;
           let touchInFlight = false;
           let touchDebounce = null;
+          let redirectingToLogin = false;
+
+          function redirectToLogin(res){
+            if(redirectingToLogin || !res || !res.redirected || !res.url) return;
+            const loginUrl = new URL(res.url, window.location.href);
+            if(loginUrl.origin !== window.location.origin || loginUrl.pathname !== '/login') return;
+            loginUrl.searchParams.set('next', window.location.pathname + window.location.search + window.location.hash);
+            redirectingToLogin = true;
+            window.location.replace(loginUrl.toString());
+          }
 
           function sendTouch(){
             const now = Date.now();
             if(touchInFlight) return;
             if((now - lastTouchSent) < TOUCH_THROTTLE_MS) return;
             touchInFlight = true;
-            function touchComplete(){
+            function touchComplete(res){
               touchInFlight = false;
               lastTouchSent = now;
+              redirectToLogin(res);
             }
             fetch(TOUCH_URL, {cache: 'no-store'}).then(touchComplete, touchComplete);
           }
@@ -213,9 +224,7 @@
           async function ping(){
             try{
               const res = await fetch(PING_URL, {cache: 'no-store'});
-              if(res && res.redirected && res.url && res.url.indexOf('/login') !== -1){
-                window.location = res.url;
-              }
+              redirectToLogin(res);
             }catch(e){
               // ignore
             }
