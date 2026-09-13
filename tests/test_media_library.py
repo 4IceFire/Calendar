@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from collections import namedtuple
 from pathlib import Path
 from unittest.mock import patch
 
@@ -108,6 +109,125 @@ class MediaLibraryTests(unittest.TestCase):
                     self.library.upload(io.BytesIO(content), "looks-valid.png")
         self.assertEqual(self.library.list(), [])
         self.assertEqual(list((self.root / "images").iterdir()), [])
+
+    def test_disguised_scripts_documents_and_executables_are_rejected(self):
+        for content in (
+            b'MZ\x90\x00executable placeholder', b'<html><script>alert(1)</script></html>',
+            b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>',
+            b'PK\x03\x04archive placeholder', b'%PDF-1.7 document placeholder',
+        ):
+            with self.subTest(content=content[:8]), self.assertRaises(ValueError):
+                self.library.upload(io.BytesIO(content), 'photo.png')
+        self.assertEqual(self.library.list(), [])
+        self.assertEqual(list((self.root / 'images').iterdir()), [])
+        self.assertEqual(list((self.root / 'thumbnails').iterdir()), [])
+
+    def test_original_filename_and_appended_content_never_reach_stored_files(self):
+        script = b'<script>window.uploadPayload = true</script>'
+        item = self.library.upload(io.BytesIO(image_bytes() + script),
+                                   '../../outside.html', '<img src=x onerror=alert(1)>')
+        # Display names remain text; they are never interpreted as paths or code.
+        self.assertEqual(item['name'], '<img src=x onerror=alert(1)>')
+        for thumbnail in (False, True):
+            path = self.library.path(item['id'], thumbnail)
+            self.assertRegex(path.name, r'^[0-9a-f]{32}\.png$')
+            self.assertTrue(path.is_relative_to(self.root))
+            self.assertNotIn(script, path.read_bytes())
+            with Image.open(path) as decoded:
+                self.assertEqual(decoded.format, 'PNG')
+                decoded.verify()
+        self.assertFalse((self.root.parent / 'outside.html').exists())
+
+    def test_dimensions_and_buffer_size_are_rechecked_after_decode(self):
+        class ChangingImage:
+            size, mode, n_frames = (2, 2), 'RGB', 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def getbands(self):
+                return tuple(self.mode)
+
+            def load(self):
+                self.size, self.mode = self.after
+
+        for after, message in (((8000, 8000), 'RGB'), 'megapixel'), (((4, 4), 'F'), 'memory limit'):
+            source = ChangingImage()
+            source.after = after
+            with self.subTest(after=after), \
+                    patch.object(media_library, 'MAX_DECODED_BYTES', 50), \
+                    patch.object(media_library.Image, 'open', return_value=source), \
+                    patch.object(media_library.ImageOps, 'exif_transpose') as orient:
+                with self.assertRaisesRegex(ValueError, message):
+                    self.library.upload(io.BytesIO(b'placeholder'), 'photo.heic')
+                orient.assert_not_called()
+        self.assertEqual(self.library.list(), [])
+
+    def test_normalized_png_has_an_encoded_size_limit(self):
+        with patch.object(media_library, 'MAX_STORED_IMAGE_BYTES', 40):
+            with self.assertRaisesRegex(ValueError, 'Prepared image exceeds'):
+                self.upload()
+        self.assertEqual(self.library.list(), [])
+        self.assertEqual(list((self.root / 'images').iterdir()), [])
+
+    def test_storage_quota_counts_normalized_images_thumbnails_and_orphans(self):
+        first = self.upload()
+        pair_bytes = sum(self.library.path(first['id'], thumbnail).stat().st_size for thumbnail in (False, True))
+        with patch.object(media_library, 'MAX_LIBRARY_BYTES', pair_bytes * 2 - 1):
+            with self.assertRaisesRegex(ValueError, 'storage limit'):
+                self.upload('Over quota')
+        self.assertEqual(self.library.list(), [first])
+        with patch.object(media_library, 'MAX_LIBRARY_BYTES', pair_bytes):
+            # Existing assets can still be read/deleted; deletion restores capacity.
+            self.assertEqual(self.library.get(first['id']), first)
+            self.library.delete(first['id'])
+            self.assertEqual(self.upload('Replacement')['name'], 'Replacement')
+        self.library.delete(self.library.list()[0]['id'])
+        (self.root / 'images' / '.orphan.tmp').write_bytes(b'x' * pair_bytes)
+        with patch.object(media_library, 'MAX_LIBRARY_BYTES', pair_bytes + 1):
+            with self.assertRaisesRegex(ValueError, 'storage limit'):
+                self.upload()
+        self.assertEqual(self.library.list(), [])
+
+    def test_image_quota_is_checked_before_decode_and_serializes_final_slot(self):
+        another = MediaLibrary(self.root)
+
+        def attempt(library):
+            try:
+                return library.upload(io.BytesIO(image_bytes()), 'photo.png')
+            except ValueError as exc:
+                return str(exc)
+
+        with patch.object(media_library, 'MAX_LIBRARY_IMAGES', 1):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(attempt, (self.library, another)))
+            self.assertEqual(sum(isinstance(item, dict) for item in results), 1)
+            self.assertEqual(sum(isinstance(item, str) and 'image limit' in item for item in results), 1)
+            with patch.object(media_library, '_decode') as decode:
+                with self.assertRaisesRegex(ValueError, 'image limit'):
+                    self.upload()
+                decode.assert_not_called()
+        self.assertEqual(len(self.library.list()), 1)
+
+    def test_low_disk_space_is_checked_before_decode_and_again_before_write(self):
+        DiskUsage = namedtuple('DiskUsage', 'total used free')
+        reserve = media_library.MIN_FREE_DISK_BYTES
+        with patch.object(media_library.shutil, 'disk_usage', return_value=DiskUsage(0, 0, reserve)), \
+                patch.object(media_library, '_decode') as decode:
+            with self.assertRaisesRegex(ValueError, 'low on free storage'):
+                self.upload()
+            decode.assert_not_called()
+        with patch.object(media_library.shutil, 'disk_usage', side_effect=[
+            DiskUsage(0, 0, reserve + 100_000), DiskUsage(0, 0, reserve + 4096),
+        ]):
+            with self.assertRaisesRegex(ValueError, 'low on free storage'):
+                self.upload()
+        self.assertEqual(self.library.list(), [])
+        self.assertEqual(list((self.root / 'images').iterdir()), [])
+        self.assertEqual(list((self.root / 'thumbnails').iterdir()), [])
 
     def test_upload_reads_only_the_byte_limit_plus_one_and_checks_decoded_pixels(self):
         class Stream:

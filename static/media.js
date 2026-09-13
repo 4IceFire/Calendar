@@ -72,7 +72,7 @@ function initializeMediaPage() {
       const response = await fetch(path, settings);
       const payload = await response.json().catch(function() { return {}; });
       if (!response.ok || payload.ok === false) {
-        const error = new Error(payload.error || 'The request could not be completed. Please try again.');
+        const error = new Error(payload.message || payload.error || 'The request could not be completed. Please try again.');
         error.status = response.status;
         throw error;
       }

@@ -90,6 +90,48 @@ test('Media back buttons preserve the selected output through upload and inputs'
   await expect(page.locator('#routing-current')).toContainText('Hall');
 });
 
+test('Upload safeguards show helpful errors and leave retry under user control', async ({page, request}) => {
+  const errors = collectPageErrors(page);
+  await page.goto('/media/upload?output=1');
+  await chooseUpload(page, request, 'Upload security check');
+  let displayCalls = 0;
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/media/display') displayCalls += 1;
+  });
+  let failure = {};
+  await page.route('**/api/media/upload', route => route.fulfill({
+    status: failure.status, contentType: 'application/json',
+    body: JSON.stringify({ok: false, error: failure.code, message: failure.message}),
+  }));
+  for (const rejection of [
+    {status: 429, code: 'upload_busy', message: 'Another image is being uploaded. Try again shortly.'},
+    {status: 429, code: 'rate_limited', message: 'Too many image uploads. Wait a minute and try again.'},
+    {status: 413, code: 'request_too_large', message: 'This image is too large to upload.'},
+  ]) {
+    failure = rejection;
+    await page.locator('#media-upload-button').click();
+    await expect(page.locator('#media-progress-message')).toHaveText(rejection.message);
+    await expect(page.locator('#media-upload-button')).toBeEnabled();
+    await expect(page).toHaveURL(/\/media\/upload\?output=1$/);
+  }
+  expect(displayCalls).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+test('Image names containing markup remain plain text in the picker', async ({page}) => {
+  const unsafeName = '<img src=x onerror="window.mediaNameExecuted=true">';
+  await page.route('**/api/media', async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.items[0].name = unsafeName;
+    await route.fulfill({response, json: body});
+  });
+  await page.goto('/media?output=1');
+  await expect(page.locator('.media-tile-name').filter({hasText: unsafeName})).toHaveText(unsafeName);
+  await expect(page.locator('#media-grid [onerror]')).toHaveCount(0);
+  expect(await page.evaluate(() => window.mediaNameExecuted)).toBeUndefined();
+});
+
 test('Failed display retains the selected image and requires an explicit retry', async ({page}) => {
   const display = mockDisplay(page, {failed: true});
   await display.ready;

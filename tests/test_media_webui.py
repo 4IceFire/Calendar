@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PIL import Image
+from werkzeug.datastructures import MultiDict
 
 import api_security
 import webui
@@ -90,6 +91,8 @@ class MediaWebTests(unittest.TestCase):
         webui._init_auth_db()
         with webui._api_rate_lock:
             webui._api_rate_events.clear()
+        with webui._media_upload_rate_lock:
+            webui._media_upload_rate_events.clear()
         self.client = webui.app.test_client()
         with self.client.session_transaction() as state:
             state['_csrf'] = 'media-csrf'
@@ -107,6 +110,7 @@ class MediaWebTests(unittest.TestCase):
                 self.assertEqual(image.status_code, 200)
                 self.assertEqual(image.mimetype, 'image/png')
                 self.assertIn('no-store', image.headers['Cache-Control'])
+                self.assertEqual(image.headers['X-Content-Type-Options'], 'nosniff')
         self.manager.load.assert_not_called()
 
     def test_media_page_renders_without_loading_hardware(self):
@@ -151,6 +155,208 @@ class MediaWebTests(unittest.TestCase):
             result = self.client.post('/api/media/upload', data={'file': (_image(), 'test.png')}, headers=headers)
             self.assertEqual(result.status_code, 403)
         self.assertEqual(len(self.library.list()), 1)
+
+    def test_upload_denies_permission_origin_and_header_csrf_before_parsing(self):
+        for path in ('/api/media/upload', '/api/v1/media/upload'):
+            for grants, headers in (
+                ({'page:media'}, self.headers),
+                ({'page:media', 'page:media_upload'}, {**self.headers, 'Origin': 'https://untrusted.invalid'}),
+                ({'page:media', 'page:media_upload'}, {**self.headers, 'X-CSRF-Token': 'wrong'}),
+            ):
+                with self.subTest(path=path, grants=grants, headers=headers):
+                    self.grants = grants
+                    with patch.object(webui.app.request_class, '_load_form_data',
+                                      side_effect=AssertionError('Rejected requests must not parse uploads')):
+                        response = self.client.post(path, data={'file': (_image(), 'test.png')}, headers=headers)
+                    self.assertEqual(response.status_code, 403)
+        self.assertEqual(len(self.library.list()), 1)
+
+    def test_upload_accepts_form_csrf_and_large_valid_file_with_bounded_parser(self):
+        self.grants.add('page:media_upload')
+        # Random pixels produce a PNG larger than the multipart parser's read
+        # buffer, checking that form-memory limits still allow normal files.
+        import random
+        image = io.BytesIO()
+        Image.frombytes('RGB', (300, 300), random.Random(0).randbytes(300 * 300 * 3)).save(image, format='PNG')
+        self.assertGreater(image.tell(), 128 * 1024)
+        image.seek(0)
+        response = self.client.post('/api/media/upload',
+                                    data={'file': (image, 'photo.png'), 'name': 'Photo', '_csrf': 'media-csrf'},
+                                    headers={'Origin': 'http://localhost'})
+        self.assertEqual(response.status_code, 201)
+
+    def test_upload_rejects_duplicate_files_fields_and_unexpected_parts(self):
+        self.grants.add('page:media_upload')
+        for path in ('/api/media/upload', '/api/v1/media/upload'):
+            for extra in (
+                [('file', (_image(), 'second.png'))],
+                [('other_file', (_image(), 'second.png'))],
+                [('name', 'First'), ('name', 'Second')],
+                [('preset', 'true')],
+                [('name', ' ' * 1025)],
+            ):
+                with self.subTest(path=path, fields=[entry[0] for entry in extra]):
+                    # Flask closes each submitted stream; create a fresh
+                    # second file for each request using its original bytes.
+                    fields = [('file', (_image(), 'photo.png'))]
+                    for key, value in extra:
+                        fields.append((key, (_image(), value[1]) if isinstance(value, tuple) else value))
+                    response = self.client.post(path, data=MultiDict(fields), headers=self.headers)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.get_json()['error'], 'invalid_upload')
+        self.assertEqual(len(self.library.list()), 1)
+
+    def test_upload_limits_multipart_parts_and_text_before_decode(self):
+        self.grants.add('page:media_upload')
+        for path in ('/api/media/upload', '/api/v1/media/upload'):
+            for extra in (
+                [('padding' + str(index), 'x') for index in range(3)],
+                [('name', 'x' * (128 * 1024 + 1))],
+            ):
+                with self.subTest(path=path, extra_count=len(extra)):
+                    with patch.object(self.library, 'upload', side_effect=AssertionError('Must reject before image decode')):
+                        response = self.client.post(path,
+                                                    data=MultiDict([('file', (_image(), 'test.png')), *extra]),
+                                                    headers=self.headers)
+                    self.assertEqual(response.status_code, 413)
+                    self.assertEqual(response.get_json()['error'], 'request_too_large')
+        self.assertEqual(len(self.library.list()), 1)
+
+    def test_upload_does_not_trust_filename_or_declared_content_type(self):
+        self.grants.add('page:media_upload')
+        response = self.client.post('/api/media/upload',
+                                    data={'file': (io.BytesIO(b'<html>Not an image</html>'), 'photo.png', 'image/png')},
+                                    headers=self.headers)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(self.library.list()), 1)
+        response = self.client.post('/api/media/upload',
+                                    data={'file': (_image(), '../../outside.html', 'text/html'), 'name': 'Safe pixels'},
+                                    headers=self.headers)
+        self.assertEqual(response.status_code, 201)
+        item = response.get_json()['item']
+        self.assertEqual(self.library.path(item['id']).parent, self.library.path(self.item['id']).parent)
+        self.assertEqual(self.library.path(item['id']).name, item['id'] + '.png')
+        self.assertFalse((self.root / 'outside.html').exists())
+        with self.client.get(item['url']) as image:
+            self.assertEqual(image.mimetype, 'image/png')
+            self.assertTrue(image.data.startswith(b'\x89PNG\r\n\x1a\n'))
+
+    def test_upload_rate_limit_is_shared_by_aliases_and_checked_before_parsing(self):
+        self.grants.add('page:media_upload')
+        with patch.object(webui, '_MEDIA_UPLOADS_PER_MINUTE', 2):
+            for path in ('/api/media/upload', '/api/v1/media/upload'):
+                response = self.client.post(path, data={'file': (_image(), 'test.png')}, headers=self.headers)
+                self.assertEqual(response.status_code, 201)
+            with patch.object(webui.app.request_class, '_load_form_data',
+                              side_effect=AssertionError('Rate-limited uploads must not be parsed')):
+                response = self.client.post('/api/media/upload', data={'file': (_image(), 'test.png')},
+                                            headers=self.headers)
+            self.assertEqual(response.status_code, 429)
+            self.assertEqual(response.get_json()['error'], 'rate_limited')
+            self.assertGreater(int(response.headers['Retry-After']), 0)
+            # Filling the dedicated upload allowance does not block a normal
+            # media read or an unrelated API write.
+            self.assertEqual(self.client.get('/api/media').status_code, 200)
+            self.grants.add('page:config')
+            self.assertEqual(self.client.patch('/api/media/' + self.item['id'], json={'name': 'Updated'},
+                                               headers=self.headers).status_code, 200)
+            with webui._media_upload_rate_lock:
+                webui._media_upload_rate_events['user:42'] = webui.deque([webui.time.monotonic() - 61] * 2)
+            response = self.client.post('/api/media/upload', data={'file': (_image(), 'recovered.png')},
+                                        headers=self.headers)
+            self.assertEqual(response.status_code, 201)
+
+    def test_only_one_upload_can_parse_or_decode_at_a_time(self):
+        self.grants.add('page:media_upload')
+        entered, release = threading.Event(), threading.Event()
+        results = []
+        original_upload = self.library.upload
+
+        def hold_upload(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('test timed out')
+            return original_upload(*args, **kwargs)
+
+        def first_upload():
+            with webui.app.test_client() as client:
+                with client.session_transaction() as state:
+                    state['_csrf'] = 'media-csrf'
+                results.append(client.post('/api/media/upload', data={'file': (_image(), 'first.png')},
+                                            headers=self.headers).status_code)
+
+        with patch.object(self.library, 'upload', side_effect=hold_upload):
+            worker = threading.Thread(target=first_upload)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                for headers, form in (
+                    (self.headers, {}),
+                    ({'Origin': 'http://localhost'}, {'_csrf': 'media-csrf'}),
+                ):
+                    with patch.object(webui.app.request_class, '_load_form_data',
+                                      side_effect=AssertionError('Busy uploads must not be parsed')):
+                        response = self.client.post('/api/v1/media/upload',
+                                                    data={'file': (_image(), 'next.png'), **form}, headers=headers)
+                    self.assertEqual(response.status_code, 429)
+                    self.assertEqual(response.get_json()['error'], 'upload_busy')
+                    self.assertEqual(response.headers['Retry-After'], '2')
+            finally:
+                release.set()
+                worker.join(6)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [201])
+        response = self.client.post('/api/media/upload', data={'file': (_image(), 'after.png')}, headers=self.headers)
+        self.assertEqual(response.status_code, 201)
+
+    def test_failed_upload_releases_admission_for_next_request(self):
+        self.grants.add('page:media_upload')
+        for form, headers, expected in (
+            ({'file': (_image(), 'test.png'), '_csrf': 'wrong'}, {'Origin': 'http://localhost'}, 403),
+            ({'file': (io.BytesIO(b'Not an image'), 'test.png')}, self.headers, 400),
+            ({'file': (_image(), 'test.png'), 'name': 'x' * (128 * 1024 + 1)}, self.headers, 413),
+        ):
+            response = self.client.post('/api/media/upload', data=form, headers=headers)
+            self.assertEqual(response.status_code, expected)
+            response = self.client.post('/api/media/upload', data={'file': (_image(), 'next.png')}, headers=self.headers)
+            self.assertEqual(response.status_code, 201)
+
+    def test_rejected_multipart_upload_closes_partial_temporary_files(self):
+        self.grants.add('page:media_upload')
+        original_factory = webui.Request._get_file_stream
+        streams = []
+
+        def track_stream(request_object, *args, **kwargs):
+            stream = original_factory(request_object, *args, **kwargs)
+            streams.append(stream)
+            return stream
+
+        for path in ('/api/media/upload', '/api/v1/media/upload'):
+            for streamed in (False, True):
+                with self.subTest(path=path, streamed=streamed):
+                    streams.clear()
+                    with patch.object(webui.Request, '_get_file_stream', autospec=True, side_effect=track_stream):
+                        if streamed:
+                            self.cfg['api_upload_max_request_bytes'] = 1024
+                            body = (b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="test.png"\r\n'
+                                    b'Content-Type: image/png\r\n\r\n' + b'x' * 2048 + b'\r\n--boundary--\r\n')
+                            response = self.client.post(path, data=body, headers=self.headers,
+                                                        content_type='multipart/form-data; boundary=boundary',
+                                                        environ_overrides={'CONTENT_LENGTH': '', 'wsgi.input_terminated': True})
+                        else:
+                            self.cfg['api_upload_max_request_bytes'] = 4 * 1024 * 1024
+                            # Send the file first: Werkzeug's test builder
+                            # normally places text parts before all files.
+                            body = (b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="test.png"\r\n'
+                                    b'Content-Type: image/png\r\n\r\n' + _image().getvalue() + b'\r\n')
+                            for index in range(3):
+                                body += (f'--boundary\r\nContent-Disposition: form-data; name="padding{index}"\r\n\r\nx\r\n').encode()
+                            body += b'--boundary--\r\n'
+                            response = self.client.post(path, data=body, headers=self.headers,
+                                                        content_type='multipart/form-data; boundary=boundary')
+                    self.assertEqual(response.status_code, 413)
+                    self.assertTrue(streams, 'The parser must have created a partial file before rejecting the body')
+                    self.assertTrue(all(stream.closed for stream in streams))
 
     def test_upload_grant_saves_images_but_only_config_can_edit_presets_or_delete(self):
         self.grants.add('page:media_upload')
@@ -273,6 +479,7 @@ class MediaWebTests(unittest.TestCase):
         token = api_security.create_service_token(self.db, name='ATEM', scopes=['atem', 'config'])['token']
         for method, path in (('get', '/api/media'), ('get', '/api/atem/media/state'),
                              ('post', '/api/atem/media/load'), ('put', '/api/config/atem-media'),
+                             ('post', '/api/media/upload'), ('post', '/api/v1/media/upload'),
                              ('post', '/api/media/display'), ('post', '/api/v1/media/display'),
                              ('get', '/api/media/display/' + self.display_job['id'])):
             result = getattr(self.client, method)(path, headers={'Authorization': 'Bearer ' + token})

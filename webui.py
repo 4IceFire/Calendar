@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context, g
+from flask import Flask, Request, render_template, jsonify, request, redirect, url_for, session, abort, send_file, send_from_directory, Response, has_request_context, g
 import copy
 import fnmatch
 import gzip
@@ -343,7 +343,25 @@ except Exception:
 
     utils = _StubUtils()
 
+class _TDeckRequest(Request):
+    def _get_file_stream(self, total_content_length, content_type, filename=None, content_length=None):
+        stream = super()._get_file_stream(total_content_length, content_type, filename, content_length)
+        if self.path in ('/api/media/upload', '/api/v1/media/upload'):
+            # A rejected multipart parse can fail before Werkzeug publishes
+            # request.files. Retain those partial streams for prompt cleanup.
+            self.__dict__.setdefault('_media_parser_streams', []).append(stream)
+        return stream
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            for stream in self.__dict__.pop('_media_parser_streams', []):
+                stream.close()
+
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
+app.request_class = _TDeckRequest
 
 _BUILD_ID_LOCK = threading.Lock()
 _BUILD_ID_CACHE: str | None = None
@@ -3116,7 +3134,14 @@ def _csrf_token() -> str:
 
 def _validate_csrf() -> bool:
     try:
-        sent = request.form.get('_csrf') or request.headers.get('X-CSRF-Token')
+        # Browser media uploads send their token in the header. Validate it
+        # without parsing an untrusted multipart body first; retain form-token
+        # support for callers that do not send the header.
+        header = request.headers.get('X-CSRF-Token')
+        if _api_normalized_path() == '/api/media/upload' and header is not None:
+            sent = header
+        else:
+            sent = request.form.get('_csrf') or header
     except RequestEntityTooLarge:
         raise
     except Exception:
@@ -3788,6 +3813,26 @@ def _api_security_gate():
             )
             return _api_json_error(403, 'forbidden', 'Your groups do not grant access to this API capability.')
         if request.method in _API_MUTATING_METHODS:
+            if normalized == '/api/media/upload':
+                # These checks must precede form-based CSRF validation, which
+                # can otherwise parse uploads from a read-only media account
+                # or an untrusted browser origin before rejecting them.
+                if not _media_permissions()['upload']:
+                    return _media_action_denied('upload')
+                if not _api_same_origin_request():
+                    _api_security_event(
+                        'security.api.origin_denied',
+                        'Rejected a browser API write from an untrusted origin',
+                        details={'user_id': user_id, 'path': normalized, 'method': request.method},
+                    )
+                    return _api_json_error(403, 'invalid_origin', 'The request Origin or Referer is not trusted.')
+                # Header tokens can be rejected before reserving capacity.
+                # Form tokens require parsing, so admission must precede
+                # their validation to bound even that work to one upload.
+                if request.headers.get('X-CSRF-Token') is None or _validate_csrf():
+                    admission_error = _admit_media_upload(f'user:{user_id}')
+                    if admission_error is not None:
+                        return admission_error
             if not _validate_csrf():
                 _api_security_event(
                     'security.api.csrf_denied',
@@ -3975,6 +4020,11 @@ def _auth_gate():
         from media_library import MAX_UPLOAD_BYTES
         _, upload_limit = _api_request_within_size_limit('/api/media/upload')
         request.max_content_length = min(upload_limit, MAX_UPLOAD_BYTES + 1024 * 1024)
+        # One image, its optional name and an optional form CSRF token. Keep
+        # parser buffering above Werkzeug's 64 KiB read size while bounding
+        # text fields and multipart headers independently of the image bytes.
+        request.max_form_parts = 3
+        request.max_form_memory_size = 128 * 1024
 
     view_as_response = _view_as_request_gate()
     if view_as_response is not None:
@@ -7357,6 +7407,10 @@ def routing_page():
 
 _media_library_lock = threading.Lock()
 _media_operation_lock = threading.RLock()
+_media_upload_slot = threading.BoundedSemaphore(1)
+_media_upload_rate_lock = threading.Lock()
+_media_upload_rate_events: dict[str, deque[float]] = {}
+_MEDIA_UPLOADS_PER_MINUTE = 10
 _media_library_instance = None
 _media_routing_instance = None
 _media_routing_lock = threading.Lock()
@@ -7366,6 +7420,46 @@ _MEDIA_CONFIG_DEFAULTS = {
     'atem_media_destinations': [],
 }
 _MEDIA_ACTIVE_JOBS = {'queued', 'preparing', 'uploading', 'selecting', 'loading', 'routing'}
+
+
+def _admit_media_upload(principal_key: str):
+    """Bound multipart parsing/decoding and attempts independently of controls."""
+    if getattr(g, '_media_upload_admitted', False):
+        return None
+    now = time.monotonic()
+    cutoff = now - 60.0
+    with _media_upload_rate_lock:
+        events = _media_upload_rate_events.setdefault(principal_key, deque())
+        while events and events[0] <= cutoff:
+            events.popleft()
+        if len(events) >= _MEDIA_UPLOADS_PER_MINUTE:
+            retry_after = max(1, int(61 - (now - events[0])))
+        else:
+            events.append(now)
+            retry_after = 0
+        if len(_media_upload_rate_events) > 2000:
+            stale = [key for key, values in _media_upload_rate_events.items() if not values or values[-1] <= cutoff]
+            for key in stale[:500]:
+                _media_upload_rate_events.pop(key, None)
+    if retry_after:
+        log_event('security.media.upload_rate_limited', 'Limited repeated image upload attempts', status='warning')
+        response = _api_json_error(429, 'rate_limited', 'Too many image uploads. Wait a minute and try again.',
+                                   retryAfter=retry_after)
+        response.headers['Retry-After'] = str(retry_after)
+        return response
+    if not _media_upload_slot.acquire(blocking=False):
+        response = _api_json_error(429, 'upload_busy', 'Another image is being uploaded. Try again shortly.', retryAfter=2)
+        response.headers['Retry-After'] = '2'
+        return response
+    g._media_upload_admitted = True
+    return None
+
+
+@app.teardown_request
+def _release_media_upload(_error=None):
+    if getattr(g, '_media_upload_admitted', False):
+        g._media_upload_admitted = False
+        _media_upload_slot.release()
 
 
 def _media_library_root() -> Path:
@@ -7663,6 +7757,23 @@ def api_media_list():
 def api_media_upload():
     if not _media_permissions()['upload']:
         return _media_action_denied('upload')
+    # Normally admitted by the authenticated API gate, before CSRF parsing.
+    # Keep the resource bound when the site's global auth is disabled too.
+    principal_key = (f'user:{current_user.get_id()}' if getattr(current_user, 'is_authenticated', False)
+                     else f'address:{request.remote_addr or "unknown"}')
+    admission_error = _admit_media_upload(principal_key)
+    if admission_error is not None:
+        return admission_error
+    if request.mimetype != 'multipart/form-data':
+        return _api_json_error(400, 'invalid_upload', 'Upload one image using the image upload form.')
+    if (set(request.files) - {'file'} or len(request.files.getlist('file')) > 1
+            or set(request.form) - {'name', '_csrf'}
+            or any(len(request.form.getlist(key)) != 1 for key in request.form)):
+        return _api_json_error(400, 'invalid_upload', 'Upload one image with an optional image name.')
+    # Reject oversized metadata before image decoding even if whitespace
+    # normalization would turn the supplied name into a short valid name.
+    if any(len(value) > 1024 for value in request.form.values()):
+        return _api_json_error(400, 'invalid_upload', 'The image name or form token is too long.')
     upload = request.files.get('file')
     if upload is None:
         return _api_json_error(400, 'missing_file', 'Choose an image to upload.')

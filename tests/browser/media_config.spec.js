@@ -33,7 +33,7 @@ test('Media Config combines available players, library management and a collapse
 
 test('Media Config uploads, renames, saves a preset and deletes it', async ({page, request}, testInfo) => {
   const errors = collectPageErrors(page);
-  const name = 'Config Team Night ' + testInfo.project.name + ' ' + Date.now();
+  const name = '<img src=x onerror="window.mediaNameExecuted=true"> ' + testInfo.project.name + ' ' + Date.now();
   const renamed = name + ' updated';
   await openConfig(page);
   const image = await request.get('/__media_fixture__/upload.png');
@@ -43,6 +43,8 @@ test('Media Config uploads, renames, saves a preset and deletes it', async ({pag
   await page.locator('#media-upload-button').click();
   await expect(page.locator('#media-message')).toContainText('Image added to the library.');
   await expect(page.locator('#media-selected-name')).toHaveText(name);
+  await expect(page.locator('#media-grid [onerror]')).toHaveCount(0);
+  expect(await page.evaluate(() => window.mediaNameExecuted)).toBeUndefined();
   await page.locator('#media-edit-name').fill(renamed);
   await page.locator('#media-edit-preset').check();
   await page.locator('#media-save-image').click();
@@ -57,6 +59,22 @@ test('Media Config uploads, renames, saves a preset and deletes it', async ({pag
   await expect(page.locator('#media-message')).toHaveText('Image deleted from the library.');
   await expect(page.locator('#media-grid .media-tile')).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test('Config explains an upload rate limit without adding an image', async ({page, request}) => {
+  await openConfig(page);
+  const initialCount = await page.locator('#media-grid .media-tile').count();
+  const image = await request.get('/__media_fixture__/upload.png');
+  await page.locator('#media-upload-panel > summary').click();
+  await page.locator('#media-upload-file').setInputFiles({name: 'photo.png', mimeType: 'image/png', buffer: await image.body()});
+  await page.route('**/api/media/upload', route => route.fulfill({
+    status: 429, contentType: 'application/json',
+    body: JSON.stringify({ok: false, error: 'rate_limited', message: 'Too many image uploads. Wait a minute and try again.'}),
+  }));
+  await page.locator('#media-upload-button').click();
+  await expect(page.locator('#media-message')).toHaveText('Too many image uploads. Wait a minute and try again.');
+  await expect(page.locator('#media-upload-button')).toBeEnabled();
+  await expect(page.locator('#media-grid .media-tile')).toHaveCount(initialCount);
 });
 
 test('Media Config saves only unique VideoHub inputs and preserves unmapped players', async ({page}) => {

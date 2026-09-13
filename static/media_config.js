@@ -60,7 +60,7 @@ function initializeMediaConfigPage() {
       const response = await fetch(path, settings);
       const payload = await response.json().catch(function() { return {}; });
       if (!response.ok || payload.ok === false) {
-        throw new Error(payload.error || ('Request failed (' + response.status + '). Refresh the page if your session has expired.'));
+        throw new Error(payload.message || payload.error || ('Request failed (' + response.status + '). Refresh the page if your session has expired.'));
       }
       if (response.redirected || !response.headers.get('content-type') || response.headers.get('content-type').indexOf('application/json') === -1) {
         throw new Error('Your session may have expired. Refresh the page to sign in again.');

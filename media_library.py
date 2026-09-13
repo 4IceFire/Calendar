@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import threading
 import uuid
@@ -26,12 +27,18 @@ from pillow_heif import register_heif_opener
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_DECODED_BYTES = 160_000_000
+MAX_STORED_IMAGE_BYTES = 64 * 1024 * 1024
+MAX_LIBRARY_IMAGES = 1000
+MAX_LIBRARY_BYTES = 5 * 1024 * 1024 * 1024
+MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
 MAX_FRAME_PIXELS = 4096 * 2160
 THUMBNAIL_SIZE = (480, 270)
 MAX_NAME_LENGTH = 120
 SUPPORTED_FORMATS = ("JPEG", "PNG", "WEBP", "HEIF")
 
-register_heif_opener(thumbnails=False)
+# Only the primary still is used. Keep libheif's built-in security limits on
+# (its default) and avoid decoding auxiliary/depth images or multiple threads.
+register_heif_opener(thumbnails=False, depth_images=False, aux_images=False, decode_threads=1)
 
 _locks_guard = threading.Lock()
 _root_locks: dict[str, threading.RLock] = {}
@@ -68,22 +75,31 @@ def _atomic_write(path: Path, data: bytes) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _validate_dimensions(source: Image.Image) -> None:
+    width, height = source.size
+    if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+        raise ValueError("Image exceeds the 40 megapixel limit")
+    # This bounds a decoded buffer, not the process's total memory: the decoder
+    # and normalization can hold additional copies. HTTP upload admission is
+    # separately limited to one active request per server process.
+    bytes_per_sample = 4 if source.mode in ("I", "F") else (2 if "16" in source.mode else 1)
+    decoded_size = width * height * max(4, len(source.getbands()) * bytes_per_sample)
+    if decoded_size > MAX_DECODED_BYTES:
+        raise ValueError("Decoded image exceeds the memory limit")
+
+
 def _decode(content: bytes) -> Image.Image:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(content), formats=SUPPORTED_FORMATS) as source:
-                width, height = source.size
-                if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
-                    raise ValueError("Image exceeds the 40 megapixel limit")
-                # Account for higher bit-depth decoder output as well as RGBA.
-                bytes_per_sample = 4 if source.mode in ("I", "F") else (2 if "16" in source.mode else 1)
-                decoded_size = width * height * max(4, len(source.getbands()) * bytes_per_sample)
-                if decoded_size > MAX_DECODED_BYTES:
-                    raise ValueError("Decoded image exceeds the memory limit")
+                _validate_dimensions(source)
                 if getattr(source, "n_frames", 1) != 1 or getattr(source, "is_animated", False):
                     raise ValueError("Animated or multiple-image files are not supported; upload one still image")
                 source.load()
+                # Some decoders (including HEIF) can update size/mode on load.
+                # Recheck before allocating orientation/conversion copies.
+                _validate_dimensions(source)
                 oriented = ImageOps.exif_transpose(source)
                 try:
                     profile = oriented.info.get("icc_profile")
@@ -110,10 +126,17 @@ def _decode(content: bytes) -> Image.Image:
         raise ValueError("Upload a valid JPEG, PNG, WebP, HEIC or HEIF still image") from exc
 
 
+class _BoundedPNGBuffer(io.BytesIO):
+    def write(self, data):
+        if self.tell() + len(data) > MAX_STORED_IMAGE_BYTES:
+            raise ValueError("Prepared image exceeds the 64 MB limit. Resize the image and try again")
+        return super().write(data)
+
+
 def _png(image: Image.Image) -> bytes:
-    output = io.BytesIO()
-    image.save(output, format="PNG")
-    return output.getvalue()
+    with _BoundedPNGBuffer() as output:
+        image.save(output, format="PNG")
+        return output.getvalue()
 
 
 class MediaLibrary:
@@ -190,10 +213,37 @@ class MediaLibrary:
                 raise KeyError("Image not found")
             return dict(entry)
 
+    def _check_upload_capacity(self, entries: dict[str, dict], additional_bytes: int = 0) -> None:
+        """Check actual assets, including thumbnails/orphans, under the root lock.
+
+        Existing libraries above these limits remain readable and deletable.
+        A second check after encoding accounts for compressed-image expansion
+        and changes to free space made by other applications during decoding.
+        """
+        if len(entries) >= MAX_LIBRARY_IMAGES:
+            raise ValueError("Media library has reached its image limit. Ask an administrator to remove unused images")
+        stored_bytes = 0
+        for folder_name in ("images", "thumbnails"):
+            folder = self.root / folder_name
+            if not folder.resolve().is_relative_to(self.root):
+                raise OSError("Media library image path is outside its storage directory")
+            for path in folder.iterdir():
+                if path.is_file():
+                    stored_bytes += path.stat().st_size
+        if stored_bytes >= MAX_LIBRARY_BYTES or stored_bytes + additional_bytes > MAX_LIBRARY_BYTES:
+            raise ValueError("Media library has reached its storage limit. Ask an administrator to remove unused images")
+        # Atomic index replacement needs space for the old and new index at once.
+        index_bytes = self._index.stat().st_size if self._index.exists() else 0
+        required_free = MIN_FREE_DISK_BYTES + additional_bytes + index_bytes + 4096
+        if shutil.disk_usage(self.root).free < required_free:
+            raise ValueError("The server is low on free storage. Ask an administrator to free space before uploading")
+
     def upload(self, stream: BinaryIO, filename: str, name: str = "") -> dict:
         filename = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1]
         label = _name(name or Path(filename).stem or "Uploaded image")
         with self._lock:
+            entries = self._read()
+            self._check_upload_capacity(entries)
             content = stream.read(MAX_UPLOAD_BYTES + 1)
             if not isinstance(content, bytes) or not content:
                 raise ValueError("Image file is empty or unreadable")
@@ -205,7 +255,7 @@ class MediaLibrary:
                 with image.copy() as thumbnail:
                     thumbnail.thumbnail(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
                     preview = _png(thumbnail)
-            entries = self._read()
+            self._check_upload_capacity(entries, len(encoded) + len(preview))
             image_id = uuid.uuid4().hex
             entry = {
                 "id": image_id, "name": label, "width": width, "height": height,
