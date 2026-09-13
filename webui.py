@@ -7473,8 +7473,7 @@ def routing_page():
     return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs,
                            media_available=can_access('page:media'), media_notice=notice,
                            presets_available=can_access('page:routing_presets'),
-                           selected_preset=selected_preset,
-                           hide_connection_status=True)
+                           selected_preset=selected_preset)
 
 
 _media_library_lock = threading.Lock()
