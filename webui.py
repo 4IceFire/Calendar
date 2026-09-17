@@ -2356,9 +2356,11 @@ def require_page(page_key: str, friendly_name: str):
 _PAGE_PREREQUISITES = {
     'page:media': ('page:routing',),
     'page:media_upload': ('page:routing', 'page:media'),
+    'page:media_save': ('page:routing', 'page:media', 'page:media_upload'),
     'page:routing_presets': ('page:routing',),
 }
 _register_page('page:media_upload', 'Media: Upload images')
+_register_page('page:media_save', 'Media: Save uploads to library')
 _register_page('page:routing_presets', 'Routing: Presets')
 
 
@@ -3082,6 +3084,7 @@ _PAGE_LANDING_PATHS = (
     ('page:surface_controls', '/surface-controls'),
     ('page:templates', '/templates'),
     ('page:api_reference', '/api-reference'),
+    ('page:media_library', '/media-library'),
     ('page:config', '/config'),
     ('page:console', '/console'),
     ('page:admin', '/admin/permissions'),
@@ -3390,11 +3393,11 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
     if p == '/api/config/atem-media':
         return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
     if p.startswith('/api/atem/media/'):
-        return {'scope': 'atem', 'pages': ('page:config',), 'service_tokens': False}
+        return {'scope': 'atem', 'pages': ('page:config', 'page:media_library'), 'service_tokens': False}
     if p == '/api/media/display' or p.startswith('/api/media/display/'):
         return {'scope': 'atem', 'pages': ('page:media',), 'service_tokens': False}
     if p == '/api/media' or p.startswith('/api/media/'):
-        return {'scope': 'atem', 'pages': ('page:media', 'page:config'), 'service_tokens': False}
+        return {'scope': 'atem', 'pages': ('page:media', 'page:config', 'page:media_library'), 'service_tokens': False}
     if p.startswith('/api/admin/'):
         return {'scope': 'admin', 'pages': ('page:admin',)}
     if p.startswith('/api/config') or p.startswith('/api/companion-surfaces-config'):
@@ -4070,10 +4073,10 @@ def _auth_gate():
         from media_library import MAX_UPLOAD_BYTES
         _, upload_limit = _api_request_within_size_limit('/api/media/upload')
         request.max_content_length = min(upload_limit, MAX_UPLOAD_BYTES + 1024 * 1024)
-        # One image, its optional name and an optional form CSRF token. Keep
+        # One image, its name, temporary flag and optional form CSRF token. Keep
         # parser buffering above Werkzeug's 64 KiB read size while bounding
         # text fields and multipart headers independently of the image bytes.
-        request.max_form_parts = 3
+        request.max_form_parts = 4
         request.max_form_memory_size = 128 * 1024
 
     view_as_response = _view_as_request_gate()
@@ -6238,7 +6241,7 @@ def admin_permissions_page():
         conn.close()
 
     pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()
-                    if k not in ('page:media', 'page:media_upload', 'page:routing_presets')], key=lambda x: x[1].lower())
+                    if k not in ('page:media', 'page:media_upload', 'page:media_save', 'page:routing_presets')], key=lambda x: x[1].lower())
     group_to_pages: dict[int, set[str]] = {}
     for gp in group_pages or []:
         try:
@@ -7486,6 +7489,7 @@ _media_library_instance = None
 _media_routing_instance = None
 _media_routing_lock = threading.Lock()
 _MEDIA_CONFIG_DEFAULTS = {
+    'media_temporary_retention_days': 7,
     'atem_media_enabled': False,
     'atem_media_node_path': '',
     'atem_media_destinations': [],
@@ -7580,10 +7584,11 @@ def _serialize_media_configuration(fn):
 
 def _media_permissions() -> dict[str, bool]:
     return {
-        'upload': bool(can_access('page:config') or
+        'upload': bool(can_access('page:media_library') or
                        (can_access('page:media') and can_access('page:media_upload'))),
-        'manage': bool(can_access('page:config')),
-        'load': bool(can_access('page:media')),
+        'manage': bool(can_access('page:media_library')),
+        'save': bool(can_access('page:media_library') or can_access('page:media_save')),
+        'load': bool(can_access('page:media_library')),
     }
 
 
@@ -7617,21 +7622,22 @@ def _media_page_context():
         item = next((item for item in state.get('outputs', []) if item.get('number') == output), {})
         label = str(item.get('label') or f'Output {output}')
     permissions = _media_permissions()
-    # Config privileges are intentionally confined to the management page.
+    # Library privileges do not replace Routing's upload permission.
     permissions['upload'] = bool(can_access('page:media') and can_access('page:media_upload'))
     return {'media_permissions': permissions, 'output': output, 'output_label': label,
-            'can_display': bool(output and _media_display_allowed()), 'hide_connection_status': True}
+            'can_display': bool(output and _media_display_allowed()), 'hide_connection_status': True,
+            'retention_days': utils.get_config().get('media_temporary_retention_days', 7)}
 
 
 def _require_media_read(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
-        if not (can_access('page:media') or can_access('page:config')):
+        if not (can_access('page:media') or can_access('page:config') or can_access('page:media_library')):
             media_id = kwargs.get('media_id')
             if not any(item['media_id'] == media_id for item in _visible_routing_presets()):
                 abort(403)
         return fn(*args, **kwargs)
-    wrapped._required_any_page_keys = ('page:media', 'page:config', 'page:routing_presets')
+    wrapped._required_any_page_keys = ('page:media', 'page:config', 'page:media_library', 'page:routing_presets')
     return wrapped
 
 
@@ -7640,18 +7646,61 @@ def _media_action_denied(action: str):
               status='warning', details={'action': action})
     message = {
         'upload': 'Uploading images requires permission to upload media.',
-        'manage': 'Managing images and presets requires Config access.',
+        'manage': 'Managing images requires Media Library access.',
         'load': 'Your permissions do not allow displaying images here.',
     }.get(action, 'Your permissions do not allow this media action.')
     return _api_json_error(403, 'forbidden', message)
 
 
 def _media_item_payload(item: dict) -> dict:
+    item = dict(item)
+    if not can_access('page:media_library'):
+        item.pop('uploaded_by', None)
+        item.pop('uploaded_by_id', None)
     return {
         **item,
         'url': url_for('media_image', media_id=item['id']),
         'thumbnail_url': url_for('media_thumbnail', media_id=item['id']),
     }
+
+
+def _media_authorized_item(media_id):
+    """Temporary uploads are private to their uploader and library managers."""
+    library = _get_media_library()
+    item = library.get(media_id)
+    if library.expired(item):
+        raise KeyError('Image has expired')
+    if item.get('temporary') and not can_access('page:media_library'):
+        owner = str(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+        if not owner or item.get('uploaded_by_id') != owner or not can_access('page:media_upload'):
+            abort(403)
+    return item
+
+
+def _cleanup_temporary_media():
+    """Serialize retention with uploads, promotion and background transfers."""
+    with _media_operation_lock:
+        if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+            return
+        library = _get_media_library()
+        preset_file = library.root / 'routing_presets.json'
+        protected = {item['media_id'] for item in _get_routing_preset_store().list()} if preset_file.exists() else set()
+        for item in library.purge_expired(protected_ids=protected):
+            log_event('media.image.expire', f"Deleted expired temporary image '{item['name']}'",
+                      source='system', status='success', target_type='media_image', target_id=item['id'],
+                      details=item, actor_user_id=None, actor_username='System', actor_display='System')
+
+
+def _media_retention_loop():
+    while True:
+        # Also runs when no browser is open; expired images survive downtime
+        # only until this first sweep after the server restarts.
+        time.sleep(60)
+        try:
+            if (_media_library_root() / 'index.json').exists():
+                _cleanup_temporary_media()
+        except Exception as error:
+            logging.getLogger(__name__).warning('Temporary media cleanup failed: %s', error)
 
 
 def _media_api_failure(action: str, error: Exception, status_code: int = 400):
@@ -7736,7 +7785,7 @@ def api_media_display():
     try:
         output, allowed_inputs = _media_output_access(data['output'])
         with _media_operation_lock:
-            _get_media_library().get(data['media_id'])
+            _media_authorized_item(data['media_id'])
             cfg = validate_media_config(utils.get_config())
             mappings = [item for item in cfg['atem_media_destinations'] if item.get('videohub_input')]
             if mappings and allowed_inputs and not any(item['videohub_input'] in allowed_inputs for item in mappings):
@@ -7897,7 +7946,8 @@ def _preset_destination(item, requested_output):
             raise ValueError('This preset has a fixed output.')
         requested_output = item['output']
     output, inputs = _media_output_access(requested_output)
-    _get_media_library().get(item['media_id'])
+    if _get_media_library().get(item['media_id']).get('temporary'):
+        raise ValueError('Keep this image in the saved library before using it in a preset.')
     from atem_media import validate_media_config
     cfg = validate_media_config(utils.get_config())
     mappings = [entry for entry in cfg['atem_media_destinations'] if entry.get('videohub_input')]
@@ -7926,7 +7976,7 @@ def api_routing_presets_config(identity=None):
             store = _get_routing_preset_store()
             if request.method == 'GET':
                 return jsonify(ok=True, presets=store.list(),
-                               images=[_media_item_payload(item) for item in _get_media_library().list()],
+                               images=[_media_item_payload(item) for item in _get_media_library().list() if not item.get('temporary')],
                                outputs=_get_videohub_state_snapshot().get('outputs', []))
             if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
                 return _api_json_error(409, 'busy', 'Wait for the current display or preset to finish.')
@@ -7942,7 +7992,8 @@ def api_routing_presets_config(identity=None):
                 result = None
             else:
                 data = validate_preset(data)
-                _get_media_library().get(data['media_id'])
+                if _get_media_library().get(data['media_id']).get('temporary'):
+                    raise ValueError('Keep this image in the saved library before using it in a preset.')
                 if not all(_preset_action_permitted(action) for action in data['actions']):
                     raise ValueError('Use existing operational TDeck API actions. Account, configuration and browser-only APIs cannot be delegated to a preset.')
                 result = store.save(data, identity, revision)
@@ -8069,11 +8120,14 @@ def media_upload_page():
 @app.route('/config/atem-media')
 @require_page('page:config', 'Config')
 def atem_media_setup_page():
-    permissions = _media_permissions()
-    permissions['load'] = bool(can_access('page:media'))
     return render_template('media_config.html', config_active_tab='atem-media',
-                           media_permissions=permissions,
-                           can_configure_media=True)
+                           media_permissions=_media_permissions())
+
+
+@app.route('/media-library')
+@require_page('page:media_library', 'Media Library')
+def media_library_page():
+    return render_template('media_library.html', media_permissions=_media_permissions())
 
 
 @app.route('/media/images/<media_id>.png')
@@ -8093,6 +8147,7 @@ def _send_media_image(media_id: str, *, thumbnail: bool):
         # Open while the operation lock is held so a concurrent deletion cannot
         # substitute a missing path between validation and response creation.
         with _media_operation_lock:
+            _media_authorized_item(media_id)
             path = _get_media_library().path(media_id, thumbnail=thumbnail)
             response = send_file(path, mimetype='image/png', conditional=True)
         response.headers['Cache-Control'] = 'private, no-store'
@@ -8105,8 +8160,15 @@ def _send_media_image(media_id: str, *, thumbnail: bool):
 @app.route('/api/media')
 def api_media_list():
     try:
+        collection = request.args.get('collection', 'saved')
+        if collection not in ('saved', 'temporary'):
+            raise ValueError('Choose saved or temporary images.')
+        if collection == 'temporary' and not can_access('page:media_library'):
+            return _media_action_denied('manage')
+        _cleanup_temporary_media()
         return jsonify({
-            'ok': True, 'items': [_media_item_payload(item) for item in _get_media_library().list()],
+            'ok': True, 'items': [_media_item_payload(item) for item in _get_media_library().list()
+                                 if bool(item.get('temporary')) == (collection == 'temporary')],
             'permissions': _media_permissions(),
         })
     except (ValueError, OSError, RuntimeError) as error:
@@ -8127,7 +8189,7 @@ def api_media_upload():
     if request.mimetype != 'multipart/form-data':
         return _api_json_error(400, 'invalid_upload', 'Upload one image using the image upload form.')
     if (set(request.files) - {'file'} or len(request.files.getlist('file')) > 1
-            or set(request.form) - {'name', '_csrf'}
+            or set(request.form) - {'name', '_csrf', 'temporary'}
             or any(len(request.form.getlist(key)) != 1 for key in request.form)):
         return _api_json_error(400, 'invalid_upload', 'Upload one image with an optional image name.')
     # Reject oversized metadata before image decoding even if whitespace
@@ -8138,7 +8200,19 @@ def api_media_upload():
     if upload is None:
         return _api_json_error(400, 'missing_file', 'Choose an image to upload.')
     try:
-        item = _get_media_library().upload(upload.stream, upload.filename or '', request.form.get('name', ''))
+        temporary_flag = request.form.get('temporary', 'true')
+        if temporary_flag not in ('true', 'false'):
+            raise ValueError('Temporary must be true or false.')
+        if temporary_flag == 'false' and not _media_permissions()['save']:
+            return _api_json_error(403, 'forbidden', 'Saving uploads to the library requires additional permission.')
+        with _media_operation_lock:
+            _cleanup_temporary_media()
+            item = _get_media_library().upload(
+                upload.stream, upload.filename or '', request.form.get('name', ''),
+                temporary=temporary_flag == 'true',
+                retention_days=utils.get_config().get('media_temporary_retention_days', 7),
+                uploaded_by=str(getattr(current_user, 'username', '') or 'Authentication disabled')[:200],
+                uploaded_by_id=str(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None)
         log_event('media.image.upload', f"Uploaded image '{item['name']}'", status='success',
                   target_type='media_image', target_id=item['id'], details=item)
         return jsonify({'ok': True, 'item': _media_item_payload(item)}), 201
@@ -8165,12 +8239,19 @@ def api_media_edit(media_id: str):
                 item = library.delete(media_id)
             else:
                 data = request.get_json(silent=True)
-                if not isinstance(data, dict) or set(data) - {'name', 'preset'}:
+                if not isinstance(data, dict) or set(data) - {'name', 'preset', 'keep'}:
                     raise ValueError('Supply an image name and/or preset flag.')
                 preset = data.get('preset', existing['preset'])
                 if not isinstance(preset, bool):
                     raise ValueError('Preset must be true or false.')
-                item = library.update(media_id, data.get('name', existing['name']), preset=preset)
+                keep = data.get('keep', False)
+                if not isinstance(keep, bool):
+                    raise ValueError('Keep must be true or false.')
+                if keep and library.expired(existing):
+                    raise ValueError('This image has expired. Upload it again to keep it.')
+                item = library.update(media_id, data.get('name', existing['name']), preset=preset, keep=keep)
+                if keep and existing.get('temporary'):
+                    action = 'media.image.keep'
         verb = 'Deleted' if request.method == 'DELETE' else 'Updated'
         log_event(action, f"{verb} image '{item['name']}'", status='success',
                   target_type='media_image', target_id=media_id, details=item)
@@ -8191,7 +8272,7 @@ def api_atem_media_state():
 @app.route('/api/atem/media/load', methods=['POST'])
 @_guard_videohub_write
 def api_atem_media_load():
-    if not (can_access('page:config') and _media_permissions()['load']):
+    if not can_access('page:media_library'):
         return _media_action_denied('load')
     from atem_media import BusyError
     data = request.get_json(silent=True)
@@ -8213,7 +8294,7 @@ def api_atem_media_load():
             media_id = data.get('media_id')
             if not isinstance(media_id, str):
                 raise ValueError('Choose a saved image.')
-            _get_media_library().get(media_id)
+            _media_authorized_item(media_id)
             job = _get_atem_media_manager().load(media_id, data.get('player'), on_complete=completed)
         log_event('atem.media.load.queued', 'Queued image for ATEM media player', status='info',
                   target_type='atem_media_player', target_id=job.get('player'), details=job)
@@ -15478,6 +15559,8 @@ def _register_api_v1_aliases() -> None:
 
 
 _register_api_v1_aliases()
+
+threading.Thread(target=_media_retention_loop, name='tdeck-media-retention', daemon=True).start()
 
 
 @app.after_request

@@ -1,0 +1,90 @@
+{% extends 'base.html' %}
+{% set page_title = 'Media Library' %}
+{% set page_subtitle = 'Manage saved images and review temporary uploads.' %}
+{% block head_extra %}<link rel="stylesheet" href="{{ static_asset('media.css') }}">{% endblock %}
+{% block content %}
+<div id="media-library-page" data-permissions='{{ media_permissions|tojson }}'>
+  <div id="media-message" class="d-none mb-3" role="status" aria-live="polite"></div>
+  <div class="media-workspace">
+    <section class="card media-library" aria-labelledby="media-library-title">
+      <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+          <h2 class="h5 mb-0" id="media-library-title">Images <span class="text-muted small" id="media-count"></span></h2>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="media-refresh-library">Refresh library</button>
+        </div>
+        <div class="d-flex flex-wrap gap-2 my-3" role="group" aria-label="Image collection">
+          <button type="button" class="btn btn-primary" id="media-saved-tab" aria-pressed="true">Saved images</button>
+          <button type="button" class="btn btn-outline-primary" id="media-temporary-tab" aria-pressed="false">Temporary images</button>
+        </div>
+        <p class="small text-muted mb-3" id="media-collection-help">Saved images are available to choose in Routing.</p>
+        {% if media_permissions.upload %}
+        <details id="media-upload-panel" class="media-disclosure mb-3">
+          <summary>Add an image</summary>
+          <form id="media-upload-form" class="mt-3">
+            <label class="form-label" for="media-upload-file">Choose a photo or image</label>
+            <input class="form-control" id="media-upload-file" name="file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif" required aria-describedby="media-upload-help">
+            <div class="form-text" id="media-upload-help">JPEG, PNG, WebP, HEIC or HEIF, up to 20 MB and 40 megapixels. Images are fitted to the ATEM video format with black bars where needed, without cropping.</div>
+            <label class="form-label mt-3" for="media-upload-name">Image name <span class="text-muted">(optional)</span></label>
+            <input class="form-control" id="media-upload-name" name="name" type="text" maxlength="120" placeholder="For example, Mother's Day">
+            <button class="btn btn-primary mt-3" id="media-upload-button" type="submit">Upload to library</button>
+          </form>
+        </details>
+        {% endif %}
+        <div class="media-library-toolbar mb-3">
+          <div class="flex-grow-1">
+            <label class="visually-hidden" for="media-search">Search images</label>
+            <input class="form-control" id="media-search" type="search" placeholder="Search images…" autocomplete="off">
+          </div>
+          <div>
+
+          </div>
+        </div>
+        <p class="text-muted small" id="media-library-status" role="status">Loading your image library…</p>
+        <div id="media-grid" class="media-grid" aria-label="Choose an image to manage" aria-busy="true"></div>
+      </div>
+    </section>
+
+    <section class="card media-selection" aria-labelledby="media-selection-title">
+      <div class="card-body">
+        <h2 class="h5 mb-3" id="media-selection-title">Manage image</h2>
+        <p class="text-muted" id="media-selection-empty">Select an image to preview it and edit its details.</p>
+        <div id="media-selection-content" class="d-none">
+          <div class="media-preview"><img id="media-preview-image" alt=""></div>
+          <h3 class="h6 mt-3 mb-1 media-wrap" id="media-selected-name"></h3>
+          <p class="small text-muted" id="media-selected-details"></p>
+          <p class="small mb-1" id="media-selected-uploader"></p>
+          <p class="small mb-1" id="media-selected-uploaded"></p>
+          <p class="small text-muted" id="media-selected-expiry"></p>
+          {% if media_permissions.manage %}
+          <form class="mt-3" id="media-edit-form">
+            <label class="form-label" for="media-edit-name">Image name</label>
+            <input class="form-control" id="media-edit-name" type="text" required maxlength="120">
+            {% if can_access('page:config') %}<a class="btn btn-sm btn-outline-secondary mt-3" id="media-create-preset" href="/config/routing-presets">Create routing preset with this image</a>{% endif %}
+            <button type="button" id="media-keep-image" class="btn btn-primary mt-3 d-none">Keep in saved library</button>
+            <div class="d-flex flex-wrap gap-2 mt-3">
+              <button type="submit" id="media-save-image" class="btn btn-sm btn-outline-primary">Save details</button>
+              <button type="button" id="media-delete-image" class="btn btn-sm btn-outline-danger">Delete image</button>
+            </div>
+          </form>
+          {% endif %}
+        </div>
+        {% if media_permissions.load %}
+        <details class="media-disclosure mt-4" id="media-test-panel">
+          <summary>Test a media player</summary>
+          <div class="mt-3">
+            <label class="form-label" for="media-player">Media player</label>
+            <select class="form-select" id="media-player" disabled><option value="">Loading players…</option></select>
+            <p class="small text-muted mt-2 mb-2" id="media-player-detail"></p>
+            <p class="small mb-3">All TVs or outputs already using this media player will change together when the image loads.</p>
+            <button type="button" class="btn btn-outline-primary w-100" id="media-load-button" disabled>Load selected image</button>
+            <p class="form-text mb-0" id="media-load-help">Select an image and a configured media player.</p>
+          </div>
+        </details>
+        {% endif %}
+        <div id="media-job" class="d-none mt-3" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ static_asset('media_config.js') }}"></script>{% endblock %}

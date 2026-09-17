@@ -12,14 +12,24 @@ async function openConfig(page) {
   const access = await openProtectedPage(page, '/config/atem-media');
   expect(access.ok, access.reason).toBe(true);
   await expect(page.locator('#media-config-page')).toBeVisible();
-  await expect(page.getByRole('button', {name: 'Select Welcome', exact: true})).toBeVisible();
   await expect(page.locator('#media-connection-status')).toHaveText('ATEM media connected');
 }
 
-test('Media Config combines available players, library management and a collapsed player test', async ({page}, testInfo) => {
+async function openLibrary(page) {
+  const access = await openProtectedPage(page, '/media-library');
+  expect(access.ok, access.reason).toBe(true);
+  await expect(page.locator('#media-library-page')).toBeVisible();
+  await expect(page.getByRole('button', {name: 'Select Welcome', exact: true})).toBeVisible();
+}
+
+test('Media setup is separate from library management and player tests', async ({page}, testInfo) => {
   const errors = collectPageErrors(page);
   await openConfig(page);
   await expect(page.locator('#media-setup')).toHaveAttribute('open', '');
+  await expect(page.locator('#media-grid')).toHaveCount(0);
+  await expect(page.locator('#media-retention-days')).toHaveValue('7');
+  await page.getByRole('link', {name: 'Open Media Library', exact: true}).click();
+  await expect(page.locator('#media-library-page')).toBeVisible();
   await expect(page.locator('#media-test-panel')).not.toHaveAttribute('open', '');
   await page.getByRole('button', {name: "Select Mother's Day", exact: true}).click();
   await expect(page.locator('#media-edit-form')).toBeVisible();
@@ -35,7 +45,7 @@ test('Media Config uploads, renames and deletes an image', async ({page, request
   const errors = collectPageErrors(page);
   const name = '<img src=x onerror="window.mediaNameExecuted=true"> ' + testInfo.project.name + ' ' + Date.now();
   const renamed = name + ' updated';
-  await openConfig(page);
+  await openLibrary(page);
   const image = await request.get('/__media_fixture__/upload.png');
   await page.locator('#media-upload-panel > summary').click();
   await page.locator('#media-upload-file').setInputFiles({name: 'phone-photo.png', mimeType: 'image/png', buffer: await image.body()});
@@ -60,7 +70,7 @@ test('Media Config uploads, renames and deletes an image', async ({page, request
 });
 
 test('Config explains an upload rate limit without adding an image', async ({page, request}) => {
-  await openConfig(page);
+  await openLibrary(page);
   const initialCount = await page.locator('#media-grid .media-tile').count();
   const image = await request.get('/__media_fixture__/upload.png');
   await page.locator('#media-upload-panel > summary').click();
@@ -104,8 +114,10 @@ test('Media Config saves only unique VideoHub inputs and preserves unmapped play
   await expect(page.locator('#media-setup-status')).toContainText('VideoHub input 7 is listed more than once');
   expect(saved).toBeNull();
   await added.locator('[data-field="videohub_input"]').fill('8');
+  await page.locator('#media-retention-days').fill('14');
   await page.locator('#media-save-setup').click();
   await expect(page.locator('#media-setup-status')).toContainText('Setup saved.');
+  expect(saved.media_temporary_retention_days).toBe(14);
   expect(saved.atem_media_destinations).toEqual([
     {player: 2, label: 'Foyer', slots: [41, 42], videohub_input: 7},
     {player: 4, label: 'Kids', slots: [43, 44]},
@@ -116,7 +128,7 @@ test('Media Config saves only unique VideoHub inputs and preserves unmapped play
 
 test('Media Config keeps explicit player test control and verified completion', async ({page}) => {
   const errors = collectPageErrors(page);
-  await openConfig(page);
+  await openLibrary(page);
   await page.getByRole('button', {name: 'Select Welcome', exact: true}).click();
   await page.locator('#media-test-panel > summary').click();
   await page.locator('#media-player').selectOption('2');

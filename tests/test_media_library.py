@@ -53,6 +53,33 @@ class MediaLibraryTests(unittest.TestCase):
         first["name"] = "Changed return value"
         self.assertEqual(reopened.get(first["id"])["name"], "Mother's Day")
 
+    def test_legacy_images_remain_permanent_and_unknown_uploader_is_preserved(self):
+        item = self.upload()
+        raw = json.loads((self.root / 'index.json').read_text())
+        for field in ('uploaded_by', 'uploaded_by_id', 'temporary', 'expires_at'):
+            raw['images'][0].pop(field)
+        (self.root / 'index.json').write_text(json.dumps(raw))
+        old = MediaLibrary(self.root).get(item['id'])
+        self.assertFalse(old['temporary'])
+        self.assertIsNone(old['uploaded_by'])
+        self.assertEqual(old['created_at'], item['created_at'])
+        self.library.update(item['id'], 'Renamed')
+        self.assertEqual(self.library.purge_expired(), [])
+
+    def test_retention_deletes_only_expired_images_and_promoted_images_survive(self):
+        from datetime import datetime, timedelta, timezone
+        expired = self.library.upload(io.BytesIO(image_bytes()), 'temporary.png', temporary=True, uploaded_by='Operator')
+        kept = self.library.upload(io.BytesIO(image_bytes()), 'keep.png', temporary=True)
+        self.library.update(kept['id'], 'Keep', keep=True)
+        saved = self.upload()
+        cutoff = datetime.now(timezone.utc) + timedelta(days=8)
+        self.assertEqual(self.library.purge_expired(protected_ids=[expired['id']], now=cutoff), [])
+        removed = self.library.purge_expired(now=cutoff)
+        self.assertEqual([item['id'] for item in removed], [expired['id']])
+        self.assertFalse((self.root / 'images' / (expired['id'] + '.png')).exists())
+        self.assertFalse((self.root / 'thumbnails' / (expired['id'] + '.png')).exists())
+        self.assertEqual({item['id'] for item in self.library.list()}, {kept['id'], saved['id']})
+
     def test_exif_orientation_and_sensitive_metadata_are_not_retained(self):
         exif = Image.Exif()
         exif[274] = 6  # Portrait rotation applied before dimensions/preview are stored.

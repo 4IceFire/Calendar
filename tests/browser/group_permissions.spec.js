@@ -32,7 +32,8 @@ async function saveChange(page, action) {
 test('Routing contains media selection and subordinate upload options', async ({page}) => {
   const errors = collectPageErrors(page);
   const form = await openGroup(page);
-  await expect(form.locator('.group-page-access input[value^="page:media"]')).toHaveCount(0);
+  await expect(form.locator('.group-page-access input[value^="page:media"]')).toHaveCount(1);
+  await expect(pageGrant(form, 'media_library')).toBeVisible();
   await expect(form.locator('[data-permission-tab="media"]')).toHaveCount(0);
   await form.getByRole('tab', {name: 'Routing', exact: true}).click();
   const media = pageGrant(form, 'media');
@@ -41,8 +42,13 @@ test('Routing contains media selection and subordinate upload options', async ({
   await expect(upload).toBeVisible();
   const payload = await saveChange(page, () => upload.check());
   expect(payload.page_keys).toContain('page:media_upload');
+  const permanent = pageGrant(form, 'media_save');
+  await expect(permanent).toBeVisible();
+  const savePayload = await saveChange(page, () => permanent.check());
+  expect(savePayload.page_keys).toContain('page:media_save');
   await saveChange(page, () => media.uncheck());
   await expect(upload).toBeHidden();
+  await expect(permanent).toBeHidden();
   await expect(upload).toBeChecked();
   await saveChange(page, () => media.check());
   await expect(upload).toBeVisible();
@@ -55,6 +61,7 @@ test('Routing contains media selection and subordinate upload options', async ({
   await form.getByRole('tab', {name: 'Routing', exact: true}).click();
   await expect(media).toBeChecked();
   await expect(upload).toBeChecked();
+  await expect(permanent).toBeChecked();
   expect(errors).toEqual([]);
 });
 

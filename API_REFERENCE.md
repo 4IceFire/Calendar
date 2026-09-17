@@ -17,15 +17,15 @@ and same-origin checks. Image numbers in configuration and responses are 1-based
 
 | Method and path | Access | Contract |
 | --- | --- | --- |
-| `GET /api/media` | Media or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, creation time, `url` and `thumbnail_url`. |
-| `POST /api/media/upload` | Config, or Media + upload | Multipart `file` and optional `name`; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
-| `PATCH /api/media/<id>` | Config | JSON `name` and/or boolean `preset`; returns `{ok, item}`. |
-| `DELETE /api/media/<id>` | Config | Removes the local image. Active displays/loads and references from saved routing presets return 409. Does not clear ATEM stills. |
+| `GET /api/media` | Routing Media, Media Library or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, `created_at`, `temporary`, `expires_at`, `url` and `thumbnail_url`. Defaults to saved images. `?collection=temporary` and uploader fields (`uploaded_by`, `uploaded_by_id`) require Media Library access. |
+| `POST /api/media/upload` | Media Library, or Routing Media + upload | Multipart `file`, optional `name` and string `temporary` (`true` by default); `false` additionally requires `page:media_save` or Media Library; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
+| `PATCH /api/media/<id>` | Media Library | JSON `name`, boolean `preset` and/or boolean `keep`; `keep: true` promotes a temporary image without changing its upload attribution/time; returns `{ok, item}`. |
+| `DELETE /api/media/<id>` | Media Library | Removes the local image. Active displays/loads and references from saved routing presets return 409. Does not clear ATEM stills. |
 | `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/input; overrides are rejected. ATEM output routing is never changed. |
 | `GET /api/media/display/<job_id>` | Routing + Media, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`. No hardware assignments or internal diagnostics. |
-| `GET /api/atem/media/state` | Config | Cached connection, detected format/capacity, configured destinations, players/stills/AUXes and current/last ATEM `job`. An offline state is a successful HTTP read. |
-| `POST /api/atem/media/load` | Config + Media | Administrative player test. JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Does not route a TV. |
-| `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path` and `atem_media_destinations`. Obsolete destination `aux` values are omitted from the response without changing saved configuration. |
+| `GET /api/atem/media/state` | Config or Media Library | Cached connection, detected format/capacity, configured destinations, players/stills/AUXes and current/last ATEM `job`. An offline state is a successful HTTP read. |
+| `POST /api/atem/media/load` | Media Library | Administrative player test. JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Does not route a TV. |
+| `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path`, `atem_media_destinations` and `media_temporary_retention_days` (7 by default, integer 1–365). Obsolete destination `aux` values are omitted from the response without changing saved configuration. |
 | `PUT /api/config/atem-media` | Config | Partial configuration object with those keys only. Executable-path changes additionally require Admin. Destinations are `{player,label,slots,videohub_input}` with at least two exclusive still slots. Omitting the VideoHub input preserves a test-only player. Players, inputs and slots must be distinct. ATEM output routing is managed manually; legacy `aux` values are ignored and removed on save. |
 
 Display statuses are `queued`, `preparing`, `loading`, `routing`, `succeeded`,
@@ -39,8 +39,13 @@ display owns routing, normal VideoHub route/preset writes and raw player tests
 return 409 immediately. External controllers are not part of that reservation.
 
 The existing ATEM test job also uses `uploading` and `selecting` statuses and
-includes player/slot details for Config. Library image URLs require Media
-or Config and return PNGs with private/no-store caching. Validation returns 400,
+includes player/slot details for Config and Media Library. Saved image URLs require
+Routing Media, Media Library or Config and return PNGs with private/no-store caching.
+Temporary images are readable/displayable only by their authenticated uploader
+with current Routing upload permission or a Media Library manager. They are never
+listed in the normal picker and cannot be attached to presets until promoted.
+Expired images return 404; background cleanup deletes their local files, leaving
+ATEM stills unchanged. Retention changes affect only new uploads. Validation returns 400,
 missing media/jobs 404, oversized uploads 413 and storage/runtime failures 503.
 `page:media` permits browsing and selecting existing images and requires
 `page:routing`. Both it and optional `page:media_upload` are edited inside the
@@ -49,7 +54,9 @@ Preset-only users may read image URLs only for their accessible saved routing
 presets, without gaining access to the full library. The `preset` image field is
 retained for legacy compatibility; new presets use the APIs below.
 The legacy `page:media_load` and `page:media_manage` keys
-are ignored; management now requires Config.
+are ignored; management requires the independent `page:media_library` grant.
+`page:media_save` is a Routing option requiring Media + upload and allows saving
+new uploads permanently. Media Library managers can also upload permanently.
 
 ## Routing presets
 

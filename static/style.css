@@ -1004,6 +1004,9 @@ html[data-bs-theme="dark"] .timer-stage-card{
 .tdeck-navbar > .container-fluid > .navbar-brand{ margin-right:0; }
 .tdeck-navbar > .container-fluid > .tdeck-nav-right{ margin-left:auto; }
 .tdeck-menu-button,.tdeck-account-button{ min-width:44px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; }
+.tdeck-account-button{ gap:.4rem; }
+.tdeck-account-button > svg{ flex-shrink:0; }
+.tdeck-account-name{ max-width:12rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tdeck-menu-button .navbar-toggler-icon{ width:1.25rem; height:1.25rem; }
 .tdeck-side-menu{ width:min(84vw, 340px); }
 .tdeck-side-menu .nav-link{ min-height:48px; display:flex; align-items:center; padding:.7rem .85rem; color:var(--bs-body-color); }
@@ -1054,6 +1057,7 @@ html[data-bs-theme="dark"] .timer-stage-card{
   .tdeck-navbar > .container-fluid{ flex-wrap:nowrap; padding-left:max(.5rem,env(safe-area-inset-left)); padding-right:max(.5rem,env(safe-area-inset-right)); }
   .tdeck-navbar .navbar-brand{ margin-right:0; }
   .tdeck-nav-right{ width:auto; margin-top:0; flex-wrap:nowrap; gap:.35rem; }
+  .tdeck-account-name{ max-width:min(6rem, 20vw); }
   .tdeck-nav-status{ flex-wrap:nowrap; gap:.2rem; overflow:hidden; }
   .tdeck-nav-status > div{ display:none; margin-right:0!important; white-space:nowrap; font-size:.72rem; }
   .tdeck-nav-status #mobile-connection-indicator{ display:flex; align-items:center; }

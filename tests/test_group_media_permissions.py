@@ -51,6 +51,8 @@ class GroupMediaPermissionTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.library = Mock()
         self.library.list.return_value = []
+        self.library.root = Path(self.temp.name) / "library"
+        self.library.purge_expired.return_value = []
         for context in (
             patch.object(webui, '_AUTH_DB_PATH', self.db),
             patch.object(webui, '_auth_enabled', return_value=True),
@@ -104,7 +106,7 @@ class GroupMediaPermissionTests(unittest.TestCase):
         top_media = [attrs['value'] for attrs, parents in controls
                      if attrs.get('name') == 'page_keys' and attrs.get('value', '').startswith('page:media')
                      and any('group-page-access' in parent.get('class', '').split() for parent in parents)]
-        self.assertEqual(top_media, [])
+        self.assertEqual(top_media, ['page:media_library'])
         media = [(attrs, parents) for attrs, parents in controls if attrs.get('value') == 'page:media']
         self.assertEqual(len(media), 1)
         self.assertTrue(any(parent.get('data-permission-panel') == 'routing' for parent in media[0][1]))
@@ -113,6 +115,25 @@ class GroupMediaPermissionTests(unittest.TestCase):
         self.assertIn('checked', uploads[0][0])
         self.assertTrue(any(parent.get('data-permission-panel') == 'routing' for parent in uploads[0][1]))
         self.assertFalse(any(attrs.get('value') in ('page:media_load', 'page:media_manage') for attrs, _ in controls))
+
+    def test_library_access_and_permanent_upload_grants_are_independent(self):
+        webui._set_group_pages(2, ['page:media_library', 'page:media_save'])
+        user = webui._User(webui._user_record(2))
+        for check in (user.allows_page, lambda key: webui._user_allows_page(2, key)):
+            self.assertTrue(check('page:media_library'))
+            self.assertFalse(check('page:routing'))
+            self.assertFalse(check('page:media_save'))
+        keys = ['page:routing', 'page:media', 'page:media_upload', 'page:media_save']
+        self._save(keys)
+        self.assertTrue(webui._User(webui._user_record(2)).allows_page('page:media_save'))
+        self.assertFalse(webui._user_allows_page(2, 'page:media_library'))
+        controls = self._editor().controls
+        save = [(attrs, parents) for attrs, parents in controls if attrs.get('value') == 'page:media_save']
+        self.assertEqual(len(save), 1)
+        self.assertTrue(any(parent.get('data-permission-panel') == 'routing' for parent in save[0][1]))
+        self._save([key for key in keys if key != 'page:media_upload'])
+        self.assertFalse(webui._user_allows_page(2, 'page:media_save'))
+        self.assertIn('page:media_save', webui._group_settings_snapshot(2)['page_keys'])
 
     def test_hidden_upload_survives_page_changes_and_can_be_explicitly_revoked(self):
         webui._set_group_pages(2, ['page:media', 'page:media_upload', 'page:routing'])
@@ -249,7 +270,7 @@ class GroupMediaPermissionTests(unittest.TestCase):
                     result = self.client.get('/api/media')
                     if 'page:media' in keys:
                         self.assertEqual(result.status_code, 200)
-                        self.assertEqual(result.get_json()['permissions'], {'load': True, 'upload': False, 'manage': False})
+                        self.assertEqual(result.get_json()['permissions'], {'load': False, 'upload': False, 'manage': False, 'save': False})
                     else:
                         self.assertEqual(result.status_code, 403)
                     self.assertEqual(self.client.patch('/api/media/' + 'a' * 32, json={'preset': True},
@@ -273,7 +294,7 @@ class GroupMediaPermissionTests(unittest.TestCase):
         with patch.object(webui, 'current_user', webui._User(webui._user_record(2))):
             result = self.client.get('/api/media')
             self.assertEqual(result.status_code, 200)
-            self.assertEqual(result.get_json()['permissions'], {'load': True, 'upload': True, 'manage': False})
+            self.assertEqual(result.get_json()['permissions'], {'load': False, 'upload': True, 'manage': False, 'save': False})
             self.assertTrue(webui._media_display_allowed())
             self.assertFalse(webui.can_access('page:config'))
 

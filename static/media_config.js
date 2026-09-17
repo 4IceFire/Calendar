@@ -1,11 +1,12 @@
 function initializeMediaConfigPage() {
-  const root = document.getElementById('media-config-page');
+  const root = document.getElementById('media-config-page') || document.getElementById('media-library-page');
   if (!root) return;
 
   const el = function(id) { return document.getElementById(id); };
   let permissions = {};
   try { permissions = JSON.parse(root.dataset.permissions || '{}'); } catch (_error) {}
   let items = [];
+  let collection = 'saved';
   let selectedId = '';
   let state = null;
   let stateValid = false;
@@ -78,6 +79,10 @@ function initializeMediaConfigPage() {
   }
 
   function updateControls() {
+    ['media-saved-tab', 'media-temporary-tab'].forEach(function(id) {
+      if (el(id)) el(id).disabled = libraryInFlight || uploadInFlight || editInFlight;
+    });
+    if (el('media-keep-image')) el('media-keep-image').disabled = editInFlight || !selectedItem();
     if (el('media-upload-button')) {
       el('media-upload-button').disabled = uploadInFlight || !permissions.upload;
       el('media-upload-file').disabled = uploadInFlight || !permissions.upload;
@@ -106,6 +111,48 @@ function initializeMediaConfigPage() {
     text(el('media-load-button'), busy ? 'Loading into ATEM…' : 'Load selected image');
   }
 
+  function formatDate(value) {
+    if (!value) return 'Unknown';
+    const date = new Date(value);
+    return isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString();
+  }
+  function renderCollection() {
+    ['saved', 'temporary'].forEach(function(kind) {
+      const button = el('media-' + kind + '-tab');
+      if (!button) return;
+      button.setAttribute('aria-pressed', collection === kind ? 'true' : 'false');
+      button.classList.toggle('btn-primary', collection === kind);
+      button.classList.toggle('btn-outline-primary', collection !== kind);
+    });
+    text(el('media-collection-help'), collection === 'temporary' ? 'Temporary uploads are only listed here. Keep an image to make it available in Routing.' : 'Saved images are available to choose in Routing.');
+  }
+  function changeCollection(kind) {
+    if (libraryInFlight || uploadInFlight || editInFlight || kind === collection) return;
+    collection = kind;
+    selectedId = '';
+    items = [];
+    renderCollection();
+    renderLibrary();
+    renderSelection();
+    refreshLibrary();
+  }
+  async function keepImage() {
+    const item = selectedItem();
+    if (!item || !item.temporary || editInFlight) return;
+    editInFlight = true;
+    updateControls();
+    try {
+      await jsonRequest('/api/media/' + encodeURIComponent(item.id), 'PATCH', {keep: true});
+      libraryRevision += 1;
+      items = items.filter(function(current) { return current.id !== item.id; });
+      selectedId = '';
+      renderLibrary();
+      renderSelection();
+      message('Image kept in the saved library. It is now available in Routing.', 'success');
+    } catch (error) { message(errorMessage(error), 'danger'); }
+    finally { editInFlight = false; updateControls(); }
+  }
+
   function renderLibrary() {
     const grid = el('media-grid');
     const query = el('media-search').value.trim().toLowerCase();
@@ -127,7 +174,8 @@ function initializeMediaConfigPage() {
       picture.loading = 'lazy';
       const caption = node('span', 'media-tile-caption');
       caption.appendChild(node('span', 'media-tile-name', item.name));
-      caption.appendChild(node('span', 'media-tile-meta', item.width + ' × ' + item.height));
+      caption.appendChild(node('span', 'media-tile-meta', item.uploaded_by || 'Unknown uploader'));
+      caption.appendChild(node('span', 'media-tile-meta', formatDate(item.created_at)));
       tile.appendChild(picture);
       tile.appendChild(caption);
       tile.addEventListener('click', function() { selectImage(item.id); });
@@ -153,9 +201,16 @@ function initializeMediaConfigPage() {
       el('media-preview-image').alt = item.name;
       text(el('media-selected-name'), item.name);
       text(el('media-selected-details'), item.width + ' × ' + item.height + ' · ' + formatBytes(item.size_bytes));
+      text(el('media-selected-uploader'), 'Uploaded by: ' + (item.uploaded_by || 'Unknown (older upload)'));
+      text(el('media-selected-uploaded'), 'Uploaded: ' + formatDate(item.created_at));
+      text(el('media-selected-expiry'), item.temporary ? 'Scheduled deletion: ' + formatDate(item.expires_at) : 'Saved in library');
+      show(el('media-keep-image'), !!item.temporary);
       if (el('media-edit-name')) {
         el('media-edit-name').value = item.name;
-        el('media-create-preset').href = '/config/routing-presets?image=' + encodeURIComponent(item.id);
+        if (el('media-create-preset')) {
+          el('media-create-preset').href = '/config/routing-presets?image=' + encodeURIComponent(item.id);
+          show(el('media-create-preset'), !item.temporary);
+        }
       }
     } else {
       el('media-preview-image').removeAttribute('src');
@@ -167,11 +222,12 @@ function initializeMediaConfigPage() {
   async function refreshLibrary() {
     if (libraryInFlight || uploadInFlight || editInFlight) return;
     libraryInFlight = true;
+    updateControls();
     const revision = libraryRevision;
     el('media-refresh-library').disabled = true;
     el('media-grid').setAttribute('aria-busy', 'true');
     try {
-      const data = await request('/api/media');
+      const data = await request('/api/media?collection=' + collection);
       if (revision !== libraryRevision) return;
       items = data.items || [];
       if (data.permissions) permissions = data.permissions;
@@ -185,6 +241,7 @@ function initializeMediaConfigPage() {
       libraryInFlight = false;
       el('media-grid').setAttribute('aria-busy', 'false');
       el('media-refresh-library').disabled = false;
+      updateControls();
     }
   }
 
@@ -211,7 +268,7 @@ function initializeMediaConfigPage() {
       detail = (state.product || 'ATEM') + (mode.name ? ' · ' + mode.name : '') + (mode.width && mode.height ? ' · ' + mode.width + ' × ' + mode.height : '');
       if (state.error) detail += ' · ' + state.error;
     }
-    status.classList.toggle('text-success', !!state.connected && !!state.enabled);
+    if (status) status.classList.toggle('text-success', !!state.connected && !!state.enabled);
     text(status, label);
     text(el('media-connection-detail'), detail);
     const capabilities = state.capabilities || {};
@@ -271,12 +328,12 @@ function initializeMediaConfigPage() {
     if (pageActive && !document.hidden) pollTimer = setTimeout(refreshState, pollDelay);
   }
   async function refreshState() {
-    if (stateInFlight || document.hidden || !pageActive) return;
+    if (stateInFlight || document.hidden || !pageActive || (!el('media-setup') && !permissions.load)) return;
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = null;
     stateInFlight = true;
     const revision = stateRevision;
-    el('media-refresh-state').disabled = true;
+    if (el('media-refresh-state')) el('media-refresh-state').disabled = true;
     try {
       const data = await request('/api/atem/media/state');
       // A refresh started before a write must not replace its newer job/setup state.
@@ -289,12 +346,12 @@ function initializeMediaConfigPage() {
       stateValid = false;
       pollDelay = Math.min(pollDelay * 2, 30000);
       text(el('media-connection-status'), 'ATEM media status unavailable');
-      el('media-connection-status').classList.remove('text-success');
+      if (el('media-connection-status')) el('media-connection-status').classList.remove('text-success');
       text(el('media-connection-detail'), errorMessage(error));
       updateControls();
     } finally {
       stateInFlight = false;
-      el('media-refresh-state').disabled = false;
+      if (el('media-refresh-state')) el('media-refresh-state').disabled = false;
       schedulePoll();
     }
   }
@@ -307,12 +364,16 @@ function initializeMediaConfigPage() {
     const form = new FormData();
     form.append('file', file);
     form.append('name', el('media-upload-name').value.trim());
+    form.append('temporary', 'false');
     uploadInFlight = true;
     updateControls();
     try {
       const data = await request('/api/media/upload', { method: 'POST', body: form });
       libraryRevision += 1;
       if (data.item) {
+        if (collection !== 'saved') items = [];
+        collection = 'saved';
+        renderCollection();
         items.unshift(data.item);
         selectedId = data.item.id;
       }
@@ -443,6 +504,7 @@ function initializeMediaConfigPage() {
       const config = data.config || {};
       el('media-setup-enabled').checked = !!config.atem_media_enabled;
       el('media-node-path').value = config.atem_media_node_path || '';
+      el('media-retention-days').value = config.media_temporary_retention_days || 7;
       clear(el('media-destinations'));
       (config.atem_media_destinations || []).forEach(addDestination);
       el('media-setup-fields').disabled = false;
@@ -505,7 +567,8 @@ function initializeMediaConfigPage() {
     const body = {
       atem_media_enabled: el('media-setup-enabled').checked,
       atem_media_node_path: el('media-node-path').value.trim(),
-      atem_media_destinations: destinations
+      atem_media_destinations: destinations,
+      media_temporary_retention_days: Number(el('media-retention-days').value)
     };
     if (body.atem_media_enabled && !destinations.length) {
       text(el('media-setup-status'), 'Add a media player and reserve its still slots before enabling uploads.');
@@ -529,9 +592,12 @@ function initializeMediaConfigPage() {
     }
   }
 
+  if (el('media-saved-tab')) el('media-saved-tab').addEventListener('click', function() { changeCollection('saved'); });
+  if (el('media-temporary-tab')) el('media-temporary-tab').addEventListener('click', function() { changeCollection('temporary'); });
+  if (el('media-keep-image')) el('media-keep-image').addEventListener('click', keepImage);
   if (el('media-search')) el('media-search').addEventListener('input', renderLibrary);
   if (el('media-refresh-library')) el('media-refresh-library').addEventListener('click', refreshLibrary);
-  el('media-refresh-state').addEventListener('click', refreshState);
+  if (el('media-refresh-state')) el('media-refresh-state').addEventListener('click', refreshState);
   if (el('media-upload-form')) el('media-upload-form').addEventListener('submit', uploadImage);
   if (el('media-edit-form')) el('media-edit-form').addEventListener('submit', saveImage);
   if (el('media-delete-image')) el('media-delete-image').addEventListener('click', deleteImage);
@@ -553,7 +619,7 @@ function initializeMediaConfigPage() {
   window.addEventListener('pagehide', function() { pageActive = false; if (pollTimer) clearTimeout(pollTimer); });
   window.addEventListener('pageshow', function(event) { pageActive = true; if (event.persisted) refreshState(); });
   updateControls();
-  refreshLibrary();
+  if (el('media-grid')) refreshLibrary();
   refreshState();
 }
 

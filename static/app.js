@@ -920,7 +920,7 @@ function _renderConfigGroups(cfg) {
 
   // Legacy keys that should not be edited anymore.
   const hiddenKeys = new Set([
-    'atem_media_enabled', 'atem_media_node_path', 'atem_media_destinations',
+    'atem_media_enabled', 'atem_media_node_path', 'atem_media_destinations', 'media_temporary_retention_days',
     'videohub_allowed_outputs',
     'videohub_allowed_inputs',
     // Managed by the dedicated DiGiCo Mixer setup page.
@@ -3887,6 +3887,9 @@ function _initAccessLevelsPage() {
     _selectPermissionTab(form, selected ? selected.getAttribute('data-permission-tab') : 'general');
     form.querySelectorAll('[data-routing-media-upload]').forEach(row => {
       row.hidden = !pageKeys.has('page:media');
+    });
+    form.querySelectorAll('[data-routing-media-save]').forEach(row => {
+      row.hidden = !pageKeys.has('page:media') || !pageKeys.has('page:media_upload');
     });
     form.querySelectorAll('[data-routing-preset-options]').forEach(row => {
       row.hidden = !pageKeys.has('page:routing_presets');

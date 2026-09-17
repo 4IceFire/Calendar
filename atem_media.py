@@ -47,6 +47,10 @@ def _positive_int(value, label):
 def validate_media_config(cfg):
     """Return a normalized config copy; capacity is checked against the device."""
     result = dict(cfg or {})
+    days = result.get("media_temporary_retention_days", 7)
+    if type(days) is not int or not 1 <= days <= 365:
+        raise ValueError("Temporary image retention must be between 1 and 365 days")
+    result["media_temporary_retention_days"] = days
     enabled = result.get("atem_media_enabled", False)
     if not isinstance(enabled, bool):
         raise ValueError("ATEM media enabled must be true or false")

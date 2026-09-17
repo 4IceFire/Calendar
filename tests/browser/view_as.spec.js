@@ -7,6 +7,7 @@ test.beforeEach(async ({page, request}) => {
   test.skip(!probe.ok() || body.fixture !== 'tdeck-view-as-ui', 'Run tests/permissions_ui_harness.py --view-as on port 5065 with workers=1.');
   expect((await request.post('/__permissions_fixture__/reset')).ok()).toBe(true);
   await page.goto('/login?next=/admin/users/2');
+  await expect(page.getByRole('button', {name: 'Open menu', exact: true})).toHaveCount(0);
   await page.getByLabel('Username', {exact: true}).fill('fixture-admin');
   await page.getByLabel('Password', {exact: true}).fill('fixture-password');
   await page.getByRole('button', {name: 'Sign in', exact: true}).click();
@@ -66,6 +67,8 @@ test('A test user can upload and display media using their granted permissions',
   await page.locator('#media-upload-file').setInputFiles({name: 'phone-photo.png', mimeType: 'image/png', buffer: await preview.body()});
   await page.locator('#media-upload-name').fill('View as test image');
   await expect(page.locator('#media-upload-preview')).toBeVisible();
+  await expect(page.locator('#media-upload-temporary')).toBeChecked();
+  await expect(page.locator('#media-upload-temporary')).toBeDisabled();
   await page.screenshot({path: testInfo.outputPath('view-as-upload.png'), fullPage: true});
   const uploadFinished = page.waitForResponse(response => response.url().endsWith('/api/media/upload') && response.request().method() === 'POST');
   await page.getByRole('button', {name: 'Upload and display', exact: true}).click();
@@ -73,9 +76,23 @@ test('A test user can upload and display media using their granted permissions',
   await expect(page).toHaveURL(/\/routing\?media_job=/);
   await expect(page.locator('#view-as-banner')).toBeVisible();
   const saved = await page.request.get('/api/media');
-  expect((await saved.json()).items.some(item => item.name === 'View as test image')).toBe(true);
+  expect((await saved.json()).items.some(item => item.name === 'View as test image')).toBe(false);
+  expect((await page.request.get('/api/media?collection=temporary')).status()).toBe(403);
   await page.getByRole('button', {name: 'Return to admin', exact: true}).click();
   await expect(page).toHaveURL(/\/admin\/users\/2$/);
+  await page.goto('/media-library');
+  await page.getByRole('button', {name: 'Temporary images', exact: true}).click();
+  await page.getByRole('button', {name: 'Select View as test image', exact: true}).click();
+  await expect(page.locator('#media-selected-uploader')).toHaveText('Uploaded by: media-operator');
+  await expect(page.locator('#media-selected-uploaded')).not.toContainText('Unknown');
+  await expect(page.locator('#media-selected-expiry')).toContainText('Scheduled deletion:');
+  await page.screenshot({path: testInfo.outputPath('temporary-library.png'), fullPage: true});
+  await page.getByRole('button', {name: 'Keep in saved library', exact: true}).click();
+  await expect(page.locator('#media-message')).toContainText('Image kept in the saved library');
+  await page.getByRole('button', {name: 'Saved images', exact: true}).click();
+  await page.getByRole('button', {name: 'Select View as test image', exact: true}).click();
+  await expect(page.locator('#media-selected-uploader')).toHaveText('Uploaded by: media-operator');
+  await expect(page.locator('#media-selected-expiry')).toHaveText('Saved in library');
   expect(errors).toEqual([]);
 });
 
@@ -122,3 +139,61 @@ for (const mode of ['view-as', 'sign-in']) {
     expect(errors).toEqual([]);
   });
 }
+
+async function setGroupGrant(page, key, checked) {
+  const checkbox = page.locator('[data-role-form][data-role-id="68"] input[value="page:' + key + '"]');
+  if (await checkbox.isChecked() === checked) return;
+  const result = page.waitForResponse(response => response.url().endsWith('/api/admin/groups/68') && response.request().method() === 'POST');
+  await checkbox.setChecked(checked);
+  expect((await result).ok()).toBe(true);
+}
+
+test('Library permission gives management and a menu link without Config or Routing', async ({page}) => {
+  const errors = collectPageErrors(page);
+  await page.goto('/admin/permissions?tab=groups#role-68');
+  await setGroupGrant(page, 'media_library', true);
+  await setGroupGrant(page, 'routing', false);
+  await page.goto('/admin/users/2');
+  await page.getByRole('button', {name: 'View as user', exact: true}).click();
+  await expect(page).toHaveURL(/\/media-library$/);
+  await page.getByRole('button', {name: 'Account menu', exact: true}).click();
+  await expect(page.getByRole('link', {name: 'Media Library', exact: true})).toBeVisible();
+  await expect(page.locator('a[href="/config"]')).toHaveCount(0);
+  await page.getByRole('button', {name: 'Account menu', exact: true}).click();
+  await page.getByRole('button', {name: 'Select Welcome', exact: true}).click();
+  await expect(page.locator('#media-edit-form')).toBeVisible();
+  await expect(page.locator('#media-test-panel')).toBeVisible();
+  await expect(page.locator('#media-create-preset')).toHaveCount(0);
+  await page.locator('#media-edit-name').fill('Library manager edit');
+  await page.locator('#media-save-image').click();
+  await expect(page.locator('#media-message')).toHaveText('Image details saved.');
+  expect((await page.request.get('/config/atem-media')).status()).toBe(403);
+  expect((await page.request.get('/routing')).status()).toBe(403);
+  expect(errors).toEqual([]);
+});
+
+test('An operator with permanent-save permission can keep a routing upload', async ({page}) => {
+  const errors = collectPageErrors(page);
+  await page.goto('/admin/permissions?tab=groups#role-68');
+  await page.locator('[data-role-form][data-role-id="68"]').getByRole('tab', {name: 'Routing', exact: true}).click();
+  // Media grants also exist in a separate group; enable the parents here to expose this option.
+  await setGroupGrant(page, 'media', true);
+  await setGroupGrant(page, 'media_upload', true);
+  await setGroupGrant(page, 'media_save', true);
+  await page.goto('/admin/users/2');
+  await beginViewAs(page);
+  const items = await (await page.request.get('/api/media')).json();
+  const image = await page.request.get(items.items[0].thumbnail_url);
+  await page.goto('/media/upload?output=1');
+  await expect(page.locator('#media-upload-temporary')).toBeChecked();
+  await expect(page.locator('#media-upload-temporary')).toBeEnabled();
+  await page.locator('#media-upload-temporary').uncheck();
+  await page.locator('#media-upload-file').setInputFiles({name: 'permanent.png', mimeType: 'image/png', buffer: await image.body()});
+  await page.locator('#media-upload-name').fill('Keep for future');
+  await page.getByRole('button', {name: 'Upload and display', exact: true}).click();
+  await expect(page).toHaveURL(/\/routing\?media_job=/);
+  const saved = await (await page.request.get('/api/media')).json();
+  expect(saved.items.find(item => item.name === 'Keep for future').temporary).toBe(false);
+  expect((await page.request.get('/media-library')).status()).toBe(403);
+  expect(errors).toEqual([]);
+});

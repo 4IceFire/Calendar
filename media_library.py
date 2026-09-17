@@ -16,7 +16,7 @@ import tempfile
 import threading
 import uuid
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO
 
@@ -179,11 +179,23 @@ class MediaLibrary:
                     raise ValueError("Invalid image dimensions")
                 if not isinstance(item.get("created_at"), str):
                     raise ValueError("Invalid image timestamp")
+                temporary = item.get("temporary", False)
+                if not isinstance(temporary, bool):
+                    raise ValueError("Invalid temporary image flag")
+                expires_at = item.get("expires_at")
+                if temporary:
+                    if not isinstance(expires_at, str) or datetime.fromisoformat(expires_at).tzinfo is None:
+                        raise ValueError("Invalid temporary image expiry")
+                for field in ("uploaded_by", "uploaded_by_id"):
+                    if item.get(field) is not None and (not isinstance(item[field], str) or len(item[field]) > 200):
+                        raise ValueError("Invalid uploader")
                 result[image_id] = {
                     "id": image_id, "name": _name(item.get("name")),
                     "width": item["width"], "height": item["height"],
                     "size_bytes": item["size_bytes"], "created_at": item["created_at"],
                     "preset": item["preset"],
+                    "uploaded_by": item.get("uploaded_by"), "uploaded_by_id": item.get("uploaded_by_id"),
+                    "temporary": temporary, "expires_at": expires_at if temporary else None,
                 }
             return result
         except (ValueError, KeyError, TypeError) as exc:
@@ -238,7 +250,13 @@ class MediaLibrary:
         if shutil.disk_usage(self.root).free < required_free:
             raise ValueError("The server is low on free storage. Ask an administrator to free space before uploading")
 
-    def upload(self, stream: BinaryIO, filename: str, name: str = "") -> dict:
+    def upload(self, stream: BinaryIO, filename: str, name: str = "", *, uploaded_by=None,
+               uploaded_by_id=None, temporary=False, retention_days=7) -> dict:
+        if not isinstance(temporary, bool) or type(retention_days) is not int or not 1 <= retention_days <= 365:
+            raise ValueError("Temporary image retention must be between 1 and 365 days")
+        for value in (uploaded_by, uploaded_by_id):
+            if value is not None and (not isinstance(value, str) or len(value) > 200):
+                raise ValueError("Invalid uploader")
         filename = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1]
         label = _name(name or Path(filename).stem or "Uploaded image")
         with self._lock:
@@ -257,10 +275,14 @@ class MediaLibrary:
                     preview = _png(thumbnail)
             self._check_upload_capacity(entries, len(encoded) + len(preview))
             image_id = uuid.uuid4().hex
+            now = datetime.now(timezone.utc)
             entry = {
                 "id": image_id, "name": label, "width": width, "height": height,
-                "size_bytes": len(encoded), "created_at": datetime.now(timezone.utc).isoformat(),
+                "size_bytes": len(encoded), "created_at": now.isoformat(),
                 "preset": False,
+                "uploaded_by": uploaded_by, "uploaded_by_id": uploaded_by_id,
+                "temporary": temporary,
+                "expires_at": (now + timedelta(days=retention_days)).isoformat() if temporary else None,
             }
             original_path = self._asset_path(image_id)
             thumbnail_path = self._asset_path(image_id, True)
@@ -275,7 +297,7 @@ class MediaLibrary:
                 raise
             return dict(entry)
 
-    def update(self, image_id: str, name: str, preset: bool = False) -> dict:
+    def update(self, image_id: str, name: str, preset: bool = False, *, keep=False) -> dict:
         label = _name(name)
         if not isinstance(preset, bool):
             raise ValueError("Preset must be true or false")
@@ -285,8 +307,22 @@ class MediaLibrary:
             if image_id not in entries:
                 raise KeyError("Image not found")
             entries[image_id].update(name=label, preset=preset)
+            if keep:
+                entries[image_id].update(temporary=False, expires_at=None)
             self._save(entries)
             return dict(entries[image_id])
+
+    @staticmethod
+    def expired(item, now=None):
+        return bool(item.get("temporary") and datetime.fromisoformat(item["expires_at"]) <=
+                    (now or datetime.now(timezone.utc)))
+
+    def purge_expired(self, *, protected_ids=(), now=None):
+        """Remove expired local assets; never send commands to the switcher."""
+        with self._lock:
+            expired = [item for item in self._read().values()
+                       if item["id"] not in protected_ids and self.expired(item, now)]
+            return [self.delete(item["id"]) for item in expired]
 
     def delete(self, image_id: str) -> dict:
         with self._lock:

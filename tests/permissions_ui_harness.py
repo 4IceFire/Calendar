@@ -182,8 +182,8 @@ def main():
         if view_as_mode:
             allowed.update({'login_page', 'logout_page', 'admin_user_detail_page', 'admin_view_as_user',
                 'stop_view_as_user', 'auth_ping', 'auth_touch', 'account_password_page',
-                'media_page', 'media_upload_page', 'media_image', 'media_thumbnail',
-                'api_media_list', 'api_media_upload', 'api_media_display', 'api_media_display_job',
+                'media_library_page', 'media_page', 'media_upload_page', 'media_image', 'media_thumbnail',
+                'api_media_list', 'api_media_upload', 'api_media_edit', 'api_atem_media_state', 'api_atem_media_load', 'api_media_display', 'api_media_display_job',
                 'routing_page', 'api_videohub_state', 'api_videohub_labels', 'atem_media_setup_page'})
         if presets_mode:
             allowed.update({'routing_presets_config_page', 'api_routing_presets_config', 'routing_presets_page',

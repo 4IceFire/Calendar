@@ -8,7 +8,7 @@
 {% endblock %}
 
 {% block content %}
-<div id="media-page" class="media-operator" data-output="{{ output or '' }}" data-output-label="{{ output_label }}" data-can-display="{{ 'true' if can_display else 'false' }}" data-upload-page="{{ 'true' if upload_page else 'false' }}">
+<div id="media-page" class="media-operator" data-output="{{ output or '' }}" data-output-label="{{ output_label }}" data-can-display="{{ 'true' if can_display else 'false' }}" data-can-save="{{ 'true' if media_permissions.save else 'false' }}" data-upload-page="{{ 'true' if upload_page else 'false' }}">
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
     <a class="btn btn-outline-secondary media-return-link" id="media-back" href="{{ '/media' if upload_page else '/routing' }}{% if output %}?output={{ output }}{% endif %}">{{ 'Back to images' if upload_page else ('Back to inputs' if output else 'Choose an output') }}</a>
     {% if not upload_page and media_permissions.upload %}
@@ -37,6 +37,11 @@
         <div id="media-upload-preview" class="media-preview d-none mt-3"><img id="media-upload-preview-image" alt="Image preview"></div>
         <label class="form-label mt-3" for="media-upload-name">Image name <span class="text-muted">(optional)</span></label>
         <input class="form-control" id="media-upload-name" type="text" maxlength="120" placeholder="For example, Team Night">
+        <div class="form-check mt-3">
+          <input class="form-check-input" type="checkbox" id="media-upload-temporary" checked {% if not media_permissions.save %}disabled{% endif %}>
+          <label class="form-check-label" for="media-upload-temporary">Temporary image</label>
+        </div>
+        <p class="form-text">Temporary images are kept for {{ retention_days }} days and stay out of the saved library.{% if media_permissions.save %} Untick to keep this image for future use.{% endif %}</p>
         <button class="btn btn-primary mt-4" id="media-upload-button" type="submit">{{ 'Upload and display' if can_display and output else 'Upload image' }}</button>
       </form>
     </div>

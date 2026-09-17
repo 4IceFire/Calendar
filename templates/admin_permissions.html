@@ -276,9 +276,14 @@
                                 <div class="form-check mt-2" data-routing-media-upload {% if 'page:media' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>
                                   <input class="form-check-input" type="checkbox" name="page_keys" value="page:media_upload" id="group-{{ g.id }}-media-upload"
                                     {% if 'page:media_upload' in group_to_pages.get(g.id, []) %}checked{% endif %}>
-                                  <label class="form-check-label" for="group-{{ g.id }}-media-upload">Allow uploading media</label>
+                                  <label class="form-check-label" for="group-{{ g.id }}-media-upload">Allow uploading temporary media</label>
                                 </div>
-                                <div class="form-text mt-2">Choose saved images from Routing for the allowed outputs. Display also requires access to a configured media player's VideoHub input. Uploading requires media selection access. Manage images in Config → Media and presets in Config → Routing presets.</div>
+                                <div class="form-check mt-2" data-routing-media-save {% if 'page:media' not in group_to_pages.get(g.id, []) or 'page:media_upload' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>
+                                  <input class="form-check-input" type="checkbox" name="page_keys" value="page:media_save" id="group-{{ g.id }}-media-save"
+                                    {% if 'page:media_save' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-media-save">Allow saving uploads to the media library</label>
+                                </div>
+                                <div class="form-text mt-2">Choose saved images from Routing for the allowed outputs. Display also requires access to a configured media player's VideoHub input. Uploading requires media selection access. Media Library page access gives full library management. Manage presets in Config → Routing presets.</div>
                               </div>
                               <div class="col-12">
                                 <div class="fw-semibold mb-2">Presets</div>

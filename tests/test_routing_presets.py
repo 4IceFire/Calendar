@@ -164,6 +164,16 @@ class RoutingPresetWebTests(unittest.TestCase):
         return self.client.post('/api/routing/presets/' + self.preset['id'] + '/apply', headers=self.headers,
                                 json={'confirmation_token': prepared['confirmation_token'], **(extra or {})})
 
+    def test_temporary_images_are_excluded_and_cannot_be_saved_into_presets(self):
+        temporary = self.library.upload(io.BytesIO(self.library.path(self.image['id']).read_bytes()), 'temporary.png', temporary=True)
+        with self.user(1):
+            listing = self.client.get('/api/config/routing-presets').get_json()
+            self.assertNotIn(temporary['id'], [image['id'] for image in listing['images']])
+            response = self.client.post('/api/config/routing-presets', headers=self.headers,
+                                        json={'name': 'Temporary preset', 'media_id': temporary['id'], 'output': 26})
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('saved library', response.get_json()['message'])
+
     def test_only_assigned_presets_are_visible_without_granting_the_media_pool(self):
         other = self.store.save({'name': 'Hidden', 'media_id': self.image['id'], 'output': 25})
         with self.user():

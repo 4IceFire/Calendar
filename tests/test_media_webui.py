@@ -98,6 +98,97 @@ class MediaWebTests(unittest.TestCase):
             state['_csrf'] = 'media-csrf'
         self.headers = {'X-CSRF-Token': 'media-csrf', 'Origin': 'http://localhost'}
 
+    def test_routing_uploads_default_to_private_temporary_images(self):
+        self.grants.add('page:media_upload')
+        response = self.client.post('/api/media/upload', data={'file': (_image(), 'photo.png')}, headers=self.headers)
+        self.assertEqual(response.status_code, 201)
+        item = response.get_json()['item']
+        self.assertTrue(item['temporary'])
+        self.assertNotIn('uploaded_by_id', item)
+        stored = self.library.get(item['id'])
+        self.assertEqual(stored['uploaded_by'], 'media-operator')
+        self.assertEqual(stored['uploaded_by_id'], '42')
+        from datetime import datetime
+        self.assertEqual((datetime.fromisoformat(stored['expires_at']) - datetime.fromisoformat(stored['created_at'])).days, 7)
+        self.assertEqual([entry['id'] for entry in self.client.get('/api/media').get_json()['items']], [self.item['id']])
+        self.assertEqual(self.client.get('/api/media?collection=temporary').status_code, 403)
+        with self.client.get(item['thumbnail_url']) as image:
+            self.assertEqual(image.status_code, 200)
+        self._allow_display()
+        self.assertEqual(self.client.post('/api/media/display', json={'media_id': item['id'], 'output': 1}, headers=self.headers).status_code, 202)
+        with patch.object(_User, 'get_id', return_value='99'):
+            self.assertEqual(self.client.get(item['thumbnail_url']).status_code, 403)
+            self.assertEqual(self.client.post('/api/media/display', json={'media_id': item['id'], 'output': 1}, headers=self.headers).status_code, 403)
+        self.grants = {'page:config'}
+        self.assertEqual(self.client.get(item['url']).status_code, 403)
+        self.grants = {'page:media_library'}
+        listing = self.client.get('/api/media?collection=temporary').get_json()['items']
+        self.assertEqual(listing[0]['uploaded_by'], 'media-operator')
+        with self.client.get(item['url']) as image:
+            self.assertEqual(image.status_code, 200)
+
+    def test_permanent_uploads_require_additional_grant_and_ignore_spoofed_metadata(self):
+        self.grants.add('page:media_upload')
+        for prefix in ('/api', '/api/v1'):
+            response = self.client.post(prefix + '/media/upload', data={'file': (_image(), 'photo.png'), 'temporary': 'false'}, headers=self.headers)
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(len(self.library.list()), 1)
+        self.grants.add('page:media_save')
+        response = self.client.post('/api/media/upload', data={'file': (_image(), 'photo.png'), 'temporary': 'false'}, headers=self.headers)
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.get_json()['item']['temporary'])
+        self.assertEqual(len(self.client.get('/api/media').get_json()['items']), 2)
+        for field in ('uploaded_by', 'uploaded_by_id', 'expires_at'):
+            response = self.client.post('/api/media/upload', data={'file': (_image(), 'photo.png'), field: 'fake'}, headers=self.headers)
+            self.assertEqual(response.status_code, 400)
+        self.grants.remove('page:media_upload')
+        self.assertFalse(webui.can_access('page:media_save'))
+
+    def test_promoting_temporary_image_requires_library_and_preserves_attribution(self):
+        item = self.library.upload(_image(), 'temp.png', uploaded_by='Original uploader', uploaded_by_id='99', temporary=True)
+        self.grants.add('page:media_save')
+        path = '/api/media/' + item['id']
+        self.assertEqual(self.client.patch(path, json={'keep': True}, headers=self.headers).status_code, 403)
+        self.grants = {'page:media_library'}
+        self.assertEqual(self.client.patch(path, json={'keep': True}).status_code, 403)
+        response = self.client.patch(path, json={'keep': True}, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        promoted = response.get_json()['item']
+        self.assertFalse(promoted['temporary'])
+        self.assertIsNone(promoted['expires_at'])
+        self.assertEqual(promoted['created_at'], item['created_at'])
+        self.assertEqual(promoted['uploaded_by'], 'Original uploader')
+        self.assertEqual(self.client.get('/api/media?collection=temporary').get_json()['items'], [])
+        self.assertEqual(len(self.client.get('/api/media').get_json()['items']), 2)
+        self.assertTrue(any(call.args[0] == 'media.image.keep' for call in self.events.call_args_list))
+
+    def test_retention_waits_for_active_transfer_then_deletes_local_files_only(self):
+        item = self.library.upload(_image(), 'temp.png', temporary=True)
+        path = self.library.path(item['id'])
+        raw = json.loads((self.library.root / 'index.json').read_text())
+        next(entry for entry in raw['images'] if entry['id'] == item['id'])['expires_at'] = '2000-01-01T00:00:00+00:00'
+        (self.library.root / 'index.json').write_text(json.dumps(raw))
+        self.routing.active_job.return_value = {'status': 'uploading', 'mediaId': item['id']}
+        webui._cleanup_temporary_media()
+        self.assertTrue(path.exists())
+        self.routing.active_job.return_value = None
+        webui._cleanup_temporary_media()
+        self.assertFalse(path.exists())
+        self.assertEqual(len(self.library.list()), 1)
+        self.manager.load.assert_not_called()
+        self.routing.display.assert_not_called()
+        self.assertTrue(any(call.args[0] == 'media.image.expire' for call in self.events.call_args_list))
+
+    def test_config_validates_retention_and_uses_it_for_new_uploads(self):
+        self.grants = {'page:config', 'page:media_library'}
+        for invalid in (0, -1, 366, True, '7', 1.5):
+            self.assertEqual(self.client.put('/api/config/atem-media', json={'media_temporary_retention_days': invalid}, headers=self.headers).status_code, 400)
+        self.assertEqual(self.client.put('/api/config/atem-media', json={'media_temporary_retention_days': 30}, headers=self.headers).status_code, 200)
+        self.cfg['media_temporary_retention_days'] = 30
+        item = self.client.post('/api/media/upload', data={'file': (_image(), 'photo.png')}, headers=self.headers).get_json()['item']
+        from datetime import datetime
+        self.assertEqual((datetime.fromisoformat(item['expires_at']) - datetime.fromisoformat(item['created_at'])).days, 30)
+
     def test_library_view_and_protected_image_urls_work_offline(self):
         result = self.client.get('/api/media')
         self.assertEqual(result.status_code, 200)
@@ -210,7 +301,7 @@ class MediaWebTests(unittest.TestCase):
         self.grants.add('page:media_upload')
         for path in ('/api/media/upload', '/api/v1/media/upload'):
             for extra in (
-                [('padding' + str(index), 'x') for index in range(3)],
+                [('padding' + str(index), 'x') for index in range(4)],
                 [('name', 'x' * (128 * 1024 + 1))],
             ):
                 with self.subTest(path=path, extra_count=len(extra)):
@@ -257,7 +348,7 @@ class MediaWebTests(unittest.TestCase):
             # Filling the dedicated upload allowance does not block a normal
             # media read or an unrelated API write.
             self.assertEqual(self.client.get('/api/media').status_code, 200)
-            self.grants.add('page:config')
+            self.grants.update({'page:config', 'page:media_library'})
             self.assertEqual(self.client.patch('/api/media/' + self.item['id'], json={'name': 'Updated'},
                                                headers=self.headers).status_code, 200)
             with webui._media_upload_rate_lock:
@@ -349,7 +440,7 @@ class MediaWebTests(unittest.TestCase):
                             # normally places text parts before all files.
                             body = (b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="test.png"\r\n'
                                     b'Content-Type: image/png\r\n\r\n' + _image().getvalue() + b'\r\n')
-                            for index in range(3):
+                            for index in range(4):
                                 body += (f'--boundary\r\nContent-Disposition: form-data; name="padding{index}"\r\n\r\nx\r\n').encode()
                             body += b'--boundary--\r\n'
                             response = self.client.post(path, data=body, headers=self.headers,
@@ -358,7 +449,7 @@ class MediaWebTests(unittest.TestCase):
                     self.assertTrue(streams, 'The parser must have created a partial file before rejecting the body')
                     self.assertTrue(all(stream.closed for stream in streams))
 
-    def test_upload_grant_saves_images_but_only_config_can_edit_presets_or_delete(self):
+    def test_upload_grant_creates_temporary_images_but_only_library_managers_can_edit_or_delete(self):
         self.grants.add('page:media_upload')
         result = self.client.post('/api/media/upload', data={'file': (_image(), 'event.png'), 'name': "Mother's Day"},
                                   headers=self.headers)
@@ -377,7 +468,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(self.client.delete('/api/media/' + item['id'], headers=self.headers).status_code, 403)
         self.assertEqual(self.library.get(item['id'])['name'], "Mother's Day")
         self.assertFalse(self.library.get(item['id'])['preset'])
-        self.grants = {'page:config'}
+        self.grants = {'page:media_library'}
         edited = self.client.patch('/api/media/' + item['id'], json={'preset': True}, headers=self.headers)
         self.assertEqual(edited.status_code, 200)
         self.assertTrue(edited.get_json()['item']['preset'])
@@ -385,7 +476,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(self.client.get(item['thumbnail_url']).status_code, 404)
 
     def test_invalid_upload_and_edit_are_rejected(self):
-        self.grants.add('page:config')
+        self.grants.update({'page:config', 'page:media_library'})
         result = self.client.post('/api/media/upload', data={'file': (io.BytesIO(b'not an image'), 'fake.png')}, headers=self.headers)
         self.assertEqual(result.status_code, 400)
         for payload in ([], {'preset': 'false'}, {'unknown': True}, {'name': ''}, {'name': 17}):
@@ -406,11 +497,11 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(result.status_code, 413)
 
     def test_load_returns_job_and_preserves_actor_for_terminal_log(self):
-        self.grants.add('page:config')
+        self.grants.update({'page:config', 'page:media_library'})
         self.cfg.update(atem_media_enabled=True, atem_media_destinations=[
             {'player': 2, 'label': 'Test only', 'slots': [41, 42]},
         ])
-        page = self.client.get('/config/atem-media')
+        page = self.client.get('/media-library')
         self.assertEqual(page.status_code, 200)
         self.assertIn('id="media-load-button"', page.get_data(as_text=True))
         result = self.client.post('/api/atem/media/load', json={'media_id': self.item['id'], 'player': 2}, headers=self.headers)
@@ -427,13 +518,13 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(event.kwargs['status'], 'success')
 
     def test_unknown_image_never_reaches_hardware(self):
-        self.grants.add('page:config')
+        self.grants.update({'page:config', 'page:media_library'})
         result = self.client.post('/api/atem/media/load', json={'media_id': 'f' * 32, 'player': 2}, headers=self.headers)
         self.assertEqual(result.status_code, 404)
         self.manager.load.assert_not_called()
 
     def test_busy_job_cannot_be_deleted_or_reconfigured(self):
-        self.grants.add('page:config')
+        self.grants.update({'page:config', 'page:media_library'})
         self.manager.snapshot.return_value['job'] = {'mediaId': self.item['id'], 'status': 'uploading'}
         self.assertEqual(self.client.delete('/api/media/' + self.item['id'], headers=self.headers).status_code, 409)
         self.assertEqual(self.client.put('/api/config/atem-media', json={'atem_media_enabled': True}, headers=self.headers).status_code, 409)
@@ -503,39 +594,35 @@ class MediaWebTests(unittest.TestCase):
         self.assertEqual(len(self.library.list()), 1)
 
     def test_invalid_old_setup_can_be_repaired_without_constructing_manager(self):
-        self.grants.add('page:config')
+        self.grants.update({'page:config', 'page:media_library'})
         self.cfg['atem_media_destinations'] = 'invalid imported value'
         with patch.object(webui, '_get_atem_media_manager', side_effect=AssertionError('Must not construct a manager')):
             response = self.client.put('/api/config/atem-media', json={'atem_media_destinations': []}, headers=self.headers)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(self.client.delete('/api/media/' + self.item['id'], headers=self.headers).status_code, 200)
 
-    def test_config_only_user_can_manage_library_without_gaining_hardware_load(self):
+    def test_config_access_is_separate_from_library_management(self):
         self.grants = {'page:config'}
-        response = self.client.get('/config/atem-media')
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('media-setup', response.get_data(as_text=True))
-        self.assertIn('id="media-grid"', response.get_data(as_text=True))
-        self.assertNotIn('id="media-load-button"', response.get_data(as_text=True))
+        page = self.client.get('/config/atem-media')
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn('id="media-grid"', page.get_data(as_text=True))
+        self.assertNotIn('id="media-load-button"', page.get_data(as_text=True))
+        self.assertEqual(self.client.get('/media-library').status_code, 403)
+        self.assertEqual(self.client.get('/api/media').status_code, 200)  # preset image selector
+        self.assertEqual(self.client.post('/api/media/upload', data={'file': (_image(), 'photo.png')}, headers=self.headers).status_code, 403)
+        self.assertEqual(self.client.delete('/api/media/' + self.item['id'], headers=self.headers).status_code, 403)
+        self.grants = {'page:media_library'}
+        page = self.client.get('/media-library')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('id="media-load-button"', page.get_data(as_text=True))
+        self.assertEqual(self.client.get('/config/atem-media').status_code, 403)
+        self.assertEqual(self.client.get('/api/config/atem-media').status_code, 403)
         self.assertEqual(self.client.get('/api/atem/media/state').status_code, 200)
-        listing = self.client.get('/api/media')
-        self.assertEqual(listing.status_code, 200)
-        self.assertEqual(listing.get_json()['permissions'], {'upload': True, 'manage': True, 'load': False})
-        for key in ('url', 'thumbnail_url'):
-            with self.client.get(listing.get_json()['items'][0][key]) as image:
-                self.assertEqual(image.status_code, 200)
-        upload = self.client.post('/api/media/upload', data={'file': (_image(), 'config-image.png')}, headers=self.headers)
+        upload = self.client.post('/api/media/upload', data={'file': (_image(), 'photo.png'), 'temporary': 'false'}, headers=self.headers)
         self.assertEqual(upload.status_code, 201)
-        item = upload.get_json()['item']
-        self.assertEqual(self.client.patch('/api/media/' + item['id'], json={'name': 'Team Night', 'preset': True},
-                                           headers=self.headers).status_code, 200)
-        self.assertEqual(self.client.delete('/api/media/' + item['id'], headers=self.headers).status_code, 200)
-        self.assertEqual(self.client.post('/api/atem/media/load', json={'media_id': self.item['id'], 'player': 2},
-                                          headers=self.headers).status_code, 403)
-        self.assertEqual(self.client.post('/api/media/display', json={'media_id': self.item['id'], 'output': 1},
-                                          headers=self.headers).status_code, 403)
-        self.manager.load.assert_not_called()
-        self.routing.display.assert_not_called()
+        self.assertFalse(upload.get_json()['item']['temporary'])
+        self.assertEqual(self.client.post('/api/atem/media/load', json={'media_id': self.item['id'], 'player': 2}, headers=self.headers).status_code, 202)
+
 
     def test_nonadmin_cannot_change_server_executable(self):
         self.grants.add('page:config')
@@ -684,7 +771,7 @@ class MediaWebTests(unittest.TestCase):
 
     def test_all_active_display_stages_block_reconfiguration_and_image_deletion(self):
         self._allow_display()
-        self.grants.add('page:config')
+        self.grants.update({'page:config', 'page:media_library'})
         for stage in ('queued', 'preparing', 'loading', 'routing'):
             with self.subTest(stage=stage):
                 self.routing.active_job.return_value = {**self.display_job, 'status': stage}
@@ -723,7 +810,7 @@ class MediaWebTests(unittest.TestCase):
         self.assertFalse(any(call.args[0] == 'media.display.queued' for call in self.events.call_args_list))
 
     def test_active_display_does_not_block_unrelated_library_work(self):
-        self.grants = {'page:config'}
+        self.grants = {'page:media_library'}
         self.routing.active_job.return_value = {**self.display_job, 'status': 'routing'}
         upload = self.client.post('/api/media/upload', data={'file': (_image(), 'next-event.png')}, headers=self.headers)
         self.assertEqual(upload.status_code, 201)

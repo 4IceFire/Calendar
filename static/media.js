@@ -45,6 +45,7 @@ function initializeMediaPage() {
       el('media-upload-button').disabled = busy || uploaded;
       el('media-upload-file').disabled = busy || uploaded;
       el('media-upload-name').disabled = busy || uploaded;
+      el('media-upload-temporary').disabled = busy || uploaded || root.dataset.canSave !== 'true';
       text(el('media-upload-button'), busy ? (jobId ? 'Displaying…' : 'Please wait…') : (uploaded ? 'Image uploaded' : (canDisplay ? 'Upload and display' : 'Upload image')));
     }
   }
@@ -230,6 +231,7 @@ function initializeMediaPage() {
     if (file.size > 20 * 1024 * 1024) { message('Choose an image smaller than 20 MB.'); return; }
     const form = new FormData();
     form.append('file', file); form.append('name', el('media-upload-name').value.trim());
+    form.append('temporary', el('media-upload-temporary').checked ? 'true' : 'false');
     busy = true;
     show(el('media-message'), false);
     progress('Uploading your image…', false, false);

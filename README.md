@@ -128,10 +128,11 @@ In **Permissions → Groups**, select a group and tick its page access. The tabs
 below show additional settings only for enabled pages. **General** contains the
 idle timeout. Turning off a page hides its tab while preserving its settings.
 Enable **Routing**, then use its **Routing** tab to enable **Allow selecting
-media** and optionally **Allow uploading media**. Media access requires Routing;
+media** and optionally **Allow uploading temporary media** and **Allow saving
+uploads to the media library**. Media access requires Routing;
 uploads additionally require media selection access. Existing saved grants are
 preserved, including when the Routing tab is hidden. Manage the image library in
-**Config → Media**, and saved routing presets in **Config → Routing presets**.
+**Media Library** in the account menu, hardware setup in **Config → Media**, and saved routing presets in **Config → Routing presets**.
 For preset access, enable **Allow using presets** in the group's Routing tab and
 tick each preset that group may run. No selection means no presets; new presets
 are Admin-only until assigned. Preset access does not grant general media browsing
@@ -192,11 +193,12 @@ Starting `webui.py` starts the calendar scheduler automatically. Do not also run
 ## Media library and ATEM still players
 
 In **Routing**, choose an output, choose **Media**, then select an existing image
-or open **Upload an image**. Uploading saves the image to TDeck and displays it
+or open **Upload an image**. Uploads default to temporary storage and display the image
 on the selected output. The page returns to the output list only after confirmed
 completion. If display fails, the saved image remains available for retry.
 The operator pages show images and progress; player assignments, connection
-status and library management live in **Config → Media**. Saved preset setup
+status live in **Config → Media**. Image management lives in **Media Library**,
+above Config in the account menu. Saved preset setup
 lives in **Config → Routing presets**.
 
 The signal path is: **TDeck library → ATEM still slot → media player → manually
@@ -234,28 +236,46 @@ receiving that player changes together.
    slot reservations must be distinct. Use displayed numbering (player 1,
    still 1, input 1). Enable media display and save. Existing players without
    a VideoHub input remain usable
-   for Config testing, but cannot be selected automatically for TV display.
+   for testing in Media Library, but cannot be selected automatically for TV display.
    Previously saved AUX assignments are ignored and removed on the next Media
    setup save; existing VideoHub input mappings continue working.
    An administrator can optionally specify the trusted server Node.js
    executable in Advanced setup if PATH discovery is unavailable.
 5. In **Permissions → Groups**, enable **Routing**. Inside the group's
    **Routing** tab, enable **Allow selecting media**, then optionally
-   **Allow uploading media** if they may add images.
-   Their existing Routing allow-lists must permit the target output and at
-   least one mapped VideoHub input. Config access grants setup and image
-   management even without a Media grant. Routing preset changes require Admin.
-   Direct player testing also
-   requires Routing and media selection access. Admin has full access. The old
-   separate display and image-management grants are no longer used; existing
-   Media and upload grants
+   **Allow uploading temporary media** if they may upload photos.
+   **Allow saving uploads to the media library** additionally permits permanent
+   uploads. Their Routing allow-lists must permit the target output and at least
+   one mapped VideoHub input. Media Library is a separate top-level page grant
+   providing all library tools, including direct player tests, without Config
+   or Routing access. Config handles setup; preset changes still require Admin.
+   Admin has full access. Existing non-admin groups must be given the new library
+   or permanent-save permission explicitly. Existing Media and upload grants
    remain in place but require Routing to take effect. Port access combines
-   across Routing-enabled groups; a separate Media-only group does not expand
-   it. Blank/all in any Routing group means unrestricted ports. Invalid port
-   entries are rejected without changing the saved permissions.
-6. In Config → Media, add images. For recurring graphics such as Mother's Day or
-   Team Night, create a preset in **Config → Routing presets** (or select an image
-   and choose **Create routing preset**). Test the operator flow through Routing.
+   across Routing-enabled groups; a Media-only or library-only group does not
+   expand it. Blank/all in any Routing group means unrestricted ports.
+6. In **Media Library**, add saved images. For recurring graphics such as
+   Mother's Day or Team Night, create a preset in **Config → Routing presets**
+   (or select a saved image and choose **Create routing preset**).
+
+Media Library has **Saved images** and **Temporary images** collections. Each
+image shows its uploader and upload time; temporary images also show scheduled
+deletion. Older uploads retain their original time and show an unknown uploader.
+Managers can rename, delete, or **Keep in saved library** a temporary image.
+Keeping it preserves its original attribution and makes it available in Routing.
+
+Routing uploads start with **Temporary image** checked. Users with permanent-save
+permission can untick it; other uploaders always upload temporarily. Temporary
+images do not appear in the Routing picker or preset image choices. Their uploader
+can still preview/display their own image, including retrying a failed display.
+Other users cannot access it except through full Media Library access.
+
+**Config → Media → Keep temporary images for (days)** defaults to **7 days**
+and accepts 1–365. It applies to new uploads. TDeck checks for expiry every minute
+while running and when reading/uploading media; it delays deletion during active
+transfers. Deletion only removes TDeck's local files and never clears the ATEM
+or changes a TV. Actual deletions are recorded in the Activity Log.
+
 
 TDeck detects the connected ATEM's video mode and player/still counts, including
 the distinction between 1080p59.94 and 1080p60. Images keep their aspect ratio and
@@ -372,7 +392,7 @@ still needs checking even after the media dependencies are repaired.
 For a home demo, run `python tests/media_ui_harness.py` and open
 `http://127.0.0.1:5063/routing`. Choose Foyer, Media, then an image; the simulated
 display returns to the output list. Config → Media is available at
-`http://127.0.0.1:5063/config/atem-media`. Data resets when the demo stops, and
+`http://127.0.0.1:5063/config/atem-media`; Media Library is at `/media-library`. Data resets when the demo stops, and
 outbound hardware traffic is blocked. The demo has no sign-in or real transfers.
 
 For browser checks, install tools with `npm ci`, run the demo, then in another

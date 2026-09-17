@@ -229,7 +229,7 @@ def main():
             return webui.jsonify({'ok': False, 'error': 'This route is disabled in the isolated Media UI fixture.'}), 404
 
         allowed = {
-            'static', 'media_page', 'media_image', 'media_thumbnail', 'api_media_list', 'api_media_upload',
+            'static', 'media_library_page', 'media_page', 'media_image', 'media_thumbnail', 'api_media_list', 'api_media_upload',
             'api_media_edit', 'api_atem_media_state', 'api_atem_media_load', 'api_atem_media_config',
             'routing_page', 'media_upload_page', 'api_media_display', 'api_media_display_job',
             'api_videohub_state', 'api_videohub_labels', 'api_videohub_route',
