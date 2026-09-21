@@ -169,6 +169,16 @@ class MediaManagerTests(unittest.TestCase):
         self.assertNotIn("expectedAux", bridge.load_data)
         self.assertEqual(manager.snapshot()["auxes"], before)
 
+    def test_confirmed_library_load_updates_shared_player_recency(self):
+        from media_player_usage import PLAYER_USAGE
+        manager, _ = self.connected()
+        before = PLAYER_USAGE.last_used(manager.cfg, 1)
+        completed = []
+        manager.load('image-1', 1, on_complete=completed.append)
+        eventually(lambda: completed)
+        self.assertEqual(completed[0]['status'], 'succeeded')
+        self.assertGreater(PLAYER_USAGE.last_used(manager.cfg, 1), before)
+
     def test_load_does_not_require_aux_state_or_fill_source(self):
         manager, bridge = self.connected()
         current = state()

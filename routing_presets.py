@@ -194,6 +194,12 @@ class RoutingPresetRunner:
                 if job['status'] != 'loading':
                     return
                 job['sharedOutputs'] = list(outcome.get('sharedOutputs') or [])
+                if outcome.get('status') == 'confirmation_required':
+                    job.update(status='confirmation_required', message=outcome['message'],
+                               allocation=copy.deepcopy(outcome['allocation']))
+                    self._active = None
+                    completed(copy.deepcopy(job))
+                    return
                 if outcome.get('status') == 'succeeded':
                     job.update(status='actions', imageDisplayed=True, message='Finishing the preset…')
                 else:

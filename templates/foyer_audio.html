@@ -5,11 +5,14 @@
 
 {% block content %}
   <div id="foyer-audio-page"
+       data-default-view='{{ default_view|tojson }}'
        data-allowed-source-ids='{{ allowed_source_ids|tojson }}'
        data-allow-all='{{ atem_allow_all|tojson }}'
        data-can-solo='{{ atem_can_solo|tojson }}'
        data-can-monitor='{{ atem_can_monitor|tojson }}'>
     <div id="foyer-audio-status" class="mb-3"></div>
+    {% if default_view is not none %}<div id="audio-default-view" class="mb-3"></div>{% endif %}
+    <div id="foyer-audio-master"></div>
     <div id="foyer-audio-monitor"></div>
     <div id="foyer-audio-grid" class="foyer-audio-grid"></div>
     <div id="foyer-audio-empty" class="alert alert-secondary d-none">

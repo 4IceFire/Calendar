@@ -19,9 +19,13 @@ It supports:
   - `BEFORE` (N minutes before the event)
   - `AT` (at the event time)
   - `AFTER` (N minutes after the event)
-- When a trigger is due, the scheduler sends an HTTP POST to Bitfocus Companion’s HTTP API for a button press.
+- Each trigger selects an action: Companion Button, Timer Preset, VideoHub Preset, Routing Presets, or API Call. The Calendar editor and Trigger Templates use this same order.
+- VideoHub Preset selects an existing preset by stable ID. Routing Presets selects an enabled saved preset and captures its destination (a fixed preset destination cannot be overridden). Calendar/Templates editors schedule these actions under the scheduler's existing operational authority; preset configuration remains Admin-only.
+- CLI JSON trigger imports preserve `preset_action: {preset, output?}` and the existing trigger ID; only preset references and a positive destination are accepted, never embedded actions. Routing Preset execution still requires the built-in scheduler.
+- Scheduled Routing Presets use the built-in scheduler's private dispatcher: display and verify the image first, then run approved saved actions in order. A failed display runs no actions; an action failure stops subsequent actions. If every alternative player is busy, the least recently used alternative is replaced under the saved schedule's authority, also changing screens sharing it. Completion appears in Activity Log. Browser preset use retains confirmation and direct resource permissions; API Call triggers and service tokens cannot bypass that confirmation. Routing Presets require the built-in Web UI scheduler and are unavailable from the standalone CLI scheduler.
+- Timer Preset target times already support the same service-relative values as API triggers: `$-40` means service start minus 40 minutes, `$0` the service start, and `$+15` fifteen minutes after. Before/At/After controls **when the trigger executes**, independently of the timer target. For a 10:00 service, a trigger 60 minutes Before with target `$-40` executes at 09:00 and sets the timer target to 09:20.
 
-Internally, triggers are stored like `location/<page>/<row>/<column>/press`.
+Companion button triggers are stored like `location/<page>/<row>/<column>/press`.
 
 Important: store **paths**, not full URLs. The scheduler automatically prefixes Companion’s `/api/` base.
 
@@ -124,6 +128,22 @@ scope semantics.
 
 ### Groups and testing user access
 
+**VideoHub** presets and **Permissions → Groups** support shared folders and manual ordering.
+Use **New folder**, then drag an entry's **⠿** handle onto a folder or between
+rows to move and reorder it. Drop onto **No folder** to move it back out. Collapsed
+folders accept drops and open afterwards. Moves appear immediately and save in
+the background; failed saves restore the previous position. With a keyboard,
+focus the handle, press Space, choose a position with arrow keys, then Enter to
+drop or Escape to cancel. Folder headers expand/collapse and offer ordering,
+rename/delete. Deleting a folder keeps its entries and moves them to **No folder**.
+These folders organise whole groups, not
+the permissions within a group. VideoHub organisation requires preset-edit access.
+Select a group and use **Rename group** in the **Edit Group** header to rename it;
+renaming keeps its ID, members and permissions. The protected Admin group cannot
+be renamed and has no rename control. Preset IDs and saved references also remain unchanged.
+VideoHub organisation is backed up with its presets file; group organisation is
+included in the Auth DB backup/export.
+
 In **Permissions → Groups**, select a group and tick its page access. The tabs
 below show additional settings only for enabled pages. **General** contains the
 idle timeout. Turning off a page hides its tab while preserving its settings.
@@ -189,6 +209,10 @@ It reads `webserver_port` from `config.json` and prints the URL at startup.
 
 The Web UI also has controls to start/stop registered apps (including the calendar scheduler) from the browser.
 Starting `webui.py` starts the calendar scheduler automatically. Do not also run `cli.py start calendar` for the same installation; that would create a second scheduler process and can duplicate cues.
+
+## Routing and Record Audio default views
+
+Admins can choose **Configure defaults** on Routing to select the default inputs and outputs, and on Record Audio to select default faders. These preferences are shared by all admins and saved in the Auth DB; no selections means all. **Show all** temporarily reveals the full selection. Other users retain their existing group access rules. Record Audio's Master is a full-width fader above Monitor, with the same volume control and meters; Monitor keeps its separate permission.
 
 ## Media library and ATEM still players
 
@@ -329,17 +353,20 @@ Only **Confirm & apply** starts it. Fixed destinations must also be allowed by
 the operator's Routing permissions. Presets can be granted separately from
 general image browsing/uploading through **Permissions → Groups → Routing**.
 
-If the selected TV already receives an allowed, configured media player, a
-preset reuses that player and loads its selected image, even when other outputs
-share it. All screens receiving that player show the new image; the confirmation
-screen explains this. TDeck skips an unnecessary VideoHub write when the route
-is already correct, but still loads/verifies the image and reads back the route.
-If the TV does not already receive an eligible player, TDeck reuses an allowed
-player already feeding other outputs, or chooses an unused one if none are in
-use. The order of players in Config → Media breaks ties. It loads the image,
-then routes the chosen player to the preset's selected output while preserving
-the other output routes. Selected-output and mapped-input permissions still apply, and changes
-to the target or other receivers during the load prevent a successful result.
+Media and Routing Presets inspect actual VideoHub routes before uploading.
+If the target is its mapped player's only receiver, TDeck replaces the image on
+that player. Otherwise it chooses the least recently used eligible alternative,
+preferring players that do not feed other outputs. If every alternative is busy,
+the browser names the other outputs that will also show the new image and asks
+for confirmation before uploading. Changed receiver assignments require another
+confirmation. With no eligible alternative, display stops without uploading.
+Scheduled presets may use this shared fallback under the saved schedule's authority.
+Confirmed image loads, including Library player tests, update recency; restarting
+TDeck resets usage history, with Config order breaking ties. An uploaded image
+counts as use even if a later routing step fails. TDeck verifies the image and
+route, skips redundant route writes, preserves all other VideoHub routes and
+never changes manually configured ATEM AUX routing. Existing output/input grants
+still apply to browser operations.
 
 After verified image display, extra actions run once in order with
 administrator-approved authority, even when the operator cannot access those
@@ -600,6 +627,8 @@ python -m unittest discover -s tests -p test_routing_presets.py -v
 ```
 
 ### Cross-browser page and failure tests
+
+To check these changes without hardware, run `python -m unittest discover -s tests -p test_admin_default_views.py -v`. Start `python tests/default_views_ui_harness.py` in another terminal, set `TDECK_BASE_URL=http://127.0.0.1:5068`, and run `npx playwright test tests/browser/default_views.spec.js --workers=1` for all five supported browser projects. The fixture uses temporary users/data and fake devices.
 
 The Playwright suite exercises Chromium, Firefox, WebKit, mobile Chromium and mobile WebKit. Routing and Record Audio use intercepted device-state responses, including outage/recovery and hidden-tab polling checks, and never issue live hardware-control commands. The general page smoke is read-only.
 

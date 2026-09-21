@@ -9,6 +9,12 @@ function initializeRoutingPresets() {
   // Keep the modal above the backdrop outside the page's stacking context.
   document.body.appendChild(modalElement);
   const modal = new bootstrap.Modal(modalElement);
+  let modalHiding = false, showAfterHide = false;
+  modalElement.addEventListener('hide.bs.modal', () => { modalHiding = true; });
+  modalElement.addEventListener('hidden.bs.modal', () => {
+    modalHiding = false;
+    if (showAfterHide) { showAfterHide = false; modal.show(); }
+  });
   function message(copy, error) {
     el('preset-message').className = copy ? 'alert alert-' + (error ? 'danger' : 'info') : '';
     el('preset-message').textContent = copy || '';
@@ -40,18 +46,23 @@ function initializeRoutingPresets() {
     });
     grid.setAttribute('aria-busy', 'false'); controls();
   }
-  async function choose(item, output) {
+  async function choose(item, output, sharedConfirmation, warning) {
     if (busy) return;
     if (item.output === null && !output) { window.location.assign('/routing?preset=' + encodeURIComponent(item.id)); return; }
     busy = true; controls(); message(''); confirmation = null;
     try {
-      confirmation = await post('/api/routing/presets/' + item.id + '/prepare', {revision: item.revision, output: item.output === null ? output : item.output});
+      const body = {revision: item.revision, output: item.output === null ? output : item.output};
+      if (sharedConfirmation) body.shared_confirmation = sharedConfirmation;
+      confirmation = await post('/api/routing/presets/' + item.id + '/prepare', body);
       el('preset-confirm-copy').textContent = 'Apply “' + item.name + '” to ' + confirmation.output_label + '?';
+      el('preset-confirm-warning').textContent = warning || '';
+      el('preset-confirm-warning').classList.toggle('d-none', !warning);
       el('preset-confirm-description').textContent = item.description;
       el('preset-confirm-image').src = item.thumbnail_url;
       el('preset-confirm-actions').textContent = '';
       confirmation.actions.forEach(label => { const li = document.createElement('li'); li.textContent = label; el('preset-confirm-actions').appendChild(li); });
-      modal.show();
+      if (modalHiding) showAfterHide = true;
+      else modal.show();
     } catch (error) { message(error.message, true); }
     finally { busy = false; controls(); }
   }
@@ -61,6 +72,11 @@ function initializeRoutingPresets() {
     if (job.status === 'succeeded') {
       const finishedId = jobId; jobId = ''; remember();
       window.location.assign('/routing?preset_job=' + encodeURIComponent(finishedId));
+    } else if (job.status === 'confirmation_required') {
+      jobId = ''; busy = false; remember(); controls();
+      const item = presets.find(entry => entry.id === job.presetId);
+      if (item) choose(item, job.output, job.shared_confirmation, job.message);
+      else message('Refresh and select the preset again to review affected outputs.', true);
     } else if (job.status === 'failed') {
       jobId = ''; busy = false; remember(); controls();
       el('preset-progress').classList.add('border-danger');

@@ -473,6 +473,9 @@ class AtemMediaManager:
                 if player.get("type") != "still" or player.get("slot") != slot:
                     raise RuntimeError("ATEM media selection changed before completion was confirmed")
                 self._job["generation"] = generation
+                # Include successful raw Library tests in display allocation.
+                from media_player_usage import PLAYER_USAGE
+                PLAYER_USAGE.record(self.cfg, self._job["player"])
             self._job.update(status=status, error=error[:500], updatedAt=time.time())
             if slot is not None:
                 self._job["slot"] = slot

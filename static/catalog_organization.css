@@ -1,0 +1,21 @@
+.catalog-tree { position: relative; gap: .35rem; scroll-behavior: auto; }
+html.catalog-dragging { scroll-behavior: auto !important; }
+.catalog-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-bottom: .3rem; }
+.catalog-help { color: var(--bs-secondary-color, #8795a3); font-size: .8rem; }
+.catalog-section { border: 1px solid var(--bs-border-color, #495057); border-radius: .5rem; padding: .4rem; margin-top: .5rem; min-width: 0; }
+.catalog-header { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; border-radius: .35rem; padding: .2rem; transition: background-color 120ms, box-shadow 120ms; }
+.catalog-header.catalog-drop-target { background: rgba(13,110,253,.16); box-shadow: inset 0 0 0 2px #438dff; }
+.catalog-items { min-height: 16px; }
+.catalog-item { position: relative; display: flex; gap: .35rem; align-items: stretch; padding: .25rem 0; min-width: 0; }
+.catalog-item-content { flex: 1; min-width: 0; }
+.catalog-item-content > * { width: 100%; margin-bottom: 0 !important; }
+.catalog-item-content .btn-link { min-width: 0; overflow-wrap: anywhere; }
+.catalog-handle { flex: 0 0 28px; padding: 0; border: 0; border-radius: .35rem; background: transparent; color: var(--bs-secondary-color, #8795a3); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; font-size: 1.25rem; }
+.catalog-handle:hover, .catalog-handle:focus-visible { background: rgba(13,110,253,.15); color: #438dff; outline: 2px solid #438dff; outline-offset: -2px; }
+.catalog-handle:disabled { opacity: .45; cursor: progress; }
+.catalog-drag-origin { opacity: .3; }
+.catalog-drop-line { position: fixed; height: 3px; border-radius: 3px; background: #438dff; box-shadow: 0 0 0 1px rgba(255,255,255,.3); pointer-events: none; z-index: 1090; }
+.catalog-drag-ghost { position: fixed; top: 0; left: 0; z-index: 1091; pointer-events: none; padding: .65rem 1rem; border: 1px solid #438dff; border-radius: .5rem; background: var(--bs-body-bg, #212529); color: var(--bs-body-color, #eee); box-shadow: 0 10px 28px #0005; max-width: min(320px, 85vw); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; will-change: transform; }
+body.catalog-dragging { user-select: none; -webkit-user-select: none; cursor: grabbing; }
+@media (pointer: coarse) { .catalog-handle { flex-basis: 36px; min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .catalog-header { transition: none; } }

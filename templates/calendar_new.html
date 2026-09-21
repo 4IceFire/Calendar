@@ -37,7 +37,7 @@
   </div>
 
   <h4>Triggers</h4>
-  <div class="mb-2 d-flex gap-2 align-items-center">
+  <div class="mb-2 d-flex flex-wrap gap-2 align-items-center">
     <select id="trigger-template-select" class="form-select form-select-sm" style="max-width:360px">
       <option value="">(select template)</option>
     </select>
@@ -61,6 +61,7 @@
 </form>
 </div>
 
+<script src="{{ static_asset('trigger_presets.js') }}"></script>
 <script>
 function normalizeApiPath(p){
   let s = String(p || '').trim();
@@ -166,7 +167,7 @@ function newTriggerRow(templates, timerPresets){
     <input type="hidden" name="uid" value="${uid}">
 
     <div class="trigger-body mt-2">
-      <div class="d-flex gap-2 align-items-center">
+      <div class="d-flex flex-wrap gap-2 align-items-center">
         <input name="minutes" placeholder="minutes" class="form-control form-control-sm" style="width:100px">
         <select name="typeOfTrigger" class="form-select form-select-sm" style="width:140px">
           <option value="BEFORE">Before</option>
@@ -175,8 +176,10 @@ function newTriggerRow(templates, timerPresets){
         </select>
         <select name="actionType" class="form-select form-select-sm" style="width:160px">
           <option value="companion">Companion Button</option>
-          <option value="api">API Call</option>
           <option value="timer">Timer Preset</option>
+          <option value="videohub_preset">VideoHub Preset</option>
+          <option value="routing_preset">Routing Presets</option>
+          <option value="api">API Call</option>
         </select>
         <div class="ms-auto d-flex align-items-center gap-2">
           <button type="button" class="btn btn-sm btn-outline-secondary move-up" title="Move up">↑</button>
@@ -219,7 +222,7 @@ function newTriggerRow(templates, timerPresets){
             return `<option value="${i + 1}" data-time="${_escHtml(tm)}">${_escHtml(lbl)}</option>`;
           }).join('')}
         </select>
-        <input name="timerTime" placeholder="HH:MM or $-15" class="form-control form-control-sm" style="max-width:160px">
+        <input name="timerTime" placeholder="HH:MM or $-40" title="Timer target relative to service start; trigger execution uses Before/At/After above." class="form-control form-control-sm" style="max-width:160px">
         <div class="form-check mb-0">
           <input class="form-check-input" type="checkbox" name="timerApply" checked>
           <label class="form-check-label small">Apply when triggered</label>
@@ -262,6 +265,8 @@ function newTriggerRow(templates, timerPresets){
   if(minutesInput) minutesInput.addEventListener('input', syncSummary);
   syncSummary();
   div.__syncSummary = syncSummary;
+
+  triggerPresetFields(div);
 
   // Toggle companion vs api fields
   const actionSel = div.querySelector('select[name="actionType"]');
@@ -311,9 +316,10 @@ function newTriggerRow(templates, timerPresets){
       if(timerApplyInp) timerApplyInp.disabled = true;
     }
   };
-  if(actionSel) actionSel.addEventListener('change', syncActionFields);
+  const syncAllActionFields = ()=>{ syncActionFields(); div.__syncPresetFields(String(actionSel.value || 'companion')); };
+  if(actionSel) actionSel.addEventListener('change', syncAllActionFields);
   syncActionFields();
-  div.__syncActionFields = syncActionFields;
+  div.__syncActionFields = syncAllActionFields;
 
   return div;
 }
@@ -427,6 +433,10 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       const mins = parseInt(minsRaw,10);
       if(Number.isNaN(mins) || mins < 0){ throw new Error('Minutes must be a non-negative integer'); }
 
+      if(actionType === 'videohub_preset' || actionType === 'routing_preset'){
+        times.push({uid, name, minutes: mins, typeOfTrigger: type, enabled, actionType, preset_action: row.__readPreset()});
+        continue;
+      }
       if(actionType === 'api'){
         const method = String(row.querySelector('select[name="apiMethod"]').value || 'POST').toUpperCase();
         const path = String(row.querySelector('input[name="apiPath"]').value || '').trim();
@@ -512,6 +522,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           row.querySelector('input[name="minutes"]').value = t.minutes;
           row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
           row.querySelector('select[name="actionType"]').value = (t.actionType || 'companion');
+    row.__syncActionFields();
+    row.__restorePreset(t.preset_action);
           const en = (t && t.enabled !== false);
           const enInput = row.querySelector('input[name="enabled"]');
           if(enInput) enInput.checked = !!en;
@@ -704,6 +716,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       row.querySelector('input[name="minutes"]').value = t.minutes;
       row.querySelector('select[name="typeOfTrigger"]').value = t.typeOfTrigger;
       row.querySelector('select[name="actionType"]').value = (t.actionType || 'companion');
+    row.__syncActionFields();
+    row.__restorePreset(t.preset_action);
       const en = (t && t.enabled !== false);
       const enInput = row.querySelector('input[name="enabled"]');
       if(enInput) enInput.checked = !!en;

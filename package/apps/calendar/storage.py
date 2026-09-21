@@ -110,7 +110,12 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                         else:
                             action_type = "companion"
 
-                    if action_type == "api":
+                    if action_type in ("videohub_preset", "routing_preset"):
+                        times.append(TimeOfTrigger(
+                            trig.get("minutes", 0), TypeofTime[trig.get("typeOfTrigger", "AT")],
+                            name=trig_name, uid=trig_uid, actionType=action_type,
+                            preset_action=trig.get("preset_action"), enabled=enabled))
+                    elif action_type == "api":
                         times.append(
                             TimeOfTrigger(
                                 trig.get("minutes", 0),
@@ -212,6 +217,9 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                         if "timer" not in trig or not isinstance(trig.get("timer"), dict):
                             trig["timer"] = {}
                             changed = True
+                    elif action_type in ("videohub_preset", "routing_preset"):
+                        # Preset references and trigger UIDs survive normal load/save.
+                        pass
                     else:
                         if "buttonURL" not in trig:
                             trig["buttonURL"] = ""

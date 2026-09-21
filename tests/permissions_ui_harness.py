@@ -47,6 +47,8 @@ def main():
                           atem_media_enabled=True, atem_media_node_path='',
                           atem_media_destinations=[{'player': 2, 'label': 'Media A', 'slots': [41, 42],
                                                     'videohub_input': 7}])
+        if presets_mode:
+            config['atem_media_destinations'].append({'player': 4, 'label': 'Media B', 'slots': [43, 44], 'videohub_input': 8})
         config_path = root / 'config.json'
         config_path.write_text(json.dumps(config), encoding='utf-8')
         for operation in ('connect', 'connect_ex', 'sendto'):
@@ -97,6 +99,11 @@ def main():
             'scenes': [{'id': 'welcome', 'name': 'Welcome', 'enabled': True}],
         }))
         webui._init_auth_db()
+        if not view_as_mode:
+            stack.enter_context(patch.object(webui, '_get_videohub_state_snapshot', return_value={
+                'ok': True, 'configured': True, 'inputs': [{'number': 1, 'label': 'Camera'}],
+                'outputs': [{'number': 1, 'label': 'Screen'}], 'routing': [1],
+            }))
         media_fixture = {}
         if view_as_mode:
             from media_library import MediaLibrary
@@ -112,10 +119,20 @@ def main():
             stack.enter_context(patch.object(webui, '_invalidate_videohub_state_snapshot'))
 
         def reset_fixture():
+            if not view_as_mode:
+                from package.apps.videohub import storage as videohub_storage
+                from package.apps.videohub.models import VideohubPreset, VideohubRoute
+                presets_path = root / 'videohub_presets.json'
+                presets_path.write_text('[]', encoding='utf-8')
+                videohub_storage.save_presets([
+                    VideohubPreset(id=3, name='Sunday', routes=[VideohubRoute(output=1, input=1)]),
+                    VideohubPreset(id=8, name='Midweek', routes=[], locked=True),
+                ], presets_path)
             with closing(webui._db()) as conn:
                 conn.execute('DELETE FROM user_groups')
                 conn.execute('DELETE FROM group_pages')
                 conn.execute('DELETE FROM groups')
+                conn.execute('DELETE FROM group_organization')
                 conn.execute("INSERT INTO groups (id,name,is_admin,is_system) VALUES (1,'Admin',1,1)")
                 conn.execute("INSERT INTO groups (id,name,is_admin) VALUES (68,'Media Testing',0)")
                 conn.execute("INSERT INTO groups (id,name,is_admin) VALUES (69,'Routing',0)")
@@ -155,6 +172,8 @@ def main():
                     route_videohub=lambda output, input_: hub.route_video_output(output=output - 1, input_=input_ - 1))
                 media_fixture.update(library=library, atem=atem, hub=hub, routing=routing)
                 if presets_mode:
+                    from media_player_usage import PlayerUsage
+                    routing._player_usage = PlayerUsage()
                     from routing_presets import RoutingPresetStore, RoutingPresetRunner
                     webui._routing_preset_runner = RoutingPresetRunner()
                     store = RoutingPresetStore(library.root)
@@ -166,6 +185,7 @@ def main():
                     store.save({'name': 'Private preset', 'media_id': image_id, 'output': 2})
                     media_fixture['actions'] = []
                     with closing(webui._db()) as conn:
+                        conn.execute("UPDATE groups SET videohub_allowed_inputs='[1,7,8]' WHERE id=68")
                         conn.execute('DELETE FROM user_groups WHERE user_id=2 AND group_id=70')
                         conn.executemany('INSERT INTO group_pages(group_id,page_key) VALUES(68,?)',
                             [('page:routing_presets',), ('preset:' + choose['id'],), ('preset:' + fixed['id'],)])
@@ -178,7 +198,11 @@ def main():
         def blocked_route(**_kwargs):
             return webui.jsonify({'ok': False, 'error': 'This route is disabled in the isolated permissions fixture.'}), 404
 
-        allowed = {'static', 'admin_permissions_page', 'api_admin_group_update'}
+        allowed = {'static', 'admin_permissions_page', 'api_admin_group_update',
+                   'api_admin_group_organization', 'api_admin_group_rename'}
+        if not view_as_mode:
+            allowed.update({'videohub_page', 'api_videohub_presets_list', 'api_videohub_presets_organization',
+                            'api_videohub_rooms_config_get', 'api_videohub_state', 'api_videohub_labels'})
         if view_as_mode:
             allowed.update({'login_page', 'logout_page', 'admin_user_detail_page', 'admin_view_as_user',
                 'stop_view_as_user', 'auth_ping', 'auth_touch', 'account_password_page',

@@ -44,6 +44,12 @@ class VideohubApp(AppBase):
         presets = storage.load_presets(self._presets_file(cfg))
         return [p.to_dict() for p in presets]
 
+    def get_organization(self, cfg: dict) -> dict:
+        return storage.load_organization(self._presets_file(cfg))
+
+    def save_organization(self, cfg: dict, value: dict) -> dict:
+        return storage.save_organization(value, self._presets_file(cfg))
+
     def get_preset(self, cfg: dict, preset_id: int) -> Optional[VideohubPreset]:
         presets = storage.load_presets(self._presets_file(cfg))
         for p in presets:
@@ -51,6 +57,7 @@ class VideohubApp(AppBase):
                 return p
         return None
 
+    @storage.locked_mutation
     def upsert_preset(self, cfg: dict, preset: dict) -> VideohubPreset:
         presets = storage.load_presets(self._presets_file(cfg))
 
@@ -87,7 +94,7 @@ class VideohubApp(AppBase):
                     storage.save_presets(presets, self._presets_file(cfg))
                     return updated
 
-        next_id = 1
+        next_id = storage.next_preset_id(self._presets_file(cfg))
         for p in presets:
             next_id = max(next_id, int(p.id) + 1)
         created = VideohubPreset(id=next_id, name=name, routes=routes_in, locked=False)
@@ -95,6 +102,7 @@ class VideohubApp(AppBase):
         storage.save_presets(presets, self._presets_file(cfg))
         return created
 
+    @storage.locked_mutation
     def delete_preset(self, cfg: dict, preset_id: int) -> bool:
         presets = storage.load_presets(self._presets_file(cfg))
         found = None
@@ -114,6 +122,7 @@ class VideohubApp(AppBase):
         storage.save_presets(presets, self._presets_file(cfg))
         return True
 
+    @storage.locked_mutation
     def set_preset_locked(self, cfg: dict, preset_id: int, locked: bool) -> VideohubPreset:
         presets = storage.load_presets(self._presets_file(cfg))
         for i, p in enumerate(presets):

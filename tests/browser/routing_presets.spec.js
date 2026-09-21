@@ -32,7 +32,7 @@ test('Only assigned presets appear; a fixed preset confirms before image and API
   await expect(modal).toHaveCSS('opacity', '1');
   await expect(modal).toContainText('Foyer');
   await expect(modal).toContainText('Start the welcome timer');
-  await expect(modal).toContainText('Other screens using the same media player will also show this image.');
+  await expect(page.locator('#preset-confirm-warning')).toBeHidden();
   expect((await (await request.get('/__permissions_fixture__/state')).json()).actions).toEqual([]);
   await page.screenshot({path: testInfo.outputPath('preset-confirmation.png'), fullPage: true, animations: 'disabled'});
   await modal.getByRole('button', {name: 'Cancel', exact: true}).click();
@@ -62,16 +62,21 @@ test('A preset without a destination uses the restricted Routing output picker',
   expect(errors).toEqual([]);
 });
 
-test('A preset updates a busy player, adds its output and can replace the shared photo again', async ({page, request}) => {
+test('A shared fallback names affected outputs before each confirmed replacement', async ({page, request}, testInfo) => {
   const errors = collectPageErrors(page);
-  // Foyer is the only allowed target; Kids and Hall already receive Media A.
-  expect((await request.post('/__permissions_fixture__/state', {data: {routing: [1, 7, 7]}})).ok()).toBe(true);
+  // Foyer is the only allowed target; both alternatives are busy.
+  expect((await request.post('/__permissions_fixture__/state', {data: {routing: [1, 7, 8]}})).ok()).toBe(true);
   await asOperator(page);
   await page.getByRole('button', {name: "Select Mother's Day", exact: true}).click();
   await page.getByRole('button', {name: 'Confirm & apply', exact: true}).click();
+  await expect(page.locator('#preset-confirm-warning')).toContainText('Output 2 (Kids)');
+  expect((await (await request.get('/__permissions_fixture__/state')).json()).actions).toEqual([]);
+  await expect(page.locator('#preset-confirm-modal')).toHaveCSS('opacity', '1');
+  await page.screenshot({path: testInfo.outputPath('shared-output-confirmation.png'), fullPage: true, animations: 'disabled'});
+  await page.getByRole('button', {name: 'Confirm & apply', exact: true}).click();
   await expect(page).toHaveURL(/\/routing\?preset_job=/);
   const first = await (await request.get('/__permissions_fixture__/state')).json();
-  expect(first.routing).toEqual([7, 7, 7]);
+  expect(first.routing).toEqual([7, 7, 8]);
   expect(first.media_job.status).toBe('succeeded');
   expect(first.media_job.mediaName).toBe('Welcome');
   expect(first.actions).toEqual([{preset: 1}]);
@@ -81,13 +86,15 @@ test('A preset updates a busy player, adds its output and can replace the shared
   await expect(page.locator('#routing-outputs button')).toHaveCount(1);
   await page.locator('#routing-outputs button').click();
   await page.getByRole('button', {name: 'Confirm & apply', exact: true}).click();
+  await expect(page.locator('#preset-confirm-warning')).toContainText('Output 3 (Hall)');
+  await page.getByRole('button', {name: 'Confirm & apply', exact: true}).click();
   await expect(page).toHaveURL(/\/routing\?preset_job=/);
   const second = await (await request.get('/__permissions_fixture__/state')).json();
-  expect(second.routing).toEqual([7, 7, 7]);
+  expect(second.routing).toEqual([8, 7, 8]);
   expect(second.media_job.status).toBe('succeeded');
   expect(second.media_job.mediaName).toBe('Team graphic');
   expect(second.media_job.mediaId).not.toBe(first.media_job.mediaId);
-  expect(second.media_job.player).toBe(first.media_job.player);
+  expect(second.media_job.player).not.toBe(first.media_job.player);
   expect(second.actions).toEqual([{preset: 1}]);
   expect(errors).toEqual([]);
 });

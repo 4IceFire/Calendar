@@ -10,12 +10,198 @@ test.beforeEach(async ({page, request}) => {
   await installCommonReadMocks(page);
 });
 
+async function dragRow(page, handle, destination, atTop = false) {
+  await expect(handle).toBeEnabled();
+  await handle.evaluate(el => el.scrollIntoView({block: 'center', behavior: 'instant'}));
+  await handle.scrollIntoViewIfNeeded();
+  const source = await handle.boundingBox();
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(source.x + source.width / 2 + 8, source.y + source.height / 2);
+  // Native drag edge scrolling deliberately keeps running while the pointer is
+  // held; don't use an actionability wait that requires the target to stop.
+  await destination.evaluate(el => el.scrollIntoView({block: 'center', behavior: 'instant'}));
+  const target = await destination.boundingBox();
+  await page.mouse.move(target.x + target.width / 2, target.y + (atTop ? 3 : target.height / 2), {steps: 10});
+  await expect(page.locator('.catalog-drop-target')).toHaveCount(1);
+  await page.mouse.up();
+}
+
+test('Group drag movement and header rename persist without changing grants', async ({page, request}, testInfo) => {
+  const errors = collectPageErrors(page);
+  await openGroup(page);
+  const list = page.locator('#access-levels-role-list');
+  await expect(list.getByRole('button', {name: 'New folder', exact: true})).toBeVisible();
+  page.once('dialog', dialog => dialog.accept('Production teams'));
+  let saved = page.waitForResponse(response => response.url().endsWith('/api/admin/groups/organization') && response.request().method() === 'POST');
+  await list.getByRole('button', {name: 'New folder', exact: true}).click();
+  expect((await saved).ok()).toBe(true);
+  let group = list.locator('[data-role-item][data-role-id="68"]');
+  saved = page.waitForResponse(response => response.url().endsWith('/api/admin/groups/organization') && response.request().method() === 'POST');
+  await dragRow(page, list.getByRole('button', {name: 'Move Media Testing', exact: true}), list.getByRole('button', {name: 'Expand or collapse Production teams'}));
+  expect((await saved).ok()).toBe(true);
+  await page.reload();
+  group = list.locator('[data-catalog-folder]:not([data-catalog-folder=""]) [data-role-item][data-role-id="68"]');
+  await expect(group).toBeVisible();
+  await expect(list.locator('[data-role-item][data-role-id="1"] [data-group-rename]')).toHaveCount(0);
+  await expect(list.locator('[data-group-rename]')).toHaveCount(0);
+  await list.locator('[data-role-select][data-role-id="68"]').click();
+  await expect(page.locator('#group-editor-header [data-group-rename="68"]')).toBeVisible();
+  page.once('dialog', dialog => dialog.accept('Production operators'));
+  await page.getByRole('button', {name: 'Rename group', exact: true}).click();
+  await expect(list.locator('[data-role-item][data-role-id="68"]')).toContainText('Production operators');
+  const form = page.locator('[data-role-form][data-role-id="68"]');
+  await list.locator('[data-role-select][data-role-id="68"]').click();
+  await expect(pageGrant(form, 'routing')).toBeChecked();
+  await expect(pageGrant(form, 'media')).toBeChecked();
+  const state = await request.get('/api/admin/groups/organization');
+  expect((await state.json()).organization.items.find(item => item.id === '68').folderId).toBeTruthy();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  await page.screenshot({path: testInfo.outputPath('group-drag-editor.png'), fullPage: true});
+  await list.locator('[data-role-select][data-role-id="1"]').click();
+  await expect(page.getByRole('button', {name: 'Rename group', exact: true})).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test('VideoHub drag folders and keyboard order survive reload and preserve locked presets', async ({page, request}, testInfo) => {
+  const errors = collectPageErrors(page);
+  await page.goto('/videohub');
+  const list = page.locator('#vh-list');
+  await expect(list.getByRole('button', {name: 'New folder', exact: true})).toBeVisible();
+  const before = (await (await request.get('/api/videohub/presets')).json()).presets;
+  page.once('dialog', dialog => dialog.accept('Services'));
+  let saved = page.waitForResponse(response => response.url().endsWith('/api/videohub/presets/organization') && response.request().method() === 'POST');
+  await list.getByRole('button', {name: 'New folder', exact: true}).click();
+  expect((await saved).ok()).toBe(true);
+  const preset = list.locator('[data-catalog-item="8"]');
+  saved = page.waitForResponse(response => response.url().endsWith('/api/videohub/presets/organization') && response.request().method() === 'POST');
+  const handle = preset.locator('.catalog-handle');
+  await expect(handle).toBeEnabled();
+  await handle.focus(); await page.keyboard.press('Space'); await page.keyboard.press('ArrowUp'); await page.keyboard.press('Enter');
+  expect((await saved).ok()).toBe(true);
+  await expect(list.locator('[data-act="select"]').first()).toHaveAttribute('data-id', '8');
+  saved = page.waitForResponse(response => response.url().endsWith('/api/videohub/presets/organization') && response.request().method() === 'POST');
+  await dragRow(page, handle, list.getByRole('button', {name: 'Expand or collapse Services'}));
+  expect((await saved).ok()).toBe(true);
+  await page.reload();
+  const folder = list.locator('[data-catalog-folder]:not([data-catalog-folder=""])');
+  await expect(folder.locator('[data-act="select"][data-id="8"]')).toBeVisible();
+  await expect(folder).toContainText('Locked');
+  await page.screenshot({path: testInfo.outputPath('videohub-drag-folders.png'), fullPage: true});
+  await list.getByRole('button', {name: 'Expand or collapse Services'}).click();
+  await expect(folder.locator('[data-act="select"][data-id="8"]')).toBeHidden();
+  const after = (await (await request.get('/api/videohub/presets')).json()).presets;
+  expect(after).toEqual(before);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 async function openGroup(page) {
   await page.goto('/admin/permissions?tab=groups#role-68');
+  await expect(page.locator('#access-levels-role-list').getByRole('button', {name: 'New folder', exact: true})).toBeVisible();
   const form = page.locator('[data-role-form][data-role-id="68"]');
   await expect(form).toBeVisible();
   return form;
 }
+
+test('Drag cancellation, delayed saves and failed saves keep the selected group stable', async ({page, request}) => {
+  const errors = collectPageErrors(page);
+  const form = await openGroup(page);
+  const list = page.locator('#access-levels-role-list');
+  const state = (await (await request.get('/api/admin/groups/organization')).json()).organization;
+  let writes = 0, release;
+  await page.route('**/api/admin/groups/organization', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    writes += 1;
+    await new Promise(resolve => { release = resolve; });
+    await route.fulfill({status: 500, contentType: 'application/json', body: JSON.stringify({ok: false, error: 'Fixture save failed'})});
+  });
+  const handle = list.getByRole('button', {name: 'Move Media Testing', exact: true});
+  await handle.focus(); await page.keyboard.press('Space'); await page.keyboard.press('ArrowUp'); await page.keyboard.press('Escape');
+  expect(writes).toBe(0);
+  await expect(form).toBeVisible();
+  await handle.focus(); await page.keyboard.press('Space'); await page.keyboard.press('ArrowUp'); await page.keyboard.press('Enter');
+  await expect(list.locator('[data-catalog-item]').first()).toHaveAttribute('data-catalog-item', '68');
+  await expect(list).toHaveAttribute('aria-busy', 'true');
+  await expect(form).toBeVisible();
+  await expect.poll(() => writes).toBe(1);
+  release();
+  await expect(page.getByText('Fixture save failed', {exact: true})).toBeVisible();
+  await expect(list.locator('[data-catalog-item]').first()).toHaveAttribute('data-catalog-item', '1');
+  await expect(handle).toBeFocused();
+  expect((await (await request.get('/api/admin/groups/organization')).json()).organization).toEqual(state);
+  expect(errors).toEqual([]);
+});
+
+test('Dropping into a collapsed folder opens it and moving back to No folder persists', async ({page, request}) => {
+  await openGroup(page);
+  const list = page.locator('#access-levels-role-list');
+  page.once('dialog', dialog => dialog.accept('Team'));
+  await list.getByRole('button', {name: 'New folder', exact: true}).click();
+  const folderToggle = list.getByRole('button', {name: 'Expand or collapse Team'});
+  await expect(folderToggle).toBeEnabled(); await folderToggle.click();
+  await expect(folderToggle).toHaveAttribute('aria-expanded', 'false');
+  const handle = list.getByRole('button', {name: 'Move Media Testing', exact: true});
+  await dragRow(page, handle, folderToggle);
+  await expect(folderToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(list).toHaveAttribute('aria-busy', 'false');
+  await dragRow(page, handle, list.locator('[data-catalog-folder=""] .catalog-header'));
+  await expect(list.locator('[data-catalog-folder=""] [data-catalog-item="68"]')).toBeVisible();
+  await expect(list).toHaveAttribute('aria-busy', 'false');
+  expect((await (await request.get('/api/admin/groups/organization')).json()).organization.items.find(item => item.id === '68').folderId).toBe(null);
+  await page.reload();
+  await expect(list.locator('[data-catalog-folder=""] [data-catalog-item="68"]')).toBeVisible();
+});
+
+test('Touch dragging uses the same folder allocation without page scrolling', async ({page, browserName}, testInfo) => {
+  test.skip(browserName !== 'chromium' || !testInfo.project.use.isMobile, 'Native multi-point touch input uses the mobile Chromium protocol.');
+  await openGroup(page);
+  const list = page.locator('#access-levels-role-list');
+  page.once('dialog', dialog => dialog.accept('Touch team'));
+  await list.getByRole('button', {name: 'New folder', exact: true}).click();
+  const target = list.getByRole('button', {name: 'Expand or collapse Touch team'});
+  await expect(target).toBeEnabled();
+  // Keep the gesture clear of intentional edge scrolling while checking that
+  // touching the handle does not turn into a normal page-pan gesture.
+  await target.evaluate(el => el.scrollIntoView({block: 'center', behavior: 'instant'}));
+  const handle = list.getByRole('button', {name: 'Move Media Testing', exact: true});
+  const a = await handle.boundingBox(), b = await target.boundingBox();
+  const session = await page.context().newCDPSession(page);
+  const start = {x: a.x + a.width / 2, y: a.y + a.height / 2};
+  const end = {x: b.x + b.width / 2, y: b.y + b.height / 2};
+  const before = await page.evaluate(() => window.scrollY);
+  await session.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [start]});
+  for (let n = 1; n <= 10; n++) await session.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: start.x + (end.x - start.x) * n / 10, y: start.y + (end.y - start.y) * n / 10}]});
+  await expect(page.locator('.catalog-drag-ghost')).toBeVisible();
+  await session.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
+  await expect(list.locator('[data-catalog-folder]:not([data-catalog-folder=""]) [data-catalog-item="68"]')).toBeVisible();
+  expect(Math.abs(await page.evaluate(() => window.scrollY) - before)).toBeLessThan(10);
+  await session.detach();
+});
+
+test('Opening a VideoHub preset during a slow organisation save does not undo the move', async ({page}) => {
+  const errors = collectPageErrors(page);
+  await page.goto('/videohub');
+  const list = page.locator('#vh-list');
+  await expect(list.getByRole('button', {name: 'New folder', exact: true})).toBeVisible();
+  let release;
+  await page.route('**/api/videohub/presets/organization', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    await new Promise(resolve => { release = resolve; });
+    await route.continue();
+  });
+  await list.locator('[data-catalog-item="8"] .catalog-handle').focus();
+  await page.keyboard.press('Space'); await page.keyboard.press('ArrowUp'); await page.keyboard.press('Enter');
+  await expect(list).toHaveAttribute('aria-busy', 'true');
+  await list.locator('[data-act="select"][data-id="8"]').click();
+  await expect(page.locator('#vh-name')).toHaveValue('Midweek');
+  await expect(list.locator('[data-catalog-item]').first()).toHaveAttribute('data-catalog-item', '8');
+  await expect.poll(() => typeof release).toBe('function'); release();
+  await expect(list).toHaveAttribute('aria-busy', 'false');
+  await expect(list.locator('[data-catalog-item]').first()).toHaveAttribute('data-catalog-item', '8');
+  await expect(list.locator('[data-catalog-item="8"]')).toContainText('Open');
+  expect(errors).toEqual([]);
+});
 
 function pageGrant(form, key) {
   return form.locator('input[name="page_keys"][value="page:' + key + '"]');

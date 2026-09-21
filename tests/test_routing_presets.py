@@ -196,7 +196,7 @@ class RoutingPresetWebTests(unittest.TestCase):
             self.assertEqual(self.client.post('/api/timers/apply', json={'preset': 1}, headers=self.headers).status_code, 403)
             response = self.apply(prepared)
             self.assertEqual(response.status_code, 202, response.get_json())
-            self.assertTrue(self.manager.display.call_args.kwargs['allow_shared_player'])
+            self.assertIsNone(self.manager.display.call_args.kwargs['shared_confirmation'])
             self.assertEqual(self.calls, [])
             self.assertEqual(self.apply(prepared).status_code, 202)
             self.assertEqual(len(self.callbacks), 1)
@@ -210,6 +210,28 @@ class RoutingPresetWebTests(unittest.TestCase):
             job = self.client.get('/api/routing/presets/jobs/' + prepared['execution_id']).get_json()['job']
             self.assertEqual(job['status'], 'succeeded')
             self.assertNotIn('owner', job)
+
+    def test_shared_fallback_requires_named_output_confirmation_before_actions(self):
+        allocation = {'player': 2, 'videohubInput': 13, 'sharedOutputs': [25], 'configKey': 'fixture'}
+        with self.user():
+            prepared = self.prepare().get_json()
+            self.apply(prepared)
+            self.callbacks[0]({'status': 'confirmation_required', 'message': 'Confirm other outputs.',
+                               'allocation': allocation, 'sharedOutputs': [25]})
+            self.assertEqual(self.calls, [])
+            pending = self.client.get('/api/routing/presets/jobs/' + prepared['execution_id']).get_json()['job']
+            self.assertIn('Output 25', pending['message'])
+            self.assertEqual(pending['status'], 'confirmation_required')
+            confirmation = self.client.post('/api/routing/presets/' + self.preset['id'] + '/prepare',
+                headers=self.headers, json={'revision': self.preset['revision'], 'output': 26,
+                                            'shared_confirmation': pending['shared_confirmation']}).get_json()
+            self.apply(confirmation)
+            self.assertEqual(self.manager.display.call_args.kwargs['shared_confirmation'], allocation)
+            self.assertEqual(self.calls, [])
+            self.callbacks[1]({'status': 'succeeded'})
+            self.assertEqual(len(self.calls), 1)
+            job = self.client.get('/api/routing/presets/jobs/' + confirmation['execution_id']).get_json()['job']
+            self.assertEqual(job['status'], 'succeeded')
 
     def test_output_inputs_grants_csrf_and_stale_confirmation_are_enforced(self):
         with self.user():

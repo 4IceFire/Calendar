@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import json
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,16 @@ from package.apps.videohub.models import VideohubPreset, VideohubRoute
 
 DEFAULT_PRESETS_FILE = "videohub_presets.json"
 
-_lock = threading.Lock()
+_lock = threading.RLock()
+
+
+def locked_mutation(function):
+    """Serialize read/modify/write operations, including ID allocation."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _lock:
+            return function(*args, **kwargs)
+    return wrapped
 
 
 def _coerce_route(value: Any) -> VideohubRoute | None:
@@ -74,6 +85,8 @@ def load_presets(path: str | Path = DEFAULT_PRESETS_FILE) -> list[VideohubPreset
     with _lock:
         try:
             def _transform(raw: Any) -> tuple[list[VideohubPreset], bool]:
+                if isinstance(raw, dict):
+                    raw = raw.get('presets')
                 if not isinstance(raw, list):
                     return [], True
 
@@ -143,9 +156,51 @@ def save_presets(presets: list[VideohubPreset], path: str | Path = DEFAULT_PRESE
     p = Path(path)
     data = [pr.to_dict() for pr in (presets or [])]
     with _lock:
+        old = _read_document(p)
+        previous = old.get('presets', []) if isinstance(old, dict) else old
+        previous_next = max([item['id'] + 1 for item in previous
+                             if isinstance(item, dict) and isinstance(item.get('id'), int)] or [1])
+        document = dict(old) if isinstance(old, dict) else {'version': 2}
+        data = dict(document, presets=data, next_id=max(int(document.get('next_id') or 1), previous_next,
+                                                      max([pr.id + 1 for pr in presets] or [1])))
         if not write_json(p, data):
-            return
+            raise OSError('Could not save VideoHub presets')
         try:
             remember_json(p, presets)
         except Exception:
             pass
+
+
+def _read_document(path):
+    p = Path(path)
+    return json.loads(p.read_text(encoding='utf-8')) if p.exists() else []
+
+
+def next_preset_id(path=DEFAULT_PRESETS_FILE):
+    with _lock:
+        document = _read_document(path)
+        saved_next = int(document.get('next_id') or 1) if isinstance(document, dict) else 1
+        return max(saved_next, max([preset.id + 1 for preset in load_presets(path)] or [1]))
+
+
+def load_organization(path=DEFAULT_PRESETS_FILE):
+    from catalog_organization import reconcile_organization
+    with _lock:
+        raw = _read_document(path)
+        return reconcile_organization(raw.get('organization') if isinstance(raw, dict) else {},
+                                      [preset.id for preset in load_presets(path)])
+
+
+def save_organization(value, path=DEFAULT_PRESETS_FILE):
+    from catalog_organization import validate_organization
+    with _lock:
+        presets = load_presets(path)
+        normalized = validate_organization(value, [preset.id for preset in presets])
+        old = _read_document(path)
+        document = dict(old) if isinstance(old, dict) else {'version': 2}
+        document.update(presets=[preset.to_dict() for preset in presets], organization=normalized,
+                        next_id=max(int(document.get('next_id') or 1), max([p.id + 1 for p in presets] or [1])))
+        if not write_json(path, document):
+            raise OSError('Could not save VideoHub organisation')
+        remember_json(path, presets)
+        return normalized

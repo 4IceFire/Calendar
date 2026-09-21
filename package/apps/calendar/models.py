@@ -32,6 +32,7 @@ class TimeOfTrigger:
         actionType: str = "companion",
         api: Optional[Dict[str, Any]] = None,
         timer: Optional[Dict[str, Any]] = None,
+        preset_action: Optional[Dict[str, Any]] = None,
         enabled: bool = True,
     ) -> None:
         self.minutes = minutes
@@ -42,6 +43,7 @@ class TimeOfTrigger:
         self.actionType = (actionType or "companion").lower()
         self.api: Optional[Dict[str, Any]] = api if isinstance(api, dict) else None
         self.timer: Optional[Dict[str, Any]] = timer if isinstance(timer, dict) else None
+        self.preset_action = preset_action if isinstance(preset_action, dict) else None
         self.enabled = bool(enabled)
 
         if typeOfTrigger == TypeofTime.BEFORE:
@@ -65,7 +67,10 @@ class TimeOfTrigger:
         if self.name:
             out["name"] = self.name
 
-        if self.actionType == "api":
+        if self.actionType in ("videohub_preset", "routing_preset"):
+            out["actionType"] = self.actionType
+            out["preset_action"] = self.preset_action or {}
+        elif self.actionType == "api":
             out["actionType"] = "api"
             out["api"] = self.api or {}
         elif self.actionType == "timer":

@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from media_routing import BusyError, MediaRoutingManager, VIDEO_ROUTING_LOCK, video_routing_guard
+from media_player_usage import PlayerUsage
 
 
 def configuration():
@@ -73,12 +74,13 @@ class MediaRoutingTests(unittest.TestCase):
         self.after_route = None
         self.done = threading.Event()
         self.outcomes = []
+        self.usage = PlayerUsage()
         self.manager = self.make_manager()
 
     def make_manager(self, **options):
         return MediaRoutingManager(get_config=lambda: copy.deepcopy(self.cfg),
                                    get_media_manager=lambda: self.media,
-                                   read_videohub=self.read, route_videohub=self.route, **options)
+                                   read_videohub=self.read, route_videohub=self.route, player_usage=self.usage, **options)
 
     def read(self):
         self.read_count += 1
@@ -172,10 +174,10 @@ class MediaRoutingTests(unittest.TestCase):
         self.assertEqual(self.media.calls[0]["player"], 4)
         self.assertEqual(self.state["routing"][2], 5)
 
-    def test_all_used_players_fail_without_loading_or_routing(self):
+    def test_all_used_players_require_confirmation_without_loading_or_routing(self):
         self.state["routing"] = [1, 5, 6, 4]
         self.display()
-        self.assertIn("in use", self.wait()["error"])
+        self.assertEqual(self.wait()["status"], "confirmation_required")
         self.assertEqual(self.media.calls, [])
         self.assertEqual(self.routes, [])
 
@@ -214,16 +216,16 @@ class MediaRoutingTests(unittest.TestCase):
     def test_shared_current_player_is_not_reused(self):
         self.state["routing"] = [5, 5, 6, 4]
         self.display()
-        self.assertEqual(self.wait()["status"], "failed")
+        self.assertEqual(self.wait()["status"], "confirmation_required")
         self.assertEqual(self.media.calls, [])
 
-    def test_preset_reuses_shared_current_player_even_with_another_player_free(self):
+    def test_preset_leaves_shared_current_player_when_another_player_free(self):
         self.state["routing"] = [6, 6, 3, 4]
         self.display(allow_shared_player=True)
         self.assertEqual(self.wait()["status"], "succeeded")
-        self.assertEqual(self.media.calls, [{"media_id": "image-1", "player": 4}])
-        self.assertEqual(self.routes, [])
-        self.assertEqual(self.state["routing"], [6, 6, 3, 4])
+        self.assertEqual(self.media.calls, [{"media_id": "image-1", "player": 2}])
+        self.assertEqual(self.routes, [(1, 5)])
+        self.assertEqual(self.state["routing"], [5, 6, 3, 4])
 
     def test_preset_loads_busy_player_then_adds_a_different_target_output(self):
         self.cfg["atem_media_destinations"] = self.cfg["atem_media_destinations"][:1]
@@ -250,13 +252,13 @@ class MediaRoutingTests(unittest.TestCase):
                 self.assertEqual(self.media.calls, [])
                 self.assertEqual(self.routes, [])
 
-    def test_preset_prefers_an_existing_feed_over_an_unused_player(self):
+    def test_preset_prefers_an_unused_player_over_an_existing_feed(self):
         self.state["routing"] = [1, 6, 3, 4]
         self.display(allow_shared_player=True)
         self.assertEqual(self.wait()["status"], "succeeded")
-        self.assertEqual(self.media.calls[0]["player"], 4)
-        self.assertEqual(self.routes, [(1, 6)])
-        self.assertEqual(self.state["routing"], [6, 6, 3, 4])
+        self.assertEqual(self.media.calls[0]["player"], 2)
+        self.assertEqual(self.routes, [(1, 5)])
+        self.assertEqual(self.state["routing"], [5, 6, 3, 4])
 
     def test_preset_chooses_busy_players_in_config_order_after_input_permissions(self):
         for allowed, player, source in (([], 2, 5), ([6], 4, 6)):
@@ -272,11 +274,12 @@ class MediaRoutingTests(unittest.TestCase):
                 self.assertEqual(self.state["routing"], [source, 6, 5, 4])
 
     def test_shared_receivers_must_stay_unchanged_before_and_during_image_load(self):
-        for phase, output, source in ((2, 2, 5), (3, 2, 5), (3, 1, 2), (3, 0, 2), (4, 2, 5)):
+        for phase, output, source in ((2, 3, 6), (3, 3, 6), (3, 2, 2), (3, 0, 2), (4, 2, 5)):
             with self.subTest(phase=phase, output=output, source=source):
                 self.state["routing"] = [5, 5, 6, 4]
                 self.read_count = 0
                 self.media.calls.clear()
+                self.routes.clear()
                 self.done.clear()
                 def change(count):
                     if count == phase:
@@ -286,7 +289,7 @@ class MediaRoutingTests(unittest.TestCase):
                 self.assertEqual(self.wait()["status"], "failed")
                 if phase == 2:
                     self.assertEqual(self.media.calls, [])
-                self.assertEqual(self.routes, [])
+                self.assertEqual(self.routes, [(1, 6)] if phase == 4 else [])
 
     def test_two_presets_replace_shared_image_and_run_actions_after_each_verified_load(self):
         from routing_presets import RoutingPresetRunner
@@ -312,11 +315,66 @@ class MediaRoutingTests(unittest.TestCase):
             self.media.complete()
             result = self.wait()
             self.assertEqual(result["status"], "succeeded")
-            self.assertEqual(result["sharedOutputs"], [2])
+            self.assertEqual(result["sharedOutputs"], [2] if identity == 'first' else [3])
         self.assertEqual(actions, ["first", "second"])
-        self.assertEqual([call["player"] for call in self.media.calls], [2, 2])
-        self.assertEqual(self.routes, [(1, 5)])
-        self.assertEqual(self.state["routing"], [5, 5, 6, 4])
+        self.assertEqual([call["player"] for call in self.media.calls], [2, 4])
+        self.assertEqual(self.routes, [(1, 5), (1, 6)])
+        self.assertEqual(self.state["routing"], [6, 5, 6, 4])
+
+    def test_lru_uses_confirmed_loads_and_survives_manager_replacement(self):
+        self.display()
+        self.assertEqual(self.wait()['status'], 'succeeded')
+        self.state['routing'] = [1, 2, 3, 4]
+        self.done.clear()
+        self.manager = self.make_manager()
+        self.display()
+        self.assertEqual(self.wait()['status'], 'succeeded')
+        self.assertEqual([call['player'] for call in self.media.calls], [2, 4])
+        self.assertGreater(self.usage.last_used(self.cfg, 4), self.usage.last_used(self.cfg, 2))
+
+    def test_shared_fallback_uses_lru_and_requires_exact_confirmation(self):
+        self.usage.record(self.cfg, 2)
+        self.state['routing'] = [1, 5, 6, 4]
+        self.display()
+        pending = self.wait()
+        self.assertEqual(pending['status'], 'confirmation_required')
+        self.assertEqual(pending['sharedOutputs'], [3])
+        self.assertEqual(self.media.calls, [])
+        self.done.clear()
+        self.display(shared_confirmation=pending['allocation'])
+        self.assertEqual(self.wait()['status'], 'succeeded')
+        self.assertEqual(self.media.calls, [{'media_id': 'image-1', 'player': 4}])
+        self.assertEqual(self.state['routing'], [6, 5, 6, 4])
+
+    def test_changed_receivers_require_new_confirmation_before_upload(self):
+        self.state['routing'] = [1, 5, 6, 4]
+        self.display()
+        pending = self.wait()
+        self.state['routing'][3] = 5
+        self.done.clear()
+        self.display(shared_confirmation=pending['allocation'])
+        updated = self.wait()
+        self.assertEqual(updated['status'], 'confirmation_required')
+        self.assertEqual(updated['sharedOutputs'], [2, 4])
+        self.assertEqual(self.media.calls, [])
+
+    def test_failed_upload_does_not_record_use_but_failed_route_after_upload_does(self):
+        self.media.failure = 'upload failed'
+        self.display()
+        self.assertEqual(self.wait()['status'], 'failed')
+        self.assertEqual(self.usage.last_used(self.cfg, 2), 0)
+        self.media.failure = None
+        self.done.clear()
+        self.after_route = lambda: self.state['routing'].__setitem__(0, 2)
+        self.display()
+        self.assertEqual(self.wait()['status'], 'failed')
+        self.assertGreater(self.usage.last_used(self.cfg, 2), 0)
+
+    def test_shared_current_without_an_eligible_alternative_stops(self):
+        self.state['routing'] = [5, 5, 3, 4]
+        self.display(allowed_inputs=[5], allow_shared_player=True)
+        self.assertEqual(self.wait()['status'], 'failed')
+        self.assertEqual(self.media.calls, [])
 
     def test_allowed_input_list_filters_candidates_before_any_load(self):
         self.display(allowed_inputs=[6])

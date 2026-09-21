@@ -94,6 +94,13 @@ function initializeMediaPage() {
   function acceptJob(job) {
     if (!job || !job.id) throw new Error('The display request could not be confirmed. Check the screen before trying again.');
     jobId = job.id;
+    if (job.status === 'confirmation_required') {
+      stopPoll(); jobId = ''; busy = false; retryChecksJob = false;
+      saveProgress(); updateControls();
+      progress(job.message, false, true);
+      if (window.confirm(job.message)) displayImage(chosen, job.shared_confirmation);
+      return;
+    }
     if (job.status === 'succeeded') {
       stopPoll();
       clearProgress();
@@ -142,7 +149,7 @@ function initializeMediaPage() {
       }
     } finally { pollInFlight = false; }
   }
-  async function displayImage(item) {
+  async function displayImage(item, sharedConfirmation) {
     if (busy || !canDisplay) return;
     chosen = item;
     busy = true;
@@ -153,7 +160,9 @@ function initializeMediaPage() {
     progress('Displaying your image…', false, false);
     updateControls();
     try {
-      const data = await request('/api/media/display', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({media_id: item.id, output: output})});
+      const body = {media_id: item.id, output: output};
+      if (sharedConfirmation) body.shared_confirmation = sharedConfirmation;
+      const data = await request('/api/media/display', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
       acceptJob(data.job);
     } catch (error) {
       busy = false;

@@ -35,6 +35,7 @@ from werkzeug.serving import make_server
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 import json
+from contextlib import closing
 import re
 from datetime import datetime, timedelta
 from tempfile import NamedTemporaryFile
@@ -781,6 +782,7 @@ def _init_auth_db() -> None:
             )
             """
         )
+        cur.execute('CREATE TABLE IF NOT EXISTS group_organization (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS user_groups (
@@ -3386,6 +3388,8 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
 
     if p.startswith('/api/config/service-tokens'):
         return {'scope': 'admin', 'pages': ('page:config',), 'service_tokens': False}
+    if p.startswith('/api/admin/default-views/'):
+        return {'scope': 'admin', 'pages': ('page:admin',), 'service_tokens': False}
     if p.startswith('/api/config/routing-presets'):
         return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
     if p.startswith('/api/routing/presets'):
@@ -5112,6 +5116,12 @@ for p in (TRIGGER_TEMPLATES, BUTTON_TEMPLATES):
 def _execute_scheduler_internal_action(action: dict, job=None) -> bool:
     """Dispatch a Calendar action inside this process without API credentials."""
     payload = action if isinstance(action, dict) else {}
+    if payload.get('actionType') == 'routing_preset':
+        trigger = getattr(job, 'trigger', None)
+        if (getattr(trigger, 'actionType', None) != 'routing_preset'
+                or payload.get('preset_action') != getattr(trigger, 'preset_action', None)):
+            return False
+        return _execute_scheduled_routing_preset(payload['preset_action'], job)
     method = str(payload.get('method') or 'POST').strip().upper()
     path = str(payload.get('path') or '').strip()
     if method not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
@@ -5134,7 +5144,9 @@ def _execute_scheduler_internal_action(action: dict, job=None) -> bool:
         with app.test_request_context(path, **request_args):
             g._tdeck_scheduler_principal = marker
             response = app.full_dispatch_request()
-            return 200 <= int(response.status_code) < 300
+            result = response.get_json(silent=True)
+            return (200 <= int(response.status_code) < 300
+                    and not (isinstance(result, dict) and result.get('ok') is False))
     except Exception:
         logging.getLogger('calendar').exception(
             'In-process scheduler action dispatch failed for %s %s', method, path
@@ -6371,6 +6383,63 @@ def admin_groups_page():
     return redirect(url_for('admin_permissions_page', tab='groups') + '#groups')
 
 
+def _load_group_organization(conn):
+    from catalog_organization import reconcile_organization
+    row = conn.execute('SELECT value FROM group_organization WHERE id=1').fetchone()
+    ids = [row['id'] for row in conn.execute('SELECT id FROM groups ORDER BY is_system DESC, lower(name)')]
+    return reconcile_organization(json.loads(row['value']) if row else {}, ids)
+
+
+@app.route('/api/admin/groups/organization', methods=['GET', 'POST'])
+@require_page('page:admin', 'Admin')
+def api_admin_group_organization():
+    from catalog_organization import validate_organization
+    conn = _db()
+    try:
+        if request.method == 'GET':
+            return jsonify({'ok': True, 'organization': _load_group_organization(conn)})
+        conn.execute('BEGIN IMMEDIATE')
+        ids = [row['id'] for row in conn.execute('SELECT id FROM groups')]
+        value = validate_organization(request.get_json(silent=True), ids)
+        conn.execute('INSERT OR REPLACE INTO group_organization(id,value) VALUES(1,?)', (json.dumps(value),))
+        conn.commit()
+        log_event('group.organize', 'Organised permission groups', source='web', status='success')
+        return jsonify({'ok': True, 'organization': value})
+    except ValueError as error:
+        return jsonify({'ok': False, 'error': str(error)}), 400
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/groups/<int:group_id>/rename', methods=['POST'])
+@require_page('page:admin', 'Admin')
+def api_admin_group_rename(group_id):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {'name'} or not isinstance(body.get('name'), str):
+        return jsonify({'ok': False, 'error': 'Provide only a group name as text'}), 400
+    name = body['name'].strip()
+    if not name or len(name) > 120:
+        return jsonify({'ok': False, 'error': 'Enter a group name of 1–120 characters'}), 400
+    conn = _db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        group = conn.execute('SELECT name,is_admin FROM groups WHERE id=?', (group_id,)).fetchone()
+        if group is None:
+            return jsonify({'ok': False, 'error': 'Group not found'}), 404
+        if group['is_admin'] or str(group['name']).lower() == 'admin' or name.lower() == 'admin':
+            return jsonify({'ok': False, 'error': 'The Admin group is protected'}), 403
+        duplicate = conn.execute('SELECT id FROM groups WHERE lower(name)=lower(?) AND id<>?', (name, group_id)).fetchone()
+        if duplicate:
+            return jsonify({'ok': False, 'error': 'A group with that name already exists'}), 400
+        conn.execute('UPDATE groups SET name=? WHERE id=?', (name, group_id))
+        conn.commit()
+        log_event('group.rename', f"Renamed group '{group['name']}' to '{name}'", source='web', status='success',
+                  target_type='group', target_id=group_id, details={'old_name': group['name'], 'name': name})
+        return jsonify({'ok': True, 'id': group_id, 'name': name})
+    finally:
+        conn.close()
+
+
 @app.route('/api/admin/groups/<int:group_id>', methods=['POST'])
 @require_page('page:admin', 'Admin')
 def api_admin_group_update(group_id: int):
@@ -7108,7 +7177,10 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
             except Exception:
                 trig_name = ''
             if not trig_name:
-                if action_type == 'api':
+                if action_type in ('videohub_preset', 'routing_preset'):
+                    from package.apps.calendar.scheduler import _resolve_trigger_display_name
+                    trig_name = _resolve_trigger_display_name(trig)
+                elif action_type == 'api':
                     try:
                         trig_name = str((api or {}).get('path') or '').strip() if isinstance(api, dict) else ''
                     except Exception:
@@ -7140,6 +7212,7 @@ def _compute_upcoming_triggers_payload(*, events_file: str, limit: int = 3) -> d
                     'buttonURL': url if action_type == 'companion' else '',
                     'api': api if (action_type == 'api' and isinstance(api, dict)) else None,
                     'timer': timer if (action_type == 'timer' and isinstance(timer, dict)) else None,
+                    'preset_action': getattr(trig, 'preset_action', None),
                     'button': {
                         'label': button_label,
                         'pattern': button_pattern,
@@ -7276,6 +7349,57 @@ def videohub_monitor_page():
     return render_template('videohub_monitor.html')
 
 
+def _can_edit_admin_default_views() -> bool:
+    return not _auth_enabled() or bool(
+        getattr(current_user, 'is_authenticated', False)
+        and _user_is_admin(int(current_user.get_id()))
+    )
+
+
+def _admin_default_view(page: str) -> dict | None:
+    """Shared Admin display preferences; never an authorization source."""
+    if not _can_edit_admin_default_views():
+        return None
+    with closing(_db()) as conn:
+        row = conn.execute('SELECT value FROM auth_meta WHERE key=?',
+                           ('admin_default_view:' + page,)).fetchone()
+    return json.loads(row['value']) if row else {}
+
+
+@app.route('/api/admin/default-views/<page>', methods=['PUT'])
+def api_admin_default_view_update(page: str):
+    if not _can_edit_admin_default_views():
+        return jsonify(ok=False, error='Protected Admin membership is required.'), 403
+    fields = {'routing': ('inputs', 'outputs'), 'audio': ('sources',)}.get(page)
+    if not fields:
+        return jsonify(ok=False, error='Unknown default view.'), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != set(fields):
+        return jsonify(ok=False, error='Supply the default selections for this page.'), 400
+    normalized = {}
+    for field in fields:
+        values = body[field]
+        if not isinstance(values, list) or len(values) > 1024:
+            return jsonify(ok=False, error='Selections must be a list of at most 1024 IDs.'), 400
+        clean = []
+        for value in values:
+            valid = (type(value) is int and 1 <= value <= 65535) if page == 'routing' else (
+                isinstance(value, str) and (value == 'master' or (value.isascii() and value.isdigit() and 0 < int(value) <= 65535))
+            )
+            if not valid:
+                return jsonify(ok=False, error='Invalid port or fader ID.'), 400
+            if value not in clean:
+                clean.append(value)
+        normalized[field] = clean
+    with closing(_db()) as conn:
+        conn.execute('INSERT INTO auth_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                     ('admin_default_view:' + page, json.dumps(normalized)))
+        conn.commit()
+    log_event('admin.default_view.update', 'Updated shared Admin default view',
+              details={'page': page, 'selections': normalized})
+    return jsonify(ok=True, preferences=normalized)
+
+
 @app.route('/foyer-audio')
 @require_page('page:atem_audio', 'Record Audio')
 def foyer_audio_page():
@@ -7313,6 +7437,7 @@ def foyer_audio_page():
         atem_allow_all=bool(allow_all),
         atem_can_solo=bool(can_solo),
         atem_can_monitor=bool(can_monitor),
+        default_view=_admin_default_view('audio'),
     )
 
 
@@ -7476,6 +7601,7 @@ def routing_page():
     return render_template('routing.html', allowed_outputs=allowed_outputs, allowed_inputs=allowed_inputs,
                            media_available=can_access('page:media'), media_notice=notice,
                            presets_available=can_access('page:routing_presets'),
+                           default_view=_admin_default_view('routing'),
                            selected_preset=selected_preset)
 
 
@@ -7763,7 +7889,34 @@ def _guard_videohub_write(fn):
 
 def _public_media_display_job(job):
     # Operators need the outcome, not player, AUX, input assignments or diagnostics.
-    return {key: job.get(key) for key in ('id', 'mediaId', 'output', 'status', 'message', 'error')}
+    result = {key: job.get(key) for key in ('id', 'mediaId', 'output', 'status', 'message', 'error')}
+    return _add_shared_media_confirmation(result, job)
+
+
+def _add_shared_media_confirmation(result, job):
+    if job.get('status') == 'confirmation_required' and has_request_context():
+        outputs = job['allocation']['sharedOutputs']
+        labels = {entry.get('number'): entry.get('label') for entry in _get_videohub_state_snapshot().get('outputs', [])}
+        names = [f"Output {number}" + (f" ({labels[number]})" if labels.get(number) else '') for number in outputs]
+        result['message'] = 'This image will also display on ' + ', '.join(names) + '. Continue?'
+        result['shared_confirmation'] = _preset_signer().dumps({
+            'kind': 'media-share', 'owner': _preset_owner(), 'media_id': job['mediaId'],
+            'output': job['output'], 'allocation': job['allocation']})
+    return result
+
+
+def _read_shared_media_confirmation(token, media_id, output):
+    if token is None:
+        return None
+    from itsdangerous import BadSignature
+    try:
+        value = _preset_signer().loads(token, max_age=300)
+        if (value.get('kind') != 'media-share' or value.get('owner') != _preset_owner()
+                or value.get('media_id') != media_id or value.get('output') != output):
+            raise ValueError('Review the affected outputs again before displaying this image.')
+        return value['allocation']
+    except (BadSignature, TypeError, KeyError, AttributeError):
+        raise ValueError('The shared-output confirmation expired. Select the image again.') from None
 
 
 @app.route('/api/media/display', methods=['POST'])
@@ -7772,18 +7925,20 @@ def api_media_display():
     if not _media_display_allowed():
         return _media_action_denied('load')
     data = request.get_json(silent=True)
-    if not isinstance(data, dict) or set(data) != {'media_id', 'output'}:
+    if (not isinstance(data, dict) or not {'media_id', 'output'} <= set(data)
+            or set(data) - {'media_id', 'output', 'shared_confirmation'}):
         return _api_json_error(400, 'invalid_request', 'Choose an image and an output.')
     actor = capture_activity_actor()
 
     def completed(job):
         success = job.get('status') == 'succeeded'
         log_event('media.display', f"{'Displayed image on' if success else 'Could not display image on'} output {job['output']}",
-                  status='success' if success else 'failure', target_type='videohub_output',
+                  status='success' if success else ('warning' if job.get('status') == 'confirmation_required' else 'failure'), target_type='videohub_output',
                   target_id=job['output'], details=job, **actor)
 
     try:
         output, allowed_inputs = _media_output_access(data['output'])
+        shared_confirmation = _read_shared_media_confirmation(data.get('shared_confirmation'), data['media_id'], output)
         with _media_operation_lock:
             _media_authorized_item(data['media_id'])
             cfg = validate_media_config(utils.get_config())
@@ -7795,7 +7950,8 @@ def api_media_display():
             if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
                 raise BusyError('Another image is being displayed. Wait a moment and try again.')
             job = _get_media_routing_manager(refresh=True).display(
-                data['media_id'], output, allowed_inputs=allowed_inputs, on_complete=completed)
+                data['media_id'], output, allowed_inputs=allowed_inputs, on_complete=completed,
+                shared_confirmation=shared_confirmation)
         log_event('media.display.queued', f'Queued an image for output {output}', status='info',
                   target_type='videohub_output', target_id=output, details=job)
         return jsonify({'ok': True, 'job': _public_media_display_job(job)}), 202
@@ -7960,6 +8116,46 @@ def _preset_destination(item, requested_output):
     return output, inputs
 
 
+def _execute_scheduled_routing_preset(selection, job):
+    """Private typed scheduler capability; never exposed as an HTTP route.
+
+    Selection contains references only. Reload approved actions and enabled
+    state at execution, then use the same image-first runner as browser apply.
+    """
+    actor = {'actor_user_id': None, 'actor_username': 'Scheduler',
+             'actor_display': 'Scheduler', 'source': 'scheduler'}
+    try:
+        with app.test_request_context('/api/routing/presets'):
+            g.api_principal = {'type': 'scheduler', 'key': 'scheduler:calendar'}
+            with _media_operation_lock:
+                item = _get_routing_preset_store().get(selection.get('preset'))
+                if not item or not item['enabled']:
+                    raise ValueError('The scheduled routing preset is unavailable or disabled.')
+                output, inputs = _preset_destination(item, selection.get('output'))
+                if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                    raise RuntimeError('Another display or preset is running.')
+                execution = _uuid4_str()
+                manager = _get_media_routing_manager(refresh=True)
+                def completed(outcome):
+                    log_event('routing.preset.apply', f"{item['name']}: {outcome['message']}",
+                              status='success' if outcome['status'] == 'succeeded' else 'failure',
+                              target_type='routing_preset', target_id=item['id'],
+                              details={**_public_routing_preset_job(outcome),
+                                       'event_id': getattr(getattr(job, 'event', None), 'id', None)}, **actor)
+                result = _routing_preset_runner.start(
+                    execution, item, output, 'scheduler:calendar',
+                    display=lambda callback: manager.display(item['media_id'], output, allowed_inputs=inputs,
+                                                             on_complete=callback, allow_shared_player=True),
+                    execute=lambda action: _execute_routing_preset_action(action, item, actor), completed=completed)
+            log_event('routing.preset.queued', f"Scheduled preset '{item['name']}' on output {output}",
+                      status='info', target_type='routing_preset', target_id=item['id'], **actor)
+            return result['status'] != 'failed'
+    except Exception as error:
+        log_event('routing.preset.apply', 'Scheduled routing preset could not start', status='failure',
+                  details={'error': str(error)}, **actor)
+        return False
+
+
 @app.route('/config/routing-presets')
 @require_page('page:config', 'Config')
 def routing_presets_config_page():
@@ -8026,14 +8222,16 @@ def api_routing_preset_prepare(identity):
     try:
         item = _routing_preset_for_user(identity)
         data = request.get_json(silent=True)
-        if not isinstance(data, dict) or set(data) - {'output', 'revision'}:
+        if not isinstance(data, dict) or set(data) - {'output', 'revision', 'shared_confirmation'}:
             raise ValueError('Choose a preset and an output.')
         if data.get('revision') != item['revision']:
             return _api_json_error(409, 'changed', 'This preset changed. Refresh and select it again.')
         output, _ = _preset_destination(item, data.get('output'))
         import uuid
         execution_id = uuid.uuid4().hex
+        shared = _read_shared_media_confirmation(data.get('shared_confirmation'), item['media_id'], output)
         token = _preset_signer().dumps({'preset': identity, 'revision': item['revision'], 'output': output,
+                                      'shared_confirmation': shared,
                                       'owner': _preset_owner(), 'execution': execution_id})
         snapshot = _get_videohub_state_snapshot()
         label = next((entry.get('label') for entry in snapshot.get('outputs', []) if entry.get('number') == output), None)
@@ -8068,14 +8266,14 @@ def api_routing_preset_apply(identity):
             actor = capture_activity_actor()
             def completed(job):
                 log_event('routing.preset.apply', f"{item['name']}: {job['message']}",
-                          status='success' if job['status'] == 'succeeded' else 'failure',
+                          status='success' if job['status'] == 'succeeded' else ('warning' if job['status'] == 'confirmation_required' else 'failure'),
                           target_type='routing_preset', target_id=identity,
-                          details={**_public_routing_preset_job(job), 'display_error': job.get('displayError', ''),
+                          details={**_public_routing_preset_job(job, confirmation=False), 'display_error': job.get('displayError', ''),
                                    'shared_outputs': job.get('sharedOutputs', [])}, **actor)
             manager = _get_media_routing_manager(refresh=True)
             job = _routing_preset_runner.start(confirmed['execution'], item, output, confirmed['owner'],
                 display=lambda callback: manager.display(item['media_id'], output, allowed_inputs=inputs,
-                                                         on_complete=callback, allow_shared_player=True),
+                                                         on_complete=callback, shared_confirmation=confirmed.get('shared_confirmation')),
                 execute=lambda action: _execute_routing_preset_action(action, item, actor), completed=completed)
         log_event('routing.preset.queued', f"Started preset '{item['name']}' on output {output}",
                   status='info', target_type='routing_preset', target_id=identity)
@@ -8088,8 +8286,9 @@ def api_routing_preset_apply(identity):
         return _api_json_error(400, 'invalid_preset', str(error))
 
 
-def _public_routing_preset_job(job):
-    return {key: job.get(key) for key in ('id', 'presetId', 'name', 'output', 'status', 'message', 'imageDisplayed', 'actionsCompleted')}
+def _public_routing_preset_job(job, *, confirmation=True):
+    result = {key: job.get(key) for key in ('id', 'presetId', 'name', 'output', 'status', 'message', 'imageDisplayed', 'actionsCompleted')}
+    return _add_shared_media_confirmation(result, job) if confirmation else result
 
 
 @app.route('/api/routing/presets/jobs/<identity>')
@@ -9541,6 +9740,22 @@ def api_get_templates():
     return jsonify({'buttons': btns, 'buttons_tree': tree, 'triggers': trigs})
 
 
+@app.route('/api/templates/preset-actions')
+def api_trigger_preset_catalog():
+    """References for existing Calendar/Templates operational authority."""
+    try:
+        backend = _get_videohub_app()
+        videos = backend.list_presets(utils.get_config()) if backend else []
+        routing = _get_routing_preset_store().list()
+        return jsonify(ok=True,
+                       videohub=[{'id': item['id'], 'name': item.get('name', '')} for item in videos],
+                       routing=[{key: item[key] for key in ('id', 'name', 'output')}
+                                for item in routing if item['enabled']],
+                       outputs=_get_videohub_state_snapshot().get('outputs', []))
+    except (ValueError, OSError, RuntimeError) as error:
+        return _api_json_error(503, 'unavailable', 'Preset choices are unavailable. Check preset setup.')
+
+
 @app.route('/api/templates/button', methods=['POST'])
 def api_add_button_template():
     body = request.get_json() or {}
@@ -9862,6 +10077,7 @@ def api_ui_events():
                         'buttonURL': t.buttonURL if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'companion' else '',
                         'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
                         'timer': getattr(t, 'timer', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'timer' else None,
+                        'preset_action': getattr(t, 'preset_action', None),
                     }
                     for t in e.times
                 ],
@@ -12017,9 +12233,42 @@ def api_videohub_presets_list():
                     preset for preset in presets
                     if int((preset.get('id') if isinstance(preset, dict) else getattr(preset, 'id', 0)) or 0) in allowed_ids
                 ]
-        return jsonify({'ok': True, 'presets': presets})
+        organization = app_inst.get_organization(cfg) if hasattr(app_inst, 'get_organization') else {'folders': [], 'items': []}
+        visible_ids = {str(p['id']) for p in presets}
+        organization['items'] = [item for item in organization['items'] if str(item['id']) in visible_ids]
+        return jsonify({'ok': True, 'presets': presets, 'organization': organization})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/videohub/presets/organization', methods=['POST'])
+def api_videohub_presets_organization():
+    # Organisation is display metadata only; normal VideoHub editing grants apply.
+    try:
+        app_inst = _get_videohub_app()
+        cfg = utils.get_config()
+        value = request.get_json(silent=True)
+        visible_ids = None
+        if _auth_enabled() and not _api_request_is_automation_principal():
+            allowed = _effective_videohub_preset_ids_for_user(int(current_user.get_id()))
+            if allowed:
+                from catalog_organization import validate_organization
+                current = app_inst.get_organization(cfg)
+                visible_ids = {str(item['id']) for item in current['items'] if int(item['id']) in allowed}
+                value = validate_organization(value, visible_ids)
+                folder_ids = {folder['id'] for folder in value['folders']}
+                for item in current['items']:
+                    if str(item['id']) not in visible_ids:
+                        value['items'].append(dict(item, folderId=item['folderId'] if item['folderId'] in folder_ids else None))
+        result = app_inst.save_organization(cfg, value)
+        if visible_ids is not None:
+            result['items'] = [item for item in result['items'] if str(item['id']) in visible_ids]
+        log_event('videohub.presets.organize', 'Organised VideoHub presets', source='web', status='success')
+        return jsonify({'ok': True, 'organization': result})
+    except (ValueError, TypeError) as error:
+        return jsonify({'ok': False, 'error': str(error)}), 400
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Could not save VideoHub organisation'}), 500
 
 
 @app.route('/api/videohub/presets', methods=['POST'])
@@ -13330,6 +13579,39 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
             action_type = 'timer'
         else:
             action_type = 'companion'
+
+    if action_type in ('videohub_preset', 'routing_preset'):
+        selection = raw.get('preset_action')
+        if not isinstance(selection, dict) or set(selection) - {'preset', 'output'}:
+            return None, 'Choose a saved preset and its destination.'
+        try:
+            if action_type == 'videohub_preset':
+                identity = selection.get('preset')
+                if type(identity) is not int or identity < 1 or 'output' in selection:
+                    raise ValueError('Choose a VideoHub preset.')
+                backend = _get_videohub_app()
+                presets = backend.list_presets(utils.get_config()) if backend else []
+                if not any(item.get('id') == identity for item in presets):
+                    raise ValueError('The VideoHub preset is no longer available.')
+                normalized = {'preset': identity}
+            else:
+                identity = selection.get('preset')
+                item = _get_routing_preset_store().get(identity)
+                if not item or not item['enabled']:
+                    raise ValueError('The routing preset is unavailable or disabled.')
+                output = selection.get('output', item['output'])
+                if type(output) is not int or output < 1:
+                    raise ValueError('Choose an output for the routing preset.')
+                if item['output'] is not None and output != item['output']:
+                    raise ValueError('This routing preset has a fixed output.')
+                if not all(_preset_action_permitted(action) for action in item['actions']):
+                    raise ValueError('This preset contains an action that cannot be scheduled.')
+                normalized = {'preset': identity, 'output': output}
+        except (ValueError, OSError, KeyError) as error:
+            return None, str(error)
+        out['actionType'] = action_type
+        out['preset_action'] = normalized
+        return out, None
 
     if action_type == 'api':
         method = None
@@ -15275,6 +15557,7 @@ def api_get_event_ui(ident: int):
                     'buttonURL': t.buttonURL if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'companion' else '',
                     'api': getattr(t, 'api', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'api' else None,
                     'timer': getattr(t, 'timer', None) if str(getattr(t, 'actionType', 'companion') or 'companion').lower() == 'timer' else None,
+                    'preset_action': getattr(t, 'preset_action', None),
                 }
                 for t in e.times
             ],
@@ -15371,6 +15654,7 @@ def api_update_event_ui(ident: int):
                         actionType=action_type, 
                         api=api_obj, 
                         timer=timer_obj,
+                        preset_action=t3.get('preset_action'),
                         enabled=enabled, 
                     ) 
                 ) 
@@ -15502,6 +15786,7 @@ def api_create_event_ui():
                     actionType=action_type,
                     api=api_obj,
                     timer=timer_obj,
+                    preset_action=t3.get('preset_action'),
                     enabled=enabled,
                 )
             )

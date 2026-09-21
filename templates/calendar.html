@@ -218,6 +218,13 @@ async function loadEvents(){
         ? 'At (0m)'
         : ((rawType === 'BEFORE') ? `Before ${mins}m` : `After ${mins}m`);
 
+      if(actionType === 'videohub_preset' || actionType === 'routing_preset'){
+        const selection = t.preset_action || {};
+        const kind = actionType === 'videohub_preset' ? 'VideoHub Preset' : 'Routing Presets';
+        return {rawType, timeLabel, offsetHint,
+          target: trigName || `${kind}: ${selection.preset || '?'}${selection.output ? ' → Output ' + selection.output : ''}`,
+          targetKind: actionType};
+      }
       if(actionType === 'api'){
         const m = (t.api && t.api.method) ? String(t.api.method).toUpperCase() : 'POST';
         const rawP = (t.api && t.api.path) ? String(t.api.path) : '';

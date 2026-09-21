@@ -5,12 +5,14 @@
 
 {% block content %}
   <div id="routing-page"
+       data-default-view='{{ default_view|tojson }}'
        data-allowed-outputs='{{ allowed_outputs|tojson }}'
        data-allowed-inputs='{{ allowed_inputs|tojson }}'
        data-media-available="{{ 'true' if media_available else 'false' }}"
        data-preset-id="{{ selected_preset.id if selected_preset else '' }}"
        data-media-notice="{{ media_notice|default('') }}">
     <div id="routing-status" class="mb-3"></div>
+    {% if default_view is not none %}<div id="routing-default-view" class="mb-3"></div>{% endif %}
     <div class="routing-steps" aria-label="Routing steps">
       <section id="routing-output-step" class="card tdeck-soft routing-step" tabindex="-1">
         <div class="card-body">

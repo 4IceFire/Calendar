@@ -176,6 +176,20 @@ def _trigger_from_spec(spec: str):
             if not isinstance(timer, dict):
                 raise ValueError("timer triggers require a 'timer' object")
             return TimeOfTrigger(minutes, trig_type, "", api=None, timer=timer, **common_kwargs)
+        if action_type in ("videohub_preset", "routing_preset"):
+            selection = payload.get("preset_action")
+            allowed = {"preset"} if action_type == "videohub_preset" else {"preset", "output"}
+            if not isinstance(selection, dict) or "preset" not in selection or set(selection) - allowed:
+                raise ValueError("preset triggers require a preset_action containing a saved preset reference")
+            identity = selection["preset"]
+            valid = (type(identity) is int and identity > 0) if action_type == "videohub_preset" else (
+                isinstance(identity, str) and len(identity) == 32 and all(c in "0123456789abcdef" for c in identity))
+            if not valid:
+                raise ValueError("invalid saved preset reference")
+            output = selection.get("output")
+            if output is not None and (type(output) is not int or output < 1):
+                raise ValueError("preset destination must be a positive output number")
+            return TimeOfTrigger(minutes, trig_type, "", preset_action=dict(selection), **common_kwargs)
 
         button_url = str(payload.get("buttonURL") or payload.get("button_url") or payload.get("url") or "").strip()
         return TimeOfTrigger(minutes, trig_type, button_url, api=None, timer=None, **common_kwargs)
@@ -207,7 +221,9 @@ def _trigger_display_dict(trigger) -> dict:
         out["name"] = name
     if uid:
         out["uid"] = uid
-    if action_type == "api":
+    if action_type in ("videohub_preset", "routing_preset"):
+        out["preset_action"] = getattr(trigger, "preset_action", None) or {}
+    elif action_type == "api":
         out["api"] = getattr(trigger, "api", None) or {}
     elif action_type == "timer":
         out["timer"] = getattr(trigger, "timer", None) or {}

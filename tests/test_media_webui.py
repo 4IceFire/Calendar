@@ -127,6 +127,28 @@ class MediaWebTests(unittest.TestCase):
         with self.client.get(item['url']) as image:
             self.assertEqual(image.status_code, 200)
 
+    def test_shared_confirmation_names_outputs_and_binds_image_output_and_session(self):
+        self._allow_display()
+        allocation = {'player': 2, 'videohubInput': 5, 'sharedOutputs': [2], 'configKey': 'fixture'}
+        self.routing.get_job.return_value = {**self.display_job, 'status': 'confirmation_required',
+                                             'allocation': allocation}
+        pending = self.client.get('/api/media/display/' + self.display_job['id']).get_json()['job']
+        self.assertIn('Output 2 (Kids)', pending['message'])
+        token = pending['shared_confirmation']
+        body = {'media_id': self.item['id'], 'output': 1, 'shared_confirmation': token}
+        response = self.client.post('/api/media/display', json=body, headers=self.headers)
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(self.routing.display.call_args.kwargs['shared_confirmation'], allocation)
+        self.routing.display.reset_mock()
+        for changed in ({'output': 2}, {'media_id': 'b' * 32}, {'shared_confirmation': token + 'broken'}):
+            response = self.client.post('/api/media/display', json={**body, **changed}, headers=self.headers)
+            self.assertEqual(response.status_code, 400, response.get_json())
+        with patch.object(_User, 'get_id', return_value='99'):
+            response = self.client.post('/api/media/display', json=body, headers=self.headers)
+            self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.client.post('/api/media/display', json=body).status_code, 403)
+        self.routing.display.assert_not_called()
+
     def test_permanent_uploads_require_additional_grant_and_ignore_spoofed_metadata(self):
         self.grants.add('page:media_upload')
         for prefix in ('/api', '/api/v1'):

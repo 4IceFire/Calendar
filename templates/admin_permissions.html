@@ -1,6 +1,7 @@
 {% extends 'base.html' %}
 
 {% set page_title = 'Permissions' %}
+{% block head_extra %}<link rel="stylesheet" href="{{ static_asset('catalog_organization.css') }}">{% endblock %}
 
 {% block content %}
   <div id="permissions-page" data-feedback-error="{{ feedback_error|default('')|e }}" data-min-password-length="{{ min_len }}">
@@ -144,11 +145,14 @@
           <div class="col-lg-8">
             <div class="card tdeck-soft">
               <div class="card-body">
-                <h2 class="h5 mb-1">Edit Group</h2>
-                <div class="small text-muted mb-3">Select a group. Changes auto-save.</div>
+                <div id="group-editor-header" class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                  <div><h2 class="h5 mb-1">Edit Group</h2>
+                    <div class="small text-muted">Select a group. Changes auto-save.</div></div>
+                  <button id="group-editor-rename" class="btn btn-sm btn-outline-secondary d-none" type="button">Rename group</button>
+                </div>
 
                 {% for g in groups %}
-                  <div class="border rounded-3 p-3 mb-3" data-role-panel="1" data-role-id="{{ g.id }}">
+                  <div class="border rounded-3 p-3 mb-3" data-role-panel="1" data-role-id="{{ g.id }}" data-group-name="{{ g.name }}" data-group-protected="{{ 'true' if g.is_admin else 'false' }}">
                     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                       <div>
                         <div class="fw-semibold">{{ g.name }}</div>
@@ -462,4 +466,6 @@
       </div>
     </div>
   </div>
+<script src="{{ static_asset('catalog_organization.js') }}"></script>
+<script src="{{ static_asset('group_organization.js') }}"></script>
 {% endblock %}

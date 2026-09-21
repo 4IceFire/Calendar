@@ -9,6 +9,10 @@ This document lists the HTTP API endpoints implemented by the Flask Web UI serve
 - Auth: authenticated browser session or scoped Bearer service token when `auth_enabled` is true
 - Format: JSON (unless otherwise noted)
 
+## Shared Admin default views
+
+`PUT /api/admin/default-views/routing` accepts `{"inputs":[1,2],"outputs":[3]}`; `PUT /api/admin/default-views/audio` accepts `{"sources":["master","1"]}`. Both require a protected Admin browser session and the normal CSRF/origin checks; service tokens and scheduler dispatch are denied. Responses are `{ok:true, preferences:{...}}`. Port IDs are positive integers and audio IDs are strings; empty lists mean all. These shared display preferences persist in the Auth DB and never modify resource permissions. Show all is temporary page state. Non-admin pages ignore these preferences.
+
 ## Media library and ATEM players
 
 These endpoints are browser-session only, including their `/api/v1/...` aliases.
@@ -21,8 +25,8 @@ and same-origin checks. Image numbers in configuration and responses are 1-based
 | `POST /api/media/upload` | Media Library, or Routing Media + upload | Multipart `file`, optional `name` and string `temporary` (`true` by default); `false` additionally requires `page:media_save` or Media Library; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
 | `PATCH /api/media/<id>` | Media Library | JSON `name`, boolean `preset` and/or boolean `keep`; `keep: true` promotes a temporary image without changing its upload attribution/time; returns `{ok, item}`. |
 | `DELETE /api/media/<id>` | Media Library | Removes the local image. Active displays/loads and references from saved routing presets return 409. Does not clear ATEM stills. |
-| `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}`; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/input; overrides are rejected. ATEM output routing is never changed. |
-| `GET /api/media/display/<job_id>` | Routing + Media, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`. No hardware assignments or internal diagnostics. |
+| `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}` with optional signed `shared_confirmation` from a pending job; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/input; arbitrary overrides are rejected. ATEM AUX routing is never changed. |
+| `GET /api/media/display/<job_id>` | Routing + Media, allowed output | `{ok,job}` with `id`, `mediaId`, `output`, `status`, `message`, `error`; `confirmation_required` also includes a signed `shared_confirmation` and message naming affected outputs. No internal diagnostics. |
 | `GET /api/atem/media/state` | Config or Media Library | Cached connection, detected format/capacity, configured destinations, players/stills/AUXes and current/last ATEM `job`. An offline state is a successful HTTP read. |
 | `POST /api/atem/media/load` | Media Library | Administrative player test. JSON `{"media_id":"<id>","player":2}`; returns `202 {ok, job}`. Does not route a TV. |
 | `GET /api/config/atem-media` | Config | `{ok, config}` with `atem_media_enabled`, `atem_media_node_path`, `atem_media_destinations` and `media_temporary_retention_days` (7 by default, integer 1–365). Obsolete destination `aux` values are omitted from the response without changing saved configuration. |
@@ -73,7 +77,7 @@ Media access is not required. Grants are assigned in Permissions → Groups → 
 | `PUT /api/config/routing-presets/<id>` | Config + Admin | Full preset configuration plus current `revision`; rejects stale edits. |
 | `DELETE /api/config/routing-presets/<id>` | Config + Admin | JSON `{revision}`. Active preset/display jobs block configuration writes with 409. |
 | `GET /api/routing/presets` | Routing + Presets | `{ok, presets}` filtered to enabled, assigned presets and permitted fixed outputs. Returns display fields and thumbnails, never API bodies. |
-| `POST /api/routing/presets/<id>/prepare` | Individual preset access | JSON `{revision, output}`. Validates setup/access and returns a signed `confirmation_token`, `execution_id`, preset, output label and action descriptions. Does not operate hardware. |
+| `POST /api/routing/presets/<id>/prepare` | Individual preset access | JSON `{revision, output}` with optional signed `shared_confirmation` from a pending job. Validates setup/access and returns a signed `confirmation_token`, `execution_id`, preset, output label and action descriptions. Does not operate hardware. |
 | `POST /api/routing/presets/<id>/apply` | Individual preset access | JSON `{confirmation_token}` only. Returns `202 {ok, job}` after current access/setup checks. User-supplied actions or output overrides are rejected. |
 | `GET /api/routing/presets/jobs/<id>` | Initiating session + preset/output access | `{ok, job}` with `id`, `presetId`, `name`, `output`, `status`, `message`, `imageDisplayed`, `actionsCompleted`. |
 
@@ -85,24 +89,24 @@ in-process authentication after verified media display, with administrator-appro
 authority, irrespective of the operator's direct control grants. The scheduler's
 operational policy excludes account/configuration/credential/browser-only APIs.
 
-Preset display reuses the selected output's existing allowed, configured player,
-including a shared player: all existing receivers show the new image. Its
-confirmation covers that shared image change; only the selected output's route
-is considered for writing. When the route is already correct, the image is still
-loaded/verified and the route read back, without sending a redundant route write.
-If the target does not already receive an eligible player, reuse an allowed
-player already routed to another output, falling back to an unused player only
-when none are in use. Configured player order breaks ties. The preset loads the
-new image and then adds its selected output to that feed, preserving existing
-receiver routes. The standalone
-`/api/media/display` retains exclusive-player allocation and does not accept a
-shared-player override. Shared receiver details are retained in Activity Log,
-without expanding the public job response.
+Media and preset display reuse an exclusive current player, otherwise select the
+least recently used eligible free alternative, then a shared alternative if all
+are busy. A shared current player is excluded from alternatives. No alternative
+means failure without uploading. Browser jobs pause as `confirmation_required`
+with a `message` naming affected outputs and an opaque `shared_confirmation`.
+After explicit confirmation, ordinary Media resubmits `{media_id, output,
+shared_confirmation}` to `/api/media/display`; presets prepare a new confirmation
+with that value and apply normally. Tokens bind the session, image, output and
+exact allocation, expire after five minutes/restart and cannot bypass current
+permissions. Changed shared receivers require a fresh warning before upload.
+Only private saved scheduler execution permits unattended shared fallback.
+Confirmed loads update process-wide recency, including Library tests; Config
+order breaks ties after restart. No ATEM AUX routes are changed.
 
 Confirmation tokens expire in five minutes and bind the session, preset revision,
 output and execution ID. They also expire on server restart. A retried confirmation
 cannot repeat an execution; poll its job after an uncertain apply response instead
-of submitting a new confirmation automatically. States are `loading`, `actions`,
+of submitting a new confirmation automatically. States are `loading`, `confirmation_required`, `actions`,
 `succeeded`, `failed`. Actions run in order and stop at the first failure without
 rollback; a device API may accept a command asynchronously. Partial results remain
 visible in job status and Activity Log. No actions run on preset save or startup.
@@ -554,7 +558,16 @@ Timer selection is either:
 
 ### Presets: list
 - **GET** `/api/videohub/presets`
-- **Returns:** `{ ok: true, presets: [...] }`
+- **Returns:** `{ ok: true, presets: [...], organization: {folders: [...], items: [...]} }`. Preset IDs remain stable; folder metadata only affects display.
+
+### Presets: folders and ordering
+- **POST** `/api/videohub/presets/organization`
+- Uses VideoHub preset-edit access. Body: `{folders: [{id, name}], items: [{id, folderId}]}`; array order determines display order. Supply every visible preset once; `folderId: null` means root. Hidden preset references survive restricted-editor updates. Returns `{ok, organization}`.
+- Removing a folder moves its items to root in the UI; it does not delete presets, routes, grants or references. Folder changes may include locked presets because they do not edit their routing.
+
+### Permission groups: folders and rename
+- **GET/POST** `/api/admin/groups/organization` reads/saves the same folder/item shape, containing whole groups. Requires Permissions page access; writes retain normal CSRF/origin protection.
+- **POST** `/api/admin/groups/<id>/rename` accepts `{name}` and updates only that group's name. IDs, memberships and grants remain unchanged. Admin cannot be renamed, and names must be non-empty, unique ignoring case, and at most 120 characters.
 
 ### Presets: create
 - **POST** `/api/videohub/presets`
@@ -620,6 +633,21 @@ Timer selection is either:
 - **POST** `/api/templates/trigger`
 - **PUT** `/api/templates/trigger/<idx>`
 - **DELETE** `/api/templates/trigger/<idx>`
+
+Calendar events and trigger templates accept `actionType: "videohub_preset"` with
+`preset_action: {"preset": 9}`, or `actionType: "routing_preset"` with
+`preset_action: {"preset": "<saved preset ID>", "output": 2}`. Saving validates
+existing presets, enabled Routing Presets, and fixed destinations. IDs remain
+references; editing does not copy or change preset definitions. The
+**GET** `/api/templates/preset-actions` catalogue returns compact `videohub`,
+`routing`, and `outputs` arrays under Calendar/Templates access.
+
+Routing Presets execute through a private typed built-in scheduler capability,
+not an HTTP apply route. Generic API triggers, service tokens and browsers cannot
+claim that authority; normal browser prepare/apply confirmation remains required.
+Scheduled display is asynchronous, with image verification before saved actions
+and final completion in Activity Log. Busy-player fallback proceeds under saved
+schedule authority and may update other screens sharing that player.
 
 `idx` is a **0-based array index** into the JSON file (not a stable ID).
 

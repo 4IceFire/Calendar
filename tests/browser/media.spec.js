@@ -33,6 +33,29 @@ function mockDisplay(page, options = {}) {
   return {ready, calls: () => calls, job: () => job};
 }
 
+test('Shared media fallback names affected outputs and requires explicit confirmation', async ({page}) => {
+  const errors = collectPageErrors(page);
+  await openMedia(page);
+  const calls = [];
+  await page.route('**/api/media/display', route => {
+    const body = route.request().postDataJSON(); calls.push(body);
+    const job = {id: 'confirmed-shared-job', mediaId: body.media_id, output: 1,
+      status: body.shared_confirmation ? 'succeeded' : 'confirmation_required',
+      message: 'This image will also display on Output 2 (Kids). Continue?', shared_confirmation: 'signed-fixture'};
+    return route.fulfill({status: 202, contentType: 'application/json', body: JSON.stringify({ok: true, job})});
+  });
+  page.once('dialog', async dialog => { expect(dialog.message()).toContain('Output 2 (Kids)'); await dialog.dismiss(); });
+  await page.getByRole('button', {name: 'Display Welcome', exact: true}).click();
+  await expect(page.locator('#media-display-retry')).toBeVisible();
+  expect(calls).toHaveLength(1);
+  page.once('dialog', async dialog => { expect(dialog.message()).toContain('Output 2 (Kids)'); await dialog.accept(); });
+  await page.locator('#media-display-retry').click();
+  await expect(page).toHaveURL(/\/routing\?media_job=/);
+  expect(calls).toHaveLength(3);
+  expect(calls[2].shared_confirmation).toBe('signed-fixture');
+  expect(errors).toEqual([]);
+});
+
 test('Media picker stays simple and searches images on desktop and mobile', async ({page}, testInfo) => {
   const errors = collectPageErrors(page);
   const hardwareRequests = [];

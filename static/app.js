@@ -315,6 +315,73 @@ function _routingParseAllowList(raw) {
   }
 }
 
+function _adminDefaultView(root, page, fields, onChange) {
+  const host = document.getElementById(page + '-default-view');
+  if (!host) return {filter: list => list, update: () => {}};
+  let preferences = JSON.parse(root.getAttribute('data-default-view') || '{}') || {};
+  let choices = {};
+  let signature = '';
+  host.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-3 mb-2">
+    <div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="${page}-show-all"><label class="form-check-label" for="${page}-show-all">Show all${page === 'audio' ? ' faders' : ''}</label></div>
+    <button type="button" class="btn btn-sm btn-outline-secondary" data-default-edit>Configure defaults</button></div>
+    <div class="card d-none" data-default-editor><div class="card-body">
+      <p class="small text-muted">Default views are shared by all admins. These display preferences do not change permissions. No selections means show all.</p>
+      <div data-default-choices class="row g-3"></div>
+      <div class="d-flex flex-wrap gap-2 mt-3"><button type="button" class="btn btn-primary" data-default-save>Save defaults</button><button type="button" class="btn btn-outline-secondary" data-default-cancel>Cancel</button></div>
+    </div></div><div class="small mt-2" data-default-status role="status"></div>`;
+  const showAll = host.querySelector('input[type="checkbox"]');
+  const editor = host.querySelector('[data-default-editor]');
+  const status = host.querySelector('[data-default-status]');
+  function renderChoices() {
+    host.querySelector('[data-default-choices]').innerHTML = fields.map(field => {
+      const items = (choices[field.key] || []).slice();
+      const saved = (preferences[field.key] || []).map(String);
+      saved.forEach(id => {
+        if (!items.some(item => String(item.id) === id)) items.push({id, label: id + ' (unavailable)'});
+      });
+      return `<fieldset class="col-12 ${fields.length > 1 ? 'col-md-6' : ''}"><legend class="h6">${field.label}</legend>` + items.map((item, index) => {
+        const id = `${page}-default-${field.key}-${index}`;
+        return `<div class="form-check"><input class="form-check-input" id="${id}" type="checkbox" data-default-field="${field.key}" value="${_escapeHtml(String(item.id))}" ${saved.indexOf(String(item.id)) >= 0 ? 'checked' : ''}><label class="form-check-label" for="${id}">${_escapeHtml(item.label || String(item.id))}</label></div>`;
+      }).join('') + '</fieldset>';
+    }).join('');
+  }
+  showAll.addEventListener('change', onChange);
+  host.querySelector('[data-default-edit]').addEventListener('click', () => { renderChoices(); editor.classList.toggle('d-none'); });
+  host.querySelector('[data-default-cancel]').addEventListener('click', () => editor.classList.add('d-none'));
+  host.querySelector('[data-default-save]').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    const body = {};
+    fields.forEach(field => {
+      body[field.key] = Array.from(host.querySelectorAll(`[data-default-field="${field.key}"]:checked`)).map(input => page === 'routing' ? Number(input.value) : input.value);
+    });
+    button.disabled = true;
+    status.textContent = '';
+    try {
+      const response = await fetch('/api/admin/default-views/' + page, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Could not save defaults');
+      preferences = data.preferences;
+      showAll.checked = false;
+      editor.classList.add('d-none');
+      status.textContent = 'Shared defaults saved.';
+      onChange();
+    } catch (error) { status.textContent = error.message || 'Could not save defaults'; }
+    finally { button.disabled = false; }
+  });
+  return {
+    filter(list, field, idKey) {
+      const selected = (preferences[field] || []).map(String);
+      return showAll.checked || !selected.length ? list : list.filter(item => selected.indexOf(String(item[idKey])) >= 0);
+    },
+    update(next) {
+      const nextSignature = JSON.stringify(next);
+      choices = next;
+      if (signature !== nextSignature && editor.classList.contains('d-none')) renderChoices();
+      signature = nextSignature;
+    },
+  };
+}
+
 function _initRoutingPage() {
   const root = document.getElementById('routing-page');
   if (!root) return;
@@ -338,6 +405,7 @@ function _initRoutingPage() {
   let mediaNotice = root.dataset.mediaNotice || '';
   const requestedOutput = Number(new URLSearchParams(window.location.search).get('output')) || null;
   let restoredOutput = false;
+  const defaultView = _adminDefaultView(root, 'routing', [{key: 'outputs', label: 'Default outputs'}, {key: 'inputs', label: 'Default inputs'}], () => { _renderOutputs(); _renderInputs(); });
 
   function _showRoutingStep(step) {
     if (!step) return;
@@ -383,7 +451,7 @@ function _initRoutingPage() {
 
   function _renderOutputs() {
     if (!elOutputs) return;
-    const outputs = _filterList(state.outputs, allowedOutputs);
+    const outputs = defaultView.filter(_filterList(state.outputs, allowedOutputs), 'outputs', 'number');
     elOutputs.innerHTML = '';
 
     outputs.forEach((o) => {
@@ -422,7 +490,7 @@ function _initRoutingPage() {
 
   function _renderInputs() {
     if (!elInputs) return;
-    const inputs = _filterList(state.inputs, allowedInputs);
+    const inputs = defaultView.filter(_filterList(state.inputs, allowedInputs), 'inputs', 'number');
     elInputs.innerHTML = '';
 
     inputs.forEach((i) => {
@@ -530,6 +598,7 @@ function _initRoutingPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Unable to load VideoHub state');
       state = data;
+      defaultView.update({outputs: (state.outputs || []).map(item => ({id: item.number, label: _routingLabel(item)})), inputs: (state.inputs || []).map(item => ({id: item.number, label: _routingLabel(item)}))});
       if (!restoredOutput && requestedOutput) {
         restoredOutput = true;
         const accessible = _filterList(state.outputs, allowedOutputs);
@@ -3817,6 +3886,14 @@ function _initAccessLevelsPage() {
       panel.classList.toggle('d-none', !match);
     });
 
+    const rename = document.getElementById('group-editor-rename');
+    const selected = _rolePanelById(id);
+    if (rename && selected) {
+      rename.classList.toggle('d-none', selected.dataset.groupProtected === 'true');
+      rename.setAttribute('data-group-rename', id);
+      rename.setAttribute('data-group-current-name', selected.dataset.groupName || '');
+    }
+
     if (persist) {
       try { window.localStorage.setItem(ROLE_STORAGE_KEY, id); } catch (e) {}
     }
@@ -4336,6 +4413,7 @@ function _initFoyerAudioPage() {
   const root = document.getElementById('foyer-audio-page');
   if (!root) return;
   const grid = document.getElementById('foyer-audio-grid');
+  const masterEl = document.getElementById('foyer-audio-master');
   const monitorEl = document.getElementById('foyer-audio-monitor');
   const emptyEl = document.getElementById('foyer-audio-empty');
   const statusEl = document.getElementById('foyer-audio-status');
@@ -4370,6 +4448,7 @@ function _initFoyerAudioPage() {
   const canSolo = !!_foyerJsonAttr('data-can-solo', false);
   const canMonitor = !!_foyerJsonAttr('data-can-monitor', false);
   const allowedIds = new Set((_foyerJsonAttr('data-allowed-source-ids', []) || []).map(v => String(v)));
+  const defaultView = _adminDefaultView(root, 'audio', [{key: 'sources', label: 'Default faders'}], _render);
 
   function _foyerSetStatus(text, type) {
     if (!statusEl) return;
@@ -4383,8 +4462,8 @@ function _initFoyerAudioPage() {
   }
 
   function _sourceVisible(source) {
-    if (allowAll) return true;
-    return allowedIds.has(String(source && source.id));
+    const allowed = allowAll || allowedIds.has(String(source && source.id));
+    return allowed && defaultView.filter([source], 'sources', 'id').length > 0;
   }
 
   function _formatDb(value) {
@@ -4442,7 +4521,7 @@ function _initFoyerAudioPage() {
     const soloActive = !!monitorState.solo && String(monitorState.soloSource || '') === id;
     const level = source.level || {};
     return `
-      <section class="foyer-audio-strip" data-source-id="${_escapeHtml(id)}">
+      <section class="${isMaster ? 'foyer-audio-monitor foyer-audio-master' : 'foyer-audio-strip'}" data-source-id="${_escapeHtml(id)}">
         <div class="foyer-audio-strip-head">
           <div class="foyer-audio-name">${_escapeHtml(source.label || id)}</div>
           <div class="foyer-audio-value" data-volume-readout="${_escapeHtml(id)}">${_escapeHtml(_formatDb(volume))}</div>
@@ -4455,10 +4534,10 @@ function _initFoyerAudioPage() {
           <input class="form-range foyer-audio-slider" type="range" min="-60" max="6" step="0.1" value="${String(Math.max(-60, Math.min(volume, 6)))}" data-foyer-volume="${_escapeHtml(id)}" aria-label="${_escapeHtml(source.label || id)} volume">
           <div class="foyer-audio-percent" data-volume-percent="${_escapeHtml(id)}">${_pctFromDb(volume)}%</div>
         </div>
-        <div class="foyer-audio-actions">
+        ${isMaster ? '' : `<div class="foyer-audio-actions">
           ${isMaster ? '' : `<button class="btn ${muted ? 'btn-outline-secondary' : 'btn-primary'}" type="button" data-foyer-mute="${_escapeHtml(id)}" aria-pressed="${muted ? 'false' : 'true'}">On</button>`}
           ${(!isMaster && canSolo) ? `<button class="btn ${soloActive ? 'btn-warning' : 'btn-outline-secondary'}" type="button" data-foyer-solo="${_escapeHtml(id)}">${soloActive ? 'Solo' : 'Solo'}</button>` : ''}
-        </div>
+        </div>`}
       </section>
     `;
   }
@@ -4496,7 +4575,8 @@ function _initFoyerAudioPage() {
   function _render() {
     const visible = stateSources.filter(_sourceVisible);
     _renderMonitor();
-    if (grid) grid.innerHTML = visible.map(_renderSource).join('');
+    if (masterEl) masterEl.innerHTML = visible.filter(source => String(source.id) === 'master').map(_renderSource).join('');
+    if (grid) grid.innerHTML = visible.filter(source => String(source.id) !== 'master').map(_renderSource).join('');
     if (emptyEl) emptyEl.classList.toggle('d-none', visible.length > 0);
     sourceSignature = _sourcesSignature(stateSources);
   }
@@ -4621,6 +4701,7 @@ function _initFoyerAudioPage() {
       throw new Error((data && (data.error || data.lastError)) || 'Could not load ATEM audio state');
     }
     const nextSources = data.sources;
+    defaultView.update({sources: nextSources.filter(source => allowAll || allowedIds.has(String(source.id))).map(source => ({id: source.id, label: source.label || String(source.id)}))});
     monitorState = data.monitor || {};
     const stateError = data.lastError || data.error;
     if (data.stale && stateError) {

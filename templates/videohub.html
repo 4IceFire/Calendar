@@ -2,6 +2,7 @@
 
 {% set page_title = 'VideoHub' %}
 {% set page_subtitle = 'Room-based preset editor' %}
+{% block head_extra %}<link rel="stylesheet" href="{{ static_asset('catalog_organization.css') }}">{% endblock %}
 
 {% block page_actions %}
 {% if can_edit_presets %}
@@ -111,8 +112,10 @@
   </div>
 </div>
 
+<script src="{{ static_asset('catalog_organization.js') }}"></script>
 <script>
 let _vhAllowedPresetIds = [];
+let _vhOrganization = {folders: [], items: []};
 let _vhCanEditPresets = true;
 let _vhPresets = [];
 let _vhLabels = {inputs: [], outputs: [], configured: false};
@@ -402,16 +405,17 @@ function _vhRenderRooms(){
 function _vhRenderList(){
   const el = document.getElementById('vh-list');
   if(!el) return;
-  if(!_vhPresets.length){
-    el.innerHTML = '<div class="text-muted">No presets yet.</div>';
+  if(el._catalogMoving && el._catalogMoving()) {
+    el._catalogRenderAfterMove = _vhRenderList;
     return;
   }
   el.innerHTML = '';
+  const rows = [];
   _vhPresets.forEach((p) => {
     const active = (_vhCurrentId === p.id);
     const locked = !!p.locked;
     const div = document.createElement('div');
-    div.className = 'd-flex align-items-center mb-2';
+    div.className = 'd-flex flex-wrap gap-2 align-items-center mb-2';
     div.innerHTML = `
       <div class="flex-grow-1">
         <strong>${_safeHtml(p.name || ('Preset ' + p.id))}</strong>
@@ -423,7 +427,20 @@ function _vhRenderList(){
         <button class="btn btn-sm btn-primary" data-act="apply" data-id="${p.id}">Apply</button>
       </div>
     `;
-    el.appendChild(div);
+    rows.push({id: p.id, node: div, label: p.name || ('Preset ' + p.id)});
+  });
+  window.renderCatalogOrganization(el, _vhOrganization, rows, {
+    editable: _vhCanEditPresets,
+    error: message => _vhSetStatus(message, 'error'),
+    save: async value => {
+      const response = await fetch('/api/videohub/presets/organization', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(value)
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Could not save organisation');
+      _vhOrganization = data.organization;
+      return _vhOrganization;
+    }
   });
 }
 
@@ -450,6 +467,7 @@ async function _vhLoadPresets(){
   const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load presets');
   const all = Array.isArray(data.presets) ? data.presets : [];
+  _vhOrganization = data.organization || {folders: [], items: all.map(p => ({id: String(p.id), folderId: null}))};
   if(Array.isArray(_vhAllowedPresetIds) && _vhAllowedPresetIds.length){
     const allow = new Set(_vhAllowedPresetIds);
     _vhPresets = all.filter((p) => allow.has(parseInt(p.id, 10)));

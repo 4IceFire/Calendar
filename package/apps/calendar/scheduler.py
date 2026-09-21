@@ -156,6 +156,8 @@ def _resolve_trigger_display_name(trigger) -> str:
         return n
 
     action_type = str(getattr(trigger, "actionType", "companion") or "companion").lower()
+    if action_type in ("videohub_preset", "routing_preset"):
+        return f"{'VideoHub Preset' if action_type == 'videohub_preset' else 'Routing Presets'}: {(getattr(trigger, 'preset_action', None) or {}).get('preset', '')}"
     if action_type == "api":
         api = getattr(trigger, "api", None)
         if isinstance(api, dict):
@@ -465,6 +467,7 @@ class ClockScheduler:
                         "url": job.trigger.buttonURL,
                         "api": api if isinstance(api, dict) else None,
                         "timer": timer if isinstance(timer, dict) else None,
+                        "preset_action": getattr(job.trigger, "preset_action", None),
                     }
                 )
 
@@ -607,6 +610,27 @@ class ClockScheduler:
     def _handle_trigger(self, job: TriggerJob) -> bool:
         action_type = str(getattr(job.trigger, "actionType", "companion") or "companion").lower()
         name = _resolve_trigger_display_name(job.trigger)
+        if action_type in ("videohub_preset", "routing_preset"):
+            selection = getattr(job.trigger, "preset_action", None) or {}
+            if action_type == "videohub_preset":
+                try:
+                    preset = int(selection['preset'])
+                    if preset < 1:
+                        return False
+                except (KeyError, TypeError, ValueError):
+                    return False
+                ok = self._execute_internal_api_action({
+                    "method": "POST", "path": f"/api/videohub/presets/{preset}/apply"}, job)
+            else:
+                # This capability is deliberately unavailable through HTTP or
+                # generic API triggers. Only a typed scheduler job can invoke it.
+                ok = bool(self._internal_action_executor and self._internal_action_executor(
+                    {"actionType": "routing_preset", "preset_action": dict(selection)}, job))
+            _activity_log_scheduler_event(
+                action="scheduler.trigger." + action_type,
+                summary=f"Scheduled {action_type.replace('_', ' ')} {'accepted' if ok else 'failed'} for '{job.event.name}'",
+                status="success" if ok else "failure", job=job, details=selection)
+            return ok
         if action_type == "api":
             api = getattr(job.trigger, "api", None)
             m = str((api or {}).get("method") or "POST").upper() if isinstance(api, dict) else "POST"
