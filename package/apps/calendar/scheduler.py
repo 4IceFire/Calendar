@@ -177,6 +177,11 @@ def _resolve_trigger_display_name(trigger) -> str:
                 apply_suffix = " (apply)" if apply_now else ""
                 return f"Timer preset #{preset}{extra}{apply_suffix}"
         return "Timer preset"
+    if action_type == "atem_audio":
+        action = getattr(trigger, "atem_audio", None)
+        if isinstance(action, dict):
+            return f"ATEM Audio: {action.get('source_id', '')} {action.get('operation', '')}".strip()
+        return "ATEM Audio"
 
     url = str(getattr(trigger, "buttonURL", "") or "").strip()
     labels = _get_button_template_labels_by_url()
@@ -649,6 +654,13 @@ class ClockScheduler:
                 f"name='{name}' | offset={getattr(job.trigger, 'offset_minutes', 0)}min | timer preset={preset} time={time_str} "
                 f"apply={apply_now}"
             )
+        elif action_type == "atem_audio":
+            action = getattr(job.trigger, "atem_audio", None) or {}
+            print(
+                f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
+                f"name='{name}' | offset={getattr(job.trigger, 'offset_minutes', 0)}min | "
+                f"ATEM audio source={action.get('source_id')} operation={action.get('operation')}"
+            )
         else:
             print(
                 f"[TRIGGER] {job.due} | Event=#{getattr(job.event,'id',None)} '{job.event.name}' | "
@@ -751,6 +763,15 @@ class ClockScheduler:
                 )
                 self._dbg("Timer action -> FAIL")
             return ok
+        if action_type == "atem_audio":
+            action = getattr(job.trigger, "atem_audio", None)
+            if not isinstance(action, dict):
+                return False
+            return self._execute_internal_api_action({
+                "method": "POST",
+                "path": "/api/atem/audio/action",
+                "body": dict(action),
+            }, job)
 
         # A prior health probe is only advisory. Always attempt the scheduled
         # POST when a client exists; otherwise a transient GET failure can make

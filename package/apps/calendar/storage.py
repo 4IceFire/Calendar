@@ -89,6 +89,7 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                     action_type = str(trig.get("actionType") or trig.get("action_type") or "").strip().lower()
                     api = trig.get("api")
                     timer = trig.get("timer")
+                    atem_audio = trig.get("atem_audio")
                     enabled = True
                     trig_name = str(trig.get("name") or "").strip()
                     trig_uid = str(trig.get("uid") or "").strip()
@@ -107,6 +108,8 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                             action_type = "api"
                         elif isinstance(timer, dict):
                             action_type = "timer"
+                        elif isinstance(atem_audio, dict):
+                            action_type = "atem_audio"
                         else:
                             action_type = "companion"
 
@@ -140,6 +143,21 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                                 actionType="timer",
                                 api=None,
                                 timer=timer if isinstance(timer, dict) else {},
+                                enabled=enabled,
+                            )
+                        )
+                    elif action_type == "atem_audio":
+                        times.append(
+                            TimeOfTrigger(
+                                trig.get("minutes", 0),
+                                TypeofTime[trig.get("typeOfTrigger", "AT")],
+                                "",
+                                name=trig_name,
+                                uid=trig_uid,
+                                actionType="atem_audio",
+                                api=None,
+                                timer=None,
+                                atem_audio=atem_audio if isinstance(atem_audio, dict) else {},
                                 enabled=enabled,
                             )
                         )
@@ -203,6 +221,8 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                             action_type = "api"
                         elif isinstance(trig.get("timer"), dict):
                             action_type = "timer"
+                        elif isinstance(trig.get("atem_audio"), dict):
+                            action_type = "atem_audio"
                         else:
                             action_type = "companion"
                         trig["actionType"] = action_type
@@ -216,6 +236,10 @@ def load_events_safe(path: str = DEFAULT_EVENTS_FILE, retries: int = 10, delay: 
                     elif action_type == "timer":
                         if "timer" not in trig or not isinstance(trig.get("timer"), dict):
                             trig["timer"] = {}
+                            changed = True
+                    elif action_type == "atem_audio":
+                        if "atem_audio" not in trig or not isinstance(trig.get("atem_audio"), dict):
+                            trig["atem_audio"] = {}
                             changed = True
                     elif action_type in ("videohub_preset", "routing_preset"):
                         # Preset references and trigger UIDs survive normal load/save.

@@ -156,6 +156,8 @@ def _trigger_from_spec(spec: str):
                 action_type = "api"
             elif isinstance(payload.get("timer"), dict):
                 action_type = "timer"
+            elif isinstance(payload.get("atem_audio"), dict):
+                action_type = "atem_audio"
             else:
                 action_type = "companion"
 
@@ -176,6 +178,11 @@ def _trigger_from_spec(spec: str):
             if not isinstance(timer, dict):
                 raise ValueError("timer triggers require a 'timer' object")
             return TimeOfTrigger(minutes, trig_type, "", api=None, timer=timer, **common_kwargs)
+        if action_type == "atem_audio":
+            atem_audio = payload.get("atem_audio")
+            if not isinstance(atem_audio, dict):
+                raise ValueError("ATEM audio triggers require an 'atem_audio' object")
+            return TimeOfTrigger(minutes, trig_type, "", api=None, timer=None, atem_audio=atem_audio, **common_kwargs)
         if action_type in ("videohub_preset", "routing_preset"):
             selection = payload.get("preset_action")
             allowed = {"preset"} if action_type == "videohub_preset" else {"preset", "output"}

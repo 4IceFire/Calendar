@@ -135,6 +135,14 @@ async function loadTimerPresets(){
   }catch(e){ return []; }
 }
 
+async function loadAtemAudioSources(){
+  try{
+    const resp = await fetch('/api/templates/atem-audio-sources?_ts=' + Date.now(), {cache: 'no-store'});
+    const data = await resp.json();
+    return Array.isArray(data.sources) ? data.sources : [];
+  }catch(e){ return []; }
+}
+
 function _escHtml(s){
   return String(s ?? '')
     .replaceAll('&', '&amp;')
@@ -149,7 +157,7 @@ function _isTimerTimeExpr(s){
   return /^\d{1,2}:\d{2}$/.test(v) || /^\$(?:0|[+-]\d+)$/.test(v);
 }
 
-function newTriggerRow(templates, timerPresets){
+function newTriggerRow(templates, timerPresets, atemAudioSources){
   const uid = (function(){
     try{ return crypto.randomUUID(); }catch(e){}
     return 'id_' + String(Date.now()) + '_' + String(Math.floor(Math.random()*1e9));
@@ -177,6 +185,7 @@ function newTriggerRow(templates, timerPresets){
         <select name="actionType" class="form-select form-select-sm" style="width:160px">
           <option value="companion">Companion Button</option>
           <option value="timer">Timer Preset</option>
+          <option value="atem_audio">ATEM Audio</option>
           <option value="videohub_preset">VideoHub Preset</option>
           <option value="routing_preset">Routing Presets</option>
           <option value="api">API Call</option>
@@ -228,6 +237,24 @@ function newTriggerRow(templates, timerPresets){
           <label class="form-check-label small">Apply when triggered</label>
         </div>
       </div>
+
+      <div class="mt-2 gap-2 align-items-center atem-audio-fields flex-wrap" style="display:none">
+        <select name="atemAudioSource" class="form-select form-select-sm" style="min-width:200px">
+          <option value="">(select Record Audio source)</option>
+          ${(Array.isArray(atemAudioSources) ? atemAudioSources : []).map((source)=>`<option value="${_escHtml(source.id)}">${_escHtml(source.label || source.id)}</option>`).join('')}
+        </select>
+        <select name="atemAudioOperation" class="form-select form-select-sm" style="width:150px">
+          <option value="volume">Set volume</option>
+          <option value="mute">Mute</option>
+          <option value="unmute">Unmute</option>
+          <option value="toggle">Toggle mute</option>
+        </select>
+        <input name="atemAudioDb" type="number" min="-60" max="6" step="0.1" value="0.0" class="form-control form-control-sm" style="width:120px" aria-label="Volume in dB" title="-60.0 to +6.0 dB">
+        <span class="small text-muted atem-audio-db-label">dB</span>
+        <input name="atemAudioFade" type="number" min="0" max="600" step="0.1" value="0" class="form-control form-control-sm" style="width:130px" aria-label="Fade seconds" title="Optional linear fade, 0 to 600 seconds">
+        <span class="small text-muted atem-audio-fade-label">fade seconds</span>
+        <small class="text-muted w-100 atem-audio-note">Master supports volume only. Fades begin at the ATEM's current level.</small>
+      </div>
     </div>
   `;
 
@@ -273,11 +300,18 @@ function newTriggerRow(templates, timerPresets){
   const companionFields = div.querySelector('.companion-fields');
   const apiFields = div.querySelector('.api-fields');
   const timerFields = div.querySelector('.timer-fields');
+  const atemAudioFields = div.querySelector('.atem-audio-fields');
   const btnTplSel = div.querySelector('select[name="buttonTemplate"]');
   const btnUrlInp = div.querySelector('input[name="buttonURL"]');
   const timerPresetSel = div.querySelector('select[name="timerPreset"]');
   const timerTimeInp = div.querySelector('input[name="timerTime"]');
   const timerApplyInp = div.querySelector('input[name="timerApply"]');
+  const atemSourceSel = div.querySelector('select[name="atemAudioSource"]');
+  const atemOperationSel = div.querySelector('select[name="atemAudioOperation"]');
+  const atemDbInp = div.querySelector('input[name="atemAudioDb"]');
+  const atemFadeInp = div.querySelector('input[name="atemAudioFade"]');
+  const atemDbLabel = div.querySelector('.atem-audio-db-label');
+  const atemFadeLabel = div.querySelector('.atem-audio-fade-label');
   const syncTimerTimeFromPreset = ()=>{
     if(!timerPresetSel || !timerTimeInp) return;
     const opt = timerPresetSel.options[timerPresetSel.selectedIndex];
@@ -285,36 +319,40 @@ function newTriggerRow(templates, timerPresets){
     if(t) timerTimeInp.value = t;
   };
   if(timerPresetSel) timerPresetSel.addEventListener('change', syncTimerTimeFromPreset);
+  const syncAtemAudioFields = ()=>{
+    const isVolume = String(atemOperationSel?.value || 'volume') === 'volume';
+    const isMaster = String(atemSourceSel?.value || '') === 'master';
+    if(isMaster && !isVolume && atemOperationSel) atemOperationSel.value = 'volume';
+    const volume = String(atemOperationSel?.value || 'volume') === 'volume';
+    if(atemDbInp) atemDbInp.disabled = !volume;
+    if(atemFadeInp) atemFadeInp.disabled = !volume;
+    if(atemDbLabel) atemDbLabel.style.display = volume ? '' : 'none';
+    if(atemFadeLabel) atemFadeLabel.style.display = volume ? '' : 'none';
+    if(atemOperationSel){
+      Array.from(atemOperationSel.options).forEach((option)=>{
+        option.disabled = isMaster && option.value !== 'volume';
+      });
+    }
+  };
+  if(atemSourceSel) atemSourceSel.addEventListener('change', syncAtemAudioFields);
+  if(atemOperationSel) atemOperationSel.addEventListener('change', syncAtemAudioFields);
   const syncActionFields = ()=>{
     const v = String(actionSel ? actionSel.value : 'companion').toLowerCase();
-    if(v === 'api'){
-      if(companionFields) companionFields.style.display = 'none';
-      if(apiFields) apiFields.style.display = 'flex';
-      if(timerFields) timerFields.style.display = 'none';
-      if(btnTplSel) btnTplSel.disabled = true;
-      if(btnUrlInp) btnUrlInp.disabled = true;
-      if(timerPresetSel) timerPresetSel.disabled = true;
-      if(timerTimeInp) timerTimeInp.disabled = true;
-      if(timerApplyInp) timerApplyInp.disabled = true;
-    }else if(v === 'timer'){
-      if(companionFields) companionFields.style.display = 'none';
-      if(apiFields) apiFields.style.display = 'none';
-      if(timerFields) timerFields.style.display = 'flex';
-      if(btnTplSel) btnTplSel.disabled = true;
-      if(btnUrlInp) btnUrlInp.disabled = true;
-      if(timerPresetSel) timerPresetSel.disabled = false;
-      if(timerTimeInp) timerTimeInp.disabled = false;
-      if(timerApplyInp) timerApplyInp.disabled = false;
-    }else{
-      if(companionFields) companionFields.style.display = 'flex';
-      if(apiFields) apiFields.style.display = 'none';
-      if(timerFields) timerFields.style.display = 'none';
-      if(btnTplSel) btnTplSel.disabled = false;
-      if(btnUrlInp) btnUrlInp.disabled = false;
-      if(timerPresetSel) timerPresetSel.disabled = true;
-      if(timerTimeInp) timerTimeInp.disabled = true;
-      if(timerApplyInp) timerApplyInp.disabled = true;
-    }
+    const atemActive = v === 'atem_audio';
+    if(companionFields) companionFields.style.display = v === 'companion' ? 'flex' : 'none';
+    if(apiFields) apiFields.style.display = v === 'api' ? 'flex' : 'none';
+    if(timerFields) timerFields.style.display = v === 'timer' ? 'flex' : 'none';
+    if(atemAudioFields) atemAudioFields.style.display = atemActive ? 'flex' : 'none';
+    if(btnTplSel) btnTplSel.disabled = v !== 'companion';
+    if(btnUrlInp) btnUrlInp.disabled = v !== 'companion';
+    if(timerPresetSel) timerPresetSel.disabled = v !== 'timer';
+    if(timerTimeInp) timerTimeInp.disabled = v !== 'timer';
+    if(timerApplyInp) timerApplyInp.disabled = v !== 'timer';
+    if(atemSourceSel) atemSourceSel.disabled = !atemActive;
+    if(atemOperationSel) atemOperationSel.disabled = !atemActive;
+    if(atemDbInp) atemDbInp.disabled = !atemActive || String(atemOperationSel?.value || 'volume') !== 'volume';
+    if(atemFadeInp) atemFadeInp.disabled = !atemActive || String(atemOperationSel?.value || 'volume') !== 'volume';
+    if(atemActive) syncAtemAudioFields();
   };
   const syncAllActionFields = ()=>{ syncActionFields(); div.__syncPresetFields(String(actionSel.value || 'companion')); };
   if(actionSel) actionSel.addEventListener('change', syncAllActionFields);
@@ -328,6 +366,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   let editId = null;
   const templates = await loadButtonTemplates();
   const timerPresets = await loadTimerPresets();
+  const atemAudioSources = await loadAtemAudioSources();
   const triggerTemplates = await loadTriggerTemplates();
   // populate trigger-template select
   const tplSel = document.getElementById('trigger-template-select');
@@ -465,6 +504,32 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         continue;
       }
 
+      if(actionType === 'atem_audio'){
+        const source_id = String(row.querySelector('select[name="atemAudioSource"]')?.value || '').trim();
+        const operation = String(row.querySelector('select[name="atemAudioOperation"]')?.value || '').trim().toLowerCase();
+        if(!source_id || !['mute', 'unmute', 'toggle', 'volume'].includes(operation)){
+          throw new Error('Choose an ATEM audio source and action');
+        }
+        if(source_id === 'master' && operation !== 'volume'){
+          throw new Error('Master supports volume only');
+        }
+        const atem_audio = {source_id, operation};
+        if(operation === 'volume'){
+          const db = Number(row.querySelector('input[name="atemAudioDb"]')?.value);
+          const fade_seconds = Number(row.querySelector('input[name="atemAudioFade"]')?.value || 0);
+          if(!Number.isFinite(db) || db < -60 || db > 6 || Math.abs(db * 10 - Math.round(db * 10)) > 1e-7){
+            throw new Error('ATEM volume must be -60.0 to +6.0 dB in 0.1 dB increments');
+          }
+          if(!Number.isFinite(fade_seconds) || fade_seconds < 0 || fade_seconds > 600){
+            throw new Error('ATEM fade must be between 0 and 600 seconds');
+          }
+          atem_audio.db = Math.round(db * 10) / 10;
+          atem_audio.fade_seconds = fade_seconds;
+        }
+        times.push({uid, name, minutes: mins, typeOfTrigger: type, enabled, actionType: 'atem_audio', atem_audio});
+        continue;
+      }
+
       // If a template selected, use its buttonURL (and ignore user input)
       if(tmplIdx !== ''){
         const t = templates[parseInt(tmplIdx,10)];
@@ -512,7 +577,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         // populate triggers
         container.innerHTML = '';
         for(const t of (ev.times || [])){
-          const row = newTriggerRow(templates, timerPresets);
+          const row = newTriggerRow(templates, timerPresets, atemAudioSources);
           row.querySelector('input[name="name"]').value = String((t && t.name) ? t.name : '');
           if(t && t.uid){
             const uidEl = row.querySelector('input[name="uid"]');
@@ -541,6 +606,13 @@ document.addEventListener('DOMContentLoaded', async ()=>{
             row.querySelector('select[name="timerPreset"]').value = String(timer.preset || '');
             row.querySelector('input[name="timerTime"]').value = String(timer.time || '');
             row.querySelector('input[name="timerApply"]').checked = (timer.apply !== false);
+          }else if(String(t.actionType || 'companion').toLowerCase() === 'atem_audio'){
+            const atemAudio = (t && t.atem_audio && typeof t.atem_audio === 'object') ? t.atem_audio : {};
+            row.querySelector('select[name="atemAudioSource"]').value = String(atemAudio.source_id || '');
+            row.querySelector('select[name="atemAudioOperation"]').value = String(atemAudio.operation || 'volume');
+            row.querySelector('input[name="atemAudioDb"]').value = String(atemAudio.db ?? 0);
+            row.querySelector('input[name="atemAudioFade"]').value = String(atemAudio.fade_seconds ?? 0);
+            row.__syncActionFields();
           }else{
             // attempt to match a button template
             let matched = false;
@@ -603,7 +675,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 
   document.getElementById('add-trigger-btn').addEventListener('click', (ev)=>{
     ev.preventDefault();
-    const row = newTriggerRow(templates, timerPresets);
+    const row = newTriggerRow(templates, timerPresets, atemAudioSources);
     container.appendChild(row);
     if(typeof row.__syncSummary === 'function') row.__syncSummary();
     _applyCollapsed(row);
@@ -706,7 +778,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     container.innerHTML = '';
     // for each time, create a row and populate values
     for(const t of times){
-      const row = newTriggerRow(templates, timerPresets);
+      const row = newTriggerRow(templates, timerPresets, atemAudioSources);
       row.querySelector('input[name="name"]').value = String((t && t.name) ? t.name : '');
       if(t && t.uid){
         const uidEl = row.querySelector('input[name="uid"]');
@@ -735,6 +807,13 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         row.querySelector('select[name="timerPreset"]').value = String(timer.preset || '');
         row.querySelector('input[name="timerTime"]').value = String(timer.time || '');
         row.querySelector('input[name="timerApply"]').checked = (timer.apply !== false);
+      }else if(String(t.actionType || 'companion').toLowerCase() === 'atem_audio'){
+        const atemAudio = (t && t.atem_audio && typeof t.atem_audio === 'object') ? t.atem_audio : {};
+        row.querySelector('select[name="atemAudioSource"]').value = String(atemAudio.source_id || '');
+        row.querySelector('select[name="atemAudioOperation"]').value = String(atemAudio.operation || 'volume');
+        row.querySelector('input[name="atemAudioDb"]').value = String(atemAudio.db ?? 0);
+        row.querySelector('input[name="atemAudioFade"]').value = String(atemAudio.fade_seconds ?? 0);
+        row.__syncActionFields();
       }else{
         // try to match button template
         let matched = false;

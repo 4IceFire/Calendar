@@ -9740,6 +9740,32 @@ def api_get_templates():
     return jsonify({'buttons': btns, 'buttons_tree': tree, 'triggers': trigs})
 
 
+@app.route('/api/templates/atem-audio-sources')
+def api_trigger_atem_audio_sources():
+    """Expose the Record Audio source catalogue to Calendar and Templates."""
+    try:
+        fallback = AtemAudioClient.fallback_sources() if AtemAudioClient is not None else [
+            {'id': 'master', 'label': 'Master', 'kind': 'master'}
+        ]
+    except Exception:
+        fallback = [{'id': 'master', 'label': 'Master', 'kind': 'master'}]
+    atem = _get_atem_client_from_config()
+    if atem is None:
+        return jsonify(ok=False, connected=False, sources=fallback, error='ATEM not configured')
+    try:
+        state = atem.get_audio_state()
+        sources = state.get('sources') if isinstance(state, dict) else None
+        if not isinstance(sources, list):
+            sources = fallback
+        if not any(isinstance(item, dict) and str(item.get('id')) == 'master' for item in sources):
+            sources = [fallback[0], *sources]
+        return jsonify(ok=bool(state.get('connected', True)) if isinstance(state, dict) else False,
+                       connected=bool(state.get('connected', True)) if isinstance(state, dict) else False,
+                       sources=sources)
+    except Exception as exc:
+        return jsonify(ok=False, connected=False, sources=fallback, error=str(exc))
+
+
 @app.route('/api/templates/preset-actions')
 def api_trigger_preset_catalog():
     """References for existing Calendar/Templates operational authority."""
@@ -11652,6 +11678,95 @@ def api_atem_audio_meters():
             'stale': True,
         }
         return jsonify(_filter_atem_audio_payload_for_current_principal(payload, meters=True)), 200
+
+
+_atem_audio_fade_lock = threading.RLock()
+_atem_audio_fades: dict[str, tuple[int, threading.Event]] = {}
+
+
+def _run_atem_audio_fade(atem, source_id: str, start_db: float, target_db: float, seconds: float, generation: int) -> None:
+    cancelled = threading.Event()
+    with _atem_audio_fade_lock:
+        current = _atem_audio_fades.get(source_id)
+        if current is None or current[0] != generation:
+            return
+        cancelled = current[1]
+    try:
+        steps = max(1, int(round(seconds * 10)))
+        for step in range(1, steps + 1):
+            if cancelled.wait(seconds / steps):
+                log_event('atem.audio.fade.cancelled', f"Cancelled ATEM audio fade for {source_id}", source='scheduler', status='info', target_type='atem_audio_source', target_id=source_id, details={'source_id': source_id, 'start_db': start_db, 'target_db': target_db, 'seconds': seconds})
+                return
+            atem.set_volume(source_id, start_db + ((target_db - start_db) * step / steps))
+        log_event('atem.audio.fade.complete', f"Completed ATEM audio fade for {source_id}", source='scheduler', status='success', target_type='atem_audio_source', target_id=source_id, details={'source_id': source_id, 'start_db': start_db, 'target_db': target_db, 'seconds': seconds})
+    except Exception as exc:
+        log_event('atem.audio.fade.complete', f"Failed ATEM audio fade for {source_id}", source='scheduler', status='failure', target_type='atem_audio_source', target_id=source_id, details={'source_id': source_id, 'target_db': target_db, 'seconds': seconds, 'error': str(exc)})
+    finally:
+        with _atem_audio_fade_lock:
+            if _atem_audio_fades.get(source_id, (None,))[0] == generation:
+                _atem_audio_fades.pop(source_id, None)
+
+
+def _atem_audio_source_from_state(atem, source_id: str) -> dict:
+    state = atem.get_audio_state()
+    if not isinstance(state, dict) or not bool(state.get('connected', True)):
+        raise ValueError('ATEM audio is unavailable')
+    sources = state.get('sources')
+    if not isinstance(sources, list):
+        raise ValueError('ATEM audio source is unavailable')
+    source = next((item for item in sources if isinstance(item, dict) and str(item.get('id')) == source_id), None)
+    if source is None:
+        raise ValueError('ATEM audio source is unavailable')
+    return source
+
+
+@app.route('/api/atem/audio/action', methods=['POST'])
+def api_atem_audio_action():
+    atem = _get_atem_client_from_config()
+    body = request.get_json(silent=True) or {}
+    source_id = str(body.get('source_id') or '').strip()
+    operation = str(body.get('operation') or '').strip().lower()
+    if atem is None:
+        log_event('atem.audio.action', 'Failed ATEM audio action: ATEM not configured', source='scheduler' if _api_request_is_automation_principal() else 'web', status='failure', target_type='atem_audio_source', target_id=source_id or None, details={'source_id': source_id, 'operation': operation, 'error': 'ATEM not configured'})
+        return jsonify({'ok': False, 'error': 'ATEM not configured'}), 502
+    if not source_id or operation not in ('mute', 'unmute', 'toggle', 'volume'):
+        return jsonify({'ok': False, 'error': 'source_id and a valid operation are required'}), 400
+    if source_id == 'master' and operation != 'volume':
+        return jsonify({'ok': False, 'error': 'Master supports volume only'}), 400
+    try:
+        fade_seconds = float(body.get('fade_seconds', 0) or 0)
+        if not 0 <= fade_seconds <= 600:
+            raise ValueError
+    except ValueError:
+        return jsonify({'ok': False, 'error': 'fade_seconds must be between 0 and 600'}), 400
+    try:
+        source = _atem_audio_source_from_state(atem, source_id)
+        if operation == 'volume':
+            target_db = float(body.get('db'))
+            if (not math.isfinite(target_db) or target_db < -60 or target_db > 6
+                    or abs(target_db * 10 - round(target_db * 10)) > 1e-7):
+                raise ValueError('db must be between -60.0 and +6.0 in 0.1 dB increments')
+            target_db = round(target_db, 1)
+            if fade_seconds <= 0:
+                atem.set_volume(source_id, target_db)
+            else:
+                start_db = float(source.get('volume'))
+                with _atem_audio_fade_lock:
+                    prior = _atem_audio_fades.get(source_id)
+                    if prior:
+                        prior[1].set()
+                    generation = (prior[0] + 1) if prior else 1
+                    _atem_audio_fades[source_id] = (generation, threading.Event())
+                threading.Thread(target=_run_atem_audio_fade, args=(atem, source_id, start_db, target_db, fade_seconds, generation), daemon=True, name=f'tdeck-atem-fade-{source_id}').start()
+        elif operation == 'toggle':
+            atem.set_mute(source_id, not bool(source.get('muted')))
+        else:
+            atem.set_mute(source_id, operation == 'mute')
+        log_event('atem.audio.action', f"Scheduled ATEM audio {operation} for {source_id}", source='scheduler' if _api_request_is_automation_principal() else 'web', status='success', target_type='atem_audio_source', target_id=source_id, details={'source_id': source_id, 'operation': operation, 'db': body.get('db'), 'fade_seconds': fade_seconds})
+        return jsonify({'ok': True, 'source_id': source_id, 'operation': operation, 'fade_seconds': fade_seconds})
+    except Exception as exc:
+        log_event('atem.audio.action', f"Failed ATEM audio {operation} for {source_id}", source='scheduler' if _api_request_is_automation_principal() else 'web', status='failure', target_type='atem_audio_source', target_id=source_id, details={'source_id': source_id, 'operation': operation, 'error': str(exc)})
+        return jsonify({'ok': False, 'error': str(exc)}), 502
 
 
 @app.route('/api/atem/audio/volume', methods=['POST'])
@@ -13625,6 +13740,34 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
             return None, str(error)
         out['actionType'] = action_type
         out['preset_action'] = normalized
+        return out, None
+
+    if action_type == 'atem_audio':
+        action = raw.get('atem_audio') if isinstance(raw.get('atem_audio'), dict) else raw
+        source_id = str(action.get('source_id') or '').strip()
+        operation = str(action.get('operation') or '').strip().lower()
+        if not source_id or operation not in ('mute', 'unmute', 'toggle', 'volume'):
+            return None, 'Choose an ATEM audio source and action.'
+        if source_id == 'master' and operation != 'volume':
+            return None, 'Master supports volume only.'
+        normalized_action: dict[str, Any] = {'source_id': source_id, 'operation': operation}
+        if operation == 'volume':
+            try:
+                db = float(action.get('db'))
+            except (TypeError, ValueError):
+                return None, 'Volume must be between -60.0 and +6.0 dB.'
+            if not math.isfinite(db) or db < -60.0 or db > 6.0 or abs(db * 10 - round(db * 10)) > 1e-7:
+                return None, 'Volume must be between -60.0 and +6.0 dB in 0.1 dB increments.'
+            normalized_action['db'] = round(db, 1)
+            try:
+                fade_seconds = float(action.get('fade_seconds', 0) or 0)
+            except (TypeError, ValueError):
+                return None, 'Fade must be between 0 and 600 seconds.'
+            if not math.isfinite(fade_seconds) or fade_seconds < 0 or fade_seconds > 600:
+                return None, 'Fade must be between 0 and 600 seconds.'
+            normalized_action['fade_seconds'] = fade_seconds
+        out['actionType'] = 'atem_audio'
+        out['atem_audio'] = normalized_action
         return out, None
 
     if action_type == 'api':
@@ -15758,6 +15901,7 @@ def api_update_event_ui(ident: int):
                         api=api_obj, 
                         timer=timer_obj,
                         preset_action=t3.get('preset_action'),
+                        atem_audio=t3.get('atem_audio'),
                         enabled=enabled, 
                     ) 
                 ) 
@@ -15890,6 +16034,7 @@ def api_create_event_ui():
                     api=api_obj,
                     timer=timer_obj,
                     preset_action=t3.get('preset_action'),
+                    atem_audio=t3.get('atem_audio'),
                     enabled=enabled,
                 )
             )

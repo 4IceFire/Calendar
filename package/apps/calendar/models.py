@@ -33,6 +33,7 @@ class TimeOfTrigger:
         api: Optional[Dict[str, Any]] = None,
         timer: Optional[Dict[str, Any]] = None,
         preset_action: Optional[Dict[str, Any]] = None,
+        atem_audio: Optional[Dict[str, Any]] = None,
         enabled: bool = True,
     ) -> None:
         self.minutes = minutes
@@ -44,6 +45,7 @@ class TimeOfTrigger:
         self.api: Optional[Dict[str, Any]] = api if isinstance(api, dict) else None
         self.timer: Optional[Dict[str, Any]] = timer if isinstance(timer, dict) else None
         self.preset_action = preset_action if isinstance(preset_action, dict) else None
+        self.atem_audio = atem_audio if isinstance(atem_audio, dict) else None
         self.enabled = bool(enabled)
 
         if typeOfTrigger == TypeofTime.BEFORE:
@@ -76,6 +78,9 @@ class TimeOfTrigger:
         elif self.actionType == "timer":
             out["actionType"] = "timer"
             out["timer"] = self.timer or {}
+        elif self.actionType == "atem_audio":
+            out["actionType"] = "atem_audio"
+            out["atem_audio"] = self.atem_audio or {}
         else:
             # Backward compatible default
             out["actionType"] = "companion"
