@@ -123,6 +123,15 @@ class ScheduledAtemAudioTests(unittest.TestCase):
         self.assertEqual(webui.log_event.call_args.args[0], 'atem.audio.action')
         self.assertEqual(webui.log_event.call_args.kwargs['status'], 'failure')
 
+    def test_fade_uses_thirty_steps_per_second(self):
+        with webui._atem_audio_fade_lock:
+            webui._atem_audio_fades['7'] = (12, threading.Event())
+
+        webui._run_atem_audio_fade(self.atem, '7', -12.0, -18.0, 0.1, 12)
+
+        self.assertEqual(self.atem.set_volume.call_count, 3)
+        self.assertAlmostEqual(self.atem.set_volume.call_args_list[-1].args[1], -18.0)
+
     def test_cancelled_fade_is_logged_and_removed(self):
         cancelled = threading.Event()
         cancelled.set()

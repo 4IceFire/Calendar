@@ -253,12 +253,13 @@ class AtemAudioClient:
             "unavailableReason": "ATEM meter client is not running",
         }
 
-    def _with_switcher(self, callback):
+    def _with_switcher(self, callback, *, settle_delay: float = 0.08):
         with self._lock:
             try:
                 sw = self._ensure_switcher()
                 result = callback(sw)
-                time.sleep(0.08)
+                if settle_delay > 0:
+                    time.sleep(settle_delay)
                 return result
             except Exception:
                 self.close()
@@ -507,7 +508,9 @@ class AtemAudioClient:
             else:
                 sw.setAudioMixerInputVolume(int(source), db)
 
-        self._with_switcher(_set)
+        # Fades send a rapid sequence of volume updates. Keep the normal settle
+        # delay for other controls, but do not add 80ms to every fade step.
+        self._with_switcher(_set, settle_delay=0.0)
         self.request_audio_state_refresh()
 
     def set_mix_option(self, source_id: str, mix_option: str) -> None:

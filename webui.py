@@ -11682,6 +11682,7 @@ def api_atem_audio_meters():
 
 _atem_audio_fade_lock = threading.RLock()
 _atem_audio_fades: dict[str, tuple[int, threading.Event]] = {}
+_ATEM_AUDIO_FADE_HZ = 30
 
 
 def _run_atem_audio_fade(atem, source_id: str, start_db: float, target_db: float, seconds: float, generation: int) -> None:
@@ -11692,7 +11693,7 @@ def _run_atem_audio_fade(atem, source_id: str, start_db: float, target_db: float
             return
         cancelled = current[1]
     try:
-        steps = max(1, int(round(seconds * 10)))
+        steps = max(1, int(round(seconds * _ATEM_AUDIO_FADE_HZ)))
         for step in range(1, steps + 1):
             if cancelled.wait(seconds / steps):
                 log_event('atem.audio.fade.cancelled', f"Cancelled ATEM audio fade for {source_id}", source='scheduler', status='info', target_type='atem_audio_source', target_id=source_id, details={'source_id': source_id, 'start_db': start_db, 'target_db': target_db, 'seconds': seconds})
