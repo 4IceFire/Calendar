@@ -13471,6 +13471,20 @@ def _build_stream_start_message(preset: dict) -> str | None:
     return f"STREAM {pretty}"
 
 
+def _build_stream_delay_message(preset: dict, delay_minutes: int) -> str | None:
+    """Build a stream-delay stage message from a preset plus signed minutes."""
+    try:
+        t = str((preset or {}).get('time', '')).strip()
+        adjustment = int(delay_minutes)
+    except Exception:
+        return None
+    minutes = _time_hhmm_to_minutes(t)
+    if minutes is None:
+        return None
+    delayed_time = _minutes_to_time_hhmm(minutes + adjustment)
+    return f"STREAM DELAY - {_format_time_hhmm_ampm(delayed_time)}"
+
+
 _BTN_FULL_RE = re.compile(r'^location/\d+/\d+/\d+/press$')
 _BTN_SHORT_RE = re.compile(r'^\d+/\d+/\d+$')
 
@@ -15360,6 +15374,95 @@ def api_prop_stage_stream_start():
         'preset_number': preset_number,
         'preset_name': (preset or {}).get('name', ''),
         'preset_time': (preset or {}).get('time', ''),
+        'message': message,
+        'sent': sent,
+        'detail': detail if not sent else None,
+        'propresenter_ip': ip,
+        'propresenter_port': port,
+    })
+
+
+@app.route('/api/propresenter/stage/stream_delay', methods=['POST'])
+def api_prop_stage_stream_delay():
+    """Send a delayed stream-start stage message based on the configured preset."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'ok': False, 'error': 'request body must be a JSON object'}), 400
+    if 'delay_minutes' not in body:
+        return jsonify({'ok': False, 'error': 'delay_minutes is required'}), 400
+    raw_delay = body.get('delay_minutes')
+    if type(raw_delay) is not int:
+        return jsonify({'ok': False, 'error': 'delay_minutes must be an integer'}), 400
+    delay_minutes = raw_delay
+    if delay_minutes < -24 * 60 or delay_minutes > 24 * 60:
+        return jsonify({'ok': False, 'error': 'delay_minutes must be between -1440 and 1440'}), 400
+
+    try:
+        presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
+    except Exception:
+        presets = []
+    if not presets:
+        return jsonify({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)'}), 400
+
+    try:
+        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+    except Exception:
+        cfg = {}
+    raw_preset = body.get('preset')
+    if raw_preset is None:
+        resolved = _resolve_stream_start_preset(cfg, presets)
+        if not resolved:
+            return jsonify({'ok': False, 'error': 'stream_start_preset not configured'}), 400
+        preset_number, preset = resolved
+    else:
+        if type(raw_preset) is not int:
+            return jsonify({'ok': False, 'error': 'preset must be an integer'}), 400
+        preset_number = raw_preset
+        if preset_number < 1 or preset_number > len(presets):
+            return jsonify({'ok': False, 'error': 'preset is out of range'}), 400
+        preset = presets[preset_number - 1]
+
+    message = _build_stream_delay_message(preset, delay_minutes)
+    if not message:
+        return jsonify({'ok': False, 'error': 'invalid stream_start_preset time'}), 400
+
+    try:
+        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
+        port = int(cfg.get('propresenter_port', 1025))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
+    if ProPresentor is None:
+        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
+
+    pp = ProPresentor(ip, port)
+    sent = bool(pp.set_stage_message(message))
+    detail = getattr(pp, 'last_stage_message_error', None)
+    try:
+        extra = f" ({detail})" if detail and not sent else ''
+        log_event(
+            'propresenter.stage.stream_delay',
+            f"Sent delayed stream stage message from preset #{preset_number}: {'OK' if sent else 'FAIL'}{extra}",
+            source='api',
+            status='success' if sent else 'failure',
+            target_type='timer_preset',
+            target_id=preset_number,
+            details={
+                'preset': preset_number,
+                'delay_minutes': delay_minutes,
+                'sent': sent,
+                'detail': detail,
+                'message': message,
+            },
+        )
+    except Exception:
+        pass
+
+    return jsonify({
+        'ok': True,
+        'preset_number': preset_number,
+        'preset_name': (preset or {}).get('name', ''),
+        'preset_time': (preset or {}).get('time', ''),
+        'delay_minutes': delay_minutes,
         'message': message,
         'sent': sent,
         'detail': detail if not sent else None,

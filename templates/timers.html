@@ -76,6 +76,26 @@
 						<div class="small text-muted">Preview</div>
 						<div id="timers-stage-preview" class="timer-stage-preview mt-1"></div>
 					</div>
+					<div class="timer-stage-delay mt-3 pt-3 border-top">
+						<div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
+							<div>
+								<div class="timer-stage-eyebrow">Preset Message</div>
+								<h3 class="h6 mb-0">Stream Delay</h3>
+							</div>
+							<button id="timers-stage-delay-send" class="btn btn-warning btn-sm">Delay Stream</button>
+						</div>
+						<label for="timers-stage-delay-minutes" class="form-label mb-1">Delay adjustment (minutes)</label>
+						<div class="input-group input-group-sm">
+							<button id="timers-stage-delay-decrease" class="btn btn-outline-secondary" type="button" aria-label="Decrease stream delay by one minute">−</button>
+							<input id="timers-stage-delay-minutes" class="form-control text-center" type="number" min="-1440" max="1440" step="1" value="0" inputmode="numeric" aria-describedby="timers-stage-delay-hint">
+							<button id="timers-stage-delay-increase" class="btn btn-outline-secondary" type="button" aria-label="Increase stream delay by one minute">+</button>
+						</div>
+						<div id="timers-stage-delay-hint" class="form-text text-muted">Adjust by one minute, then send the selected preset's delayed stream message.</div>
+						<div class="timer-stage-output mt-3">
+							<div class="small text-muted">Preview</div>
+							<div id="timers-stage-delay-preview" class="timer-stage-preview mt-1"></div>
+						</div>
+					</div>
 				</div>
 			</div>
 			<div class="col-lg-6">

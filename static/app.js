@@ -2673,15 +2673,67 @@ function _timersStageSetPreview(presetId, presets) {
   const id = Number(presetId) || 0;
   if (id < 1 || id > (presets || []).length) {
     el.textContent = 'STREAM 9:30AM';
+    _timersStageSetDelayPreview(0, presets);
     return;
   }
   const msg = _timersStageMessageForPreset(presets[id - 1]);
   el.textContent = msg || 'STREAM 9:30AM';
+  _timersStageSetDelayPreview(id, presets);
+}
+
+function _timersStageReadDelayMinutes() {
+  const input = document.getElementById('timers-stage-delay-minutes');
+  if (!input) return 0;
+  const value = Number(String(input.value || '').trim());
+  if (!Number.isInteger(value) || value < -1440 || value > 1440) return null;
+  return value;
+}
+
+function _timersStageSetDelayHint(msg, kind) {
+  const el = document.getElementById('timers-stage-delay-hint');
+  if (!el) return;
+  el.textContent = String(msg || '');
+  if (kind === 'error') el.className = 'form-text text-danger';
+  else if (kind === 'ok') el.className = 'form-text text-success';
+  else el.className = 'form-text text-muted';
+}
+
+function _timersStageDelayMessageForPreset(preset, delayMinutes) {
+  const raw = String((preset && preset.time) || '').trim();
+  const match = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return '';
+  const hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours > 23 || minutes > 59) return '';
+  const total = (((hours * 60) + minutes + delayMinutes) % 1440 + 1440) % 1440;
+  const delayedHours = Math.floor(total / 60);
+  const delayedMinutes = total % 60;
+  const suffix = delayedHours >= 12 ? 'PM' : 'AM';
+  const twelveHour = delayedHours % 12 || 12;
+  return `STREAM DELAY - ${twelveHour}:${String(delayedMinutes).padStart(2, '0')}${suffix}`;
+}
+
+function _timersStageSetDelayPreview(presetId, presets) {
+  const el = document.getElementById('timers-stage-delay-preview');
+  if (!el) return;
+  const id = Number(presetId) || 0;
+  const delayMinutes = _timersStageReadDelayMinutes();
+  if (delayMinutes === null) {
+    el.textContent = 'Enter a whole number from -1440 to 1440.';
+    return;
+  }
+  if (id < 1 || id > (presets || []).length) {
+    el.textContent = 'STREAM DELAY - 9:30AM';
+    return;
+  }
+  el.textContent = _timersStageDelayMessageForPreset(presets[id - 1], delayMinutes) || 'STREAM DELAY - 9:30AM';
 }
 
 function _timersStageSetButtonsEnabled(enabled) {
   const btn = document.getElementById('timers-stage-send');
   if (btn) btn.disabled = !enabled;
+  const delayBtn = document.getElementById('timers-stage-delay-send');
+  if (delayBtn) delayBtn.disabled = !enabled;
 }
 
 function _timersApplyStagePresetId(presetId) {
@@ -2722,6 +2774,22 @@ async function _timersSendStreamStartMessage() {
   }
   if (!data.sent) {
     throw new Error('Stage message failed to send');
+  }
+  return data;
+}
+
+async function _timersSendStreamDelayMessage(delayMinutes, presetId) {
+  const res = await fetch('/api/propresenter/stage/stream_delay', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({delay_minutes: delayMinutes, preset: presetId}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || 'Stream delay message failed');
+  }
+  if (!data.sent) {
+    throw new Error(data.detail || 'Stream delay message failed to send');
   }
   return data;
 }
@@ -3095,6 +3163,64 @@ function _initTimersPage() {
           await _timersSendStreamStartMessage();
         } catch (e) {
           _timersSetStatus(String(e.message || e), 'error');
+        }
+      })();
+    });
+  }
+
+  const delayInput = document.getElementById('timers-stage-delay-minutes');
+  const delayDecreaseBtn = document.getElementById('timers-stage-delay-decrease');
+  const delayIncreaseBtn = document.getElementById('timers-stage-delay-increase');
+  const delaySendBtn = document.getElementById('timers-stage-delay-send');
+  const updateDelayPreview = () => {
+    const presets = _timersReadPresetsForStage();
+    _timersStageSetDelayPreview(_timersReadStagePresetFromUI(), presets);
+  };
+  const adjustDelayMinutes = (change) => {
+    const current = _timersStageReadDelayMinutes();
+    const next = Math.max(-1440, Math.min(1440, (current === null ? 0 : current) + change));
+    if (delayInput) delayInput.value = String(next);
+    _timersStageSetDelayHint('Adjust by one minute, then send the selected preset\'s delayed stream message.', '');
+    updateDelayPreview();
+  };
+  if (delayInput) {
+    delayInput.addEventListener('input', () => {
+      const value = _timersStageReadDelayMinutes();
+      _timersStageSetDelayHint(
+        value === null ? 'Enter a whole number from -1440 to 1440.' : 'Adjust by one minute, then send the selected preset\'s delayed stream message.',
+        value === null ? 'error' : ''
+      );
+      updateDelayPreview();
+    });
+  }
+  if (delayDecreaseBtn) delayDecreaseBtn.addEventListener('click', () => adjustDelayMinutes(-1));
+  if (delayIncreaseBtn) delayIncreaseBtn.addEventListener('click', () => adjustDelayMinutes(1));
+  if (delaySendBtn) {
+    delaySendBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      (async () => {
+        _timersClearStatus();
+        try {
+          const presetId = _timersReadStagePresetFromUI();
+          const delayMinutes = _timersStageReadDelayMinutes();
+          if (!presetId) {
+            _timersSetStatus('Select a stream start preset first.', 'error');
+            return;
+          }
+          if (delayMinutes === null) {
+            _timersStageSetDelayHint('Enter a whole number from -1440 to 1440.', 'error');
+            return;
+          }
+          delaySendBtn.disabled = true;
+          const data = await _timersSendStreamDelayMessage(delayMinutes, presetId);
+          _timersStageSetDelayHint(`Sent ${data.message || 'stream delay message'}.`, 'ok');
+        } catch (e) {
+          _timersStageSetDelayHint(String(e.message || e), 'error');
+          _timersSetStatus(String(e.message || e), 'error');
+        } finally {
+          const selected = _timersReadStagePresetFromUI();
+          const presets = _timersReadPresetsForStage();
+          delaySendBtn.disabled = !(selected > 0 && selected <= presets.length);
         }
       })();
     });
