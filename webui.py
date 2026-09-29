@@ -11685,6 +11685,16 @@ _atem_audio_fades: dict[str, tuple[int, threading.Event]] = {}
 _ATEM_AUDIO_FADE_HZ = 30
 
 
+def _cancel_atem_audio_fade(source_id: str) -> bool:
+    """Stop an active fade before an immediate command takes ownership."""
+    with _atem_audio_fade_lock:
+        prior = _atem_audio_fades.pop(str(source_id), None)
+        if prior is None:
+            return False
+        prior[1].set()
+        return True
+
+
 def _run_atem_audio_fade(atem, source_id: str, start_db: float, target_db: float, seconds: float, generation: int) -> None:
     cancelled = threading.Event()
     with _atem_audio_fade_lock:
@@ -11749,6 +11759,7 @@ def api_atem_audio_action():
                 raise ValueError('db must be between -60.0 and +6.0 in 0.1 dB increments')
             target_db = round(target_db, 1)
             if fade_seconds <= 0:
+                _cancel_atem_audio_fade(source_id)
                 atem.set_volume(source_id, target_db)
             else:
                 start_db = float(source.get('volume'))
@@ -11784,6 +11795,7 @@ def api_atem_audio_volume():
     if not source_id:
         return jsonify({'ok': False, 'error': 'source_id is required'}), 400
     try:
+        _cancel_atem_audio_fade(source_id)
         atem.set_volume(source_id, db)
         log_event(
             'atem.audio.volume',
