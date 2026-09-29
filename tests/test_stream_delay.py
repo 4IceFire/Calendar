@@ -38,6 +38,9 @@ class StreamDelayTests(unittest.TestCase):
         markup = (root / "templates" / "timers.html").read_text(encoding="utf-8")
         app_js = (root / "static" / "app.js").read_text(encoding="utf-8")
 
+        self.assertIn('<select id="timers-stage-preset"', markup)
+        self.assertNotIn('timers-stage-preset-list', markup)
+        self.assertNotIn('timers-stage-preset-id', markup)
         self.assertIn('id="timers-stage-delay-minutes"', markup)
         self.assertIn('id="timers-stage-delay-decrease"', markup)
         self.assertIn('id="timers-stage-delay-increase"', markup)

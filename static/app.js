@@ -2611,41 +2611,29 @@ function _timersStagePresetLabel(preset, id) {
 }
 
 function _timersStageRenderOptions(presets) {
-  const list = document.getElementById('timers-stage-preset-list');
-  if (!list) return;
-  list.innerHTML = '';
+  const select = document.getElementById('timers-stage-preset');
+  if (!select) return;
+  const selectedId = _timersReadStagePresetFromUI();
+  select.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select a timer preset';
+  select.appendChild(placeholder);
   (presets || []).forEach((p, idx) => {
     const opt = document.createElement('option');
-    opt.value = _timersStagePresetLabel(p, idx + 1);
-    list.appendChild(opt);
+    opt.value = String(idx + 1);
+    opt.textContent = _timersStagePresetLabel(p, idx + 1);
+    select.appendChild(opt);
   });
-}
-
-function _timersStageResolvePresetId(raw, presets) {
-  const s = String(raw || '').trim();
-  if (!s) return 0;
-  const m = s.match(/^(\d+)/);
-  if (m) {
-    const id = parseInt(m[1], 10);
-    if (Number.isFinite(id) && id >= 1 && id <= (presets || []).length) return id;
+  if (selectedId > 0 && selectedId <= (presets || []).length) {
+    select.value = String(selectedId);
   }
-  const lower = s.toLowerCase();
-  const matches = [];
-  (presets || []).forEach((p, idx) => {
-    const name = String((p && p.name) || '').trim().toLowerCase();
-    const time = String((p && p.time) || '').trim().toLowerCase();
-    if ((name && name === lower) || (!name && time === lower) || time === lower) {
-      matches.push(idx + 1);
-    }
-  });
-  if (matches.length === 1) return matches[0];
-  return 0;
 }
 
 function _timersReadStagePresetFromUI() {
-  const hidden = document.getElementById('timers-stage-preset-id');
-  if (!hidden) return 0;
-  const n = parseInt(String(hidden.value || ''), 10);
+  const select = document.getElementById('timers-stage-preset');
+  if (!select) return 0;
+  const n = parseInt(String(select.value || ''), 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
@@ -2737,18 +2725,12 @@ function _timersStageSetButtonsEnabled(enabled) {
 }
 
 function _timersApplyStagePresetId(presetId) {
-  const input = document.getElementById('timers-stage-preset');
-  const hidden = document.getElementById('timers-stage-preset-id');
+  const select = document.getElementById('timers-stage-preset');
   const presets = _timersReadPresetsForStage();
   const id = Number(presetId);
   const value = Number.isFinite(id) && id > 0 ? Math.floor(id) : 0;
-  if (hidden) hidden.value = value > 0 ? String(value) : '';
-  if (input) {
-    if (value > 0 && value <= presets.length) {
-      input.value = _timersStagePresetLabel(presets[value - 1], value);
-    } else if (!value) {
-      input.value = '';
-    }
+  if (select) {
+    select.value = value > 0 && value <= presets.length ? String(value) : '';
   }
   _timersStageSetHint(value ? '' : 'No stream-start preset selected.', value ? '' : 'warn');
   _timersStageSetPreview(value, presets);
@@ -3104,48 +3086,11 @@ function _initTimersPage() {
   // Stage message preset selection
   const stageInput = document.getElementById('timers-stage-preset');
   if (stageInput) {
-    const previewUpdate = () => {
-      const presets = _timersReadPresetsForStage();
-      const raw = String(stageInput.value || '').trim();
-      if (!raw) {
-        _timersStageSetHint('No stream-start preset selected.', 'warn');
-        _timersStageSetPreview(0, presets);
-        _timersStageSetButtonsEnabled(false);
-        return;
-      }
-      const id = _timersStageResolvePresetId(raw, presets);
-      if (id) {
-        _timersStageSetHint('', '');
-        _timersStageSetPreview(id, presets);
-        _timersStageSetButtonsEnabled(true);
-      } else {
-        _timersStageSetHint('No matching preset found.', 'error');
-        _timersStageSetPreview(0, presets);
-        _timersStageSetButtonsEnabled(false);
-      }
-    };
-
-    const commitSelection = () => {
-      const presets = _timersReadPresetsForStage();
-      const raw = String(stageInput.value || '').trim();
-      if (!raw) {
-        _timersApplyStagePresetId(0);
-        _timersSaveStagePresetId(0);
-        return;
-      }
-      const id = _timersStageResolvePresetId(raw, presets);
-      if (id) {
-        _timersApplyStagePresetId(id);
-        _timersSaveStagePresetId(id);
-      } else {
-        _timersStageSetHint('No matching preset found.', 'error');
-        _timersApplyStagePresetId(_timersReadStagePresetFromUI());
-      }
-    };
-
-    stageInput.addEventListener('input', previewUpdate);
-    stageInput.addEventListener('change', commitSelection);
-    stageInput.addEventListener('blur', commitSelection);
+    stageInput.addEventListener('change', () => {
+      const presetId = _timersReadStagePresetFromUI();
+      _timersApplyStagePresetId(presetId);
+      _timersSaveStagePresetId(presetId);
+    });
   }
 
   const stageSendBtn = document.getElementById('timers-stage-send');
