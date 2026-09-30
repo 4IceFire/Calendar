@@ -22,7 +22,8 @@ class WebAssetDeliveryTests(unittest.TestCase):
             return webui.static_asset(filename)
 
     def test_base_page_uses_bundled_content_hashed_assets(self):
-        response = webui.app.test_client().get('/login')
+        with patch.object(webui, '_auth_enabled', return_value=False):
+            response = webui.app.test_client().get('/')
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
 
@@ -35,6 +36,19 @@ class WebAssetDeliveryTests(unittest.TestCase):
         ):
             match = re.search(rf'/static/{re.escape(asset)}\?v=([0-9a-f]{{64}})', html)
             self.assertIsNotNone(match, asset)
+
+    def test_ios_home_screen_metadata_uses_a_named_png_icon(self):
+        with patch.object(webui, '_auth_enabled', return_value=False):
+            response = webui.app.test_client().get('/')
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        self.assertIn('<meta name="apple-mobile-web-app-title" content="TDeck">', html)
+        self.assertIn('<meta name="application-name" content="TDeck">', html)
+        self.assertRegex(
+            html,
+            r'<link rel="apple-touch-icon" sizes="180x180" href="/static/tdeck-icon-180\.png\?v=[0-9a-f]{64}">',
+        )
 
     def test_asset_identity_changes_with_bytes_even_when_size_and_mtime_do_not(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,8 +154,9 @@ class WebAssetDeliveryTests(unittest.TestCase):
 
     def test_html_is_compressed_for_supporting_clients(self):
         client = webui.app.test_client()
-        plain = client.get('/login')
-        compressed = client.get('/login', headers={'Accept-Encoding': 'gzip'})
+        with patch.object(webui, '_auth_enabled', return_value=False):
+            plain = client.get('/')
+            compressed = client.get('/', headers={'Accept-Encoding': 'gzip'})
 
         self.assertEqual(compressed.headers.get('Content-Encoding'), 'gzip')
         self.assertEqual(gzip.decompress(compressed.data), plain.data)
