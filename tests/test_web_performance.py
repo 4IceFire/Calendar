@@ -5,8 +5,10 @@ import hashlib
 import json
 import os
 import re
+import struct
 import tempfile
 import threading
+import zlib
 import time
 import unittest
 from pathlib import Path
@@ -17,6 +19,58 @@ import webui
 
 
 class WebAssetDeliveryTests(unittest.TestCase):
+    @staticmethod
+    def _decode_rgba_png(path: Path) -> tuple[int, int, bytes]:
+        icon = path.read_bytes()
+        if not icon.startswith(b'\x89PNG\r\n\x1a\n') or icon[12:16] != b'IHDR':
+            raise AssertionError('expected a PNG with an IHDR chunk')
+        width, height, bit_depth, color_type, *_ = struct.unpack('>IIBBBBB', icon[16:29])
+        if (bit_depth, color_type) != (8, 6):
+            raise AssertionError('expected an 8-bit RGBA PNG')
+
+        pos = 8
+        compressed = []
+        while pos < len(icon):
+            length = struct.unpack('>I', icon[pos:pos + 4])[0]
+            kind = icon[pos + 4:pos + 8]
+            payload = icon[pos + 8:pos + 8 + length]
+            pos += 12 + length
+            if kind == b'IDAT':
+                compressed.append(payload)
+        encoded = zlib.decompress(b''.join(compressed))
+        stride = width * 4
+        decoded = bytearray()
+        previous = bytearray(stride)
+        offset = 0
+
+        def paeth(left: int, up: int, up_left: int) -> int:
+            estimate = left + up - up_left
+            distances = (abs(estimate - left), abs(estimate - up), abs(estimate - up_left))
+            return (left, up, up_left)[distances.index(min(distances))]
+
+        for _ in range(height):
+            filter_type = encoded[offset]
+            offset += 1
+            row = bytearray(encoded[offset:offset + stride])
+            offset += stride
+            for index, value in enumerate(row):
+                left = row[index - 4] if index >= 4 else 0
+                up = previous[index]
+                up_left = previous[index - 4] if index >= 4 else 0
+                if filter_type == 1:
+                    row[index] = (value + left) & 0xFF
+                elif filter_type == 2:
+                    row[index] = (value + up) & 0xFF
+                elif filter_type == 3:
+                    row[index] = (value + ((left + up) // 2)) & 0xFF
+                elif filter_type == 4:
+                    row[index] = (value + paeth(left, up, up_left)) & 0xFF
+                elif filter_type != 0:
+                    raise AssertionError(f'unsupported PNG filter type {filter_type}')
+            decoded.extend(row)
+            previous = row
+        return width, height, bytes(decoded)
+
     def _asset_url(self, filename: str) -> str:
         with webui.app.test_request_context('/'):
             return webui.static_asset(filename)
@@ -48,6 +102,17 @@ class WebAssetDeliveryTests(unittest.TestCase):
         self.assertRegex(
             html,
             r'<link rel="apple-touch-icon" sizes="180x180" href="/static/tdeck-icon-180\.png\?v=[0-9a-f]{64}">',
+        )
+
+    def test_ios_home_screen_icon_has_no_transparent_padding(self):
+        width, height, pixels = self._decode_rgba_png(
+            Path(webui.app.static_folder) / 'tdeck-icon-180.png'
+        )
+        self.assertEqual((width, height), (180, 180))
+        alpha_values = pixels[3::4]
+        self.assertTrue(
+            all(alpha == 255 for alpha in alpha_values),
+            'Apple touch icon must fill its canvas without transparent padding',
         )
 
     def test_asset_identity_changes_with_bytes_even_when_size_and_mtime_do_not(self):
