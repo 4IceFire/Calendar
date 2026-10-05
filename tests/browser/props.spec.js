@@ -34,22 +34,22 @@ test('Add Preset is a Timers-style button opening a blank cancellable picker wit
   await page.goto('/props');
   const add = page.getByRole('button',{name:'Add Preset',exact:true});
   await expect(add).toHaveClass('btn btn-primary btn-sm timer-add-preset-btn');
-  await expect(page.getByLabel('Search presets',{exact:true})).toBeHidden();
+  await expect(page.locator('input[type=search]')).toHaveCount(0);
   await expect(page.getByLabel('Preset',{exact:true})).toBeHidden();
   await add.click();
   const picker = page.getByRole('dialog',{name:'Add Preset',exact:true});
   await expect(picker).toBeVisible();
   // A modal must be opaque; the shared soft panel background is translucent.
   await expect(picker).toHaveCSS('background-color', 'rgb(255, 255, 255)');
-  await expect(page.getByLabel('Search presets',{exact:true})).toBeFocused();
+  await expect(page.getByLabel('Preset',{exact:true})).toBeFocused();
   await expect(page.getByLabel('Preset',{exact:true})).toHaveValue('');
-  await page.getByLabel('Search presets',{exact:true}).fill('Service');
+  await expect(page.locator('#props-selector optgroup')).toHaveAttribute('label','Service');
   await expect(page.getByLabel('Preset',{exact:true})).toHaveValue('');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await expect(picker).toBeHidden();
   await expect(add).toBeFocused();
   await add.click();
-  await expect(page.getByLabel('Search presets',{exact:true})).toHaveValue('');
+  await expect(page.locator('input[type=search]')).toHaveCount(0);
   await expect(page.getByLabel('Preset',{exact:true})).toHaveValue('');
   await page.keyboard.press('Escape');
   await expect(picker).toBeHidden();
@@ -144,11 +144,9 @@ test('picker traps keyboard focus and unavailable presets cannot trigger', async
   await page.keyboard.press('Shift+Tab');
   await expect(page.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(page.getByLabel('Search presets',{exact:true})).toBeFocused();
-  await page.getByLabel('Search presets',{exact:true}).fill('No results');
-  await expect(page.locator('#props-selector optgroup')).toHaveCount(0);
+  await expect(page.getByLabel('Preset',{exact:true})).toBeFocused();
+  await expect(page.locator('#props-selector optgroup')).toHaveCount(1);
   await expect(page.getByLabel('Preset',{exact:true})).toHaveValue('');
-  await page.getByLabel('Search presets',{exact:true}).fill('Welcome');
   await page.getByLabel('Preset',{exact:true}).selectOption(id);
   await expect(page.getByRole('dialog',{name:'Add Preset',exact:true})).toBeHidden();
   await expect(page.getByRole('button',{name:'Trigger preset 1',exact:true})).toBeDisabled();
@@ -367,9 +365,9 @@ test('configure mappings then autosave repeated presets, reorder, trigger and re
   await page.goto('/props');
   await expect(page.getByRole('link', {name: 'Configure Props', exact: true}).first()).toBeVisible();
   await page.getByRole('link', {name: 'Configure Props', exact: true}).first().click();
+  await page.getByRole('button',{name:'Add Prop',exact:true}).click();
   await page.getByLabel('Friendly name', {exact: true}).fill('Welcome');
   await expect(page.getByLabel('Friendly name', {exact: true})).toHaveValue('Welcome');
-  await page.getByLabel('Search ProPresenter props', {exact: true}).fill('Original');
   await page.getByLabel('Existing ProPresenter prop', {exact: true}).selectOption('4cddf2c5-7355-4347-980c-b13f12cbfa85');
   await expect(page.getByLabel('Friendly name', {exact: true})).toHaveValue('Welcome');
   await page.getByRole('button', {name: 'Add mapping', exact: true}).click();
@@ -402,7 +400,7 @@ test('configure mappings then autosave repeated presets, reorder, trigger and re
   expect(errors).toEqual([]);
 });
 
-test('search is grouped and never blanks saved slots; folders and friendly-name updates persist', async ({page}) => {
+test('native dropdown is grouped and never blanks saved slots; folders and friendly-name updates persist', async ({page}) => {
   const id = '4cddf2c5-7355-4347-980c-b13f12cbfa85';
   const state = await (await page.request.get('/api/props')).json();
   const headers = {'Origin': new URL(test.info().project.use.baseURL || process.env.TDECK_BASE_URL).origin, 'X-CSRF-Token':'props-csrf'};
@@ -413,7 +411,7 @@ test('search is grouped and never blanks saved slots; folders and friendly-name 
   await addPreset(page, id);
   await page.getByRole('button', {name:'Add Preset',exact:true}).click();
   await expect(page.locator('[data-props-slot]')).toHaveCount(1);
-  await page.getByLabel('Search presets', {exact:true}).fill('No results');
+  await expect(page.locator('input[type=search]')).toHaveCount(0);
   await expect(page.getByLabel('Preset', {exact:true})).toHaveValue('');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   // Changing a name on another browser must not turn the saved slot selector blank.
@@ -425,7 +423,7 @@ test('search is grouped and never blanks saved slots; folders and friendly-name 
   await expect(page.locator('[data-props-slot]').first()).toContainText('Welcome again');
   await expect(page.getByLabel('Change preset 1', {exact:true})).toHaveValue(id);
   await page.getByRole('button',{name:'Add Preset',exact:true}).click();
-  await page.getByLabel('Search presets', {exact:true}).fill('Service');
+  await expect(page.locator('#props-selector optgroup')).toHaveAttribute('label','Service');
   await expect(page.getByLabel('Preset', {exact:true})).toHaveValue('');
   await expect(page.locator('#props-selector optgroup')).toHaveAttribute('label','Service');
   await page.screenshot({path:test.info().outputPath('props-grouped.png'),fullPage:true});
@@ -433,6 +431,7 @@ test('search is grouped and never blanks saved slots; folders and friendly-name 
 
 test('shared folders use keyboard moves and collapse; macro mode saves without triggering', async ({page}) => {
   await page.goto('/props/configure');
+  await page.getByRole('button',{name:'Add Prop',exact:true}).click();
   await page.getByLabel('Friendly name', {exact:true}).fill('Welcome');
   await page.getByLabel('Existing ProPresenter prop', {exact:true}).selectOption('4cddf2c5-7355-4347-980c-b13f12cbfa85');
   await page.getByRole('button',{name:'Add mapping',exact:true}).click();
@@ -478,4 +477,184 @@ test('operator may edit order but cannot manage mappings, denied user has no Pro
   expect(denied.status()).toBe(403);
   await page.request.get('/__props_fixture__/login?role=denied');
   expect((await page.request.get('/props')).status()).toBe(403);
+});
+
+
+test('Configure Props uses compact Timers panel and blank cancellable Add Prop dialog with native dropdowns', async ({page}) => {
+  const errors = collectPageErrors(page);
+  await page.goto('/props/configure');
+  await expect(page.locator('#props-page')).toHaveAttribute('aria-busy','false');
+  const before = await (await page.request.get('/api/props')).json();
+  const writes = [];
+  page.on('request', req => { if (req.url().includes('/api/props') && req.method() !== 'GET') writes.push(req.url()); });
+  await expect(page.locator('input[type=search],datalist')).toHaveCount(0);
+  await expect(page.locator('.props-library-panel')).toHaveClass('tdeck-soft rounded-3 p-3 props-library-panel');
+  const add = page.getByRole('button',{name:'Add Prop',exact:true});
+  await expect(add).toHaveClass('btn btn-primary btn-sm timer-add-preset-btn');
+  await expect(page.getByLabel('Friendly name',{exact:true})).toBeHidden();
+  const picker = page.getByRole('dialog',{name:'Add Prop',exact:true});
+  for (const cancel of ['Cancel','Escape']) {
+    await add.click();
+    await expect(picker).toBeVisible();
+    await expect(picker).toHaveCSS('background-color','rgb(255, 255, 255)');
+    await expect(page.getByLabel('Friendly name',{exact:true})).toBeFocused();
+    await expect(page.getByLabel('Friendly name',{exact:true})).toHaveValue('');
+    await expect(page.getByLabel('Existing ProPresenter prop',{exact:true})).toHaveValue('');
+    await expect(page.getByLabel('Optional macro',{exact:true})).toHaveValue('');
+    if (cancel === 'Cancel') await page.screenshot({path:test.info().outputPath('props-add-blank.png'),fullPage:true});
+    await page.getByLabel('Friendly name',{exact:true}).fill('Unsubmitted');
+    await page.getByLabel('Existing ProPresenter prop',{exact:true}).selectOption('4cddf2c5-7355-4347-980c-b13f12cbfa85');
+    if (cancel === 'Cancel') await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    else await page.keyboard.press('Escape');
+    await expect(picker).toBeHidden(); await expect(add).toBeFocused();
+  }
+  expect(writes).toEqual([]);
+  expect((await (await page.request.get('/api/props')).json()).revision).toBe(before.revision);
+  expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+
+test('compact library rows label editable mappings and outline blocked used Delete', async ({page}) => {
+  const id = await seedLibrary(page);
+  await page.goto('/props'); await addPreset(page,id);
+  await page.goto('/props/configure');
+  const row = page.locator('.props-row').first();
+  await expect(row.getByText('Friendly name',{exact:true})).toBeVisible();
+  await expect(row.getByText('ProPresenter prop',{exact:true})).toBeVisible();
+  await expect(row.getByText('Optional macro',{exact:true})).toBeVisible();
+  const remove = page.getByRole('button',{name:'Delete mapping Welcome',exact:true});
+  await expect(remove).toHaveText('Delete');
+  await expect(remove).toHaveClass('btn btn-sm btn-outline-danger');
+  await expect(remove).toBeDisabled();
+  await expect(row).toContainText('Used in running order');
+  await page.getByLabel('Friendly name for Welcome',{exact:true}).fill('Welcome edited');
+  await page.getByLabel('Friendly name for Welcome',{exact:true}).press('Tab');
+  await expect(page.getByLabel('Friendly name for Welcome edited',{exact:true})).toHaveValue('Welcome edited');
+  await page.getByLabel('ProPresenter prop for Welcome edited',{exact:true}).selectOption('edfad26c-6b88-4932-a996-497136f2cedf');
+  await expect.poll(async () => (await (await page.request.get('/api/props')).json()).library[0].prop_uuid).toBe('edfad26c-6b88-4932-a996-497136f2cedf');
+  await page.reload();
+  await expect(page.getByLabel('ProPresenter prop for Welcome edited',{exact:true})).toHaveValue('edfad26c-6b88-4932-a996-497136f2cedf');
+  expect((await (await page.request.get('/api/props')).json()).order).toEqual([id]);
+  expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({path:test.info().outputPath('props-compact-library.png'),fullPage:true});
+});
+
+
+for (const outcome of ['success','failure','failure-fallback']) {
+  test('Add Prop pending save isolates focus and recovers without replay: ' + outcome, async ({page}) => {
+    const errors = collectPageErrors(page);
+    if (outcome === 'failure-fallback') await page.addInitScript(() => { delete HTMLElement.prototype.inert; });
+    await page.goto('/props/configure');
+    await expect(page.locator('#props-page')).toHaveAttribute('aria-busy','false');
+    let started, release, writes = 0;
+    const blocked = new Promise(resolve => {started=resolve;});
+    const pending = new Promise(resolve => {release=resolve;});
+    await page.route('**/api/props/library', async route => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      writes++; started(); await pending;
+      if (outcome === 'success') await route.continue();
+      else await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'Save unavailable'})});
+    });
+    const add = page.getByRole('button',{name:'Add Prop',exact:true});
+    const picker = page.getByRole('dialog',{name:'Add Prop',exact:true});
+    const outside = page.locator('a[href="/props"]').first();
+    await add.click();
+    await page.getByLabel('Friendly name',{exact:true}).fill('Welcome');
+    await page.getByLabel('Existing ProPresenter prop',{exact:true}).selectOption('4cddf2c5-7355-4347-980c-b13f12cbfa85');
+    await page.getByRole('button',{name:'Add mapping',exact:true}).click();
+    await blocked;
+    try {
+      await expect(page.locator('#props-page')).toHaveAttribute('aria-busy','true');
+      await outside.evaluate(el => el.focus());
+      expect(await picker.evaluate(el => el.contains(document.activeElement))).toBe(true);
+      expect(await outside.evaluate(el => !el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})))).toBe(true);
+      for (const key of ['Tab','Shift+Tab','Escape']) {
+        await page.keyboard.press(key); await expect(picker).toBeVisible();
+        expect(await picker.evaluate(el => el.contains(document.activeElement))).toBe(true);
+      }
+      await expect(page.getByRole('button',{name:'Cancel',exact:true})).toBeDisabled();
+      expect((await (await page.request.get('/api/props')).json()).library).toEqual([]);
+    } finally {release();}
+    if (outcome === 'success') {
+      await expect(picker).toBeHidden(); await expect(add).toBeFocused();
+      expect((await (await page.request.get('/api/props')).json()).library[0].name).toBe('Welcome');
+    } else {
+      await expect(picker.getByRole('alert')).toContainText('Nothing was retried');
+      await expect(page.getByLabel('Existing ProPresenter prop',{exact:true})).toHaveValue('');
+      await expect(page.getByLabel('Optional macro',{exact:true})).toHaveValue('');
+      await expect(page.getByLabel('Existing ProPresenter prop',{exact:true})).toBeFocused();
+      await expect(page.getByRole('button',{name:'Add mapping',exact:true})).toBeEnabled();
+      await page.keyboard.press('Escape'); await expect(picker).toBeHidden(); await expect(add).toBeFocused();
+      expect((await (await page.request.get('/api/props')).json()).library).toEqual([]);
+    }
+    expect(await outside.evaluate(el => !!el.closest('[aria-hidden="true"],[inert]'))).toBe(false);
+    expect(writes).toBe(1);
+    expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
+    expect(errors).toEqual([]);
+  });
+}
+
+test('duplicate prop submission is rejected without rewriting existing mapping or retrying', async ({page}) => {
+  const id = await seedLibrary(page);
+  await page.goto('/props/configure');
+  await page.getByRole('button',{name:'Add Prop',exact:true}).click();
+  await page.getByLabel('Friendly name',{exact:true}).fill('Duplicate');
+  await page.getByLabel('Existing ProPresenter prop',{exact:true}).selectOption(id);
+  let writes = 0;
+  page.on('request', req => {if(req.url().endsWith('/api/props/library') && req.method()==='PUT') writes++;});
+  await page.getByRole('button',{name:'Add mapping',exact:true}).click();
+  const picker = page.getByRole('dialog',{name:'Add Prop',exact:true});
+  await expect(picker.getByRole('alert')).toContainText('Nothing was retried');
+  await expect(page.getByLabel('Existing ProPresenter prop',{exact:true})).toHaveValue('');
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  const current = (await (await page.request.get('/api/props')).json()).library;
+  expect(current).toHaveLength(1); expect(current[0].id).toBe(id); expect(current[0].name).toBe('Welcome');
+  expect(writes).toBe(1);
+  expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
+});
+
+
+test('explicit Add Prop saves macro reference and supports native macro editing and unused deletion', async ({page}) => {
+  const errors = collectPageErrors(page);
+  await page.goto('/props/configure');
+  await page.getByRole('button',{name:'Add Prop',exact:true}).click();
+  await page.getByLabel('Friendly name',{exact:true}).fill('Welcome');
+  await page.getByLabel('Existing ProPresenter prop',{exact:true}).selectOption('4cddf2c5-7355-4347-980c-b13f12cbfa85');
+  await page.getByLabel('Optional macro',{exact:true}).selectOption('9a87ac44-52d3-483f-a26c-f0b97b8e6281');
+  expect((await (await page.request.get('/api/props')).json()).library).toEqual([]);
+  await page.getByRole('button',{name:'Add mapping',exact:true}).click();
+  await expect(page.getByRole('dialog',{name:'Add Prop',exact:true})).toBeHidden();
+  await expect(page.getByLabel('Macro for Welcome',{exact:true})).toHaveValue('9a87ac44-52d3-483f-a26c-f0b97b8e6281');
+  const saved = (await (await page.request.get('/api/props')).json()).library[0];
+  expect(saved.macro_uuid).toBe('9a87ac44-52d3-483f-a26c-f0b97b8e6281');
+  await page.getByLabel('Macro for Welcome',{exact:true}).selectOption('20bc2bfa-df38-448e-83bb-f9eaa1b0a66f');
+  await expect.poll(async () => (await (await page.request.get('/api/props')).json()).library[0].macro_uuid).toBe('20bc2bfa-df38-448e-83bb-f9eaa1b0a66f');
+  await page.getByLabel('Macro for Welcome',{exact:true}).selectOption('');
+  await expect.poll(async () => (await (await page.request.get('/api/props')).json()).library[0].macro_uuid).toBe(null);
+  await page.getByRole('button',{name:'Delete mapping Welcome',exact:true}).click();
+  await expect(page.locator('.props-row')).toHaveCount(0);
+  expect((await (await page.request.get('/api/props')).json()).library).toEqual([]);
+  expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+test('failed mapping edit restores server values without mutation replay', async ({page}) => {
+  await seedLibrary(page); await page.goto('/props/configure');
+  await expect(page.locator('#props-page')).toHaveAttribute('aria-busy','false');
+  let writes=0;
+  await page.route('**/api/props/library',async route => {
+    if(route.request().method() === 'PUT') {
+      writes++; await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'Edit unavailable'})});
+    } else await route.continue();
+  });
+  await page.getByLabel('Friendly name for Welcome',{exact:true}).fill('Not saved');
+  await expect(page.getByLabel('Friendly name for Welcome',{exact:true})).toHaveValue('Not saved');
+  await page.locator('#page-title').click();
+  await expect(page.locator('#props-error')).toContainText('Edit unavailable');
+  await expect(page.getByLabel('Friendly name for Welcome',{exact:true})).toHaveValue('Welcome');
+  expect((await (await page.request.get('/api/props')).json()).library[0].name).toBe('Welcome');
+  expect(writes).toBe(1);
+  expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
 });

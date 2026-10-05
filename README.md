@@ -79,10 +79,11 @@ without public internet access.
 ## ProPresenter Props
 
 The **Props** navigation page (`/props`) is a shared, autosaving running order.
-Click **Add Preset** to open a blank searchable, folder-grouped library picker.
+Click **Add Preset** to open a blank native, folder-grouped library dropdown.
 Nothing is preselected: selecting a mapping explicitly adds it and saves the
 chosen library reference automatically. Cancel or Escape closes the picker
-without changing the order. Search never adds or triggers anything. The Add
+without changing the order. Both Props pages use native dropdown selection,
+including browser type-to-select; there are no separate search fields. The Add
 button is disabled while the library is empty; Configure Props (when permitted)
 provides the setup link. A failed/conflicting save leaves a readable picker and
 current order; nothing is automatically retried.
@@ -100,9 +101,14 @@ away and back. Reads/order edits stay responsive; the command uses its captured
 endpoint and exact target, and its completion remains visible without replay.
 
 The small **Configure Props** button opens `/props/configure`. It manages TDeck
-mappings and shared collapsible folders, not ProPresenter resources. Give each
-mapping a friendly name and select an existing ProPresenter prop; optionally map
-an existing macro. A prop UUID can have only one library entry. Delete protection
+mappings and shared collapsible folders, not ProPresenter resources. Its compact
+Timers-style library panel has an **Add Prop** button: open a blank dialog, give
+it a friendly name, choose an existing prop and optionally a macro, then submit
+**Add mapping** explicitly. Open, selection, Cancel and Escape do not save a new
+mapping. Existing row edits autosave on change. Both dialogs isolate background
+navigation and trap focus while open, including pending saves; failures keep
+readable errors and reset target selection for deliberate review without retries.
+A prop UUID can have only one library entry. Delete protection
 requires removing every referencing slot first. Folder controls reuse the shared
 catalog drag/touch/keyboard pattern; deleting a folder moves its mappings to root.
 

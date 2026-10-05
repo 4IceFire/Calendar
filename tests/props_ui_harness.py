@@ -26,7 +26,10 @@ def main():
             fixture.pp.get_json.side_effect = lambda kind: [
                 {'id': {'uuid': '4cddf2c5-7355-4347-980c-b13f12cbfa85', 'name': 'Original'}},
                 {'id': {'uuid': 'edfad26c-6b88-4932-a996-497136f2cedf', 'name': 'Closing'}}
-            ] if kind == 'props' else []
+            ] if kind == 'props' else [
+                {'id': {'uuid': '9a87ac44-52d3-483f-a26c-f0b97b8e6281', 'name': 'Welcome macro'}},
+                {'id': {'uuid': '20bc2bfa-df38-448e-83bb-f9eaa1b0a66f', 'name': 'Closing macro'}}
+            ]
             web = fixture.webui
             fixture.cfg['auth_idle_timeout_enabled'] = False
             for p in (patch.object(web.utils, 'save_config', side_effect=lambda value: fixture.cfg.update(value)),

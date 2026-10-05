@@ -70,14 +70,13 @@
       if (chosen) select.value = match ? (match.uuid || match.id) : chosen;
     }
     function presetChoices(select, chosen) {
-      const search = select.id === 'props-selector' ? document.getElementById('props-search').value.toLowerCase() : '';
       select.textContent = '';
       if (select.id === 'props-selector') select.appendChild(new Option('Choose a preset', ''));
       [null].concat(state.organization.folders).forEach(folder => {
         const group = document.createElement('optgroup'); group.label = folder ? folder.name : 'No folder';
         state.organization.items.filter(item => (item.folderId || null) === (folder ? folder.id : null)).forEach(item => {
           const entry = state.library.find(row => row.id === item.id);
-          if (entry && (entry.name + ' ' + group.label).toLowerCase().includes(search)) group.appendChild(new Option(entry.name, entry.id));
+          if (entry) group.appendChild(new Option(entry.name, entry.id));
         });
         if (group.children.length) select.appendChild(group);
       });
@@ -127,13 +126,13 @@
     }
     function saveOrder(order) { return mutate('/order', {revision:state.revision, order}); }
     function move(index, step) { const order = state.order.slice(); const other = order[index + step]; order[index + step] = order[index]; order[index] = other; saveOrder(order); }
-    function filterCatalog(kind) {
-      const select = document.getElementById('props-' + kind), search = document.getElementById('props-' + kind + '-search').value.toLowerCase();
-      choices(select, state.catalog[kind === 'prop' ? 'props' : 'macros'].filter(item => item.name.toLowerCase().includes(search)), select.value, kind === 'macro' ? 'No macro' : 'Choose a prop');
+    function mappingChoices() {
+      choices(document.getElementById('props-prop'), state.catalog.props, document.getElementById('props-prop').value, 'Choose a prop');
+      choices(document.getElementById('props-macro'), state.catalog.macros, document.getElementById('props-macro').value, 'No macro');
     }
     function renderConfigure() {
       document.getElementById('props-macros').checked = state.use_macros;
-      filterCatalog('prop'); filterCatalog('macro');
+      mappingChoices();
       const tree = document.getElementById('props-library');
       if (tree._catalogMoving && tree._catalogMoving()) {
         // The widget rolls back optimistic changes before invoking this hook.
@@ -142,22 +141,28 @@
       }
       const rows = state.library.map(item => {
         const row = document.createElement('div'); row.className = 'props-row';
-        const name = document.createElement('input'); name.className = 'form-control'; name.maxLength = 120; name.value = item.name;
+        const name = document.createElement('input'); name.className = 'form-control form-control-sm'; name.maxLength = 120; name.value = item.name;
         name.setAttribute('aria-label', 'Friendly name for ' + item.name);
         function update(key, value) { const library = plainLibrary(); library.find(entry => entry.id === item.id)[key] = value; mutate('/library', {revision:state.revision, library, organization:state.organization}); }
-        name.addEventListener('change', () => update('name', name.value)); row.appendChild(name);
+        function field(label, control) {
+          const wrap = document.createElement('label'); wrap.className = 'props-field';
+          const caption = document.createElement('span'); caption.className = 'small text-muted'; caption.textContent = label;
+          wrap.appendChild(caption); wrap.appendChild(control); row.appendChild(wrap);
+        }
+        name.addEventListener('change', () => update('name', name.value)); field('Friendly name', name);
         const title = document.createElement('span'); title.textContent = item.name; title.className = 'visually-hidden'; row.appendChild(title);
         ['prop', 'macro'].forEach(kind => {
-          const select = document.createElement('select'); select.className = 'form-select'; select.setAttribute('aria-label', (kind === 'prop' ? 'ProPresenter prop for ' : 'Macro for ') + item.name);
+          const select = document.createElement('select'); select.className = 'form-select form-select-sm'; select.setAttribute('aria-label', (kind === 'prop' ? 'ProPresenter prop for ' : 'Macro for ') + item.name);
           choices(select, state.catalog[kind === 'prop' ? 'props' : 'macros'], item[kind + '_uuid'], kind === 'macro' ? 'No macro' : undefined);
-          select.addEventListener('change', () => update(kind + '_uuid', select.value || null)); row.appendChild(select);
+          select.addEventListener('change', () => update(kind + '_uuid', select.value || null)); field(kind === 'prop' ? 'ProPresenter prop' : 'Optional macro', select);
         });
-        row.appendChild(button('Delete mapping', () => {
+        const remove = button('Delete', () => {
           const library = plainLibrary().filter(entry => entry.id !== item.id);
           const organization = clone(state.organization); organization.items = organization.items.filter(entry => entry.id !== item.id);
           mutate('/library', {revision:state.revision, library, organization});
-        }, state.order.includes(item.id)));
-        if (state.order.includes(item.id)) { const note = document.createElement('small'); note.textContent = 'Used in running order; remove presets before deleting.'; row.appendChild(note); }
+        }, state.order.includes(item.id));
+        remove.className = 'btn btn-sm btn-outline-danger'; remove.setAttribute('aria-label', 'Delete mapping ' + item.name); row.appendChild(remove);
+        if (state.order.includes(item.id)) { const note = document.createElement('small'); note.className = 'props-used-note text-muted'; note.textContent = 'Used in running order; remove presets before deleting.'; row.appendChild(note); }
         return {id:item.id, label:item.name, node:row};
       });
       window.renderCatalogOrganization(tree, state.organization, rows, {editable:true,
@@ -182,22 +187,13 @@
     if (configure) {
       document.getElementById('props-refresh').addEventListener('click', () => mutate('/catalog/refresh'));
       document.getElementById('props-macros').addEventListener('change', event => mutate('/settings', {use_macros:event.target.checked, previous_use_macros:state.use_macros, revision:state.revision}));
-      ['prop', 'macro'].forEach(kind => document.getElementById('props-' + kind + '-search').addEventListener('input', () => { if (state) filterCatalog(kind); }));
-      document.getElementById('props-mapping-form').addEventListener('submit', event => {
-        event.preventDefault(); if (!state || busy) return;
-        const target = document.getElementById('props-prop').value;
-        if (!target) return;
-        const id = newLibraryId();
-        const library = plainLibrary(); library.push({id, name:document.getElementById('props-name').value, prop_uuid:target, macro_uuid:document.getElementById('props-macro').value || null});
-        const organization = clone(state.organization); organization.items.push({id, folderId:null});
-        mutate('/library', {revision:state.revision, library, organization});
-      });
-    } else {
+    }
+    {
       const backdrop = document.getElementById('props-picker-backdrop');
       const picker = document.getElementById('props-picker');
       const add = document.getElementById('props-add');
-      const search = document.getElementById('props-search');
       const selector = document.getElementById('props-selector');
+      const firstField = document.getElementById(configure ? 'props-name' : 'props-selector');
       let background = [];
       function isolateBackground() {
         // Isolate siblings at every level; never hide an ancestor of the picker.
@@ -220,7 +216,7 @@
       }
       // Capture guards also protect browsers without native inert support.
       document.addEventListener('focusin', event => {
-        if (!backdrop.hidden && !picker.contains(event.target)) (busy ? picker : search).focus();
+        if (!backdrop.hidden && !picker.contains(event.target)) (busy ? picker : firstField).focus();
       }, true);
       ['pointerdown', 'mousedown', 'touchstart', 'click', 'auxclick'].forEach(type => {
         document.addEventListener(type, event => {
@@ -231,12 +227,12 @@
       });
       add.addEventListener('click', () => {
         if (!state || busy) return;
-        search.value = ''; presetChoices(selector, '');
+        if (configure) { document.getElementById('props-mapping-form').reset(); mappingChoices(); }
+        else presetChoices(selector, '');
         const pickerError = document.getElementById('props-picker-error'); pickerError.textContent = ''; pickerError.hidden = true;
-        backdrop.hidden = false; search.focus(); isolateBackground();
+        backdrop.hidden = false; firstField.focus(); isolateBackground();
       });
-      search.addEventListener('input', () => { if (state) presetChoices(selector, ''); });
-      selector.addEventListener('change', async () => {
+      if (!configure) selector.addEventListener('change', async () => {
         const id = selector.value;
         if (!state || busy || !id) return;
         if (await saveOrder(state.order.concat([id]))) closePicker();
@@ -245,6 +241,23 @@
           const pickerError = document.getElementById('props-picker-error');
           pickerError.textContent = error.textContent + ' Nothing was retried. Review the current order before choosing again.';
           pickerError.hidden = false; selector.focus();
+        }
+      });
+      if (configure) document.getElementById('props-mapping-form').addEventListener('submit', async event => {
+        event.preventDefault(); if (!state || busy) return;
+        const target = document.getElementById('props-prop').value;
+        if (!target) return;
+        const id = newLibraryId();
+        const library = plainLibrary();
+        library.push({id, name:firstField.value, prop_uuid:target, macro_uuid:document.getElementById('props-macro').value || null});
+        const organization = clone(state.organization); organization.items.push({id, folderId:null});
+        if (await mutate('/library', {revision:state.revision, library, organization})) closePicker();
+        else {
+          document.getElementById('props-prop').value = '';
+          document.getElementById('props-macro').value = '';
+          const pickerError = document.getElementById('props-picker-error');
+          pickerError.textContent = error.textContent + ' Nothing was retried. Review the library before choosing again.';
+          pickerError.hidden = false; document.getElementById('props-prop').focus();
         }
       });
       document.getElementById('props-picker-cancel').addEventListener('click', closePicker);
