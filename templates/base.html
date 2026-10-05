@@ -133,6 +133,7 @@
         <nav class="nav nav-pills flex-column" aria-label="Main navigation">
           {% if not auth_enabled or can_access('page:home') %}<a class="nav-link{% if request.path == '/' %} active{% endif %}" href="/">Home</a>{% endif %}
           {% if not auth_enabled or can_access('page:timers') %}<a class="nav-link{% if request.path.startswith('/timers') %} active{% endif %}" href="/timers">Timers</a>{% endif %}
+          {% if not auth_enabled or can_access('page:props') %}<a class="nav-link{% if request.path.startswith('/props') %} active{% endif %}" href="/props">Props</a>{% endif %}
           {% if not auth_enabled or can_access('page:calendar') %}<a class="nav-link{% if request.path.startswith('/calendar') %} active{% endif %}" href="/calendar">Schedule</a>{% endif %}
           {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub</a>{% endif %}
           {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Record Audio</a>{% endif %}

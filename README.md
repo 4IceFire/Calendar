@@ -76,6 +76,77 @@ Marked 12.0.2 and DOMPurify 3.2.6 are pinned under `static/vendor/`, including t
 upstream licenses and `THIRD_PARTY_NOTICES.md`; the API Reference therefore works
 without public internet access.
 
+## ProPresenter Props
+
+The **Props** navigation page (`/props`) is a shared, autosaving running order.
+Add or change a preset using the searchable, folder-grouped library selector;
+move slots up/down or remove them. Positions are always 1-based and contiguous;
+the order may be empty and the same library mapping may appear more than once.
+Friendly names belong to the library and update all referencing slots.
+Only an explicit **Trigger** click sends a command. Selection, saving and startup
+never trigger or clear props. Last successfully triggered is historical feedback,
+not the currently visible/active prop, and resets after a process restart.
+Config endpoint saves/imports refresh endpoint-bound catalogs but retain the
+trigger guard and history for the same Props storage. While a command is in
+flight, settings and additional triggers return 409 even if the endpoint changes
+away and back. Reads/order edits stay responsive; the command uses its captured
+endpoint and exact target, and its completion remains visible without replay.
+
+The small **Configure Props** button opens `/props/configure`. It manages TDeck
+mappings and shared collapsible folders, not ProPresenter resources. Give each
+mapping a friendly name and select an existing ProPresenter prop; optionally map
+an existing macro. A prop UUID can have only one library entry. Delete protection
+requires removing every referencing slot first. Folder controls reuse the shared
+catalog drag/touch/keyboard pattern; deleting a folder moves its mappings to root.
+
+Permissions → Groups has top-level **Props** access (edit/rearrange/add/remove and
+trigger) and subordinate **Configure Props** inside the Props tab (library,
+folders and mode). Configure requires Props access, combining grants across groups.
+Admin has all access; neither grant is assigned automatically to other groups.
+Library, order editing, catalog refresh and settings APIs are browser-session only.
+Automation can read/trigger using a `props` service-token scope; generic `read`
+tokens can read but cannot trigger. These endpoints never use anonymous legacy access.
+
+**Use Macros for Props** defaults to false (`propresenter_props_use_macros`),
+independent of `propresenter_is_latest` for timers. Direct mode uses only the prop
+UUID; macro mode uses only the optional macro UUID. Missing/unavailable targets
+fail closed. There is no fallback after an uncertain direct response and no
+automatic retry of a trigger. Existing `propresenter_ip`/`propresenter_port` apply.
+The official API contract is GET `/v1/props`, GET `/v1/macros`, and GET
+`/v1/prop/{uuid}/trigger` or `/v1/macro/{uuid}/trigger`. No resource creation,
+editing, deletion or clearing is sent. Older/newer ProPresenter compatibility
+has **not** been verified; fixture tests are not hardware compatibility claims.
+
+Configure entry and **Refresh catalog** start a nonblocking, single-flight
+refresh with shared last-successful data, stale/error status and failure backoff.
+Operational reads also refresh when the five-minute snapshot expires. An outage
+retains choices but disables triggering until a successful refresh. Activity Log
+records mutations, catalog completion and trigger success/failure, without secrets.
+Revision checks reject stale saves/triggers; browser requests are serialized and
+stale asynchronous reads cannot overwrite newer edits. Re-read after an uncertain
+response; never replay an uncertain trigger.
+
+`props.py` stores version-1 `props.json` atomically next to the configured config
+file (override with `TDECK_PROPS_FILE`); limits are 500 mappings, slots and folders,
+120-character friendly/folder names and 1 MiB storage. Corruption fails closed,
+not an empty/reset catalog. Config export/import includes **Props library and
+running order**; imports validate and atomically replace it with a fresh revision.
+The macro setting is protected: general config reads omit it, general config
+writes reject it, and App config import preserves the target instance's mode.
+Change it only through Configure Props; group grants travel with Users database.
+Runtime catalog and last-trigger feedback are not exported. Keep local Props
+storage ignored by Git and out of Docker builds.
+
+Tests (fakes only; never point them at real ProPresenter):
+
+```sh
+.venv/bin/python -m unittest discover -s tests -p test_props.py -v
+# Separate terminal: uses temporary auth/data, blocks outbound traffic, chooses a free port.
+.venv/bin/python tests/props_ui_harness.py --ready-file "$TMPDIR/props-ready.json"
+# Set TDECK_BASE_URL to the URL in the ready file, then:
+TDECK_BASE_URL=http://127.0.0.1:<fixture-port> npx playwright test tests/browser/props.spec.js --workers=1
+```
+
 ## Configuration
 
 The app reads `config.json` from the repo root.

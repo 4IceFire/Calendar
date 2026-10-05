@@ -1,0 +1,7 @@
+.props-row { display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; padding:.8rem; border:1px solid var(--bs-border-color); border-radius:.5rem; min-width:0; }
+.props-row-title { flex:1 1 12rem; overflow-wrap:anywhere; margin:0; }
+.props-row select,.props-row input { min-width:0; flex:1 1 12rem; width:auto; }
+.props-row .props-controls { display:flex; flex-wrap:wrap; gap:.4rem; }
+#props-page [hidden] { display:none !important; }
+#props-page .catalog-item-content { min-width:0; }
+#props-page select { max-width:100%; }

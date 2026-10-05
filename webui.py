@@ -226,6 +226,7 @@ except Exception:
         "propresenter_port": 4000,
         "propresenter_timer_index": 2,
         "propresenter_is_latest": True,
+        "propresenter_props_use_macros": False,
         "propresenter_timer_wait_stop_ms": 200,
         "propresenter_timer_wait_set_ms": 600,
         "propresenter_timer_wait_reset_ms": 1000,
@@ -2360,6 +2361,7 @@ _PAGE_PREREQUISITES = {
     'page:media_upload': ('page:routing', 'page:media'),
     'page:media_save': ('page:routing', 'page:media', 'page:media_upload'),
     'page:routing_presets': ('page:routing',),
+    'page:props_configure': ('page:props',),
 }
 _register_page('page:media_upload', 'Media: Upload images')
 _register_page('page:media_save', 'Media: Save uploads to library')
@@ -2563,7 +2565,7 @@ def _bootstrap_default_users_roles() -> None:
                     all_pages = ['page:home', *all_pages]
 
                 if not td_has:
-                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin') and not k.startswith('page:media')]
+                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin', 'page:props', 'page:props_configure') and not k.startswith('page:media')]
                     _set_group_pages(td_group_id, td_pages)
                 if not sp_has:
                     sp_pages = [k for k in all_pages if k in ('page:home', 'page:timers')]
@@ -3076,6 +3078,7 @@ class _User(UserMixin):
 _PAGE_LANDING_PATHS = (
     ('page:home', '/'),
     ('page:timers', '/timers'),
+    ('page:props', '/props'),
     ('page:calendar', '/calendar'),
     ('page:videohub', '/videohub'),
     ('page:atem_audio', '/foyer-audio'),
@@ -3386,6 +3389,10 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
     verb = str(method or 'GET').upper()
     write = verb in _API_MUTATING_METHODS
 
+    if p == '/api/props' or p.startswith('/api/props/'):
+        setup = p in ('/api/props/library', '/api/props/settings', '/api/props/catalog/refresh')
+        return {'scope': 'props', 'pages': ('page:props_configure' if setup else 'page:props',),
+                **({'service_tokens': False} if setup or p == '/api/props/order' else {})}
     if p.startswith('/api/config/service-tokens'):
         return {'scope': 'admin', 'pages': ('page:config',), 'service_tokens': False}
     if p.startswith('/api/admin/default-views/'):
@@ -4463,6 +4470,7 @@ def _config_transport_items() -> list[dict[str, Any]]:
         _transport_file_item('config', 'App config', 'config.json', 'Main TDeck settings, ports, integrations, theme, and auth options.'),
         _transport_file_item('events', 'Calendar events', str(cfg.get('EVENTS_FILE') or 'events.json'), 'Scheduled calendar events and their trigger definitions.'),
         _transport_file_item('timer_presets', 'Timer presets', str(getattr(utils, 'TIMER_PRESETS_FILE', 'timer_presets.json')), 'Timer preset names, times, and Companion button actions.'),
+        _transport_file_item('props', 'Props library and running order', 'props.json', 'TDeck prop mappings, shared folders and ordered presets; excludes runtime feedback.', actual_path=_props_routes.props_storage_path(sys.modules[__name__])),
         _transport_file_item('trigger_templates', 'Trigger templates', 'trigger_templates.json', 'Reusable trigger templates for calendar events.'),
         _transport_file_item('button_templates', 'Button templates', 'button_templates.json', 'Reusable Companion button templates.'),
         _transport_file_item('calendar_triggers', 'Generated calendar triggers', 'calendar_triggers.json', 'Current generated trigger queue/state for the scheduler.'),
@@ -4694,6 +4702,13 @@ def _clear_directory_contents(path: Path) -> tuple[int, list[str]]:
 
 
 def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> tuple[list[dict[str, Any]], Path | None]:
+    # Share the config-write lock with general/media/Props settings saves.
+    # Transport restores setup, never changes the separately authorized Props mode.
+    with _media_operation_lock:
+        return _apply_config_transport_import_locked(zip_path, selected_ids)
+
+
+def _apply_config_transport_import_locked(zip_path: Path, selected_ids: list[str]) -> tuple[list[dict[str, Any]], Path | None]:
     manifest = _inspect_config_transport_zip(zip_path)
     item_map = {str(item.get('id')): item for item in manifest.get('items') or [] if isinstance(item, dict)}
     expanded_ids = _expand_config_transport_selection(selected_ids, item_map)
@@ -4738,8 +4753,22 @@ def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> t
                 if member not in all_names:
                     raise ValueError(f"Missing payload for {item.get('label') or rel}.")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, target.open('wb') as dst:
-                    shutil.copyfileobj(src, dst)
+                if str(item.get('id') or '') == 'props':
+                    from props import PropsStore
+                    with zf.open(member) as src:
+                        raw = src.read(1024 * 1024 + 1)
+                    if len(raw) > 1024 * 1024:
+                        raise ValueError('Props import exceeds storage limit')
+                    PropsStore(target).import_document(json.loads(raw))
+                elif str(item.get('id') or '') == 'config':
+                    restored = json.loads(zf.read(member))
+                    if not isinstance(restored, dict):
+                        raise ValueError('Imported configuration must be an object')
+                    restored['propresenter_props_use_macros'] = utils.get_config().get('propresenter_props_use_macros', False) is True
+                    target.write_text(json.dumps(restored, ensure_ascii=False), encoding='utf-8')
+                else:
+                    with zf.open(member) as src, target.open('wb') as dst:
+                        shutil.copyfileobj(src, dst)
                 imported.append({'id': item.get('id'), 'label': item.get('label'), 'path': rel, 'count': 1})
 
     _clear_imported_config_caches()
@@ -6253,7 +6282,7 @@ def admin_permissions_page():
         conn.close()
 
     pages = sorted([(k, v.get('name') or k) for k, v in _PAGE_REGISTRY.items()
-                    if k not in ('page:media', 'page:media_upload', 'page:media_save', 'page:routing_presets')], key=lambda x: x[1].lower())
+                    if k not in ('page:media', 'page:media_upload', 'page:media_save', 'page:routing_presets', 'page:props_configure')], key=lambda x: x[1].lower())
     group_to_pages: dict[int, set[str]] = {}
     for gp in group_pages or []:
         try:
@@ -11940,7 +11969,8 @@ def api_get_config():
         if not can_access('page:config'):
             return jsonify({'ok': False, 'error': 'forbidden'}), 403
     try:
-        cfg = utils.get_config()
+        cfg = copy.deepcopy(utils.get_config())
+        cfg.pop('propresenter_props_use_macros', None)
         # Legacy: global Routing allow-lists are no longer used (now per Access Level).
         try:
             cfg.pop('videohub_allowed_outputs', None)
@@ -11965,8 +11995,13 @@ def api_set_config():
     except Exception:
         return jsonify({'ok': False, 'error': 'invalid json'}), 400
 
+    if not isinstance(new, dict):
+        return jsonify(ok=False, error='Configuration must be an object'), 400
+    if 'propresenter_props_use_macros' in new:
+        return jsonify(ok=False, error='Use /api/props/settings to change the Props trigger mode'), 400
+
     try:
-        cfg = utils.get_config()
+        cfg = copy.deepcopy(utils.get_config())
         old_cfg = copy.deepcopy(cfg)
 
         # Compute port change before writing so we can tell the UI what's happening.
@@ -12049,7 +12084,8 @@ def api_set_config():
             except Exception:
                 pass
 
-        return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
+        public_cfg = {key: value for key, value in cfg.items() if key != 'propresenter_props_use_macros'}
+        return jsonify({'ok': True, 'config': public_cfg, 'restart_required': restart_required, 'port': new_port})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -16103,6 +16139,13 @@ def _register_api_v1_aliases() -> None:
         )
         existing.add(alias)
 
+
+import props_routes as _props_routes
+
+def _get_props_service():
+    return _props_routes.get_props_service(sys.modules[__name__])
+
+_props_routes.register(sys.modules[__name__])
 
 _register_api_v1_aliases()
 

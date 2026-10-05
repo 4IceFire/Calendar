@@ -12,3 +12,4 @@ data/
 media_library/
 node_modules/
 test-results/
+props.json

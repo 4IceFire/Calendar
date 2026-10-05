@@ -9,6 +9,65 @@ This document lists the HTTP API endpoints implemented by the Flask Web UI serve
 - Auth: authenticated browser session or scoped Bearer service token when `auth_enabled` is true
 - Format: JSON (unless otherwise noted)
 
+## Props library and running order
+
+Every path below also has `/api/v1/props...` aliases returning
+`X-TDeck-API-Version: 1`. Browser writes require CSRF and same-origin checks;
+standard API request-size/rate limits apply. No anonymous legacy bypass exists.
+`page:props` grants running-order editing and triggering. `page:props_configure`
+is subordinate to Props, with union-group semantics and full Admin access.
+No new non-admin grants are assigned automatically. The protected mode key
+`propresenter_props_use_macros` is omitted from general config responses and
+rejected by general config writes; App config import preserves the target mode.
+Change it only through the revision-checked Props settings endpoint. Setup and
+order writes are browser-only; automation uses `props` scope for triggering and
+`props` or `read`
+for reads. Path constraints still apply. Never retry an uncertain trigger.
+
+| Method and path | Access | Request / response |
+| --- | --- | --- |
+| `GET /api/props` | Props session or read/props token | `{ok,version,revision,library,order,organization,presets,catalog,use_macros,last_triggered}`. Each ordered preset has 1-based `position`, stable library `id`, friendly `name`, `available`, `unavailable_reason`, retained `prop_uuid` and optional `macro_uuid`. Empty order is valid; repeated library IDs are allowed in order. |
+| `PUT /api/props/order` | Props browser session | Exact JSON `{revision,order:["<library UUID>",...]}`. Returns the complete current state with a new revision. Reorder/removal changes positions, never library UUIDs. |
+| `PUT /api/props/library` | Configure Props browser session | Exact JSON `{revision,library:[{id,name,prop_uuid,macro_uuid}],organization:{folders:[{id,name,order?}],items:[{id,folderId,order?}]}}`. Canonical lowercase UUIDs for library IDs; external prop/macro UUIDs must be hyphenated UUID strings and retain their supplied case. `macro_uuid:null` allowed. One mapping per distinct PP prop UUID. New/changed targets must exist in a successful current catalog; unchanged unavailable mappings may be retained. All library IDs must occur once in organization. Referenced mappings cannot be deleted. Returns complete state with fresh revision. |
+| `POST /api/props/catalog/refresh` | Configure Props browser session | No payload required. Returns complete cached state immediately and starts one background refresh, subject to backoff; poll GET for completion. Never sends a trigger. |
+| `PUT /api/props/settings` | Configure Props browser session | Exact JSON `{use_macros:<boolean>,previous_use_macros:<boolean>,revision:"<current revision>"}`. Explicit compare-and-save mode; conflicts if another editor changed it. Returns full state with a new revision, preserves timer-version configuration. |
+| `POST /api/props/trigger` | Props browser session or props token | Exact JSON `{position:<positive integer>,revision:"<GET revision>",use_macros:<GET mode boolean>}`. Returns `{ok:true,last_triggered:{position,id,name,revision,mode,at}}` only after a successful PP HTTP response. One selected target, no clearing, no fallback/replay. |
+
+`library` contains the mapping fields plus `available`/`unavailable_reason`.
+`order` contains stable library IDs; `presets` resolves them into numbered slots.
+`organization` is shared presentation metadata, never a grant. `catalog` has
+`props` and `macros` arrays of `{uuid,name}`, plus `stale`, `refreshing`,
+`sampledAt`, `ageMs`, `lastError` and `consecutiveFailures`. First reads may be
+empty/stale while refreshing. Failed refresh retains the last successful catalog
+and fails closed for triggering; expiry refreshes are shared across clients.
+
+`last_triggered` is null initially. It records the **last successfully triggered**
+slot's historical position, library ID/name, revision, mode (`prop`/`macro`) and
+UTC timestamp; it is not actual active visibility. A failed/uncertain command
+retains it. Order edits can renumber slots, so feedback consumers must compare the
+record's revision and position, not treat its old position as current; repeated
+slots may share a library ID. Process restart resets this runtime record.
+Endpoint changes through Config save/import replace the endpoint-bound catalog,
+not the command guard/history for that Props storage. Until an in-flight command
+finishes, further triggers and Props settings return 409 even across A → B → A
+endpoint changes. Reads and order edits remain nonblocking during hardware I/O.
+The accepted command keeps its captured endpoint, UUID spelling, revision and
+mode; completion remains visible in current feedback, without replay.
+
+Module integration: poll `GET /api/v1/props`; populate actions from `presets` and
+show availability. On a user trigger, send its position with that snapshot's
+revision and `use_macros`. Refresh on 409; do not silently retry a trigger or remap
+it to the new position. On network timeout/502, outcome is uncertain: read feedback
+and ask the operator, never automatically replay. Successful PP HTTP acceptance
+does not verify physical visibility. No ProPresenter version compatibility claim
+is made until approved hardware tests are completed.
+
+Errors: `400 {ok:false,error}` invalid/missing targets, out-of-range/noninteger
+positions, invalid schema/limits, referenced deletion; `409` stale revisions/mode
+or an in-flight trigger; `502` PP trigger failed/unknown; `503` corrupt/unreadable
+storage. Central security additionally uses 401/403/413/429. All mutations,
+triggers and catalog completion are recorded in Activity Log without secrets.
+
 ## Shared Admin default views
 
 `PUT /api/admin/default-views/routing` accepts `{"inputs":[1,2],"outputs":[3]}`; `PUT /api/admin/default-views/audio` accepts `{"sources":["master","1"]}`. Both require a protected Admin browser session and the normal CSRF/origin checks; service tokens and scheduler dispatch are denied. Responses are `{ok:true, preferences:{...}}`. Port IDs are positive integers and audio IDs are strings; empty lists mean all. These shared display preferences persist in the Auth DB and never modify resource permissions. Show all is temporary page state. Non-admin pages ignore these preferences.
@@ -148,7 +207,7 @@ server-side capability policy.
   state API is authenticated; it is no longer a silently broken public shell.
 
 Available token scopes are `read`, `timers`, `videohub`, `tvs`, `atem`,
-`propresenter`, `ccb`, `pixie`, `digico`, `calendar`, `config`, and `admin`.
+`propresenter`, `props`, `ccb`, `pixie`, `digico`, `calendar`, `config`, and `admin`.
 `read` permits read-only calls across resource APIs; a resource scope permits
 that resource's reads and writes. Avoid `*` unless a tightly constrained
 internal automation genuinely spans every capability.

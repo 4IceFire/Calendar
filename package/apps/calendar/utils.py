@@ -59,6 +59,7 @@ _defaults = {
     # Which ProPresenter timer to control
     "propresenter_timer_index": 2,
     "propresenter_is_latest": True,
+    "propresenter_props_use_macros": False,
     "propresenter_timer_wait_stop_ms": 200,
     "propresenter_timer_wait_set_ms": 600,
     "propresenter_timer_wait_reset_ms": 1000,

@@ -193,6 +193,9 @@
                                 <button type="button" class="nav-link active" role="tab" id="group-{{ g.id }}-tab-general"
                                   data-permission-tab="general" data-permission-page="" aria-controls="group-{{ g.id }}-panel-general"
                                   aria-selected="true" tabindex="0">General</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-props"
+                                  data-permission-tab="props" data-permission-page="page:props" aria-controls="group-{{ g.id }}-panel-props"
+                                  aria-selected="false" tabindex="-1" {% if 'page:props' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Props</button>
                                 <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-digico"
                                   data-permission-tab="digico" data-permission-page="page:digico_mixer" aria-controls="group-{{ g.id }}-panel-digico"
                                   aria-selected="false" tabindex="-1" {% if 'page:digico_mixer' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Personal Mixes</button>
@@ -228,6 +231,15 @@
                                        placeholder="inherit / 0 / 5">
                               </div>
                             </div>
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-props" tabindex="0"
+                            data-permission-panel="props" aria-labelledby="group-{{ g.id }}-tab-props" hidden>
+                            <div class="form-check">
+                              <input class="form-check-input" type="checkbox" name="page_keys" value="page:props_configure" id="group-{{ g.id }}-props-configure"
+                                {% if 'page:props_configure' in group_to_pages.get(g.id, []) %}checked{% endif %}>
+                              <label class="form-check-label" for="group-{{ g.id }}-props-configure">Configure Props</label>
+                            </div>
+                            <p class="form-text">Props page access allows editing the shared running order and triggering presets. Configure Props additionally manages TDeck mappings, folders and the explicit macro mode. Requires Props access; grants combine across groups.</p>
                           </section>
                           <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-digico" tabindex="0"
                             data-permission-panel="digico" aria-labelledby="group-{{ g.id }}-tab-digico" hidden>

@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% block page_actions %}{% if configure_props %}<a class="btn btn-outline-secondary" href="/props/configure">Configure Props</a>{% endif %}{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="{{ static_asset('props.css') }}">
+<section id="props-page" data-props-view="order">
+  <div id="props-error" class="alert alert-danger" role="alert" hidden></div>
+  <div id="props-status" class="text-muted small mb-2" role="status"></div>
+  <p id="props-last-triggered" class="small">No successfully triggered preset yet.</p>
+  <p class="text-muted small">Shared running order. Changes save automatically. Trigger affects only the selected prop; it does not clear others.</p>
+  <div id="props-order" class="d-grid gap-2 mb-3"></div>
+  <div class="card card-body gap-2">
+    <label for="props-search">Search presets</label><input id="props-search" class="form-control" type="search" autocomplete="off">
+    <label for="props-selector">Preset</label><select id="props-selector" class="form-select"></select>
+    <button id="props-add" type="button" class="btn btn-outline-primary align-self-start">Add preset</button>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="{{ static_asset('props.js') }}"></script>
+{% endblock %}

@@ -20,6 +20,7 @@ from typing import Iterable
 SERVICE_TOKEN_SCOPES = (
     "read",
     "timers",
+    "props",
     "videohub",
     "tvs",
     "atem",

@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block page_actions %}<a class="btn btn-outline-secondary" href="/props">Back to Props</a>{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="{{ static_asset('catalog_organization.css') }}">
+<link rel="stylesheet" href="{{ static_asset('props.css') }}">
+<section id="props-page" data-props-view="configure">
+  <div id="props-error" class="alert alert-danger" role="alert" hidden></div>
+  <p class="text-muted">TDeck mappings only. Create or change the actual props and macros in ProPresenter.</p>
+  <div class="d-flex flex-wrap gap-3 align-items-center mb-3">
+    <button id="props-refresh" type="button" class="btn btn-outline-secondary">Refresh catalog</button>
+    <label class="form-check"><input id="props-macros" type="checkbox" class="form-check-input"> Use Macros for Props</label>
+  </div>
+  <div id="props-status" class="small mb-3" role="status"></div>
+  <p class="small text-muted">Direct mode uses the saved prop UUID. Macro mode uses only the optional macro mapping; there is no automatic fallback or replay. Independent of the timer version setting. Older/newer ProPresenter compatibility testing is pending.</p>
+  <div id="props-library" class="mb-4"></div>
+  <form id="props-mapping-form" class="card card-body gap-2">
+    <h2 class="h5">Add mapping</h2>
+    <label for="props-name">Friendly name</label><input id="props-name" class="form-control" maxlength="120" required>
+    <label for="props-prop-search">Search ProPresenter props</label><input id="props-prop-search" type="search" class="form-control" autocomplete="off">
+    <label for="props-prop">Existing ProPresenter prop</label><select id="props-prop" class="form-select" required></select>
+    <label for="props-macro-search">Search ProPresenter macros</label><input id="props-macro-search" type="search" class="form-control" autocomplete="off">
+    <label for="props-macro">Optional macro</label><select id="props-macro" class="form-select"></select>
+    <button class="btn btn-outline-primary align-self-start" type="submit">Add mapping</button>
+  </form>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="{{ static_asset('catalog_organization.js') }}"></script>
+<script src="{{ static_asset('props.js') }}"></script>
+{% endblock %}

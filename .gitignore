@@ -2,6 +2,8 @@
 .venv/
 node_modules/
 test-results/
+# Instance-local Props mapping/order state
+props.json
 
 # Python bytecode / caches
 __pycache__/
