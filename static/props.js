@@ -19,6 +19,8 @@
     function setBusy(value) {
       busy = value;
       root.setAttribute('aria-busy', String(value));
+      const picker = document.getElementById('props-picker');
+      if (value && picker && !document.getElementById('props-picker-backdrop').hidden) picker.focus();
       root.querySelectorAll('button,input,select').forEach(el => { el.disabled = value || el.dataset.unavailable === '1'; });
     }
     async function api(path, method, value) {
@@ -46,6 +48,7 @@
         if (path === '/trigger') state = await api('');
         if (preserveTree) { catalogStatus(); signature = ''; }
         else render(true);
+        return true;
       } catch (e) {
         showError(e.message || 'Outcome unknown. Reload; do not automatically retry.');
         // Re-read safely after uncertain writes. Never replay a mutation.
@@ -69,6 +72,7 @@
     function presetChoices(select, chosen) {
       const search = select.id === 'props-selector' ? document.getElementById('props-search').value.toLowerCase() : '';
       select.textContent = '';
+      if (select.id === 'props-selector') select.appendChild(new Option('Choose a preset', ''));
       [null].concat(state.organization.folders).forEach(folder => {
         const group = document.createElement('optgroup'); group.label = folder ? folder.name : 'No folder';
         state.organization.items.filter(item => (item.folderId || null) === (folder ? folder.id : null)).forEach(item => {
@@ -81,24 +85,44 @@
     }
     function renderOrder() {
       const order = document.getElementById('props-order'); order.textContent = '';
-      if (!state.presets.length) { const p = document.createElement('p'); p.textContent = 'No presets in the running order.'; order.appendChild(p); }
+      if (!state.presets.length) {
+        const row = document.createElement('tr'), cell = document.createElement('td');
+        cell.colSpan = 4; cell.textContent = 'No presets in the running order.'; row.appendChild(cell); order.appendChild(row);
+      }
       state.presets.forEach((preset, index) => {
-        const row = document.createElement('div'); row.className = 'props-row'; row.dataset.propsSlot = String(index + 1);
-        const title = document.createElement('p'); title.className = 'props-row-title'; title.textContent = preset.position + '. ' + preset.name;
-        row.appendChild(title);
-        const selector = document.createElement('select'); selector.className = 'form-select'; selector.setAttribute('aria-label', 'Change preset ' + preset.position);
+        const row = document.createElement('tr'); row.dataset.propsSlot = String(index + 1);
+        const triggerCell = document.createElement('td'); triggerCell.className = 'props-trigger-cell';
+        const trigger = button('▶', () => mutate('/trigger', {position:preset.position, revision:state.revision, use_macros:state.use_macros}), !preset.available);
+        trigger.className = 'btn timer-apply-btn'; trigger.title = 'Trigger preset ' + preset.position;
+        trigger.setAttribute('aria-label', trigger.title); triggerCell.appendChild(trigger); row.appendChild(triggerCell);
+        const titleCell = document.createElement('td'); titleCell.className = 'props-name-cell';
+        const title = document.createElement('strong'); title.textContent = preset.position + '. ' + preset.name; titleCell.appendChild(title);
+        if (!preset.available) { const note = document.createElement('small'); note.className = 'd-block text-muted'; note.textContent = preset.unavailable_reason; titleCell.appendChild(note); }
+        row.appendChild(titleCell);
+        const mappingCell = document.createElement('td'); mappingCell.className = 'props-mapping-cell';
+        const selector = document.createElement('select'); selector.className = 'form-select form-select-sm'; selector.setAttribute('aria-label', 'Change preset ' + preset.position);
         presetChoices(selector, preset.id);
         selector.addEventListener('change', () => { const list = state.order.slice(); list[index] = selector.value; saveOrder(list); });
-        row.appendChild(selector);
-        const controls = document.createElement('div'); controls.className = 'props-controls';
-        controls.appendChild(button('↑', () => move(index, -1), index === 0)); controls.lastChild.setAttribute('aria-label', 'Move preset ' + preset.position + ' up');
-        controls.appendChild(button('↓', () => move(index, 1), index === state.order.length - 1)); controls.lastChild.setAttribute('aria-label', 'Move preset ' + preset.position + ' down');
-        controls.appendChild(button('Remove', () => saveOrder(state.order.filter((_, i) => i !== index))));
-        controls.appendChild(button('Trigger', () => mutate('/trigger', {position:preset.position, revision:state.revision, use_macros:state.use_macros}), !preset.available));
-        row.appendChild(controls);
-        if (!preset.available) { const note = document.createElement('small'); note.textContent = preset.unavailable_reason; row.appendChild(note); }
+        mappingCell.appendChild(selector); row.appendChild(mappingCell);
+        const actionsCell = document.createElement('td'); actionsCell.className = 'props-actions-cell';
+        const controls = document.createElement('div'); controls.className = 'd-flex align-items-start justify-content-end gap-2';
+        const arrows = document.createElement('div'); arrows.className = 'd-flex flex-column align-items-center gap-1';
+        [['▲', -1, 'up', index === 0], ['▼', 1, 'down', index === state.order.length - 1]].forEach(([label, step, direction, disabled]) => {
+          const arrow = button(label, () => move(index, step), disabled);
+          arrow.className = 'btn btn-sm btn-outline-secondary me-1 btn-icon-sm';
+          arrow.setAttribute('aria-label', 'Move preset ' + preset.position + ' ' + direction);
+          arrows.appendChild(arrow);
+        });
+        controls.appendChild(arrows);
+        const remove = button('Delete', () => saveOrder(state.order.filter((_, i) => i !== index)));
+        remove.className = 'btn btn-sm btn-outline-danger'; remove.setAttribute('aria-label', 'Delete preset ' + preset.position);
+        controls.appendChild(remove); actionsCell.appendChild(controls); row.appendChild(actionsCell);
         order.appendChild(row);
       });
+      const add = document.getElementById('props-add');
+      add.dataset.unavailable = state.library.length ? '0' : '1';
+      add.disabled = busy || !state.library.length;
+      document.getElementById('props-empty-library').hidden = !!state.library.length;
       const selector = document.getElementById('props-selector'); presetChoices(selector, selector.value);
     }
     function saveOrder(order) { return mutate('/order', {revision:state.revision, order}); }
@@ -169,8 +193,74 @@
         mutate('/library', {revision:state.revision, library, organization});
       });
     } else {
-      document.getElementById('props-search').addEventListener('input', () => { if (state) presetChoices(document.getElementById('props-selector'), document.getElementById('props-selector').value); });
-      document.getElementById('props-add').addEventListener('click', () => { const id = document.getElementById('props-selector').value; if (state && id) saveOrder(state.order.concat([id])); });
+      const backdrop = document.getElementById('props-picker-backdrop');
+      const picker = document.getElementById('props-picker');
+      const add = document.getElementById('props-add');
+      const search = document.getElementById('props-search');
+      const selector = document.getElementById('props-selector');
+      let background = [];
+      function isolateBackground() {
+        // Isolate siblings at every level; never hide an ancestor of the picker.
+        for (let node = backdrop; node !== document.body; node = node.parentElement) {
+          Array.from(node.parentElement.children).filter(el => el !== node).forEach(el => {
+            background.push({el, hidden:el.getAttribute('aria-hidden'), inert:el.getAttribute('inert')});
+            el.setAttribute('aria-hidden', 'true');
+            if ('inert' in el) el.inert = true;
+          });
+        }
+      }
+      function closePicker() {
+        if (busy) return;
+        backdrop.hidden = true;
+        background.forEach(({el, hidden, inert}) => {
+          if (hidden === null) el.removeAttribute('aria-hidden'); else el.setAttribute('aria-hidden', hidden);
+          if (inert === null) el.removeAttribute('inert'); else el.setAttribute('inert', inert);
+        });
+        background = []; add.focus();
+      }
+      // Capture guards also protect browsers without native inert support.
+      document.addEventListener('focusin', event => {
+        if (!backdrop.hidden && !picker.contains(event.target)) (busy ? picker : search).focus();
+      }, true);
+      ['pointerdown', 'mousedown', 'touchstart', 'click', 'auxclick'].forEach(type => {
+        document.addEventListener(type, event => {
+          if (!backdrop.hidden && !picker.contains(event.target)) {
+            event.preventDefault(); event.stopImmediatePropagation();
+          }
+        }, {capture:true, passive:false});
+      });
+      add.addEventListener('click', () => {
+        if (!state || busy) return;
+        search.value = ''; presetChoices(selector, '');
+        const pickerError = document.getElementById('props-picker-error'); pickerError.textContent = ''; pickerError.hidden = true;
+        backdrop.hidden = false; search.focus(); isolateBackground();
+      });
+      search.addEventListener('input', () => { if (state) presetChoices(selector, ''); });
+      selector.addEventListener('change', async () => {
+        const id = selector.value;
+        if (!state || busy || !id) return;
+        if (await saveOrder(state.order.concat([id]))) closePicker();
+        else {
+          presetChoices(selector, '');
+          const pickerError = document.getElementById('props-picker-error');
+          pickerError.textContent = error.textContent + ' Nothing was retried. Review the current order before choosing again.';
+          pickerError.hidden = false; selector.focus();
+        }
+      });
+      document.getElementById('props-picker-cancel').addEventListener('click', closePicker);
+      document.addEventListener('keydown', event => {
+        if (backdrop.hidden) return;
+        if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); closePicker(); }
+        if (event.key === 'Tab') {
+          const fields = Array.from(picker.querySelectorAll('input,select,button')).filter(el => !el.disabled);
+          const first = fields[0], last = fields[fields.length - 1];
+          if (!first) { event.preventDefault(); picker.focus(); }
+          else if (!fields.includes(document.activeElement)) { event.preventDefault(); (event.shiftKey ? last : first).focus(); }
+          else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        }
+        if (!picker.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); }
+      }, true);
     }
     setBusy(true);
     api('').then(async value => {

@@ -23,6 +23,10 @@ def main():
             from test_props import PropsSecurityTests
             fixture = PropsSecurityTests()
             fixture.setUp()
+            fixture.pp.get_json.side_effect = lambda kind: [
+                {'id': {'uuid': '4cddf2c5-7355-4347-980c-b13f12cbfa85', 'name': 'Original'}},
+                {'id': {'uuid': 'edfad26c-6b88-4932-a996-497136f2cedf', 'name': 'Closing'}}
+            ] if kind == 'props' else []
             web = fixture.webui
             fixture.cfg['auth_idle_timeout_enabled'] = False
             for p in (patch.object(web.utils, 'save_config', side_effect=lambda value: fixture.cfg.update(value)),
@@ -50,7 +54,7 @@ def main():
                     return web.jsonify(ok=True)
                 if web.request.path == '/__props_fixture__/reset':
                     fixture.store.path.unlink(missing_ok=True)
-                    fixture.service.last_triggered = None
+                    fixture.service._trigger_state.last_triggered = None
                     fixture.pp.reset_mock()
                     fixture.pp.get_command.return_value = ''
                     fixture.cfg['propresenter_props_use_macros'] = False

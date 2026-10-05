@@ -6,12 +6,36 @@
   <div id="props-error" class="alert alert-danger" role="alert" hidden></div>
   <div id="props-status" class="text-muted small mb-2" role="status"></div>
   <p id="props-last-triggered" class="small">No successfully triggered preset yet.</p>
-  <p class="text-muted small">Shared running order. Changes save automatically. Trigger affects only the selected prop; it does not clear others.</p>
-  <div id="props-order" class="d-grid gap-2 mb-3"></div>
-  <div class="card card-body gap-2">
-    <label for="props-search">Search presets</label><input id="props-search" class="form-control" type="search" autocomplete="off">
-    <label for="props-selector">Preset</label><select id="props-selector" class="form-select"></select>
-    <button id="props-add" type="button" class="btn btn-outline-primary align-self-start">Add preset</button>
+  <div class="tdeck-soft rounded-3 p-3 props-order-panel">
+    <div class="timer-presets-header mb-3">
+      <div class="timer-presets-title">
+        <h2 class="h5 mb-0">Preset Props</h2>
+        <div class="small text-muted">Shared running order. Changes save automatically.</div>
+      </div>
+      <div class="timer-presets-tools">
+        <button id="props-add" type="button" class="btn btn-primary btn-sm timer-add-preset-btn">Add Preset</button>
+      </div>
+    </div>
+    <p id="props-empty-library" class="small text-muted" hidden>No library mappings yet. {% if configure_props %}<a href="/props/configure">Configure Props</a> to add mappings.{% else %}Ask someone with Configure Props access to add mappings.{% endif %}</p>
+    <p class="text-muted small">Trigger affects only the selected prop; it does not clear others.</p>
+    <div class="table-responsive tdeck-table-wrap">
+      <table class="table table-sm table-hover align-top tdeck-table mb-0 props-order-table">
+        <thead><tr><th scope="col" class="props-trigger-cell"><span class="visually-hidden">Trigger</span></th><th scope="col">Preset / Name</th><th scope="col">Library mapping</th><th scope="col" class="text-end">Actions</th></tr></thead>
+        <tbody id="props-order"></tbody>
+      </table>
+    </div>
+  </div>
+  <div id="props-picker-backdrop" class="props-picker-backdrop" hidden>
+    <div id="props-picker" class="props-picker tdeck-soft rounded-3 p-3" role="dialog" aria-modal="true" aria-labelledby="props-picker-title" aria-describedby="props-picker-hint" tabindex="-1">
+      <h2 id="props-picker-title" class="h5">Add Preset</h2>
+      <p id="props-picker-hint" class="small text-muted">Choose a library mapping to add and save it automatically. Nothing is triggered.</p>
+      <div id="props-picker-error" class="alert alert-danger" role="alert" hidden></div>
+      <label for="props-search" class="form-label">Search presets</label>
+      <input id="props-search" class="form-control mb-3" type="search" autocomplete="off">
+      <label for="props-selector" class="form-label">Preset</label>
+      <select id="props-selector" class="form-select mb-3"></select>
+      <button id="props-picker-cancel" type="button" class="btn btn-outline-secondary btn-sm">Cancel</button>
+    </div>
   </div>
 </section>
 {% endblock %}

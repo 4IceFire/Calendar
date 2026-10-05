@@ -5,3 +5,22 @@
 #props-page [hidden] { display:none !important; }
 #props-page .catalog-item-content { min-width:0; }
 #props-page select { max-width:100%; }
+.props-picker-backdrop { position:fixed; inset:0; z-index:1060; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:1rem; }
+.props-picker { background:var(--bs-body-bg); width:100%; max-width:30rem; max-height:calc(100vh - 2rem); max-height:calc(100dvh - 2rem); overflow:auto; border:1px solid var(--bs-border-color); box-shadow:0 1rem 3rem rgba(0,0,0,.3); }
+.props-order-table { table-layout:fixed; }
+.props-trigger-cell { width:3.5rem; }
+.props-order-table th:last-child { width:8rem; }
+.props-name-cell { overflow-wrap:anywhere; }
+.props-order-panel .tdeck-table-wrap { border:1px solid rgba(127,127,127,.18); }
+.props-order-panel .tdeck-table thead th { padding-top:.7rem; padding-bottom:.7rem; background:rgba(127,127,127,.055); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+@media (max-width:767.98px) {
+  .props-order-table thead { display:none; }
+  .props-order-table tbody, .props-order-table tr { display:block; }
+  .props-order-table tr[data-props-slot] { display:grid; grid-template-columns:3rem minmax(0,1fr) 7rem; padding:.5rem 0; border-bottom:1px solid var(--bs-border-color); }
+  .props-order-table td { display:block; border:0; min-width:0; }
+  .props-order-table .props-trigger-cell { grid-column:1; grid-row:1 / span 2; width:auto; }
+  .props-name-cell { grid-column:2; grid-row:1; }
+  .props-mapping-cell { grid-column:2; grid-row:2; }
+  .props-actions-cell { grid-column:3; grid-row:1 / span 2; }
+  .props-order-panel .timer-apply-btn { min-width:40px; min-height:44px; }
+}

@@ -79,8 +79,15 @@ without public internet access.
 ## ProPresenter Props
 
 The **Props** navigation page (`/props`) is a shared, autosaving running order.
-Add or change a preset using the searchable, folder-grouped library selector;
-move slots up/down or remove them. Positions are always 1-based and contiguous;
+Click **Add Preset** to open a blank searchable, folder-grouped library picker.
+Nothing is preselected: selecting a mapping explicitly adds it and saves the
+chosen library reference automatically. Cancel or Escape closes the picker
+without changing the order. Search never adds or triggers anything. The Add
+button is disabled while the library is empty; Configure Props (when permitted)
+provides the setup link. A failed/conflicting save leaves a readable picker and
+current order; nothing is automatically retried.
+Use the slot selector to change a mapping, the stacked **▲ / ▼** buttons to
+move slots, or **Delete** to remove them. Positions are always 1-based and contiguous;
 the order may be empty and the same library mapping may appear more than once.
 Friendly names belong to the library and update all referencing slots.
 Only an explicit **Trigger** click sends a command. Selection, saving and startup
