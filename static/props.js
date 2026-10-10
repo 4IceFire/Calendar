@@ -35,10 +35,12 @@
       status.textContent = c.lastError ? 'Catalog unavailable: ' + c.lastError + '. Last successful catalog retained; refresh before triggering.' :
         c.refreshing ? 'Refreshing catalog…' : c.stale ? 'Catalog stale or not loaded. Refresh before triggering.' : 'Catalog ready. Changes save automatically.';
       const last = document.getElementById('props-last-triggered');
-      if (last) last.textContent = state.last_triggered ? 'Last successfully triggered: ' + state.last_triggered.position + '. ' + state.last_triggered.name + ' (not active visibility feedback).' : 'No successfully triggered preset yet. This is not active visibility feedback.';
+      if (last) last.textContent = state.last_triggered ? 'Last successfully triggered: ' +
+        (state.last_triggered.kind === 'library' ? 'Library: ' : state.last_triggered.position + '. ') +
+        state.last_triggered.name + ' (not active visibility feedback).' : 'No successfully triggered Prop yet. This is not active visibility feedback.';
     }
     function plainLibrary() {
-      return state.library.map(item => ({id:item.id, name:item.name, prop_uuid:item.prop_uuid, macro_uuid:item.macro_uuid}));
+      return state.library.map(item => ({id:item.id, name:item.name, prop_uuid:item.prop_uuid}));
     }
     async function mutate(path, value, preserveTree) {
       if (busy) return;
@@ -61,10 +63,16 @@
       el.textContent = label; el.disabled = !!disabled; el.dataset.unavailable = disabled ? '1' : '0';
       el.addEventListener('click', action); return el;
     }
+    function sortedChoices(entries) {
+      const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
+      // Sort a copy for presentation only, with deterministic name/identity ties.
+      return entries.slice().sort((a, b) => compare(a.name.toLowerCase(), b.name.toLowerCase()) ||
+        compare(a.name, b.name) || compare(a.uuid || a.id, b.uuid || b.id));
+    }
     function choices(select, entries, chosen, empty) {
       select.textContent = '';
       if (empty !== undefined) select.appendChild(new Option(empty, ''));
-      entries.forEach(item => select.appendChild(new Option(item.name, item.uuid || item.id)));
+      sortedChoices(entries).forEach(item => select.appendChild(new Option(item.name, item.uuid || item.id)));
       const match = chosen && entries.find(item => (item.uuid || item.id).toLowerCase() === chosen.toLowerCase());
       if (chosen && !match) select.appendChild(new Option('Unavailable saved target', chosen));
       if (chosen) select.value = match ? (match.uuid || match.id) : chosen;
@@ -74,10 +82,9 @@
       if (select.id === 'props-selector') select.appendChild(new Option('Choose a preset', ''));
       [null].concat(state.organization.folders).forEach(folder => {
         const group = document.createElement('optgroup'); group.label = folder ? folder.name : 'No folder';
-        state.organization.items.filter(item => (item.folderId || null) === (folder ? folder.id : null)).forEach(item => {
-          const entry = state.library.find(row => row.id === item.id);
-          if (entry) group.appendChild(new Option(entry.name, entry.id));
-        });
+        const entries = state.organization.items.filter(item => (item.folderId || null) === (folder ? folder.id : null))
+          .map(item => state.library.find(row => row.id === item.id)).filter(Boolean);
+        sortedChoices(entries).forEach(entry => group.appendChild(new Option(entry.name, entry.id)));
         if (group.children.length) select.appendChild(group);
       });
       if (chosen && state.library.some(item => item.id === chosen)) select.value = chosen;
@@ -91,7 +98,7 @@
       state.presets.forEach((preset, index) => {
         const row = document.createElement('tr'); row.dataset.propsSlot = String(index + 1);
         const triggerCell = document.createElement('td'); triggerCell.className = 'props-trigger-cell';
-        const trigger = button('▶', () => mutate('/trigger', {position:preset.position, revision:state.revision, use_macros:state.use_macros}), !preset.available);
+        const trigger = button('▶', () => mutate('/trigger', {position:preset.position, revision:state.revision}), !preset.available);
         trigger.className = 'btn timer-apply-btn'; trigger.title = 'Trigger preset ' + preset.position;
         trigger.setAttribute('aria-label', trigger.title); triggerCell.appendChild(trigger); row.appendChild(triggerCell);
         const titleCell = document.createElement('td'); titleCell.className = 'props-name-cell';
@@ -128,10 +135,8 @@
     function move(index, step) { const order = state.order.slice(); const other = order[index + step]; order[index + step] = order[index]; order[index] = other; saveOrder(order); }
     function mappingChoices() {
       choices(document.getElementById('props-prop'), state.catalog.props, document.getElementById('props-prop').value, 'Choose a prop');
-      choices(document.getElementById('props-macro'), state.catalog.macros, document.getElementById('props-macro').value, 'No macro');
     }
     function renderConfigure() {
-      document.getElementById('props-macros').checked = state.use_macros;
       mappingChoices();
       const tree = document.getElementById('props-library');
       if (tree._catalogMoving && tree._catalogMoving()) {
@@ -151,11 +156,9 @@
         }
         name.addEventListener('change', () => update('name', name.value)); field('Friendly name', name);
         const title = document.createElement('span'); title.textContent = item.name; title.className = 'visually-hidden'; row.appendChild(title);
-        ['prop', 'macro'].forEach(kind => {
-          const select = document.createElement('select'); select.className = 'form-select form-select-sm'; select.setAttribute('aria-label', (kind === 'prop' ? 'ProPresenter prop for ' : 'Macro for ') + item.name);
-          choices(select, state.catalog[kind === 'prop' ? 'props' : 'macros'], item[kind + '_uuid'], kind === 'macro' ? 'No macro' : undefined);
-          select.addEventListener('change', () => update(kind + '_uuid', select.value || null)); field(kind === 'prop' ? 'ProPresenter prop' : 'Optional macro', select);
-        });
+        const select = document.createElement('select'); select.className = 'form-select form-select-sm'; select.setAttribute('aria-label', 'ProPresenter prop for ' + item.name);
+        choices(select, state.catalog.props, item.prop_uuid);
+        select.addEventListener('change', () => update('prop_uuid', select.value)); field('ProPresenter prop', select);
         const remove = button('Delete', () => {
           const library = plainLibrary().filter(entry => entry.id !== item.id);
           const organization = clone(state.organization); organization.items = organization.items.filter(entry => entry.id !== item.id);
@@ -171,7 +174,7 @@
     }
     function render(force) {
       catalogStatus();
-      const next = JSON.stringify([state.revision, state.use_macros, state.library, state.catalog.props, state.catalog.macros]);
+      const next = JSON.stringify([state.revision, state.library, state.catalog.props]);
       if (!force && next === signature) return;
       signature = next;
       if (configure) renderConfigure(); else renderOrder();
@@ -186,7 +189,6 @@
     }
     if (configure) {
       document.getElementById('props-refresh').addEventListener('click', () => mutate('/catalog/refresh'));
-      document.getElementById('props-macros').addEventListener('change', event => mutate('/settings', {use_macros:event.target.checked, previous_use_macros:state.use_macros, revision:state.revision}));
     }
     {
       const backdrop = document.getElementById('props-picker-backdrop');
@@ -249,12 +251,11 @@
         if (!target) return;
         const id = newLibraryId();
         const library = plainLibrary();
-        library.push({id, name:firstField.value, prop_uuid:target, macro_uuid:document.getElementById('props-macro').value || null});
+        library.push({id, name:firstField.value, prop_uuid:target});
         const organization = clone(state.organization); organization.items.push({id, folderId:null});
         if (await mutate('/library', {revision:state.revision, library, organization})) closePicker();
         else {
           document.getElementById('props-prop').value = '';
-          document.getElementById('props-macro').value = '';
           const pickerError = document.getElementById('props-picker-error');
           pickerError.textContent = error.textContent + ' Nothing was retried. Review the library before choosing again.';
           pickerError.hidden = false; document.getElementById('props-prop').focus();

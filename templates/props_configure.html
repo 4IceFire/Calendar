@@ -7,17 +7,16 @@
   <div id="props-error" class="alert alert-danger" role="alert" hidden></div>
   <div class="tdeck-soft rounded-3 p-3 mb-3">
     <div class="d-flex flex-wrap gap-3 align-items-center justify-content-between mb-2">
-      <label class="form-check mb-0"><input id="props-macros" type="checkbox" class="form-check-input"> Use Macros for Props</label>
       <button id="props-refresh" type="button" class="btn btn-outline-secondary btn-sm">Refresh catalog</button>
     </div>
     <div id="props-status" class="small text-muted mb-2" role="status"></div>
-    <p class="small text-muted mb-0">Direct mode uses the prop; Macro mode uses only its optional macro. No automatic fallback or replay.</p>
+    <p class="small text-muted mb-0">Triggers the selected ProPresenter prop directly. No automatic fallback or replay.</p>
   </div>
   <div class="tdeck-soft rounded-3 p-3 props-library-panel">
     <div class="timer-presets-header mb-3">
       <div class="timer-presets-title">
         <h2 class="h5 mb-0">Props Library</h2>
-        <div class="small text-muted">Edit mappings here. Changes save automatically. Manage the actual props and macros in ProPresenter.</div>
+        <div class="small text-muted">Edit mappings here. Changes save automatically. Manage the actual props in ProPresenter.</div>
       </div>
       <div class="timer-presets-tools">
         <button id="props-add" type="button" class="btn btn-primary btn-sm timer-add-preset-btn">Add Prop</button>
@@ -35,8 +34,6 @@
         <input id="props-name" class="form-control mb-3" maxlength="120" required>
         <label for="props-prop" class="form-label">Existing ProPresenter prop</label>
         <select id="props-prop" class="form-select mb-3" required></select>
-        <label for="props-macro" class="form-label">Optional macro</label>
-        <select id="props-macro" class="form-select mb-3"></select>
         <div class="d-flex gap-2">
           <button class="btn btn-primary btn-sm" type="submit">Add mapping</button>
           <button id="props-picker-cancel" type="button" class="btn btn-outline-secondary btn-sm">Cancel</button>

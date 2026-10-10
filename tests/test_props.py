@@ -5,15 +5,6 @@ from pathlib import Path
 
 
 class PropsStoreTests(unittest.TestCase):
-    def test_default_macro_mode_is_explicit_and_not_seeded(self):
-        import threading
-        from unittest.mock import patch
-        with patch.object(threading.Thread, 'start'):
-            import webui
-        from package.apps.calendar import utils
-        self.assertIs(utils._defaults.get('propresenter_props_use_macros'), False)
-        source = Path(webui.__file__).read_text()
-        self.assertIn("'page:props', 'page:props_configure'", source[source.index('td_pages ='):source.index('td_pages =') + 250])
 
     def test_import_persists_canonical_organization_without_mutating_input(self):
         from props import PropsStore
@@ -50,7 +41,7 @@ class PropsStoreTests(unittest.TestCase):
         self.store = PropsStore(Path(temp.name) / 'props.json')
         upper = '4CDDF2C5-7355-4347-980C-B13F12CBFA85'
         lower = upper.lower()
-        mapping = {'id':lower,'name':'Welcome','prop_uuid':upper,'macro_uuid':None}
+        mapping = {'id':lower,'name':'Welcome','prop_uuid':upper}
         data = self.store.save_library([mapping], {'folders':[],'items':[{'id':lower}]}, 'initial')
         duplicate = {**mapping, 'id':'203878e3-0fd0-4e47-9dc6-fdeaf5185368', 'prop_uuid':lower}
         with self.assertRaises(ValueError): self.store.save_library([mapping, duplicate], {'folders':[],'items':[]}, data['revision'])
@@ -120,10 +111,10 @@ class PropsStoreTests(unittest.TestCase):
             release.set()
             deadline = time.monotonic() + 3
             while service.catalog.diagnostics()['refreshing'] and time.monotonic() < deadline: time.sleep(.01)
-            self.assertEqual(pp.get_json.call_count, 2)
+            self.assertEqual(pp.get_json.call_count, 1)
             for position in (0, True, '1', 1):
-                with self.assertRaises(ValueError): service.trigger(position, 'initial', False)
-            with self.assertRaises(PropsConflict): service.trigger(1, 'stale', False)
+                with self.assertRaises(ValueError): service.trigger(position, 'initial')
+            with self.assertRaises(PropsConflict): service.trigger(1, 'stale')
             self.assertEqual(pp.get_command.call_count, 0)
 
     def test_empty_versioned_store_round_trip(self):
@@ -144,7 +135,7 @@ class PropsStoreTests(unittest.TestCase):
             store = PropsStore(Path(root) / 'props.json')
             self.assertTrue(hasattr(store, 'save_library'), 'Library API missing')
             prop = '4cddf2c5-7355-4347-980c-b13f12cbfa85'
-            data = store.save_library([{'id': prop, 'name': 'Welcome', 'prop_uuid': prop, 'macro_uuid': None}],
+            data = store.save_library([{'id': prop, 'name': 'Welcome', 'prop_uuid': prop}],
                                       {'folders': [], 'items': [{'id': prop, 'folderId': None}]}, 'initial')
             data = store.save_order([prop, prop], data['revision'])
             self.assertEqual(data['order'], [prop, prop])
@@ -165,33 +156,32 @@ class PropsStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             store = props.PropsStore(Path(root) / 'props.json')
             prop = '4cddf2c5-7355-4347-980c-b13f12cbfa85'
-            macro = '203878e3-0fd0-4e47-9dc6-fdeaf5185368'
-            entry = {'id': prop, 'name': 'Welcome', 'prop_uuid': prop, 'macro_uuid': macro}
+            entry = {'id': prop, 'name': 'Welcome', 'prop_uuid': prop}
             data = store.save_library([entry], {'folders': [], 'items': [{'id': prop}]}, 'initial')
             data = store.save_order([prop, prop], data['revision'])
             client = Mock()
-            client.get_json.side_effect = [[{'id': {'uuid': prop, 'name': 'PP title'}}], [{'id': {'uuid': macro, 'name': 'Macro'}}]]
+            client.get_json.return_value = [{'id': {'uuid': prop, 'name': 'PP title'}}]
             client.get_command.return_value = ''
             service = props.PropsService(store, lambda: client)
             self.assertTrue(service.catalog.refresh_now())
-            state = service.state(False)
+            state = service.state()
             self.assertEqual([p['position'] for p in state['presets']], [1, 2])
             self.assertTrue(state['presets'][0]['available'])
-            service.trigger(2, data['revision'], False)
+            service.trigger(2, data['revision'])
             client.get_command.assert_called_once_with('prop/' + prop + '/trigger')
-            self.assertEqual(service.state(False)['last_triggered']['position'], 2)
+            self.assertEqual(service.state()['last_triggered']['position'], 2)
             client.get_command.return_value = None
             with self.assertRaises(RuntimeError):
-                service.trigger(1, data['revision'], True)
+                service.trigger(1, data['revision'])
             self.assertEqual(client.get_command.call_count, 2)
-            self.assertEqual(client.get_command.call_args.args, ('macro/' + macro + '/trigger',))
-            self.assertEqual(service.state(False)['last_triggered']['position'], 2)
+            self.assertEqual(client.get_command.call_args.args, ('prop/' + prop + '/trigger',))
+            self.assertEqual(service.state()['last_triggered']['position'], 2)
             client.get_json.side_effect = RuntimeError('outage')
             self.assertFalse(service.catalog.refresh_now())
-            self.assertEqual(len(service.state(False)['catalog']['props']), 1)
-            self.assertIn('outage', service.state(False)['catalog']['lastError'])
-            self.assertTrue(service.state(False)['catalog']['stale'])
-            self.assertFalse(service.state(False)['presets'][0]['available'])
+            self.assertEqual(len(service.state()['catalog']['props']), 1)
+            self.assertIn('outage', service.state()['catalog']['lastError'])
+            self.assertTrue(service.state()['catalog']['stale'])
+            self.assertFalse(service.state()['presets'][0]['available'])
 
 
     def test_corrupt_schema_and_size_fail_closed(self):
@@ -231,44 +221,12 @@ class PropsWebTests(unittest.TestCase):
         p = patch.object(webui, 'log_event'); self.log = p.start(); self.addCleanup(p.stop)
         self.client = webui.app.test_client()
 
-    def test_state_never_exposes_new_revision_with_old_mode_during_settings_save(self):
-        import threading
-        from unittest.mock import patch
-        entered, release, read_started, read_done = [threading.Event() for _ in range(4)]
-        results = {}
-        before = self.store.read()
-        def save(cfg):
-            entered.set()
-            if not release.wait(3): raise RuntimeError('Test settings release timed out')
-            self.cfg.update(cfg)
-        def settings():
-            results['save'] = self.webui.app.test_client().put('/api/props/settings', json={
-                'revision': before['revision'], 'previous_use_macros': False, 'use_macros': True})
-        def read():
-            read_started.set()
-            results['read'] = self.webui.app.test_client().get('/api/props')
-            read_done.set()
-        with patch.object(self.webui, '_auth_enabled', return_value=False), patch.object(self.webui.utils, 'save_config', side_effect=save), patch.object(self.webui.utils, 'reload_config'):
-            writer = threading.Thread(target=settings); reader = threading.Thread(target=read)
-            writer.start()
-            try:
-                self.assertTrue(entered.wait(1))
-                reader.start(); self.assertTrue(read_started.wait(1))
-                self.assertFalse(read_done.wait(.15), 'GET exposed partially committed settings')
-            finally:
-                release.set(); writer.join(3)
-                if reader.ident is not None: reader.join(3)
-            self.assertFalse(writer.is_alive()); self.assertFalse(reader.is_alive())
-        self.assertEqual(results['save'].status_code, 200)
-        data = results['read'].get_json()
-        self.assertTrue(data['use_macros'])
-        self.assertNotEqual(data['revision'], before['revision'])
 
-    def test_slow_trigger_keeps_state_reads_nonblocking_and_settings_guarded(self):
+    def test_slow_trigger_keeps_state_reads_nonblocking_and_second_trigger_guarded(self):
         import threading
         from unittest.mock import patch
         prop = '4cddf2c5-7355-4347-980c-b13f12cbfa85'
-        data = self.store.save_library([{'id': prop, 'name': 'Welcome', 'prop_uuid': prop, 'macro_uuid': None}],
+        data = self.store.save_library([{'id': prop, 'name': 'Welcome', 'prop_uuid': prop}],
             {'folders': [], 'items': [{'id': prop}]}, 'initial')
         data = self.store.save_order([prop], data['revision'])
         entered, release, read_done = [threading.Event() for _ in range(3)]
@@ -294,7 +252,7 @@ class PropsWebTests(unittest.TestCase):
                 self.assertEqual(results['read'].status_code, 200)
                 self.assertIsNone(results['read'].get_json()['last_triggered'])
                 self.assertEqual(self.client.put('/api/props/settings', json={
-                    'revision': data['revision'], 'previous_use_macros': False, 'use_macros': True}).status_code, 409)
+                    'revision': data['revision'], 'previous_use_macros': False, 'use_macros': True}).status_code, 404)
                 self.assertEqual(self.client.post('/api/props/trigger', json={
                     'position': 1, 'revision': data['revision'], 'use_macros': False}).status_code, 409)
                 edited = self.client.put('/api/props/order', json={'revision': data['revision'], 'order': []})
@@ -310,52 +268,20 @@ class PropsWebTests(unittest.TestCase):
         self.assertFalse(current['use_macros'])
         self.pp.get_command.assert_called_once_with('prop/' + prop + '/trigger')
 
-    def test_trigger_reads_mode_once_and_never_remaps_requested_target(self):
-        from unittest.mock import patch
-        prop = '4cddf2c5-7355-4347-980c-b13f12cbfa85'
-        macro = '203878e3-0fd0-4e47-9dc6-fdeaf5185368'
-        data = self.store.save_library([{'id': prop, 'name': 'Welcome', 'prop_uuid': prop, 'macro_uuid': macro}],
-            {'folders': [], 'items': [{'id': prop}]}, 'initial')
-        data = self.store.save_order([prop], data['revision'])
-        self.pp.get_json.side_effect = lambda kind: [{'id': {'uuid': prop if kind == 'props' else macro, 'name': kind}}]
-        self.service.catalog.refresh_now()
-        reads = []
-        def config():
-            reads.append(True)
-            return {**self.cfg, 'propresenter_props_use_macros': len(reads) > 1}
-        with patch.object(self.webui.utils, 'get_config', side_effect=config):
-            response = self.client.post('/api/props/trigger', headers=getattr(self, 'headers', None), json={'position': 1, 'revision': data['revision'], 'use_macros': False})
-        self.assertEqual(response.status_code, 200, response.data)
-        self.pp.get_command.assert_called_once_with('prop/' + prop + '/trigger')
-        self.assertEqual(len(reads), 1)
 
-    def test_mode_switch_increments_revision_without_touching_timer_version(self):
-        from unittest.mock import patch
-        self.cfg['propresenter_is_latest'] = True
-        before = self.client.get('/api/props').get_json()
-        with patch.object(self.webui.utils, 'save_config', side_effect=lambda cfg: self.cfg.update(cfg)), patch.object(self.webui.utils, 'reload_config'):
-            response = self.client.put('/api/props/settings', json={'use_macros': True, 'previous_use_macros': False, 'revision': before['revision']})
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertNotEqual(response.get_json()['revision'], before['revision'])
-        self.assertTrue(self.cfg['propresenter_is_latest'])
-        self.assertTrue(response.get_json()['use_macros'])
-        self.assertEqual(self.pp.get_command.call_count, 0)
-        response = self.client.post('/api/props/trigger', json={'position': 1, 'revision': before['revision'], 'use_macros': False})
-        self.assertEqual(response.status_code, 409)
-
-    def test_general_config_roundtrip_omits_protected_mode_and_preserves_current_value(self):
+    def test_general_config_roundtrip_strips_retired_setting(self):
         from unittest.mock import patch
         self.cfg['propresenter_props_use_macros'] = True
         snapshot = self.client.get('/api/config').get_json()
         self.assertNotIn('propresenter_props_use_macros', snapshot)
         snapshot['debug'] = True
-        with patch.object(self.webui.utils, 'save_config', side_effect=lambda cfg: self.cfg.update(cfg)), patch.object(self.webui.utils, 'reload_config'):
+        with patch.object(self.webui.utils, 'save_config', side_effect=lambda cfg: (self.cfg.clear(), self.cfg.update(cfg))), patch.object(self.webui.utils, 'reload_config'):
             response = self.client.post('/api/config', json=snapshot)
         self.assertEqual(response.status_code, 200)
         self.assertNotIn('propresenter_props_use_macros', response.get_json()['config'])
-        self.assertTrue(self.cfg['propresenter_props_use_macros'])
+        self.assertNotIn('propresenter_props_use_macros', self.cfg)
 
-    def test_config_import_preserves_protected_props_mode_and_restores_other_config(self):
+    def test_config_import_strips_retired_setting_and_restores_other_config(self):
         import json, zipfile
         from unittest.mock import patch
         root = Path(self.temp.name)
@@ -369,19 +295,20 @@ class PropsWebTests(unittest.TestCase):
                 for name in src.namelist():
                     data = src.read(name)
                     if name == 'payload/config.json':
-                        data = json.dumps({'propresenter_props_use_macros': True, 'debug': True})
+                        data = json.dumps({'propresenter_props_use_macros': True, 'debug': True, 'propresenter_is_latest': False})
                     dst.writestr(name, data)
             imported, _ = self.webui._apply_config_transport_import(archive, ['config'])
             self.assertEqual(imported[0]['id'], 'config')
             restored = json.loads(target.read_text())
-            self.assertFalse(restored['propresenter_props_use_macros'])
+            self.assertNotIn('propresenter_props_use_macros', restored)
             self.assertTrue(restored['debug'])
+            self.assertIs(restored['propresenter_is_latest'], False)
 
     def test_config_zip_exports_imports_validated_props_and_fresh_revision(self):
         import os, zipfile, json
         from unittest.mock import patch
         prop = '4cddf2c5-7355-4347-980c-b13f12cbfa85'
-        data = self.store.save_library([{'id':prop,'name':'Welcome','prop_uuid':prop,'macro_uuid':None}], {'folders':[],'items':[{'id':prop}]}, 'initial')
+        data = self.store.save_library([{'id':prop,'name':'Welcome','prop_uuid':prop}], {'folders':[],'items':[{'id':prop}]}, 'initial')
         data = self.store.save_order([prop, prop], data['revision'])
         root = Path(self.temp.name)
         with patch.object(self.webui, '_APP_ROOT', root), patch.dict(os.environ, {'TDECK_PROPS_FILE':str(self.store.path)}), patch.object(self.webui, '_clear_imported_config_caches'):
@@ -405,8 +332,8 @@ class PropsWebTests(unittest.TestCase):
 
     def test_malformed_library_values_fail_closed_without_server_error(self):
         before = self.store.read()
-        base = {'id':'4cddf2c5-7355-4347-980c-b13f12cbfa85','name':'Welcome','prop_uuid':'4cddf2c5-7355-4347-980c-b13f12cbfa85','macro_uuid':None}
-        for field in ('id', 'prop_uuid', 'macro_uuid'):
+        base = {'id':'4cddf2c5-7355-4347-980c-b13f12cbfa85','name':'Welcome','prop_uuid':'4cddf2c5-7355-4347-980c-b13f12cbfa85'}
+        for field in ('id', 'prop_uuid'):
             for invalid in ([], {}, 1):
                 with self.subTest(field=field, invalid=invalid):
                     response = self.client.put('/api/props/library', headers=getattr(self, 'headers', None), json={'revision':'initial','library':[{**base, field:invalid}],'organization':{'folders':[],'items':[]}})
@@ -420,7 +347,7 @@ class PropsWebTests(unittest.TestCase):
         self.assertEqual(response.headers['X-TDeck-API-Version'], '1')
         data = response.get_json()
         prop = '4cddf2c5-7355-4347-980c-b13f12cbfa85'
-        entry = {'id': prop, 'name': 'Welcome', 'prop_uuid': prop, 'macro_uuid': None}
+        entry = {'id': prop, 'name': 'Welcome', 'prop_uuid': prop}
         response = self.client.put('/api/props/library', json={'revision': data['revision'], 'library': [entry],
                                           'organization': {'folders': [], 'items': [{'id': prop}]}})
         self.assertEqual(response.status_code, 200, response.data)
@@ -471,53 +398,28 @@ class PropsSecurityTests(PropsWebTests):
         with self.user(1):
             self.assertEqual(self.client.get('/api/v1/props').status_code, 200)
 
-    def test_mode_switch_increments_revision_without_touching_timer_version(self):
-        from unittest.mock import patch
-        with patch.object(self.webui, '_auth_enabled', return_value=False):
-            super().test_mode_switch_increments_revision_without_touching_timer_version()
 
     def test_malformed_library_values_fail_closed_without_server_error(self):
         with self.user(1):
             super().test_malformed_library_values_fail_closed_without_server_error()
 
-    def test_trigger_reads_mode_once_and_never_remaps_requested_target(self):
+
+    def test_general_config_roundtrip_strips_retired_setting(self):
         from unittest.mock import patch
         with patch.object(self.webui, '_auth_enabled', return_value=False):
-            super().test_trigger_reads_mode_once_and_never_remaps_requested_target()
+            super().test_general_config_roundtrip_strips_retired_setting()
 
-    def test_general_config_roundtrip_omits_protected_mode_and_preserves_current_value(self):
-        from unittest.mock import patch
-        with patch.object(self.webui, '_auth_enabled', return_value=False):
-            super().test_general_config_roundtrip_omits_protected_mode_and_preserves_current_value()
-
-    def test_generic_config_cannot_write_props_mode_for_config_browser_or_token(self):
-        from unittest.mock import patch
-        import api_security
-        web = self.webui
-        web._set_group_pages(2, ['page:props', 'page:config'])
-        web._set_group_pages(3, [])
-        token = api_security.create_service_token(web._AUTH_DB_PATH, name='Config fixture', scopes=['config'])
-        with patch.object(web.utils, 'save_config') as save:
-            with self.user(2):
-                response = self.client.post('/api/config', headers=self.headers,
-                    json={'propresenter_props_use_macros': True})
-                self.assertEqual(response.status_code, 400, response.data)
-            response = self.client.post('/api/config', headers={'Authorization': 'Bearer ' + token['token']},
-                json={'propresenter_props_use_macros': True})
-            self.assertEqual(response.status_code, 400, response.data)
-            save.assert_not_called()
-        self.assertFalse(self.cfg['propresenter_props_use_macros'])
 
     def test_scoped_tokens_operate_but_never_configure_and_legacy_is_denied(self):
         import api_security
         prop = '4cddf2c5-7355-4347-980c-b13f12cbfa85'
-        data = self.store.save_library([{'id':prop, 'name':'Welcome', 'prop_uuid':prop, 'macro_uuid':None}], {'folders': [], 'items':[{'id':prop}]}, 'initial')
+        data = self.store.save_library([{'id':prop, 'name':'Welcome', 'prop_uuid':prop}], {'folders': [], 'items':[{'id':prop}]}, 'initial')
         data = self.store.save_order([prop], data['revision'])
         record = api_security.create_service_token(self.webui._AUTH_DB_PATH, name='Props fixture', scopes=['props'])
         headers = {'Authorization':'Bearer ' + record['token']}
         self.assertEqual(self.client.get('/api/v1/props', headers=headers).status_code, 200)
         self.assertEqual(self.client.post('/api/v1/props/trigger', headers=headers, json={'position':1,'revision':data['revision'],'use_macros':False}).status_code, 200)
-        for path in ('/api/props/library', '/api/v1/props/settings', '/api/props/order'):
+        for path in ('/api/props/library', '/api/props/order'):
             self.assertEqual(self.client.put(path, headers=headers, json={}).status_code, 403)
         reader = api_security.create_service_token(self.webui._AUTH_DB_PATH, name='Reader', scopes=['read'])
         self.assertEqual(self.client.get('/api/props', headers={'Authorization':'Bearer ' + reader['token']}).status_code, 200)
@@ -556,7 +458,6 @@ class PropsSecurityTests(PropsWebTests):
         web._set_group_pages(3, [])
         with self.user(2):
             self.assertEqual(self.client.put('/api/props/library', headers=self.headers, json={}).status_code, 403)
-            self.assertEqual(self.client.put('/api/props/settings', headers=self.headers, json={}).status_code, 403)
         web._set_group_pages(3, ['page:props_configure'])
         with self.user(3):
             self.assertFalse(web.can_access('page:props_configure'))
@@ -577,16 +478,15 @@ class PropsFactoryLifecycleTests(unittest.TestCase):
         prop = '4CDDF2C5-7355-4347-980C-B13F12CBFA85'
         identity = prop.lower()
         # Exercise both actual configuration write paths, never a fixed service.
-        for write_path in ('save', 'import'):
-            with self.subTest(write_path=write_path), tempfile.TemporaryDirectory() as root_name:
+        for write_path, trigger_kind in ((path, kind) for path in ('save', 'import') for kind in ('preset', 'library')):
+            with self.subTest(write_path=write_path, trigger_kind=trigger_kind), tempfile.TemporaryDirectory() as root_name:
                 root = Path(root_name)
                 config_path = root / 'config.json'
                 cfg = {'auth_enabled': False, 'propresenter_ip': '127.0.0.1',
                        'propresenter_port': 1400, 'propresenter_props_use_macros': False}
                 config_path.write_text(json.dumps(cfg))
                 store = PropsStore(root / 'props.json')
-                data = store.save_library([{'id': identity, 'name': 'Welcome', 'prop_uuid': prop,
-                    'macro_uuid': None}], {'folders': [], 'items': [{'id': identity}]}, 'initial')
+                data = store.save_library([{'id': identity, 'name': 'Welcome', 'prop_uuid': prop}], {'folders': [], 'items': [{'id': identity}]}, 'initial')
                 data = store.save_order([identity], data['revision'])
                 entered, release = threading.Event(), threading.Event()
                 commands, results = [], {}
@@ -643,9 +543,10 @@ class PropsFactoryLifecycleTests(unittest.TestCase):
                      patch.object(web, '_audit'), patch.object(web, '_apply_logging_config'):
                     service = web._get_props_service()
                     self.assertTrue(service.catalog.refresh_now())
-                    payload = {'position': 1, 'revision': data['revision'], 'use_macros': False}
+                    payload = {'revision': data['revision'], **({'id': identity} if trigger_kind == 'library' else {'position': 1})}
+                    trigger_path = '/api/v1/props/library/trigger' if trigger_kind == 'library' else '/api/v1/props/trigger'
                     def trigger():
-                        results['trigger'] = web.app.test_client().post('/api/v1/props/trigger', json=payload)
+                        results['trigger'] = web.app.test_client().post(trigger_path, json=payload)
                     worker = threading.Thread(target=trigger)
                     worker.start()
                     try:
@@ -654,11 +555,11 @@ class PropsFactoryLifecycleTests(unittest.TestCase):
                             update_endpoint(port)
                             current = web._get_props_service()
                             self.assertTrue(current.catalog.refresh_now())
-                            # B and then A must still reject settings and triggers.
+                            # B and then A must retain the trigger guard; retired settings stay absent.
                             settings = web.app.test_client().put('/api/props/settings', json={
                                 'revision': data['revision'], 'previous_use_macros': False, 'use_macros': True})
-                            self.assertEqual(settings.status_code, 409, settings.data)
-                            second = web.app.test_client().post('/api/v1/props/trigger', json=payload)
+                            self.assertEqual(settings.status_code, 404, settings.data)
+                            second = web.app.test_client().post(trigger_path, json=payload)
                             self.assertEqual(second.status_code, 409, second.data)
                         read_done = threading.Event()
                         def read_and_edit():
@@ -683,7 +584,8 @@ class PropsFactoryLifecycleTests(unittest.TestCase):
                     history = results['trigger'].get_json()['last_triggered']
                     self.assertEqual(history['revision'], data['revision'])
                     self.assertEqual(history['mode'], 'prop')
-                    self.assertEqual(history['position'], 1)
+                    self.assertEqual(history['position'], None if trigger_kind == 'library' else 1)
+                    self.assertEqual(history['kind'], trigger_kind)
                     self.assertEqual(commands, [(('127.0.0.1', 1400), 'prop/' + prop + '/trigger')])
                     self.assertEqual(web.app.test_client().get('/api/v1/props').get_json()['last_triggered'], history)
                     # History survives another replacement after completion too.

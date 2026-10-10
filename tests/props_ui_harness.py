@@ -23,13 +23,11 @@ def main():
             from test_props import PropsSecurityTests
             fixture = PropsSecurityTests()
             fixture.setUp()
-            fixture.pp.get_json.side_effect = lambda kind: [
+            catalog = lambda kind: [
                 {'id': {'uuid': '4cddf2c5-7355-4347-980c-b13f12cbfa85', 'name': 'Original'}},
                 {'id': {'uuid': 'edfad26c-6b88-4932-a996-497136f2cedf', 'name': 'Closing'}}
-            ] if kind == 'props' else [
-                {'id': {'uuid': '9a87ac44-52d3-483f-a26c-f0b97b8e6281', 'name': 'Welcome macro'}},
-                {'id': {'uuid': '20bc2bfa-df38-448e-83bb-f9eaa1b0a66f', 'name': 'Closing macro'}}
-            ]
+            ] if kind == 'props' else (_ for _ in ()).throw(AssertionError('Unexpected catalog API'))
+            fixture.pp.get_json.side_effect = catalog
             web = fixture.webui
             fixture.cfg['auth_idle_timeout_enabled'] = False
             for p in (patch.object(web.utils, 'save_config', side_effect=lambda value: fixture.cfg.update(value)),
@@ -59,9 +57,14 @@ def main():
                     fixture.store.path.unlink(missing_ok=True)
                     fixture.service._trigger_state.last_triggered = None
                     fixture.pp.reset_mock()
+                    fixture.pp.get_json.side_effect = catalog
                     fixture.pp.get_command.return_value = ''
-                    fixture.cfg['propresenter_props_use_macros'] = False
                     web._set_group_pages(3, ['page:props_configure'])
+                    fixture.service.catalog.refresh_now()
+                    return web.jsonify(ok=True)
+                if web.request.path == '/__props_fixture__/catalog-missing':
+                    fixture.pp.get_json.return_value = []
+                    fixture.pp.get_json.side_effect = None
                     fixture.service.catalog.refresh_now()
                     return web.jsonify(ok=True)
                 if web.request.path == '/__props_fixture__/failure':

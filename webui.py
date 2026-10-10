@@ -226,7 +226,6 @@ except Exception:
         "propresenter_port": 4000,
         "propresenter_timer_index": 2,
         "propresenter_is_latest": True,
-        "propresenter_props_use_macros": False,
         "propresenter_timer_wait_stop_ms": 200,
         "propresenter_timer_wait_set_ms": 600,
         "propresenter_timer_wait_reset_ms": 1000,
@@ -3389,8 +3388,9 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
     verb = str(method or 'GET').upper()
     write = verb in _API_MUTATING_METHODS
 
-    if p == '/api/props' or p.startswith('/api/props/'):
-        setup = p in ('/api/props/library', '/api/props/settings', '/api/props/catalog/refresh')
+    if p in ('/api/props', '/api/props/trigger', '/api/props/library/trigger',
+             '/api/props/library', '/api/props/order', '/api/props/catalog/refresh'):
+        setup = p in ('/api/props/library', '/api/props/catalog/refresh')
         return {'scope': 'props', 'pages': ('page:props_configure' if setup else 'page:props',),
                 **({'service_tokens': False} if setup or p == '/api/props/order' else {})}
     if p.startswith('/api/config/service-tokens'):
@@ -4764,7 +4764,7 @@ def _apply_config_transport_import_locked(zip_path: Path, selected_ids: list[str
                     restored = json.loads(zf.read(member))
                     if not isinstance(restored, dict):
                         raise ValueError('Imported configuration must be an object')
-                    restored['propresenter_props_use_macros'] = utils.get_config().get('propresenter_props_use_macros', False) is True
+                    restored.pop('propresenter_props_use_macros', None)
                     target.write_text(json.dumps(restored, ensure_ascii=False), encoding='utf-8')
                 else:
                     with zf.open(member) as src, target.open('wb') as dst:
@@ -11997,8 +11997,8 @@ def api_set_config():
 
     if not isinstance(new, dict):
         return jsonify(ok=False, error='Configuration must be an object'), 400
-    if 'propresenter_props_use_macros' in new:
-        return jsonify(ok=False, error='Use /api/props/settings to change the Props trigger mode'), 400
+    # Retired legacy setting is inert, including stale Config submissions.
+    new = {key: value for key, value in new.items() if key != 'propresenter_props_use_macros'}
 
     try:
         cfg = copy.deepcopy(utils.get_config())
@@ -12014,6 +12014,7 @@ def api_set_config():
         # Media setup is saved through its validated browser-only editor. The
         # general Config form includes an older full snapshot of hidden keys.
         cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS})
+        cfg.pop('propresenter_props_use_macros', None)
 
         # Legacy: global Routing allow-lists are no longer used (now per Access Level).
         cfg.pop('videohub_allowed_outputs', None)
@@ -12084,8 +12085,7 @@ def api_set_config():
             except Exception:
                 pass
 
-        public_cfg = {key: value for key, value in cfg.items() if key != 'propresenter_props_use_macros'}
-        return jsonify({'ok': True, 'config': public_cfg, 'restart_required': restart_required, 'port': new_port})
+        return jsonify({'ok': True, 'config': cfg, 'restart_required': restart_required, 'port': new_port})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

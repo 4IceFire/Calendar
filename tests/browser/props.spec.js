@@ -1,4 +1,15 @@
 const {test, expect} = require('@playwright/test');
+
+test('Props configuration is direct-only with no retired controls or mode wording', async ({page}) => {
+  await page.goto('/props/configure');
+  await expect(page.locator('#props-page')).toHaveAttribute('aria-busy','false');
+  await expect(page.locator('#props-macros,#props-macro')).toHaveCount(0);
+  await expect(page.locator('#props-page')).not.toContainText(/macro/i);
+  await page.getByRole('button',{name:'Add Prop',exact:true}).click();
+  await expect(page.getByRole('dialog',{name:'Add Prop',exact:true})).not.toContainText(/macro/i);
+  await expect(page.getByRole('dialog').locator('select')).toHaveCount(1);
+  await page.screenshot({path:test.info().outputPath('props-direct-add.png'),fullPage:true});
+});
 const {collectPageErrors, installCommonReadMocks} = require('./helpers');
 
 test.beforeEach(async ({page}) => {
@@ -14,7 +25,7 @@ async function seedLibrary(page) {
   const id = '4cddf2c5-7355-4347-980c-b13f12cbfa85';
   const headers = {'Origin':new URL(process.env.TDECK_BASE_URL).origin, 'X-CSRF-Token':'props-csrf'};
   expect((await page.request.put('/api/props/library', {headers,data:{revision:before.revision,
-    library:[{id,name:'Welcome',prop_uuid:id,macro_uuid:null}],
+    library:[{id,name:'Welcome',prop_uuid:id}],
     organization:{folders:[{id:'service',name:'Service'}],items:[{id,folderId:'service'}]}}})).ok()).toBe(true);
   return id;
 }
@@ -78,7 +89,7 @@ test('running-order rows match Timers controls and persist explicit repeated sel
   const second = 'edfad26c-6b88-4932-a996-497136f2cedf';
   const headers = {'Origin':new URL(process.env.TDECK_BASE_URL).origin,'X-CSRF-Token':'props-csrf'};
   const response = await page.request.put('/api/props/library',{headers,data:{revision:before.revision,
-    library:before.library.map(({id,name,prop_uuid,macro_uuid}) => ({id,name,prop_uuid,macro_uuid})).concat([{id:second,name:'Closing',prop_uuid:second,macro_uuid:null}]),
+    library:before.library.map(({id,name,prop_uuid}) => ({id,name,prop_uuid})).concat([{id:second,name:'Closing',prop_uuid:second}]),
     organization:{folders:before.organization.folders,items:before.organization.items.concat([{id:second,folderId:null}])}}});
   expect(response.ok(), await response.text()).toBe(true);
   await page.reload(); await addPreset(page, second);
@@ -138,7 +149,7 @@ test('picker traps keyboard focus and unavailable presets cannot trigger', async
   const id = await seedLibrary(page);
   const before = await (await page.request.get('/api/props')).json();
   const headers = {'Origin':new URL(process.env.TDECK_BASE_URL).origin,'X-CSRF-Token':'props-csrf'};
-  expect((await page.request.put('/api/props/settings',{headers,data:{revision:before.revision,previous_use_macros:false,use_macros:true}})).ok()).toBe(true);
+  expect((await page.request.post('/__props_fixture__/catalog-missing')).ok()).toBe(true);
   await page.goto('/props');
   await page.getByRole('button',{name:'Add Preset',exact:true}).click();
   await page.keyboard.press('Shift+Tab');
@@ -388,7 +399,9 @@ test('configure mappings then autosave repeated presets, reorder, trigger and re
   await page.reload();
   await expect(page.locator('[data-props-slot]')).toHaveCount(1);
   expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
+  const commandRequest = page.waitForRequest(req => req.url().endsWith('/api/props/trigger') && req.method() === 'POST');
   await page.getByRole('button', {name: 'Trigger preset 1', exact: true}).click();
+  expect(Object.keys((await commandRequest).postDataJSON()).sort()).toEqual(['position','revision']);
   await expect(page.locator('#props-last-triggered')).toContainText('Welcome');
   await page.request.post('/__props_fixture__/failure');
   await page.getByRole('button', {name: 'Trigger preset 1', exact: true}).click();
@@ -404,7 +417,7 @@ test('native dropdown is grouped and never blanks saved slots; folders and frien
   const id = '4cddf2c5-7355-4347-980c-b13f12cbfa85';
   const state = await (await page.request.get('/api/props')).json();
   const headers = {'Origin': new URL(test.info().project.use.baseURL || process.env.TDECK_BASE_URL).origin, 'X-CSRF-Token':'props-csrf'};
-  const library = [{id, name:'Welcome', prop_uuid:id, macro_uuid:null}];
+  const library = [{id, name:'Welcome', prop_uuid:id}];
   const save = await page.request.put('/api/props/library', {headers, data:{revision:state.revision, library, organization:{folders:[{id:'folder-test',name:'Service'}],items:[{id,folderId:'folder-test'}]}}});
   expect(save.ok()).toBe(true);
   await page.goto('/props');
@@ -429,7 +442,7 @@ test('native dropdown is grouped and never blanks saved slots; folders and frien
   await page.screenshot({path:test.info().outputPath('props-grouped.png'),fullPage:true});
 });
 
-test('shared folders use keyboard moves and collapse; macro mode saves without triggering', async ({page}) => {
+test('shared folders use keyboard moves and collapse without triggering', async ({page}) => {
   await page.goto('/props/configure');
   await page.getByRole('button',{name:'Add Prop',exact:true}).click();
   await page.getByLabel('Friendly name', {exact:true}).fill('Welcome');
@@ -448,10 +461,8 @@ test('shared folders use keyboard moves and collapse; macro mode saves without t
   await page.getByRole('button',{name:'Expand or collapse Service',exact:true}).click();
   await expect(page.getByLabel('Friendly name for Welcome',{exact:true})).toBeHidden();
   await page.getByRole('button',{name:'Expand or collapse Service',exact:true}).click();
-  await page.getByLabel('Use Macros for Props',{exact:true}).check();
-  await expect.poll(async () => (await (await page.request.get('/api/props')).json()).use_macros).toBe(true);
   await page.reload();
-  await expect(page.getByLabel('Use Macros for Props',{exact:true})).toBeChecked();
+  await expect(page.getByRole('button',{name:'Expand or collapse Service',exact:true})).toBeVisible();
   expect((await (await page.request.get('/__props_fixture__/health')).json()).calls).toBe(0);
   await page.screenshot({path:test.info().outputPath('props-configure.png'),fullPage:true});
 });
@@ -460,7 +471,7 @@ test('external UUID spelling is retained without showing an available target as 
   const id = '4cddf2c5-7355-4347-980c-b13f12cbfa85';
   const state = await (await page.request.get('/api/props')).json();
   const headers = {'Origin':new URL(test.info().project.use.baseURL || process.env.TDECK_BASE_URL).origin,'X-CSRF-Token':'props-csrf'};
-  const response = await page.request.put('/api/props/library',{headers,data:{revision:state.revision,library:[{id,name:'Welcome',prop_uuid:id.toUpperCase(),macro_uuid:null}],organization:{folders:[],items:[{id}]}}});
+  const response = await page.request.put('/api/props/library',{headers,data:{revision:state.revision,library:[{id,name:'Welcome',prop_uuid:id.toUpperCase()}],organization:{folders:[],items:[{id}]}}});
   expect(response.ok()).toBe(true);
   await page.goto('/props/configure');
   await expect(page.getByLabel('ProPresenter prop for Welcome',{exact:true}).locator('option:checked')).toHaveText('Original');
@@ -500,7 +511,6 @@ test('Configure Props uses compact Timers panel and blank cancellable Add Prop d
     await expect(page.getByLabel('Friendly name',{exact:true})).toBeFocused();
     await expect(page.getByLabel('Friendly name',{exact:true})).toHaveValue('');
     await expect(page.getByLabel('Existing ProPresenter prop',{exact:true})).toHaveValue('');
-    await expect(page.getByLabel('Optional macro',{exact:true})).toHaveValue('');
     if (cancel === 'Cancel') await page.screenshot({path:test.info().outputPath('props-add-blank.png'),fullPage:true});
     await page.getByLabel('Friendly name',{exact:true}).fill('Unsubmitted');
     await page.getByLabel('Existing ProPresenter prop',{exact:true}).selectOption('4cddf2c5-7355-4347-980c-b13f12cbfa85');
@@ -522,7 +532,6 @@ test('compact library rows label editable mappings and outline blocked used Dele
   const row = page.locator('.props-row').first();
   await expect(row.getByText('Friendly name',{exact:true})).toBeVisible();
   await expect(row.getByText('ProPresenter prop',{exact:true})).toBeVisible();
-  await expect(row.getByText('Optional macro',{exact:true})).toBeVisible();
   const remove = page.getByRole('button',{name:'Delete mapping Welcome',exact:true});
   await expect(remove).toHaveText('Delete');
   await expect(remove).toHaveClass('btn btn-sm btn-outline-danger');
@@ -583,7 +592,6 @@ for (const outcome of ['success','failure','failure-fallback']) {
     } else {
       await expect(picker.getByRole('alert')).toContainText('Nothing was retried');
       await expect(page.getByLabel('Existing ProPresenter prop',{exact:true})).toHaveValue('');
-      await expect(page.getByLabel('Optional macro',{exact:true})).toHaveValue('');
       await expect(page.getByLabel('Existing ProPresenter prop',{exact:true})).toBeFocused();
       await expect(page.getByRole('button',{name:'Add mapping',exact:true})).toBeEnabled();
       await page.keyboard.press('Escape'); await expect(picker).toBeHidden(); await expect(add).toBeFocused();
@@ -616,23 +624,17 @@ test('duplicate prop submission is rejected without rewriting existing mapping o
 });
 
 
-test('explicit Add Prop saves macro reference and supports native macro editing and unused deletion', async ({page}) => {
+test('explicit Add Prop saves only direct identity and supports unused deletion', async ({page}) => {
   const errors = collectPageErrors(page);
   await page.goto('/props/configure');
   await page.getByRole('button',{name:'Add Prop',exact:true}).click();
   await page.getByLabel('Friendly name',{exact:true}).fill('Welcome');
   await page.getByLabel('Existing ProPresenter prop',{exact:true}).selectOption('4cddf2c5-7355-4347-980c-b13f12cbfa85');
-  await page.getByLabel('Optional macro',{exact:true}).selectOption('9a87ac44-52d3-483f-a26c-f0b97b8e6281');
   expect((await (await page.request.get('/api/props')).json()).library).toEqual([]);
   await page.getByRole('button',{name:'Add mapping',exact:true}).click();
   await expect(page.getByRole('dialog',{name:'Add Prop',exact:true})).toBeHidden();
-  await expect(page.getByLabel('Macro for Welcome',{exact:true})).toHaveValue('9a87ac44-52d3-483f-a26c-f0b97b8e6281');
   const saved = (await (await page.request.get('/api/props')).json()).library[0];
-  expect(saved.macro_uuid).toBe('9a87ac44-52d3-483f-a26c-f0b97b8e6281');
-  await page.getByLabel('Macro for Welcome',{exact:true}).selectOption('20bc2bfa-df38-448e-83bb-f9eaa1b0a66f');
-  await expect.poll(async () => (await (await page.request.get('/api/props')).json()).library[0].macro_uuid).toBe('20bc2bfa-df38-448e-83bb-f9eaa1b0a66f');
-  await page.getByLabel('Macro for Welcome',{exact:true}).selectOption('');
-  await expect.poll(async () => (await (await page.request.get('/api/props')).json()).library[0].macro_uuid).toBe(null);
+  expect(Object.keys(saved).sort()).toEqual(['available','id','name','prop_uuid','unavailable_reason']);
   await page.getByRole('button',{name:'Delete mapping Welcome',exact:true}).click();
   await expect(page.locator('.props-row')).toHaveCount(0);
   expect((await (await page.request.get('/api/props')).json()).library).toEqual([]);

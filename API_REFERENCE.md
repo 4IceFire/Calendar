@@ -12,61 +12,71 @@ This document lists the HTTP API endpoints implemented by the Flask Web UI serve
 ## Props library and running order
 
 Every path below also has `/api/v1/props...` aliases returning
-`X-TDeck-API-Version: 1`. Browser writes require CSRF and same-origin checks;
+`X-TDeck-API-Version: 1`. Browser writes require CSRF and trusted origin;
 standard API request-size/rate limits apply. No anonymous legacy bypass exists.
 `page:props` grants running-order editing and triggering. `page:props_configure`
 is subordinate to Props, with union-group semantics and full Admin access.
-No new non-admin grants are assigned automatically. The protected mode key
-`propresenter_props_use_macros` is omitted from general config responses and
-rejected by general config writes; App config import preserves the target mode.
-Change it only through the revision-checked Props settings endpoint. Setup and
-order writes are browser-only; automation uses `props` scope for triggering and
-`props` or `read`
-for reads. Path constraints still apply. Never retry an uncertain trigger.
+No new non-admin grants are assigned automatically. Library/order saves and catalog-refresh writes
+are browser-only. Tokens use `props` for triggers and `props` or `read` for reads;
+path constraints still apply. Never retry an uncertain trigger.
 
 | Method and path | Access | Request / response |
 | --- | --- | --- |
-| `GET /api/props` | Props session or read/props token | `{ok,version,revision,library,order,organization,presets,catalog,use_macros,last_triggered}`. Each ordered preset has 1-based `position`, stable library `id`, friendly `name`, `available`, `unavailable_reason`, retained `prop_uuid` and optional `macro_uuid`. Empty order is valid; repeated library IDs are allowed in order. |
-| `PUT /api/props/order` | Props browser session | Exact JSON `{revision,order:["<library UUID>",...]}`. Returns the complete current state with a new revision. Reorder/removal changes positions, never library UUIDs. |
-| `PUT /api/props/library` | Configure Props browser session | Exact JSON `{revision,library:[{id,name,prop_uuid,macro_uuid}],organization:{folders:[{id,name,order?}],items:[{id,folderId,order?}]}}`. Canonical lowercase UUIDs for library IDs; external prop/macro UUIDs must be hyphenated UUID strings and retain their supplied case. `macro_uuid:null` allowed. One mapping per distinct PP prop UUID. New/changed targets must exist in a successful current catalog; unchanged unavailable mappings may be retained. All library IDs must occur once in organization. Referenced mappings cannot be deleted. Returns complete state with fresh revision. |
-| `POST /api/props/catalog/refresh` | Configure Props browser session | No payload required. Returns complete cached state immediately and starts one background refresh, subject to backoff; poll GET for completion. Never sends a trigger. |
-| `PUT /api/props/settings` | Configure Props browser session | Exact JSON `{use_macros:<boolean>,previous_use_macros:<boolean>,revision:"<current revision>"}`. Explicit compare-and-save mode; conflicts if another editor changed it. Returns full state with a new revision, preserves timer-version configuration. |
-| `POST /api/props/trigger` | Props browser session or props token | Exact JSON `{position:<positive integer>,revision:"<GET revision>",use_macros:<GET mode boolean>}`. Returns `{ok:true,last_triggered:{position,id,name,revision,mode,at}}` only after a successful PP HTTP response. One selected target, no clearing, no fallback/replay. |
+| `GET /api/props` | Props session or read/props token | `{ok,version:2,revision,library,order,organization,presets,catalog,use_macros:false,last_triggered}`. Each preset has 1-based `position`, stable library `id`, friendly `name`, `prop_uuid`, `available`, and nullable `unavailable_reason`. Empty order and repeated library IDs are valid. |
+| `PUT /api/props/order` | Props browser session | Exact JSON `{revision,order:["<library UUID>",...]}`. Returns complete state with a fresh revision. Reorder/removal shifts positions, never library UUIDs. |
+| `PUT /api/props/library` | Configure Props browser session | Exact JSON `{revision,library:[{id,name,prop_uuid}],organization:{folders:[{id,name,order?}],items:[{id,folderId,order?}]}}`. Library IDs are canonical lowercase UUIDs; external prop UUIDs are hyphenated UUID strings with supplied case preserved. One mapping per distinct PP prop UUID. New/changed targets must exist in a successful current catalog; unchanged unavailable mappings may be retained. Organization contains each library ID once. Referenced mappings cannot be deleted. Returns complete state with a fresh revision. |
+| `POST /api/props/catalog/refresh` | Configure Props browser session | No payload required. Returns cached state immediately and starts one background refresh, subject to backoff; poll GET for completion. Never triggers. |
+| `POST /api/props/trigger` | Props browser session or props token | Exact canonical JSON `{position:<positive integer>,revision:"<GET revision>"}`. Returns `{ok:true,last_triggered:{kind:"preset",position,id,name,revision,mode:"prop",at}}` only after successful PP HTTP response. One direct prop, no clearing, fallback or replay. |
+| `POST /api/props/library/trigger` | Props browser session or props token | Exact JSON `{id:"<saved library UUID>",revision:"<GET revision>"}`. Triggers one saved mapping independently of the running order (even when empty). Returns `{ok:true,last_triggered:{kind:"library",position:null,id,name,revision,mode:"prop",at}}`. Raw ProPresenter targets, lists, extra fields, missing/deleted mappings and unavailable targets are rejected. Stale revision or another command in progress returns 409; no retry. |
 
-`library` contains the mapping fields plus `available`/`unavailable_reason`.
-`order` contains stable library IDs; `presets` resolves them into numbered slots.
-`organization` is shared presentation metadata, never a grant. `catalog` has
-`props` and `macros` arrays of `{uuid,name}`, plus `stale`, `refreshing`,
-`sampledAt`, `ageMs`, `lastError` and `consecutiveFailures`. First reads may be
-empty/stale while refreshing. Failed refresh retains the last successful catalog
-and fails closed for triggering; expiry refreshes are shared across clients.
+`library` contains canonical mapping fields plus availability. `order` contains
+stable IDs; `presets` resolves numbered slots. Organization is presentation
+metadata, never authorization. TDeck selectors alphabetize displayed names case-insensitively with exact-name/identity ties, inside existing folder groups; storage and running-order positions remain unchanged. `catalog` contains only `props:[{uuid,name}]`,
+plus `stale`, `refreshing`, `sampledAt`, `ageMs`, `lastError` and
+`consecutiveFailures`. First reads may be empty/stale while refreshing. Discovery
+never requests a Macros catalog. Failed refresh retains last-successful data and
+fails closed for triggering; expiry refreshes are shared and nonblocking.
 
-`last_triggered` is null initially. It records the **last successfully triggered**
-slot's historical position, library ID/name, revision, mode (`prop`/`macro`) and
-UTC timestamp; it is not actual active visibility. A failed/uncertain command
-retains it. Order edits can renumber slots, so feedback consumers must compare the
-record's revision and position, not treat its old position as current; repeated
-slots may share a library ID. Process restart resets this runtime record.
-Endpoint changes through Config save/import replace the endpoint-bound catalog,
-not the command guard/history for that Props storage. Until an in-flight command
-finishes, further triggers and Props settings return 409 even across A → B → A
-endpoint changes. Reads and order edits remain nonblocking during hardware I/O.
-The accepted command keeps its captured endpoint, UUID spelling, revision and
-mode; completion remains visible in current feedback, without replay.
+`last_triggered` is null initially and otherwise historical successful HTTP
+acceptance, not actual active visibility. Its mode is always `prop`; `kind` is `preset` with a numbered position or `library` with `position:null`. Individual commands never match numbered-preset success feedback. Clients may accept older numbered history without `kind`. Failed or
+uncertain commands retain the previous record. Feedback must compare revision
+and position, not merely library ID; order changes invalidate positional
+feedback. Restart resets this process-local record. Endpoint config saves/imports
+replace the catalog/client, not storage-scoped command guards/history. Further
+triggers return 409 during in-flight hardware I/O even across A → B → A endpoint
+changes. Reads and order edits stay nonblocking; the accepted target and endpoint
+are captured atomically with revision validation and never remapped or replayed.
 
-Module integration: poll `GET /api/v1/props`; populate actions from `presets` and
-show availability. On a user trigger, send its position with that snapshot's
-revision and `use_macros`. Refresh on 409; do not silently retry a trigger or remap
-it to the new position. On network timeout/502, outcome is uncertain: read feedback
-and ask the operator, never automatically replay. Successful PP HTTP acceptance
-does not verify physical visibility. No ProPresenter version compatibility claim
-is made until approved hardware tests are completed.
+### Retired Macros compatibility and migration
 
-Errors: `400 {ok:false,error}` invalid/missing targets, out-of-range/noninteger
-positions, invalid schema/limits, referenced deletion; `409` stale revisions/mode
-or an in-flight trigger; `502` PP trigger failed/unknown; `503` corrupt/unreadable
-storage. Central security additionally uses 401/403/413/429. All mutations,
-triggers and catalog completion are recorded in Activity Log without secrets.
+There is no Props settings endpoint or enabled execution mode. The old config
+key `propresenter_props_use_macros` is inert, omitted from Config reads, and
+stripped on normalized config save/import. Timer `propresenter_is_latest` is
+untouched. For installed Companion 0.5.0, GET retains a deprecated constant
+`use_macros:false` and trigger POST optionally accepts that exact boolean false
+field. True, null, numeric/string values and unknown fields are rejected, not
+interpreted as modes. Companion 0.5.1 sends only `{position,revision}`; it rejects
+older enabled-mode servers and non-direct history before triggering.
+
+Storage reads fully validate version-1 documents (including legacy `macro_uuid`
+values) and normalize to version 2 in memory without writing. Deliberate
+library/order saves and validated imports persist `{id,name,prop_uuid}` only,
+with a fresh revision and unchanged stable IDs, names, prop UUID spelling,
+ordered references and canonical folder metadata. Corrupt legacy data fails
+closed, never resets. Old browser library payloads with retired fields are
+rejected; reload before editing. No migration triggers a device action.
+
+Companion 0.5.2 polls state and offers separate numbered-preset and individual saved-library actions. The latter sends one stable library ID plus its snapshot revision, never a raw PP resource; add separate buttons/actions for a few dedicated Props. Numbered action/option IDs and feedbacks are unchanged. Older app snapshots without a library retain numbered support, and an unsupported individual endpoint fails without fallback. Module integration sends the selected position or library ID plus its snapshot revision.
+A 409 requires read refresh but fails the original action: never remap or retry.
+Network/timeout/502 outcomes remain uncertain. The user reported direct Props
+working on ProPresenter 17.1; the agent has not reproduced that hardware test,
+and fake-hardware tests do not establish compatibility with other versions.
+
+Errors: `400 {ok:false,error}` for invalid fields/targets/limits or referenced
+deletion; `409` stale revision or in-flight trigger; `502` PP trigger failed or
+unknown; `503` corrupt/unreadable storage. Removed settings paths are 404. Central
+security also uses 401/403/413/429. Activity Log records mutations, catalog
+completion and explicit trigger outcomes without secrets.
 
 ## Shared Admin default views
 

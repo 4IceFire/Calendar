@@ -83,7 +83,7 @@ Click **Add Preset** to open a blank native, folder-grouped library dropdown.
 Nothing is preselected: selecting a mapping explicitly adds it and saves the
 chosen library reference automatically. Cancel or Escape closes the picker
 without changing the order. Both Props pages use native dropdown selection,
-including browser type-to-select; there are no separate search fields. The Add
+including browser type-to-select; there are no separate search fields. Displayed Prop choices sort alphabetically, case-insensitively, with exact-name then stable-ID ties. Add Preset/change-slot choices sort within each existing folder optgroup; Configure Props Add/edit ProPresenter targets also sort by their displayed names. Sorting changes presentation only, never stored organization, folder order, running presets or selected identities. The Add
 button is disabled while the library is empty; Configure Props (when permitted)
 provides the setup link. A failed/conflicting save leaves a readable picker and
 current order; nothing is automatically retried.
@@ -96,14 +96,16 @@ never trigger or clear props. Last successfully triggered is historical feedback
 not the currently visible/active prop, and resets after a process restart.
 Config endpoint saves/imports refresh endpoint-bound catalogs but retain the
 trigger guard and history for the same Props storage. While a command is in
-flight, settings and additional triggers return 409 even if the endpoint changes
+flight, additional triggers return 409 even if the endpoint changes
 away and back. Reads/order edits stay responsive; the command uses its captured
 endpoint and exact target, and its completion remains visible without replay.
+
+Companion 0.5.2 adds **Trigger Individual Saved Prop** separately from **Trigger Prop Preset**. Choose one friendly saved-library mapping per action; it follows that stable ID independently of the numbered order, even when the order is empty. Add separate buttons/actions for a few dedicated Props. `POST /api/props/library/trigger` (also `/api/v1/props/library/trigger`) accepts exactly `{id,revision}` with Props browser authority or a `props` token. It rejects stale revisions (409), missing/deleted/unavailable mappings and raw resource/bulk payloads without fallback or replay. Both trigger types share the same guard and history. Individual history has `kind:"library", position:null`; numbered history has `kind:"preset"` and its position, so an individual command cannot light numbered last-success feedback.
 
 The small **Configure Props** button opens `/props/configure`. It manages TDeck
 mappings and shared collapsible folders, not ProPresenter resources. Its compact
 Timers-style library panel has an **Add Prop** button: open a blank dialog, give
-it a friendly name, choose an existing prop and optionally a macro, then submit
+it a friendly name, choose an existing prop, then submit
 **Add mapping** explicitly. Open, selection, Cancel and Escape do not save a new
 mapping. Existing row edits autosave on change. Both dialogs isolate background
 navigation and trap focus while open, including pending saves; failures keep
@@ -114,21 +116,20 @@ catalog drag/touch/keyboard pattern; deleting a folder moves its mappings to roo
 
 Permissions → Groups has top-level **Props** access (edit/rearrange/add/remove and
 trigger) and subordinate **Configure Props** inside the Props tab (library,
-folders and mode). Configure requires Props access, combining grants across groups.
+folders). Configure requires Props access, combining grants across groups.
 Admin has all access; neither grant is assigned automatically to other groups.
-Library, order editing, catalog refresh and settings APIs are browser-session only.
+Library, order editing and catalog refresh APIs are browser-session only.
 Automation can read/trigger using a `props` service-token scope; generic `read`
 tokens can read but cannot trigger. These endpoints never use anonymous legacy access.
 
-**Use Macros for Props** defaults to false (`propresenter_props_use_macros`),
-independent of `propresenter_is_latest` for timers. Direct mode uses only the prop
-UUID; macro mode uses only the optional macro UUID. Missing/unavailable targets
-fail closed. There is no fallback after an uncertain direct response and no
-automatic retry of a trigger. Existing `propresenter_ip`/`propresenter_port` apply.
-The official API contract is GET `/v1/props`, GET `/v1/macros`, and GET
-`/v1/prop/{uuid}/trigger` or `/v1/macro/{uuid}/trigger`. No resource creation,
-editing, deletion or clearing is sent. Older/newer ProPresenter compatibility
-has **not** been verified; fixture tests are not hardware compatibility claims.
+Props now always triggers the selected prop directly. Missing/unavailable targets
+fail closed. There is no clearing, fallback or automatic retry. Existing
+`propresenter_ip`/`propresenter_port` apply; `propresenter_is_latest` and all timer
+workarounds are unchanged. Discovery reads only `/v1/props`; commands use
+`/v1/prop/{uuid}/trigger`. No resource creation, editing or deletion is sent.
+The user reported direct Props working with ProPresenter **17.1**; this agent
+has not independently reproduced that hardware test. Isolated fixture results
+are not claims of compatibility with every ProPresenter version.
 
 Configure entry and **Refresh catalog** start a nonblocking, single-flight
 refresh with shared last-successful data, stale/error status and failure backoff.
@@ -139,21 +140,36 @@ Revision checks reject stale saves/triggers; browser requests are serialized and
 stale asynchronous reads cannot overwrite newer edits. Re-read after an uncertain
 response; never replay an uncertain trigger.
 
-`props.py` stores version-1 `props.json` atomically next to the configured config
+`props.py` stores version-2 `props.json` atomically next to the configured config
 file (override with `TDECK_PROPS_FILE`); limits are 500 mappings, slots and folders,
 120-character friendly/folder names and 1 MiB storage. Corruption fails closed,
 not an empty/reset catalog. Config export/import includes **Props library and
 running order**; imports validate and atomically replace it with a fresh revision.
-The macro setting is protected: general config reads omit it, general config
-writes reject it, and App config import preserves the target instance's mode.
-Change it only through Configure Props; group grants travel with Users database.
+Legacy version-1 storage is fully validated, then normalized in memory to
+`{id,name,prop_uuid}` mappings. GET never rewrites it. The next deliberate
+library/order save or Props import persists version 2 with a fresh revision,
+removing only retired `macro_uuid` references while preserving stable library
+IDs, exact names/prop UUID spelling, duplicate order slots and canonical folders.
+Malformed legacy data fails closed rather than being reset. Back up the original
+file before rollout; no startup migration sends a device command.
+
+Macros support, selectors, toggle, discovery, execution and settings routes are
+removed. The legacy `propresenter_props_use_macros` config key is inert and omitted
+from Config reads; normalized config saves/imports strip it. For installed
+Companion 0.5.0 compatibility, Props GET keeps a deprecated constant
+`use_macros:false`. Trigger POST uses `{position,revision}` and also accepts only
+an optional exact boolean `use_macros:false`; true, null and other values fail.
+Reload an old browser before library edits: old `macro_uuid` save payloads are
+rejected. Content-hashed assets and revalidated HTML deliver the updated UI.
+Group grants travel with Users database.
 Runtime catalog and last-trigger feedback are not exported. Keep local Props
 storage ignored by Git and out of Docker builds.
 
 Tests (fakes only; never point them at real ProPresenter):
 
 ```sh
-.venv/bin/python -m unittest discover -s tests -p test_props.py -v
+.venv/bin/python -m unittest discover -s tests -p 'test_props*.py' -v
+node --test tests/props_choices.test.cjs tests/props_history.test.cjs
 # Separate terminal: uses temporary auth/data, blocks outbound traffic, chooses a free port.
 .venv/bin/python tests/props_ui_harness.py --ready-file "$TMPDIR/props-ready.json"
 # Set TDECK_BASE_URL to the URL in the ready file, then:
