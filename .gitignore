@@ -31,3 +31,4 @@ pixie_secrets.json
 
 auth.db
 .DS_Store
+companion_surfaces.json

@@ -1,26 +1,31 @@
 {
   "surfaces": [
     {
-      "id": "test-surface",
-      "label": "Test",
+      "id": "emulator",
+      "label": "Monitor",
+      "layout": "4x8"
+    },
+    {
+      "id": "serviceproducer",
+      "label": "SP",
       "layout": "3x5"
     },
     {
-      "id": "test-2",
-      "label": "Another Test",
-      "layout": "2x5"
+      "id": "lighting",
+      "label": "Lighting iPad",
+      "layout": "3x5"
     }
   ],
   "surface_controls": [
     {
-      "id": "test-surface",
-      "surface_id": "test-surface",
+      "id": "lighting",
+      "surface_id": "lighting",
       "label": "Left display",
       "size": "1"
     },
     {
-      "id": "test-2",
-      "surface_id": "test-2",
+      "id": "serviceproducer",
+      "surface_id": "serviceproducer",
       "label": "Right display",
       "size": "1"
     }
