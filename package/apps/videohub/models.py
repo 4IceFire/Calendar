@@ -8,18 +8,18 @@ from typing import Any
 class VideohubRoute:
     """A single route mapping.
 
-    Stored as 1-based numbers for user convenience.
+    Stored as 1-based numbers for user convenience; input=None means Ignore.
     Converted to 0-based when sent to the VideoHub protocol.
     """
 
     output: int
-    input: int
+    input: int | None
     monitoring: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "output": int(self.output),
-            "input": int(self.input),
+            "input": None if self.input is None else int(self.input),
         }
         # Keep storage compact: only persist when a route targets the monitoring table.
         if bool(self.monitoring):

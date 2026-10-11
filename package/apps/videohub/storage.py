@@ -30,7 +30,8 @@ def _coerce_route(value: Any) -> VideohubRoute | None:
 
     try:
         output = int(value.get("output"))
-        input_ = int(value.get("input"))
+        # Only an explicit JSON null means Ignore; a missing input is invalid.
+        input_ = None if "input" in value and value["input"] is None else int(value.get("input"))
     except Exception:
         return None
 
@@ -39,7 +40,7 @@ def _coerce_route(value: Any) -> VideohubRoute | None:
     except Exception:
         monitoring = False
 
-    if output <= 0 or input_ <= 0:
+    if output <= 0 or (input_ is not None and input_ <= 0):
         return None
 
     return VideohubRoute(output=output, input=input_, monitoring=monitoring)

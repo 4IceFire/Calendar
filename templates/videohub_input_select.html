@@ -152,7 +152,7 @@ function _vhiLoadDraft(){
   try{ data = JSON.parse(raw); }catch(e){ data = null; }
   if(!data || !Array.isArray(data.routing)) throw new Error('Invalid draft data');
   _vhiDraft = data;
-  const cur = parseInt(data.routing[_vhiOutput - 1], 10) || 1;
+  const cur = data.routing[_vhiOutput - 1] === null ? null : (parseInt(data.routing[_vhiOutput - 1], 10) || 1);
   _vhiSelectedInput = cur;
 }
 
@@ -177,7 +177,7 @@ function _vhiRenderHeader(){
   const curEl = document.getElementById('vhi-current-input');
   const cancelEl = document.getElementById('vhi-cancel');
   if(outTitle) outTitle.textContent = _vhiFmtLabel(_vhiLabels.outputs, _vhiOutput);
-  if(curEl) curEl.textContent = `Current: ${_vhiFmtLabel(_vhiLabels.inputs, _vhiSelectedInput)}`;
+  if(curEl) curEl.textContent = _vhiSelectedInput === null ? 'Ignore — keep current routing' : `Current: ${_vhiFmtLabel(_vhiLabels.inputs, _vhiSelectedInput)}`;
   if(cancelEl){
     const q = new URLSearchParams();
     q.set('room', _vhiRoom);
@@ -191,7 +191,7 @@ function _vhiRenderGrid(){
   const host = document.getElementById('vhi-grid');
   if(!host) return;
   const items = _vhiVisibleInputs();
-  host.innerHTML = items.map((n) => {
+  host.innerHTML = `<button class="vhi-card ${_vhiSelectedInput === null ? 'active' : ''}" type="button" data-input="ignore">Ignore — keep current routing</button>` + items.map((n) => {
     const active = parseInt(_vhiSelectedInput, 10) === parseInt(n, 10);
     return `<button class="vhi-card ${active ? 'active' : ''}" type="button" data-input="${n}">${_safeHtml(_vhiFmtLabel(_vhiLabels.inputs, n))}</button>`;
   }).join('');
@@ -200,7 +200,7 @@ function _vhiRenderGrid(){
 function _vhiSaveDraftAndReturn(){
   if(!_vhiDraft || !_vhiCanEdit) return;
   while(_vhiDraft.routing.length < _vhiOutput){ _vhiDraft.routing.push(_vhiDraft.routing.length + 1); }
-  _vhiDraft.routing[_vhiOutput - 1] = parseInt(_vhiSelectedInput, 10) || 1;
+  _vhiDraft.routing[_vhiOutput - 1] = _vhiSelectedInput === null ? null : (parseInt(_vhiSelectedInput, 10) || 1);
   _vhiDraft.dirty = true;
   _vhiDraft.ts = Date.now();
   try{
@@ -219,6 +219,12 @@ function _vhiWireUI(){
     grid.addEventListener('click', (ev) => {
       const btn = ev.target.closest('button[data-input]');
       if(!btn) return;
+      if(btn.dataset.input === 'ignore'){
+        _vhiSelectedInput = null;
+        _vhiRenderHeader();
+        _vhiRenderGrid();
+        return;
+      }
       const n = parseInt(btn.dataset.input || '', 10);
       if(!Number.isFinite(n) || n <= 0) return;
       _vhiSelectedInput = n;

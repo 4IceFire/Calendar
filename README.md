@@ -226,6 +226,32 @@ longer requires the CLI. See `API_REFERENCE.md` for the complete migration
 sequence, temporary expiring legacy flag, v1 endpoint aliases, limits, and
 scope semantics.
 
+### VideoHub preset outputs: Ignore
+
+On **VideoHub** (`/videohub`), open a preset and click an output in its room.
+Choose **Ignore — keep current routing**, then **Confirm** and **Save Preset**.
+Ignored outputs have a dashed marker and show the Ignore label instead of an
+input number. The choice is always available, including with filtered inputs;
+selecting a normal input replaces it. Cancel leaves the draft unchanged.
+
+Ignore saves explicit `input: null`, not a snapshot of the current input.
+Applying from the browser, API, scheduler or Companion leaves ignored outputs
+alone, while other routes still execute and retain their normal readback checks.
+All-ignore presets succeed as no-ops. Existing presets, IDs, folders, locks and
+access rules remain unchanged; no migration or Companion module update is needed.
+**Save From Device** remains a snapshot of actual input numbers.
+
+Regression and isolated fake-device browser checks:
+```bash
+.venv/bin/python -m unittest discover -s tests -p test_videohub_ignore.py -v
+node --test tests/videohub_ignore.test.cjs
+.venv/bin/python tests/videohub_ignore_ui_harness.py --ready-file <private-scratch>/vh-ignore-ready.json
+# Use the loopback URL in the ready file, never staging or production:
+TDECK_BASE_URL=http://127.0.0.1:<fixture-port> npx playwright test tests/browser/videohub_ignore.spec.js --workers=1
+```
+The browser spec requires the isolated fixture marker and runs on desktop
+Chromium/Firefox/WebKit and mobile Chromium/WebKit emulations.
+
 ### Groups and testing user access
 
 **VideoHub** presets and **Permissions → Groups** support shared folders and manual ordering.

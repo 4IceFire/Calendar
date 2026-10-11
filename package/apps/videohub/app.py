@@ -74,14 +74,9 @@ class VideohubApp(AppBase):
             for r in raw_routes:
                 if not isinstance(r, dict):
                     continue
-                try:
-                    out_n = int(r.get("output"))
-                    in_n = int(r.get("input"))
-                except Exception:
-                    continue
-                if out_n <= 0 or in_n <= 0:
-                    continue
-                routes_in.append(VideohubRoute(output=out_n, input=in_n, monitoring=bool(r.get("monitoring", r.get("monitor", False)))))
+                route = storage._coerce_route(r)
+                if route is not None:
+                    routes_in.append(route)
 
         # Update if id exists, else create with next id
         if target_id is not None:
@@ -143,15 +138,14 @@ class VideohubApp(AppBase):
         if preset is None:
             raise KeyError("preset not found")
 
-        vh = get_videohub_client_from_config(cfg)
-        if vh is None:
-            raise ValueError("VideoHub not configured (set videohub_ip)")
-
         # group into monitoring vs primary blocks
         primary: list[tuple[int, int]] = []
         monitoring: list[tuple[int, int]] = []
 
         for r in preset.routes or []:
+            if r.input is None:
+                # Ignore means no write (including monitoring), not a snapshot.
+                continue
             # stored as 1-based -> protocol 0-based
             out_idx = int(r.output) - 1
             in_idx = int(r.input) - 1
@@ -161,6 +155,14 @@ class VideohubApp(AppBase):
                 monitoring.append((out_idx, in_idx))
             else:
                 primary.append((out_idx, in_idx))
+
+        # All-ignore presets succeed without a device or any hardware access.
+        # Retain the legacy configuration check for empty presets.
+        vh = None
+        if primary or monitoring or not preset.routes:
+            vh = get_videohub_client_from_config(cfg)
+            if vh is None:
+                raise ValueError("VideoHub not configured (set videohub_ip)")
 
         if primary:
             vh.route_video_outputs(routes=primary, monitoring=False)
@@ -196,7 +198,8 @@ class VideohubApp(AppBase):
         return {
             "id": preset.id,
             "name": preset.name,
-            "routes": len(preset.routes or []),
+            "routes": len(primary) + len(monitoring),
+            "ignored": sum(r.input is None for r in preset.routes or []),
             "applied": True,
         }
 

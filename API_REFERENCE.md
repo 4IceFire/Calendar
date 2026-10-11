@@ -646,12 +646,14 @@ Timer selection is either:
   "name": "Sunday Service",
   "locked": false,
   "routes": [
-    {"output": 1, "input": 4, "monitoring": false}
+    {"output": 1, "input": 4, "monitoring": false},
+    {"output": 2, "input": null}
   ]
 }
 ```
 - **Notes:**
-  - Presets save **numbers only**; names/labels are fetched separately.
+  - Presets save 1-based output/input numbers; names/labels are fetched separately. An explicit `"input": null` means **Ignore — keep current routing** for that output (including monitoring routes). Missing inputs, zero/negative inputs and the string `"ignore"` are not Ignore values; they retain the existing invalid-route filtering behavior.
+  - Ignore persists unchanged through list/update/lock/folder operations and never captures the current device input. Existing positive-input presets need no migration. The direct `/api/videohub/route` endpoint still requires a positive input; Ignore belongs only to saved presets.
   - `locked=true` prevents updates/deletes until unlocked.
 
 ### Presets: update
@@ -681,7 +683,8 @@ Timer selection is either:
 ### Presets: apply (Companion → WebUI)
 - **POST** `/api/videohub/presets/<id>/apply`
 - **Body:** none required.
-- **Returns:** `{ ok: true, result: {...} }`
+- **Returns:** `{ ok: true, result: {id, name, routes, ignored, applied: true} }`; `routes` counts real routes sent and `ignored` counts skipped entries (zero for existing presets).
+- Browser, API/v1, scheduler and Companion triggers use the same backend. Ignored outputs receive no routing command; consolidated primary readback verifies only real writes. All-ignore presets are successful no-ops, even without a configured device, with normal authorization, write reservation and Activity Logging intact. Empty legacy presets retain their existing configuration check.
 
 ---
 

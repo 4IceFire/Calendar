@@ -60,6 +60,7 @@
     box-shadow: 0 2px 4px rgba(0,0,0,.08);
   }
   .vh-marker:disabled{ opacity: .7; cursor: default; }
+  .vh-marker-ignore{ border-style: dashed; border-color: var(--bs-secondary-color); width: 140px; max-width: 40%; }
   .vh-marker-title{ font-weight: 600; font-size: .78rem; line-height: 1.15; display: block; }
   .vh-marker-sub{ font-size: .68rem; color: var(--bs-secondary-color); line-height: 1.15; display: block; }
   @media (max-width: 992px){
@@ -209,6 +210,10 @@ function _vhRoutesFromRouting(){
   _vhEnsureRoutingLen();
   const routes = [];
   for(let o = 1; o <= _vhRouting.length; o++){
+    if(_vhRouting[o - 1] === null){
+      routes.push({output: o, input: null});
+      continue;
+    }
     const inp = parseInt(_vhRouting[o - 1], 10);
     if(Number.isFinite(inp) && inp > 0) routes.push({output: o, input: inp});
   }
@@ -228,8 +233,8 @@ function _vhRoutingFromPreset(p){
     for(const r of p.routes){
       const o = parseInt(r.output, 10);
       const inp = parseInt(r.input, 10);
-      if(Number.isFinite(o) && o > 0 && Number.isFinite(inp) && inp > 0 && (o - 1) < routing.length){
-        routing[o - 1] = inp;
+      if(Number.isFinite(o) && o > 0 && (r.input === null || (Number.isFinite(inp) && inp > 0)) && (o - 1) < routing.length){
+        routing[o - 1] = r.input === null ? null : inp;
       }
     }
   }
@@ -285,7 +290,7 @@ function _vhTryLoadDraftFromQuery(){
   _vhCurrentId = (data.id == null) ? null : parseInt(data.id, 10);
   _vhCurrentName = String(data.name || '');
   _vhLocked = !!data.locked;
-  _vhRouting = data.routing.map((x) => parseInt(x, 10) || 1);
+  _vhRouting = data.routing.map((x) => x === null ? null : (parseInt(x, 10) || 1));
   _vhRoomId = String(data.room_id || 'unassigned');
   _vhSetDirty(!!data.dirty);
   return true;
@@ -387,11 +392,12 @@ function _vhRenderRooms(){
       y = p.y;
     }
     const outLabel = _vhFmtLabel(_vhLabels.outputs, o);
+    const ignored = _vhRouting[o - 1] === null;
     const inputNum = parseInt(_vhRouting[o - 1], 10) || 1;
-    const inLabel = _vhFmtLabel(_vhLabels.inputs, inputNum);
+    const inLabel = ignored ? 'Ignore — keep current routing' : _vhFmtLabel(_vhLabels.inputs, inputNum);
 
     const btn = document.createElement('button');
-    btn.className = 'vh-marker';
+    btn.className = ignored ? 'vh-marker vh-marker-ignore' : 'vh-marker';
     btn.type = 'button';
     btn.style.left = `${Math.max(0, Math.min(100, x))}%`;
     btn.style.top = `${Math.max(0, Math.min(100, y))}%`;
