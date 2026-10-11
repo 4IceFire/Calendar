@@ -108,6 +108,75 @@ class MediaRoutingTests(unittest.TestCase):
     def display(self, **options):
         return self.manager.display("image-1", 1, on_complete=self.completed, **options)
 
+    def test_batch_reserves_all_outputs_and_never_overwrites_earlier_images(self):
+        self.manager.display_batch([{'media_id': 'image-1', 'output': 1},
+                                    {'media_id': 'image-2', 'output': 2}],
+                                   before_routes=lambda: None, on_complete=self.completed)
+        result = self.wait()
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(self.routes, [(1, 5), (2, 6)])
+        self.assertEqual([c['player'] for c in self.media.calls], [2, 4])
+        self.assertEqual(result['imagesCompleted'], 2)
+
+    def test_batch_detects_change_to_an_earlier_image_before_claiming_success(self):
+        def change_previous():
+            if len(self.media.calls) == 2:
+                self.state['routing'][0] = 8
+        self.media.before_complete = change_previous
+        self.manager.display_batch([{'media_id': 'first', 'output': 1},
+                                    {'media_id': 'second', 'output': 2}],
+                                   before_routes=lambda: None, on_complete=self.completed)
+        result = self.wait()
+        self.assertEqual(result['status'], 'failed', result)
+        self.assertIn('earlier', result['message'])
+
+    def test_batch_start_failure_leaves_no_active_job_or_reservation(self):
+        with patch.object(threading.Thread, 'start', side_effect=RuntimeError('Thread refused')):
+            with self.assertRaisesRegex(RuntimeError, 'Thread refused'):
+                self.manager.display_batch([{'media_id': 'first', 'output': 1}], before_routes=lambda: None)
+        self.assertIsNone(self.manager.active_job())
+        with video_routing_guard():
+            pass
+
+    def test_batch_stops_at_capacity_without_overwriting_keep_or_previous_images(self):
+        self.manager.display_batch([{'media_id': 'first', 'output': 1},
+                                    {'media_id': 'second', 'output': 2},
+                                    {'media_id': 'third', 'output': 3}],
+                                   before_routes=lambda: None, on_complete=self.completed)
+        result = self.wait()
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['imagesCompleted'], 2)
+        self.assertEqual(self.state['routing'], [5, 6, 3, 4])
+        self.assertEqual(len(self.media.calls), 2)
+
+    def test_batch_holds_reservation_between_images_and_stops_on_numeric_failure(self):
+        def check_reservation():
+            with self.assertRaises(BusyError):
+                with video_routing_guard():
+                    pass
+        self.media.before_complete = check_reservation
+        self.manager.display_batch([{'media_id': 'first', 'output': 1},
+                                    {'media_id': 'second', 'output': 2}],
+                                   before_routes=check_reservation, on_complete=self.completed)
+        self.assertEqual(self.wait()['status'], 'succeeded')
+        self.done.clear(); self.media.calls.clear()
+        def failed_routes():
+            raise RuntimeError('numeric readback mismatch')
+        self.manager.display_batch([{'media_id': 'first', 'output': 1}],
+                                   before_routes=failed_routes, on_complete=self.completed)
+        result = self.wait()
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('numeric readback mismatch', result['message'])
+        self.assertEqual(self.media.calls, [])
+
+    def test_batch_rechecks_kept_and_numeric_outputs_after_images(self):
+        self.media.before_complete = lambda: self.state['routing'].__setitem__(3, 8)
+        self.manager.display_batch([{'media_id': 'first', 'output': 1}],
+                                   before_routes=lambda: None, on_complete=self.completed)
+        result = self.wait()
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('other output', result['message'])
+
     def test_input_only_mapping_requires_media_and_full_videohub_readback(self):
         queued = self.display()
         self.assertEqual(queued["status"], "queued")

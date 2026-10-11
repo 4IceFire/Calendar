@@ -25,6 +25,25 @@ def main():
             fixture = VideoHubIgnoreApiTests()
             fixture.setUp()
             web = fixture.webui
+            from test_media_routing import FakeMedia, configuration
+            from media_routing import MediaRoutingManager
+            from media_player_usage import PlayerUsage
+            from unittest.mock import Mock
+            fixture.cfg.update(configuration())
+            media = FakeMedia()
+            identity = '12345678-1234-4234-8234-123456789abc'
+            item = {'id': identity, 'name': 'Welcome image', 'enabled': True,
+                    'output': 9, 'media_id': 'fixture-image', 'actions': [{'path': '/api/timers/1/start'}]}
+            store = Mock(); store.get.side_effect = lambda key: dict(item) if key == identity else None
+            store.list.side_effect = lambda: [dict(item)]
+            library = Mock(); library.get.return_value = {'temporary': False}
+            manager = MediaRoutingManager(get_config=lambda: fixture.cfg, get_media_manager=lambda: media,
+                read_videohub=lambda: {'input_count': 40, 'output_count': 40, 'routing': fixture.hub.routing[:]},
+                route_videohub=lambda o, i: fixture.hub.route_video_outputs(routes=[(o - 1, i - 1)]))
+            fixture.stack.enter_context(patch.object(web, '_get_media_library', return_value=library))
+            fixture.stack.enter_context(patch.object(web, '_get_routing_preset_store', return_value=store))
+            fixture.stack.enter_context(patch.object(web, '_get_media_routing_manager', return_value=manager))
+            actions = fixture.stack.enter_context(patch.object(web, '_execute_routing_preset_action'))
             allowed = {'static', 'videohub_page', 'videohub_input_select_page', 'auth_ping', 'auth_touch'}
             def blocked(**kwargs):
                 return web.jsonify(ok=False, error='Disabled in isolated fixture'), 404
@@ -37,7 +56,8 @@ def main():
                 if path == '/__videohub_ignore_fixture__/health':
                     return web.jsonify(fixture='tdeck-videohub-ignore-ui', isolated=True,
                                        writes=fixture.hub.writes, reads=fixture.hub.reads,
-                                       routing=fixture.hub.routing)
+                                       routing=fixture.hub.routing, images=media.calls,
+                                       actions=actions.call_count, routing_preset=identity)
                 if path == '/__videohub_ignore_fixture__/reset':
                     Path(fixture.cfg['videohub_presets_file']).unlink(missing_ok=True)
                     fixture.hub.writes.clear()
@@ -45,6 +65,11 @@ def main():
                     fixture.hub.routing = list(range(1, 41))
                     fixture.hub.fail_readback = False
                     fixture.log.reset_mock()
+                    media.calls.clear()
+                    manager._player_usage = PlayerUsage()
+                    actions.reset_mock()
+                    item['enabled'] = True
+                    web._videohub_image_jobs.clear()
                     return web.jsonify(ok=True)
                 if path == '/__videohub_ignore_fixture__/login':
                     uid = 2 if web.request.args.get('role') == 'operator' else 3 if web.request.args.get('role') == 'denied' else 1
@@ -54,6 +79,9 @@ def main():
                     return web.jsonify(ok=True)
                 if path == '/__videohub_ignore_fixture__/change-live':
                     fixture.hub.routing[0] = 12
+                    return web.jsonify(ok=True)
+                if path == '/__videohub_ignore_fixture__/image-ready':
+                    fixture.hub.routing[4:6] = [1, 1]
                     return web.jsonify(ok=True)
                 if path == '/__videohub_ignore_fixture__/failure':
                     fixture.hub.fail_readback = True

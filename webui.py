@@ -7350,6 +7350,7 @@ def videohub_page():
     return render_template(
         'videohub.html',
         allowed_preset_ids=allowed_preset_ids,
+        can_select_routing_presets=can_access('page:routing_presets'),
         can_edit_presets=bool(can_edit_presets),
         can_manage_rooms=bool(_can_manage_videohub_rooms_for_current_user()),
     )
@@ -7369,6 +7370,7 @@ def videohub_input_select_page():
     return render_template(
         'videohub_input_select.html',
         can_edit_presets=bool(_can_edit_videohub_presets_current_user()),
+        can_select_routing_presets=can_access('page:routing_presets'),
     )
 
 
@@ -12573,9 +12575,131 @@ def api_videohub_presets_lock(preset_id: int):
         return jsonify({'ok': False, 'error': str(e)}), 400
 
 
+_videohub_image_jobs = {}
+
+
+def _videohub_image_principal():
+    # This narrow capability never inherits scheduler/token/delegated actions.
+    if _api_request_is_automation_principal():
+        abort(403, description='Image-bearing VideoHub presets require browser Apply Preset; automation is unsupported.')
+    if not can_access('page:videohub') or not can_access('page:routing_presets'):
+        abort(403)
+
+
+def _videohub_image_selection(identity, output):
+    if not _routing_preset_allowed(identity):
+        abort(403)
+    item = _get_routing_preset_store().get(identity)
+    if not item or not item['enabled']:
+        raise ValueError('The selected routing preset is unavailable, deleted or disabled.')
+    # Override only this typed image usage, never the catalog or ordinary flow.
+    target, inputs = _media_output_access(output)
+    image = _get_media_library().get(item['media_id'])
+    if image.get('temporary'):
+        raise ValueError('The routing preset image is not a saved image.')
+    from atem_media import validate_media_config
+    cfg = validate_media_config(utils.get_config())
+    mappings = [m for m in cfg['atem_media_destinations'] if m.get('videohub_input')]
+    if not cfg['atem_media_enabled'] or not mappings:
+        raise ValueError('Image display is not configured.')
+    if inputs and not any(m['videohub_input'] in inputs for m in mappings):
+        abort(403)
+    return {'media_id': item['media_id'], 'output': target, 'allowed_inputs': inputs}
+
+
+@app.route('/api/videohub/routing-presets')
+def api_videohub_routing_presets():
+    _videohub_image_principal()
+    try:
+        # Fixed catalog destinations are deliberately irrelevant to this picker.
+        return jsonify(ok=True, presets=[{'id': p['id'], 'name': p['name']}
+            for p in _get_routing_preset_store().list()
+            if p['enabled'] and _routing_preset_allowed(p['id'])])
+    except (OSError, ValueError):
+        return _api_json_error(503, 'unavailable', 'Routing presets are unavailable.')
+
+
+def _public_videohub_image_job(job):
+    return {key: job.get(key) for key in ('id', 'status', 'message', 'imagesCompleted')}
+
+
+def _apply_videohub_images(app_inst, cfg, preset):
+    from package.apps.videohub.models import VideohubPreset
+    _videohub_image_principal()
+    with _media_operation_lock:
+        if len({r.output for r in preset.routes}) != len(preset.routes):
+            raise ValueError('Image-bearing presets require distinct output entries.')
+        selections = [_videohub_image_selection(r.routing_preset, r.output)
+                      for r in preset.routes if r.routing_preset is not None]
+        uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+        outputs, inputs = _effective_videohub_allowlists_for_user(uid)
+        for route in preset.routes:
+            if outputs and route.output not in outputs:
+                abort(403)
+            if route.input is not None and inputs and route.input not in inputs:
+                abort(403)
+        numeric = VideohubPreset(preset.id, preset.name,
+                                [r for r in preset.routes if r.routing_preset is None], preset.locked)
+        owner = _preset_owner()
+        actor = capture_activity_actor()
+        manager = _get_media_routing_manager(refresh=True)
+
+        def completed(job):
+            _invalidate_videohub_state_snapshot()
+            if job['status'] == 'succeeded':
+                _home_set_last_videohub_preset(preset_id=preset.id)
+            log_event('videohub.preset.apply', f"VideoHub preset #{preset.id}: {job['message']}",
+                      status='success' if job['status'] == 'succeeded' else 'failure',
+                      target_type='videohub_preset', target_id=preset.id,
+                      details=_public_videohub_image_job(job), **actor)
+
+        job = manager.display_batch(selections,
+            before_routes=lambda: app_inst._apply_routes(cfg, numeric) if numeric.routes else None,
+            on_complete=completed)
+        _videohub_image_jobs[job['id']] = (owner, copy.deepcopy(preset), manager)
+        while len(_videohub_image_jobs) > 32:
+            _videohub_image_jobs.pop(next(iter(_videohub_image_jobs)))
+    log_event('videohub.preset.queued', f'Queued VideoHub preset #{preset.id}', status='info',
+              target_type='videohub_preset', target_id=preset.id, **actor)
+    return jsonify(ok=True, job=_public_videohub_image_job(job)), 202
+
+
+@app.route('/api/videohub/presets/<int:preset_id>/jobs/<job_id>')
+def api_videohub_image_job(preset_id, job_id):
+    _videohub_image_principal()
+    with _media_operation_lock:
+        record = _videohub_image_jobs.get(job_id)
+        if not record:
+            return _api_json_error(404, 'not_found', 'The preset job is unavailable. Check outputs before applying again.')
+        owner, preset, manager = record
+        if owner != _preset_owner() or preset.id != preset_id:
+            abort(403)
+        uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+        allowed = _effective_videohub_preset_ids_for_user(uid) if uid is not None else []
+        if allowed and preset_id not in allowed:
+            abort(403)
+        for route in preset.routes:
+            _media_output_access(route.output)
+            if route.routing_preset and not _routing_preset_allowed(route.routing_preset):
+                abort(403)
+        try:
+            return jsonify(ok=True, job=_public_videohub_image_job(manager.get_job(job_id)))
+        except KeyError:
+            return _api_json_error(404, 'not_found', 'The preset job is no longer available.')
+
+
 @app.route('/api/videohub/presets/<int:preset_id>/apply', methods=['POST'])
-@_guard_videohub_write
 def api_videohub_presets_apply(preset_id: int):
+    from werkzeug.exceptions import HTTPException
+    from atem_media import BusyError
+    from media_routing import video_routing_guard
+    # Reject contention before constructing even a backend. The selected path
+    # acquires its real reservation again before any hardware action.
+    try:
+        with video_routing_guard():
+            pass
+    except BusyError as error:
+        return _api_json_error(409, 'busy', str(error))
     app_inst = _get_videohub_app()
     if app_inst is None or not hasattr(app_inst, 'apply_preset'):
         try:
@@ -12596,7 +12720,11 @@ def api_videohub_presets_apply(preset_id: int):
     except Exception:
         cfg = {}
     try:
-        result = app_inst.apply_preset(cfg, preset_id)  # type: ignore[attr-defined]
+        preset = app_inst.get_preset(cfg, preset_id)
+        if preset and any(r.routing_preset is not None for r in preset.routes):
+            return _apply_videohub_images(app_inst, cfg, preset)
+        with video_routing_guard():
+            result = app_inst.apply_preset(cfg, preset_id)  # type: ignore[attr-defined]
         _invalidate_videohub_state_snapshot()
         try:
             _home_set_last_videohub_preset(preset_id=preset_id)
@@ -12615,6 +12743,10 @@ def api_videohub_presets_apply(preset_id: int):
         except Exception:
             pass
         return jsonify({'ok': True, 'result': result})
+    except HTTPException:
+        raise
+    except BusyError as error:
+        return _api_json_error(409, 'busy', str(error))
     except KeyError:
         try:
             log_event(

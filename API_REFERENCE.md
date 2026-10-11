@@ -652,9 +652,10 @@ Timer selection is either:
 }
 ```
 - **Notes:**
-  - Presets save 1-based output/input numbers; names/labels are fetched separately. An explicit `"input": null` means **Ignore — keep current routing** for that output (including monitoring routes). Missing inputs, zero/negative inputs and the string `"ignore"` are not Ignore values; they retain the existing invalid-route filtering behavior.
+  - Presets save 1-based output/input numbers; names/labels are fetched separately. An explicit `"input": null` means **Keep Current Routing** for that output (including monitoring routes). Missing inputs, zero/negative inputs and the string `"ignore"` are not Ignore values; they retain the existing invalid-route filtering behavior.
   - Ignore persists unchanged through list/update/lock/folder operations and never captures the current device input. Existing positive-input presets need no migration. The direct `/api/videohub/route` endpoint still requires a positive input; Ignore belongs only to saved presets.
   - `locked=true` prevents updates/deletes until unlocked.
+  - A primary route may instead store `{ "output": 1, "routing_preset": "<opaque UUID>" }`. `input` must be absent, and monitoring is unsupported for image references. References survive save/list/update/lock/organization. Selection and storage never display images or execute actions.
 
 ### Presets: update
 - **PUT** `/api/videohub/presets/<id>`
@@ -685,6 +686,12 @@ Timer selection is either:
 - **Body:** none required.
 - **Returns:** `{ ok: true, result: {id, name, routes, ignored, applied: true} }`; `routes` counts real routes sent and `ignored` counts skipped entries (zero for existing presets).
 - Browser, API/v1, scheduler and Companion triggers use the same backend. Ignored outputs receive no routing command; consolidated primary readback verifies only real writes. All-ignore presets are successful no-ops, even without a configured device, with normal authorization, write reservation and Activity Logging intact. Empty legacy presets retain their existing configuration check.
+  This synchronous contract applies to numeric/Keep Current Routing-only presets.
+- **Image-bearing presets:** browser-session Apply only (including the v1 alias), with CSRF/trusted origin, VideoHub and Routing Presets page access, individual `preset:<UUID>` grants, allowed outputs and eligible mapped image inputs. Token, scheduler and delegated-action triggers return 403; standalone backend/CLI apply refuses them. Numeric automation remains unchanged. Every reference must resolve to an enabled preset and a permanent image at trigger time. Missing references fail, never fall back to numeric routing.
+- Each selected image targets the saved VideoHub route's `output`, overriding any catalog destination only for this image-only usage. The ordinary Routing preset fixed-output restriction remains unchanged. Extra saved API actions never run, and operator request bodies cannot supply actions or images.
+- **202 response:** `{ "ok": true, "job": { "id": "...", "status": "queued", "message": "...", "imagesCompleted": 0 } }`. One asynchronous reservation covers verified numeric routes followed by all image outputs. Images require exclusive players; shared-player fallback is refused, protecting Keep entries and previously displayed images. Final route/player readback must pass before success. Failures stop without rollback or automatic replay and may report partial completion. Contention returns 409.
+- **GET** `/api/videohub/presets/<id>/jobs/<job_id>` polls that exact job; returns `{ "ok": true, "job": { "id", "status", "message", "imagesCompleted" } }`. Jobs are process-local, bounded and browser-session-owner scoped. Recheck grants on reads. Unknown/expired jobs return 404; wrong owners/resources or automation return 403. Polling never repeats the Apply POST.
+- **GET** `/api/videohub/routing-presets` is a browser-only, permission-filtered image-reference picker returning `{ "ok": true, "presets": [{ "id", "name" }] }`. It deliberately omits actions and catalog destinations, since this picker saves the edited VideoHub output. No hardware actions occur.
 
 ---
 

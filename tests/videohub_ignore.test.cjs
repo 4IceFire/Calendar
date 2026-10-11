@@ -32,8 +32,23 @@ test('homepage save, restore and marker preserve explicit Ignore', () => {
   const markers = [];
   ctx.elements['vh-room-stage'] = {style: {}, appendChild: btn => markers.push(btn)};
   ctx.run('_vhRenderRooms()');
-  assert.match(markers[0].innerHTML, /Ignore — keep current routing/);
+  assert.match(markers[0].innerHTML, /Keep Current Routing/);
   assert.match(markers[0].className, /vh-marker-ignore/);
+});
+
+test('image reference survives save, draft restore and picker confirmation', () => {
+  const ctx = templateContext('videohub.html');
+  ctx.run("_vhRouting = _vhRoutingFromPreset({routes:[{output:1,routing_preset:'saved-image'}]});");
+  assert.deepEqual(JSON.parse(ctx.run('JSON.stringify(_vhRoutesFromRouting()[0])')),
+    {output: 1, routing_preset: 'saved-image'});
+  ctx.stored.vh_draft_test = JSON.stringify({routing: [{routing_preset: 'saved-image'}]});
+  ctx.run('_vhTryLoadDraftFromQuery()');
+  assert.equal(ctx.run('_vhRouting[0].routing_preset'), 'saved-image');
+  const picker = templateContext('videohub_input_select.html');
+  picker.run("_vhiDraftToken='test'; _vhiOutput=1;");
+  picker.stored.vh_draft_test = JSON.stringify({routing: [{routing_preset: 'saved-image'}]});
+  picker.run('_vhiLoadDraft(); _vhiSaveDraftAndReturn();');
+  assert.equal(JSON.parse(picker.stored.vh_draft_test).routing[0].routing_preset, 'saved-image');
 });
 
 test('input picker offers Ignore outside filters and confirms null in draft', () => {
@@ -45,7 +60,7 @@ test('input picker offers Ignore outside filters and confirms null in draft', ()
   ctx.elements['vhi-grid'] = {};
   ctx.run('_vhiRenderGrid()');
   assert.match(ctx.elements['vhi-grid'].innerHTML, /data-input="ignore"/);
-  assert.match(ctx.elements['vhi-grid'].innerHTML, /Ignore — keep current routing/);
+  assert.match(ctx.elements['vhi-grid'].innerHTML, /Keep Current Routing/);
   assert.match(ctx.elements['vhi-grid'].innerHTML, /active[^>]*data-input="ignore"/);
   ctx.run('_vhiSaveDraftAndReturn()');
   assert.equal(JSON.parse(ctx.stored.vh_draft_test).routing[0], null);

@@ -226,20 +226,44 @@ longer requires the CLI. See `API_REFERENCE.md` for the complete migration
 sequence, temporary expiring legacy flag, v1 endpoint aliases, limits, and
 scope semantics.
 
-### VideoHub preset outputs: Ignore
+### VideoHub preset outputs: Keep Current Routing and images
 
 On **VideoHub** (`/videohub`), open a preset and click an output in its room.
-Choose **Ignore — keep current routing**, then **Confirm** and **Save Preset**.
-Ignored outputs have a dashed marker and show the Ignore label instead of an
+Choose **Keep Current Routing**, then **Confirm** and **Save Preset**.
+Kept outputs have a dashed marker and show **Keep Current Routing** instead of an
 input number. The choice is always available, including with filtered inputs;
 selecting a normal input replaces it. Cancel leaves the draft unchanged.
 
-Ignore saves explicit `input: null`, not a snapshot of the current input.
-Applying from the browser, API, scheduler or Companion leaves ignored outputs
-alone, while other routes still execute and retain their normal readback checks.
-All-ignore presets succeed as no-ops. Existing presets, IDs, folders, locks and
-access rules remain unchanged; no migration or Companion module update is needed.
-**Save From Device** remains a snapshot of actual input numbers.
+Keep Current Routing saves explicit `input: null`, not a snapshot of the current
+input. Applying a numeric/keep-only preset from the browser, API, scheduler or
+Companion leaves kept outputs alone. Other routes retain normal readback checks;
+all-keep presets succeed as no-ops. IDs, folders, locks and existing access rules
+are unchanged. **Save From Device** still snapshots actual input numbers.
+
+The input selector's distinct **Routing Preset** button opens a searchable
+saved-preset picker. Select a preset, **Confirm**, then **Save Preset**. This saves
+an image-only reference *inside the VideoHub preset*, not a live route. Opening,
+searching, selecting, cancelling and saving send no hardware commands. The edited
+VideoHub output is the target even if the routing preset has another fixed output;
+its catalog configuration remains unchanged. **Apply Preset** displays only its
+saved image and never executes that routing preset's extra API actions.
+
+Image-bearing presets require an explicit browser session with VideoHub access,
+Routing Presets access and the individually granted routing preset, plus allowed
+target outputs and mapped media inputs. Permissions, current enabled state and
+saved-image availability are checked at Apply. Deleted, disabled or inaccessible
+references fail rather than turning into a normal input. Token/Companion,
+scheduler and delegated API-action triggers are deliberately unsupported for
+image-bearing VideoHub presets; ordinary numeric/keep-only automation is unchanged.
+
+An image-bearing Apply queues one asynchronous job covering all its outputs.
+Numeric routes run and verify first; images then load, verify and route under one
+process-wide VideoHub reservation. Each image needs an exclusive eligible player;
+shared players are refused rather than silently changing kept outputs or an
+earlier image. Insufficient players, upload failures or readback mismatches stop
+the job with explicit partial-completion feedback. Earlier writes are not undone,
+and there is no automatic replay. Check the outputs before manually applying
+again. This does not isolate manually shared external feeds or other controllers.
 
 Regression and isolated fake-device browser checks:
 ```bash

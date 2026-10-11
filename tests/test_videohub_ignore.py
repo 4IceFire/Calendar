@@ -43,6 +43,19 @@ class VideoHubIgnoreTests(unittest.TestCase):
         self.cfg = {'videohub_presets_file': str(self.path)}
         self.app = VideohubApp()
 
+    def test_image_reference_round_trips_and_automation_fails_closed(self):
+        identity = '12345678-1234-4234-8234-123456789abc'
+        routes = [{'output': 1, 'routing_preset': identity}, {'output': 2, 'input': None}]
+        saved = self.app.upsert_preset(self.cfg, {'name': 'Images', 'routes': routes})
+        self.assertEqual(saved.to_dict()['routes'], routes)
+        disk = self.path.with_name('copy.json')
+        disk.write_bytes(self.path.read_bytes())
+        self.assertEqual(self.app.list_presets({'videohub_presets_file': str(disk)})[0]['routes'], routes)
+        with patch('package.apps.videohub.app.get_videohub_client_from_config') as factory:
+            with self.assertRaisesRegex(ValueError, 'browser'):
+                self.app.apply_preset(self.cfg, saved.id)
+        factory.assert_not_called()
+
     def test_explicit_ignore_round_trips_without_changing_legacy_routes(self):
         routes = [{'output': 1, 'input': None}, {'output': 2, 'input': 7},
                   {'output': 3, 'input': None, 'monitoring': True}]
@@ -150,6 +163,77 @@ class VideoHubIgnoreApiTests(unittest.TestCase):
                                     json={'name': 'Mixed', 'routes': routes})
         self.assertEqual(response.status_code, 200, response.get_json())
         return response.get_json()['preset']
+
+    def test_browser_image_apply_overrides_only_saved_usage_and_never_runs_actions(self):
+        from test_media_routing import FakeMedia, configuration
+        from media_routing import MediaRoutingManager
+        from unittest.mock import Mock
+        identity = '12345678-1234-4234-8234-123456789abc'
+        item = {'id': identity, 'enabled': True, 'output': 9, 'media_id': 'image-1',
+                'name': 'Welcome', 'actions': [{'path': '/api/timers/1/start'}]}
+        self.cfg.update(configuration())
+        self.hub.routing = [1, 2, 3, 4]
+        media = FakeMedia()
+        manager = MediaRoutingManager(get_config=lambda: self.cfg, get_media_manager=lambda: media,
+            read_videohub=lambda: {'input_count': 8, 'output_count': 4, 'routing': self.hub.routing[:]},
+            route_videohub=lambda o, i: self.hub.routing.__setitem__(o - 1, i))
+        store = Mock(); store.get.return_value = item
+        library = Mock(); library.get.return_value = {'temporary': False}
+        with patch.object(self.webui, '_get_routing_preset_store', return_value=store), \
+             patch.object(self.webui, '_get_media_library', return_value=library), \
+             patch.object(self.webui, '_get_media_routing_manager', return_value=manager), \
+             patch.object(self.webui, '_execute_routing_preset_action') as actions:
+            preset = self.create([{'output': 1, 'routing_preset': identity},
+                                  {'output': 2, 'input': 7}, {'output': 3, 'input': None}])
+            self.assertEqual(media.calls, [])
+            response = self.client.post(f"/api/videohub/presets/{preset['id']}/apply", headers=self.headers)
+            self.assertEqual(response.status_code, 202, response.get_json())
+            job_id = response.get_json()['job']['id']
+            deadline = time.monotonic() + 3
+            while manager.get_job(job_id)['status'] not in ('succeeded', 'failed') and time.monotonic() < deadline:
+                time.sleep(.01)
+            job = manager.get_job(job_id)
+            self.assertEqual(job['status'], 'succeeded', job)
+            poll = self.client.get(f"/api/videohub/presets/{preset['id']}/jobs/{job_id}")
+            self.assertEqual(poll.status_code, 200, poll.get_json())
+            self.assertEqual(self.hub.routing, [5, 7, 3, 4])
+            self.assertEqual(item['output'], 9)
+            actions.assert_not_called()
+
+    def test_image_apply_denies_missing_disabled_permissions_and_automation_without_writes(self):
+        import api_security
+        from test_media_routing import configuration
+        from unittest.mock import Mock
+        identity = '12345678-1234-4234-8234-123456789abc'
+        self.cfg.update(configuration())
+        preset = self.create([{'output': 1, 'routing_preset': identity}, {'output': 2, 'input': 7}])
+        path = f"/api/videohub/presets/{preset['id']}/apply"
+        store = Mock()
+        library = Mock(); library.get.return_value = {'temporary': False}
+        item = {'id': identity, 'enabled': True, 'output': 9, 'media_id': 'saved', 'actions': []}
+        with patch.object(self.webui, '_get_routing_preset_store', return_value=store), \
+             patch.object(self.webui, '_get_media_library', return_value=library), \
+             patch.object(self.webui, '_get_media_routing_manager') as manager:
+            for unavailable in (None, dict(item, enabled=False)):
+                store.get.return_value = unavailable
+                response = self.client.post(path, headers=self.headers)
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertIn('unavailable', response.get_json()['error'])
+            store.get.return_value = item
+            self.login(2)
+            self.assertEqual(self.client.post(path, headers=self.headers).status_code, 403)
+            self.webui._set_group_pages(2, ['page:videohub', 'page:routing', 'page:routing_presets', 'preset:' + identity])
+            with patch.object(self.webui, '_effective_videohub_allowlists_for_user', return_value=([2], [])):
+                self.assertEqual(self.client.post(path, headers=self.headers).status_code, 403)
+            with patch.object(self.webui, '_effective_videohub_allowlists_for_user', return_value=([], [7])):
+                self.assertEqual(self.client.post(path, headers=self.headers).status_code, 403)
+            token = api_security.create_service_token(self.webui._AUTH_DB_PATH, name='image denied', scopes=['videohub'])
+            other = self.webui.app.test_client()
+            response = other.post(path.replace('/api/', '/api/v1/'), headers={'Authorization': 'Bearer ' + token['token']})
+            self.assertEqual(response.status_code, 403, response.get_json())
+            self.assertFalse(self.webui._execute_scheduler_internal_action({'method': 'POST', 'path': path}))
+            manager.assert_not_called()
+        self.assertEqual(self.hub.writes, [])
 
     def test_browser_token_companion_alias_and_scheduler_share_ignore_backend(self):
         import api_security

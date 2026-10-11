@@ -40,12 +40,13 @@
           <div id="vhi-output-title" class="fw-semibold">-</div>
           <div id="vhi-current-input" class="small text-muted"></div>
         </div>
-        <div class="d-flex align-items-center gap-3">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="vhi-show-all">
             <label class="form-check-label" for="vhi-show-all">Show all inputs</label>
           </div>
           <a id="vhi-cancel" class="btn btn-outline-secondary" href="/videohub">Cancel</a>
+          {% if can_select_routing_presets %}<button id="vhi-routing-preset" class="btn btn-primary" type="button">Routing Preset</button>{% endif %}
           <button id="vhi-confirm" class="btn btn-primary" type="button">Confirm</button>
         </div>
       </div>
@@ -55,6 +56,15 @@
   <div id="vhi-grid" class="vhi-grid">
     <div class="text-muted small">Loading inputs...</div>
   </div>
+  <section id="vhi-presets" class="card mt-3" hidden>
+    <div class="card-body">
+      <h2 class="h5">Routing Preset</h2>
+      <p class="small text-muted">Save only the preset image for this output. Nothing displays until Apply Preset; extra API actions never run.</p>
+      <label class="form-label" for="vhi-preset-search">Search routing presets</label>
+      <input id="vhi-preset-search" class="form-control mb-3" type="search">
+      <div id="vhi-preset-list" class="vhi-grid"></div>
+    </div>
+  </section>
 </div>
 
 <script>
@@ -68,6 +78,24 @@ let _vhiRoomsCfg = {filtered_inputs: []};
 let _vhiDraft = null;
 let _vhiSelectedInput = null;
 let _vhiAutoHideTimeoutId = null;
+let _vhiPresets = [];
+
+function _vhiSelectedLabel(){
+  if(_vhiSelectedInput && typeof _vhiSelectedInput === 'object'){
+    const item = _vhiPresets.find(p => p.id === _vhiSelectedInput.routing_preset);
+    return 'Routing Preset: ' + (item ? item.name : (_vhiSelectedInput.name || 'Unavailable saved preset'));
+  }
+  return _vhiSelectedInput === null ? 'Keep Current Routing' : `Current: ${_vhiFmtLabel(_vhiLabels.inputs, _vhiSelectedInput)}`;
+}
+
+function _vhiRenderPresets(){
+  const host = document.getElementById('vhi-preset-list');
+  const search = document.getElementById('vhi-preset-search');
+  const query = String(search ? search.value : '').toLowerCase();
+  if(!host) return;
+  const items = _vhiPresets.filter(p => p.name.toLowerCase().includes(query));
+  host.innerHTML = items.map(p => `<button type="button" class="vhi-card ${_vhiSelectedInput && _vhiSelectedInput.routing_preset === p.id ? 'active' : ''}" data-preset="${_safeHtml(p.id)}">${_safeHtml(p.name)}</button>`).join('') || '<p class="text-muted">No available routing presets.</p>';
+}
 
 function _vhiMessageTimeoutMs(){
   try{
@@ -152,7 +180,8 @@ function _vhiLoadDraft(){
   try{ data = JSON.parse(raw); }catch(e){ data = null; }
   if(!data || !Array.isArray(data.routing)) throw new Error('Invalid draft data');
   _vhiDraft = data;
-  const cur = data.routing[_vhiOutput - 1] === null ? null : (parseInt(data.routing[_vhiOutput - 1], 10) || 1);
+  const value = data.routing[_vhiOutput - 1];
+  const cur = value && typeof value === 'object' ? value : (value === null ? null : (parseInt(value, 10) || 1));
   _vhiSelectedInput = cur;
 }
 
@@ -177,7 +206,7 @@ function _vhiRenderHeader(){
   const curEl = document.getElementById('vhi-current-input');
   const cancelEl = document.getElementById('vhi-cancel');
   if(outTitle) outTitle.textContent = _vhiFmtLabel(_vhiLabels.outputs, _vhiOutput);
-  if(curEl) curEl.textContent = _vhiSelectedInput === null ? 'Ignore — keep current routing' : `Current: ${_vhiFmtLabel(_vhiLabels.inputs, _vhiSelectedInput)}`;
+  if(curEl) curEl.textContent = _vhiSelectedLabel();
   if(cancelEl){
     const q = new URLSearchParams();
     q.set('room', _vhiRoom);
@@ -191,7 +220,7 @@ function _vhiRenderGrid(){
   const host = document.getElementById('vhi-grid');
   if(!host) return;
   const items = _vhiVisibleInputs();
-  host.innerHTML = `<button class="vhi-card ${_vhiSelectedInput === null ? 'active' : ''}" type="button" data-input="ignore">Ignore — keep current routing</button>` + items.map((n) => {
+  host.innerHTML = `<button class="vhi-card ${_vhiSelectedInput === null ? 'active' : ''}" type="button" data-input="ignore">Keep Current Routing</button>` + items.map((n) => {
     const active = parseInt(_vhiSelectedInput, 10) === parseInt(n, 10);
     return `<button class="vhi-card ${active ? 'active' : ''}" type="button" data-input="${n}">${_safeHtml(_vhiFmtLabel(_vhiLabels.inputs, n))}</button>`;
   }).join('');
@@ -200,7 +229,7 @@ function _vhiRenderGrid(){
 function _vhiSaveDraftAndReturn(){
   if(!_vhiDraft || !_vhiCanEdit) return;
   while(_vhiDraft.routing.length < _vhiOutput){ _vhiDraft.routing.push(_vhiDraft.routing.length + 1); }
-  _vhiDraft.routing[_vhiOutput - 1] = _vhiSelectedInput === null ? null : (parseInt(_vhiSelectedInput, 10) || 1);
+  _vhiDraft.routing[_vhiOutput - 1] = _vhiSelectedInput && typeof _vhiSelectedInput === 'object' ? _vhiSelectedInput : (_vhiSelectedInput === null ? null : (parseInt(_vhiSelectedInput, 10) || 1));
   _vhiDraft.dirty = true;
   _vhiDraft.ts = Date.now();
   try{
@@ -214,6 +243,30 @@ function _vhiSaveDraftAndReturn(){
 }
 
 function _vhiWireUI(){
+  const presetButton = document.getElementById('vhi-routing-preset');
+  if(presetButton){
+    presetButton.disabled = !_vhiCanEdit;
+    presetButton.addEventListener('click', async () => {
+      try{
+        const response = await fetch('/api/videohub/routing-presets', {cache:'no-store'});
+        const data = await response.json();
+        if(!response.ok || !data.ok) throw new Error(data.error || 'Routing presets are unavailable');
+        _vhiPresets = data.presets || [];
+        document.getElementById('vhi-presets').hidden = false;
+        _vhiRenderPresets();
+        _vhiRenderHeader();
+      }catch(e){ _vhiSetStatus(String(e.message || e), 'error'); }
+    });
+    document.getElementById('vhi-preset-search').addEventListener('input', _vhiRenderPresets);
+    document.getElementById('vhi-preset-list').addEventListener('click', ev => {
+      const button = ev.target.closest('button[data-preset]');
+      if(!button || !_vhiCanEdit) return;
+      const item = _vhiPresets.find(p => p.id === button.dataset.preset);
+      if(!item) return;
+      _vhiSelectedInput = {routing_preset: item.id, name: item.name};
+      _vhiRenderHeader(); _vhiRenderGrid(); _vhiRenderPresets();
+    });
+  }
   const grid = document.getElementById('vhi-grid');
   if(grid){
     grid.addEventListener('click', (ev) => {

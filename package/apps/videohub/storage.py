@@ -28,6 +28,18 @@ def _coerce_route(value: Any) -> VideohubRoute | None:
     if not isinstance(value, dict):
         return None
 
+    if 'routing_preset' in value:
+        import re
+        identity = value['routing_preset']
+        if (not isinstance(identity, str)
+                or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', identity)
+                or 'input' in value or value.get('monitoring') or value.get('monitor')):
+            raise ValueError('Choose a valid image-only routing preset for a primary output.')
+        output = value.get('output')
+        if isinstance(output, bool) or not isinstance(output, int) or output <= 0:
+            raise ValueError('Choose a positive output for the routing preset image.')
+        return VideohubRoute(output=output, input=None, routing_preset=identity)
+
     try:
         output = int(value.get("output"))
         # Only an explicit JSON null means Ignore; a missing input is invalid.

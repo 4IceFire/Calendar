@@ -177,6 +177,82 @@ class MediaRoutingManager:
                 raise KeyError(job_id)
             return copy.deepcopy(self._jobs[job_id])
 
+    def display_batch(self, selections, *, before_routes, on_complete=None):
+        """Image-only VideoHub use: one reservation, no shared-player mutation.
+
+        Caller authorizes every immutable selection before queueing. Ordinary
+        routes run first; images allocate against their verified result. Keep
+        entries are never written. Failure stops without undo or replay.
+        """
+        selections = copy.deepcopy(selections)
+        if not selections or len({s['output'] for s in selections}) != len(selections):
+            raise ValueError('Choose distinct outputs for preset images.')
+        if not VIDEO_ROUTING_LOCK.acquire(blocking=False):
+            raise BusyError('An image or route is being applied. Please wait.')
+        try:
+            cfg, destinations = _configuration(self._get_config())
+            identity = uuid.uuid4().hex
+            now = time.time()
+            job = {'id': identity, 'status': 'queued', 'message': 'Applying VideoHub preset.',
+                   'imagesCompleted': 0, 'createdAt': now, 'updatedAt': now}
+            with self._lock:
+                self._jobs[identity] = job
+                self._active_id = identity
+                while len(self._jobs) > 32:
+                    self._jobs.popitem(last=False)
+            result = copy.deepcopy(job)
+            threading.Thread(target=self._run_batch,
+                             args=(identity, selections, cfg, destinations, before_routes, on_complete),
+                             name='tdeck-videohub-images', daemon=True).start()
+            return result
+        except Exception:
+            with self._lock:
+                if self._active_id is not None:
+                    self._jobs.pop(self._active_id, None)
+                    self._active_id = None
+            VIDEO_ROUTING_LOCK.release()
+            raise
+
+    def _run_batch(self, identity, selections, cfg, destinations, before_routes, callback):
+        try:
+            before_routes()
+            initial = _strict_state(self._read_videohub())
+            verified = []
+            for selection in selections:
+                child = uuid.uuid4().hex
+                now = time.time()
+                with self._lock:
+                    self._jobs[child] = {'id': child, 'mediaId': selection['media_id'],
+                        'output': _port(selection['output'], 'Output'), 'status': 'queued',
+                        'createdAt': now, 'updatedAt': now, '_batchChild': True}
+                self._run(child, cfg, destinations, set(selection.get('allowed_inputs') or []),
+                          time.monotonic() + self._job_timeout, None, False, None, refuse_shared=True)
+                with self._lock:
+                    outcome = self._jobs.pop(child)
+                if outcome['status'] != 'succeeded':
+                    raise RuntimeError(outcome['message'])
+                verified.append(outcome)
+                with self._lock:
+                    self._jobs[identity]['imagesCompleted'] += 1
+            final = _strict_state(self._read_videohub())
+            image_outputs = {s['output'] for s in selections}
+            if (final['input_count'] != initial['input_count']
+                    or final['output_count'] != initial['output_count']
+                    or any(source != final['routing'][index - 1]
+                           for index, source in enumerate(initial['routing'], 1) if index not in image_outputs)):
+                raise RuntimeError('Another output changed before final readback; check kept and numeric outputs.')
+            manager = self._get_media_manager()
+            for outcome in verified:
+                if final['routing'][outcome['output'] - 1] != outcome['videohubInput']:
+                    raise RuntimeError('An earlier image output changed before final readback.')
+                self._check_media_selection(manager,
+                    {'generation': outcome['confirmedGeneration'], 'slot': outcome['confirmedSlot']},
+                    {'player': outcome['player']})
+            self._finish(identity, 'succeeded', callback)
+        except Exception as error:
+            self._finish(identity, 'failed', callback,
+                         error='Preset stopped; earlier outputs may have changed. ' + str(error))
+
     def active_job(self):
         with self._lock:
             return copy.deepcopy(self._jobs.get(self._active_id))
@@ -280,14 +356,14 @@ class MediaRoutingManager:
                                   "ATEM connection or selected still changed after the media transfer")
 
     def _run(self, job_id, cfg, destinations, allowed, deadline, on_complete, allow_shared_player,
-             shared_confirmation):
+             shared_confirmation, *, refuse_shared=False):
         stage = "preparing"
         try:
             self._update(job_id, stage)
             job = self.get_job(job_id)
             output = job["output"]
             initial = self._read(deadline)
-            destination = self._choose(destinations, initial, output, allowed, True,
+            destination = self._choose(destinations, initial, output, allowed, not refuse_shared,
                                        lambda player: self._player_usage.last_used(cfg, player))
             shared = sorted(self._other_outputs(initial, destination["videohub_input"], output))
             config_key = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
@@ -334,7 +410,8 @@ class MediaRoutingManager:
             # A confirmed replacement is use even if the later route fails.
             self._player_usage.record(cfg, destination["player"])
             stage = "routing"
-            self._update(job_id, stage, mediaName=outcome.get("mediaName", ""))
+            self._update(job_id, stage, mediaName=outcome.get("mediaName", ""),
+                         confirmedGeneration=outcome.get('generation'), confirmedSlot=outcome.get('slot'))
             current = self._read(deadline)
             self._check_unchanged(cfg, initial, current, destination, output)
             self._check_media_selection(manager, outcome, destination)
@@ -374,9 +451,11 @@ class MediaRoutingManager:
                 return
             job.update(status=status, message=error or _MESSAGES[status], error=error,
                        internalError=internal_error[:1000], updatedAt=time.time())
-            self._active_id = None
+            if not job.get('_batchChild'):
+                self._active_id = None
             result = copy.deepcopy(job)
-        VIDEO_ROUTING_LOCK.release()
+        if not result.get('_batchChild'):
+            VIDEO_ROUTING_LOCK.release()
         if callback:
             try:
                 callback(result)

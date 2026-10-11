@@ -138,6 +138,15 @@ class VideohubApp(AppBase):
         if preset is None:
             raise KeyError("preset not found")
 
+        if any(getattr(r, 'routing_preset', None) is not None for r in preset.routes):
+            raise ValueError('Image-bearing VideoHub presets require an explicit browser Apply Preset; automation is unsupported.')
+
+        return self._apply_routes(cfg, preset)
+
+    def _apply_routes(self, cfg: dict, preset: VideohubPreset) -> dict:
+        """Apply a captured numeric-only snapshot; caller owns the reservation."""
+        if any(getattr(r, 'routing_preset', None) is not None for r in preset.routes):
+            raise ValueError('Image references cannot run as numeric routes.')
         # group into monitoring vs primary blocks
         primary: list[tuple[int, int]] = []
         monitoring: list[tuple[int, int]] = []

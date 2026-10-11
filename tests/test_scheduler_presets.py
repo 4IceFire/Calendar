@@ -32,6 +32,7 @@ class SchedulerPresetTests(unittest.TestCase):
         self.backend = Mock()
         self.backend.list_presets.return_value = [{'id': 9, 'name': 'Stage'}]
         self.backend.apply_preset.return_value = {'ok': True}
+        self.backend.get_preset.return_value = None
         self.callbacks = []
         self.manager = Mock()
         self.manager.display.side_effect = lambda *args, **kwargs: self.callbacks.append(kwargs['on_complete'])

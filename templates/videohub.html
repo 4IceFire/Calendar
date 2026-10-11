@@ -77,7 +77,8 @@
 
 <div id="vh-page"
      data-allowed-presets='{{ allowed_preset_ids|tojson }}'
-     data-can-edit-presets="{{ '1' if can_edit_presets else '0' }}">
+     data-can-edit-presets="{{ '1' if can_edit_presets else '0' }}"
+     data-can-select-routing-presets="{{ '1' if can_select_routing_presets else '0' }}">
   <div id="vh-status" class="mb-3"></div>
   <div id="vh-unsaved" class="alert alert-warning py-2 mb-3 d-none">You have unsaved changes.</div>
 
@@ -120,6 +121,7 @@ let _vhOrganization = {folders: [], items: []};
 let _vhCanEditPresets = true;
 let _vhPresets = [];
 let _vhLabels = {inputs: [], outputs: [], configured: false};
+let _vhRoutingPresetNames = {};
 let _vhRoomsCfg = {rooms: [], output_layouts: {}, filtered_inputs: []};
 let _vhCurrentId = null;
 let _vhCurrentName = '';
@@ -210,6 +212,10 @@ function _vhRoutesFromRouting(){
   _vhEnsureRoutingLen();
   const routes = [];
   for(let o = 1; o <= _vhRouting.length; o++){
+    if(_vhRouting[o - 1] && typeof _vhRouting[o - 1] === 'object'){
+      routes.push({output: o, routing_preset: _vhRouting[o - 1].routing_preset});
+      continue;
+    }
     if(_vhRouting[o - 1] === null){
       routes.push({output: o, input: null});
       continue;
@@ -232,6 +238,10 @@ function _vhRoutingFromPreset(p){
   if(p && Array.isArray(p.routes)){
     for(const r of p.routes){
       const o = parseInt(r.output, 10);
+      if(r.routing_preset && o > 0 && o <= routing.length){
+        routing[o - 1] = {routing_preset: r.routing_preset};
+        continue;
+      }
       const inp = parseInt(r.input, 10);
       if(Number.isFinite(o) && o > 0 && (r.input === null || (Number.isFinite(inp) && inp > 0)) && (o - 1) < routing.length){
         routing[o - 1] = r.input === null ? null : inp;
@@ -290,7 +300,7 @@ function _vhTryLoadDraftFromQuery(){
   _vhCurrentId = (data.id == null) ? null : parseInt(data.id, 10);
   _vhCurrentName = String(data.name || '');
   _vhLocked = !!data.locked;
-  _vhRouting = data.routing.map((x) => x === null ? null : (parseInt(x, 10) || 1));
+  _vhRouting = data.routing.map((x) => x && typeof x === 'object' ? x : (x === null ? null : (parseInt(x, 10) || 1)));
   _vhRoomId = String(data.room_id || 'unassigned');
   _vhSetDirty(!!data.dirty);
   return true;
@@ -394,7 +404,9 @@ function _vhRenderRooms(){
     const outLabel = _vhFmtLabel(_vhLabels.outputs, o);
     const ignored = _vhRouting[o - 1] === null;
     const inputNum = parseInt(_vhRouting[o - 1], 10) || 1;
-    const inLabel = ignored ? 'Ignore — keep current routing' : _vhFmtLabel(_vhLabels.inputs, inputNum);
+    const selected = _vhRouting[o - 1];
+    const image = selected && typeof selected === 'object';
+    const inLabel = image ? 'Routing Preset: ' + (_vhRoutingPresetNames[selected.routing_preset] || selected.name || 'Unavailable saved preset') : (ignored ? 'Keep Current Routing' : _vhFmtLabel(_vhLabels.inputs, inputNum));
 
     const btn = document.createElement('button');
     btn.className = ignored ? 'vh-marker vh-marker-ignore' : 'vh-marker';
@@ -469,6 +481,15 @@ async function _vhLoadRoomsConfig(){
 }
 
 async function _vhLoadPresets(){
+  const root = document.getElementById('vh-page');
+  if(root && root.getAttribute('data-can-select-routing-presets') === '1'){
+    _vhRoutingPresetNames = {};
+    try{
+      const response = await fetch('/api/videohub/routing-presets', {cache:'no-store'});
+      const catalog = await response.json();
+      if(response.ok && catalog.ok) (catalog.presets || []).forEach(p => { _vhRoutingPresetNames[p.id] = p.name; });
+    }catch(e){}
+  }
   const res = await fetch('/api/videohub/presets?_ts=' + Date.now(), {cache:'no-store'});
   const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Failed to load presets');
@@ -533,6 +554,18 @@ async function _vhApplyPreset(id){
   const res = await fetch(`/api/videohub/presets/${encodeURIComponent(String(id))}/apply`, {method:'POST'});
   const data = await res.json().catch(() => ({}));
   if(!res.ok || !data.ok) throw new Error(data.error || 'Apply failed');
+  if(data.job){
+    _vhSetStatus('Applying preset. Do not apply again while it is running.', 'warn');
+    let job = data.job;
+    while(job.status !== 'succeeded' && job.status !== 'failed'){
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const response = await fetch(`/api/videohub/presets/${encodeURIComponent(String(id))}/jobs/${encodeURIComponent(job.id)}`, {cache:'no-store'});
+      const state = await response.json().catch(() => ({}));
+      if(!response.ok || !state.ok) throw new Error(state.error || 'Could not confirm preset outcome. Check outputs before applying again.');
+      job = state.job;
+    }
+    if(job.status !== 'succeeded') throw new Error(job.message || 'Preset stopped. Check outputs before applying again.');
+  }
   _vhSetStatus(`Applied preset #${id}.`, 'ok');
 }
 
