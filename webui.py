@@ -14037,7 +14037,21 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
 _timer_action_lock = threading.Lock()
 _timer_action_jobs: dict[int, threading.Timer] = {}
 _timer_mutation_lock = threading.RLock()
-_stream_delay_execution_lock = threading.Lock()
+# Process-local execution reservation, independent of storage/config locks.
+# Reentrant only for the same synchronous call chain (save-and-apply -> apply).
+_timer_execution_lock = threading.RLock()
+
+
+def _guard_timer_execution(fn):
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        if not _timer_execution_lock.acquire(blocking=False):
+            return {'ok': False, 'error': 'Timer execution already in progress; no actions sent.'}, 409
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _timer_execution_lock.release()
+    return guarded
 _stream_delay_operation_lock = threading.Lock()
 _stream_delay_operations: dict[tuple, dict] = {}
 _STREAM_DELAY_OPERATION_TTL = 24 * 60 * 60
@@ -14173,7 +14187,7 @@ def _cfg_int(cfg: dict, key: str, default: int, *, min_value: int | None = None,
     return v
 
 
-def _sync_companion_timer_variable_for_preset(*, cfg: dict, preset_number: int, preset: dict) -> tuple[bool, str | None]:
+def _sync_companion_timer_variable_for_preset(*, cfg: dict, preset_number: int, preset: dict, companion) -> tuple[bool, str | None]:
     """Update Companion custom variable for a single timer preset.
 
     Uses config key `companion_timer_name` as the variable prefix.
@@ -14187,10 +14201,7 @@ def _sync_companion_timer_variable_for_preset(*, cfg: dict, preset_number: int, 
     if not prefix:
         return False, 'companion_timer_name not configured'
 
-    try:
-        comp = utils.get_companion() if hasattr(utils, 'get_companion') else None
-    except Exception:
-        comp = None
+    comp = companion
     if comp is None:
         return False, 'companion client not available'
 
@@ -14227,7 +14238,7 @@ def _sync_companion_timer_variable_for_preset(*, cfg: dict, preset_number: int, 
     return ok, None if ok else 'failed to set variable'
 
 
-def _queue_companion_timer_variable_sync(*, cfg: dict, presets: list[dict]) -> None:
+def _queue_companion_timer_variable_sync(*, cfg: dict, presets: list[dict], companion) -> None:
     """Best-effort Companion variable sync that never blocks timer saves."""
     global _timer_companion_sync_generation
 
@@ -14257,6 +14268,7 @@ def _queue_companion_timer_variable_sync(*, cfg: dict, presets: list[dict]) -> N
             for i, preset in enumerate(presets_copy, start=1):
                 ok, _err = _sync_companion_timer_variable_for_preset(
                     cfg=cfg_copy,
+                    companion=companion,
                     preset_number=i,
                     preset=preset if isinstance(preset, dict) else {},
                 )
@@ -14434,6 +14446,17 @@ def _save_timer_config_changes(cfg: dict, changes: dict) -> tuple[dict, bool]:
 
 
 def _mutate_timers(body: dict) -> tuple[dict, int]:
+    if isinstance(body, dict) and _timer_bool(_timer_get_ci(body, 'apply', 'apply_now', 'applypreset')):
+        return _mutate_and_apply_timers(body)
+    return _mutate_timers_impl(body)
+
+
+@_guard_timer_execution
+def _mutate_and_apply_timers(body: dict) -> tuple[dict, int]:
+    return _mutate_timers_impl(body)
+
+
+def _mutate_timers_impl(body: dict) -> tuple[dict, int]:
     if not isinstance(body, dict):
         body = {}
 
@@ -14453,6 +14476,7 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
         except Exception:
             presets = []
 
+        companion = utils.get_companion()
         config_changes: dict = {}
         presets_changed = False
         extra: dict = {'action': action}
@@ -14718,7 +14742,7 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                 config_changed = False
 
             if presets_changed:
-                _queue_companion_timer_variable_sync(cfg=cfg, presets=presets)
+                _queue_companion_timer_variable_sync(cfg=cfg, presets=presets, companion=companion)
 
             extra.update({
                 'presets_changed': presets_changed,
@@ -14798,6 +14822,7 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
             preset_number=preset_number,
             cfg=apply_cfg,
             presets=apply_presets,
+            companion=companion,
         )
         if isinstance(apply_payload, dict):
             apply_payload.update({
@@ -14883,6 +14908,7 @@ def api_update_timer_preset():
     return jsonify(payload), status
 
 
+@_guard_timer_execution
 def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list, companion=_TIMER_COMPANION_DEFAULT) -> tuple[dict, int]:
     """Core implementation for applying a timer preset by 1-based preset number.
 
@@ -15245,6 +15271,7 @@ def _resolve_pp_timer_id_from_body(body: dict, cfg: dict) -> tuple[int | None, s
 
 
 @app.route('/api/propresenter/timer/set', methods=['POST'])
+@_guard_timer_execution
 def api_prop_set_timer():
     body = request.get_json(silent=True) or {}
 
@@ -15295,6 +15322,7 @@ def api_prop_set_timer():
 
 
 @app.route('/api/propresenter/timer/start', methods=['POST'])
+@_guard_timer_execution
 def api_prop_start_timer():
     body = request.get_json(silent=True) or {}
 
@@ -15336,6 +15364,7 @@ def api_prop_start_timer():
 
 
 @app.route('/api/propresenter/timer/stop', methods=['POST'])
+@_guard_timer_execution
 def api_prop_stop_timer():
     body = request.get_json(silent=True) or {}
 
@@ -15377,6 +15406,7 @@ def api_prop_stop_timer():
 
 
 @app.route('/api/propresenter/timer/reset', methods=['POST'])
+@_guard_timer_execution
 def api_prop_reset_timer():
     body = request.get_json(silent=True) or {}
 
@@ -15614,9 +15644,10 @@ def api_prop_stage_stream_delay():
     if update and principal.get('type') == 'service_token':
         if not token_allows(principal.get('scopes') or [], 'timers', read_only=False):
             return _api_json_error(403, 'insufficient_scope', "Checked stream delay requires the 'timers' scope.")
-        denied = _api_service_token_constraint_error(principal, '/api/timers/apply', 'POST')
-        if denied is not None:
-            return denied
+        for path in ('/api/timers/mutate', '/api/timers/apply'):
+            denied = _api_service_token_constraint_error(principal, path, 'POST')
+            if denied is not None:
+                return denied
 
     operation_id = body.get('operation_id')
     if (update or operation_id is not None) and (
@@ -15643,7 +15674,7 @@ def api_prop_stage_stream_delay():
                 return jsonify(payload), status
             if len(_stream_delay_operations) >= _STREAM_DELAY_OPERATION_LIMIT:
                 return jsonify(ok=False, error='Stream delay operation cache full; no actions sent.'), 429
-        if not _stream_delay_execution_lock.acquire(blocking=False):
+        if not _timer_execution_lock.acquire(blocking=False):
             return jsonify(ok=False, error='Stream delay execution already in progress.'), 409
         if key is not None:
             _stream_delay_operations[key] = {'created': now, 'snapshot': snapshot, 'result': None}
@@ -15659,7 +15690,7 @@ def api_prop_stage_stream_delay():
         with _stream_delay_operation_lock:
             if key is not None:
                 _stream_delay_operations[key]['result'] = (response.get_json(), response.status_code)
-            _stream_delay_execution_lock.release()
+            _timer_execution_lock.release()
 
 
 def _execute_stream_delay(body: dict, delta: int, update: bool):
@@ -15709,7 +15740,7 @@ def _execute_stream_delay(body: dict, delta: int, update: bool):
             result.update(saved=True, preset_time=updated['time'])
     if update:
         try:
-            _queue_companion_timer_variable_sync(cfg=cfg, presets=presets)
+            _queue_companion_timer_variable_sync(cfg=cfg, presets=presets, companion=companion)
         except Exception:
             result['sync_warning'] = 'Companion variable sync could not be queued.'
         try:

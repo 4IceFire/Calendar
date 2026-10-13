@@ -852,7 +852,11 @@ Stage message setup (same page):
   Each explicit click has a fresh operation ID; duplicate requests do not replay commands,
   including zero/full-day adjustments. The bounded 24-hour cache is process-local (not retained
   across restart). Reads/config imports remain responsive during device I/O; the original
-  captured preset and endpoints finish without switching targets or automatic replay.
+  captured preset and endpoints (including queued Companion variable writes) finish without
+  switching targets or automatic replay. Timer applies, update-and-apply and direct timer
+  controls share a nonblocking process-local reservation; contention returns 409 before
+  commands or update-and-apply storage changes. Checked-delay tokens need both timers
+  mutation and apply path authority; message-only permissions are unchanged.
 
 Timer transport uses the vendor's documented `/version`, `GET/PUT /v1/timer/{id}`
 and `GET /v1/timer/{id}/reset|start`. The PUT preserves the full returned identity

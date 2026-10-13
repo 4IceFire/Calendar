@@ -4,6 +4,7 @@ from unittest.mock import patch
 import webui
 
 original_fire = webui._fire_timer_button_presses_now
+original_queue = webui._queue_companion_timer_variable_sync
 
 
 class FakePP:
@@ -397,6 +398,148 @@ class StreamDelayUpdateTests(unittest.TestCase):
             allowed = self.client.post('/api/propresenter/stage/stream_delay', json=body, headers=headers)
             self.assertEqual(allowed.status_code, 200)
             self.assertTrue(allowed.get_json()['applied'])
+
+    def test_apply_only_token_cannot_save_checked_delay(self):
+        original = webui.utils.load_timer_presets()
+        body = self.body()
+        record = {'id': 982, 'name': 'apply-only', 'scopes': ['propresenter', 'timers'],
+                  'constraints': {'allowed_paths': ['POST /api/propresenter/stage/stream_delay', 'POST /api/timers/apply']}}
+        with patch.object(webui, '_auth_enabled', return_value=True), \
+             patch.object(webui, 'authenticate_service_token', return_value=(record, None)):
+            headers = {'Authorization': 'Bearer synthetic-test-only'}
+            denied = self.client.post('/api/propresenter/stage/stream_delay', json=body, headers=headers)
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(webui.utils.load_timer_presets(), original)
+            self.assertEqual(FakePP.calls, [])
+            self.presses.assert_not_called()
+            message = self.client.post('/api/propresenter/stage/stream_delay', json=dict(body, update_timer=False), headers=headers)
+            self.assertEqual(message.status_code, 200)
+
+    def test_timer_execution_reservation_covers_cross_endpoint_and_internal_apply(self):
+        import threading
+        cases = [('/api/timers/apply', {'preset': 1}),
+                 ('/api/timers/mutate', {'action': 'update_preset', 'preset': 1, 'time': '08:00', 'apply': True}),
+                 ('/api/timers/preset', {'preset': 1, 'time': '08:00', 'apply': True})]
+        cases += [('/api/propresenter/timer/' + op, {'time': '08:00'}) for op in ('set', 'start', 'stop', 'reset')]
+        entered, release = threading.Event(), threading.Event()
+        original_set = FakePP.SetCountdownToTime
+        def blocked_set(pp, timer, value):
+            result = original_set(pp, timer, value)
+            if value == '00:01':
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return result
+        outcomes = []
+        body = self.body()
+        def send():
+            with webui.app.test_client() as client:
+                outcomes.append(client.post('/api/propresenter/stage/stream_delay', json=body))
+        with patch.object(FakePP, 'SetCountdownToTime', blocked_set):
+            worker = threading.Thread(target=send); worker.start()
+            self.assertTrue(entered.wait(5))
+            try:
+                before = webui.utils.load_timer_presets()
+                for path, payload in cases:
+                    with self.subTest(path=path):
+                        self.assertEqual(self.client.post(path, json=payload).status_code, 409)
+                        self.assertEqual(webui.utils.load_timer_presets(), before)
+                        self.assertEqual(FakePP.calls, [('set', 1, '00:01')])
+                payload, status = webui._apply_timer_preset_number(preset_number=1, cfg=self.cfg, presets=before)
+                self.assertEqual(status, 409)
+                self.assertEqual(self.client.get('/api/timers').status_code, 200)
+                with webui._media_operation_lock, webui._timer_mutation_lock, webui.utils._timer_presets_lock:
+                    pass
+            finally:
+                release.set(); worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(outcomes[0].get_json()['applied'])
+        self.assertEqual(FakePP.calls[:3], [('set', 1, '00:01'), ('reset', 1), ('start', 1)])
+
+    def test_queued_variable_sync_keeps_factory_client_snapshot_across_reload(self):
+        import threading
+        import companion as companion_module
+        entered, release = threading.Event(), threading.Event()
+        class Client:
+            connected = True
+            def __init__(self, ip, port):
+                self.ip = ip
+                self.variables = []
+                self.presses = []
+            def SetVariable(self, name, value):
+                self.variables.append((name, value))
+                return True
+            def post_command(self, command):
+                self.presses.append(command)
+                return True
+        threads = []
+        real_thread = threading.Thread
+        def thread_factory(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            threads.append(thread)
+            return thread
+        def pause_worker(seconds):
+            entered.set()
+            self.assertTrue(release.wait(5))
+        self.cfg['companion_timer_name'] = 'oldprefix'
+        body = self.body()
+        with patch.object(companion_module, 'Companion', Client):
+            old = webui.utils._create_companion_client({'companion_ip': 'old.fake.invalid'})
+            new = webui.utils._create_companion_client({'companion_ip': 'new.fake.invalid'})
+        with patch.object(webui.utils, '_companion_client', old), \
+             patch.object(webui, '_queue_companion_timer_variable_sync', wraps=original_queue), \
+             patch.object(webui, '_fire_timer_button_presses_now', wraps=original_fire), \
+             patch.object(webui.threading, 'Thread', side_effect=thread_factory), \
+             patch.object(webui.time, 'sleep', side_effect=pause_worker):
+            response = self.client.post('/api/propresenter/stage/stream_delay', json=body)
+            self.assertTrue(entered.wait(5))
+            try:
+                webui.utils._companion_client = new
+                self.cfg['companion_timer_name'] = 'newprefix'
+                webui.utils.save_timer_presets([{'name': 'New', 'time': '08:00'}])
+            finally:
+                release.set()
+                for thread in threads: thread.join(5)
+            self.assertTrue(response.get_json()['applied'])
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(old.variables, [('oldprefix1', 'First\n09:30am'), ('oldprefix2', 'Second\n12:01am')])
+            self.assertEqual(new.variables, [])
+            self.assertEqual(old.presses, ['location/1/0/1/press'])
+            self.assertEqual(new.presses, [])
+
+    def test_normal_controls_hold_reservation_against_delay_and_scheduler(self):
+        import threading
+        cases = [('/api/timers/apply', {'preset': 1}),
+                 ('/api/timers/preset', {'preset': 1, 'time': '08:00', 'apply_now': True})]
+        cases += [('/api/propresenter/timer/' + op, {'time': '08:00'}) for op in ('set', 'start', 'stop', 'reset')]
+        for path, payload in cases:
+            with self.subTest(path=path):
+                entered, release = threading.Event(), threading.Event()
+                outcomes = []
+                original_set, original_op = FakePP.SetCountdownToTime, FakePP.timer_operation
+                def pause(result):
+                    if not entered.is_set():
+                        entered.set()
+                        self.assertTrue(release.wait(5))
+                    return result
+                def send():
+                    with webui.app.test_client() as client:
+                        outcomes.append(client.post(path, json=payload))
+                with patch.object(FakePP, 'SetCountdownToTime', lambda pp, *args: pause(original_set(pp, *args))), \
+                     patch.object(FakePP, 'timer_operation', lambda pp, *args: pause(original_op(pp, *args))):
+                    worker = threading.Thread(target=send); worker.start()
+                    self.assertTrue(entered.wait(5))
+                    try:
+                        before = webui.utils.load_timer_presets()
+                        self.assertEqual(self.client.post('/api/propresenter/stage/stream_delay', json=self.body()).status_code, 409)
+                        self.assertEqual(webui.utils.load_timer_presets(), before)
+                        self.assertFalse(webui._execute_scheduler_internal_action({'method': 'POST', 'path': '/api/timers/apply', 'body': {'preset': 1}}))
+                    finally:
+                        release.set(); worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(outcomes[0].status_code, 200)
+                if path.startswith('/api/timers'):
+                    self.assertTrue(outcomes[0].get_json()['started'])
+                self.assertTrue(webui._execute_scheduler_internal_action({'method': 'POST', 'path': '/api/timers/apply', 'body': {'preset': 1}}))
 
     def body(self, **extra):
         import uuid
