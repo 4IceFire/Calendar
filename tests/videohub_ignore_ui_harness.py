@@ -44,15 +44,23 @@ def main():
             fixture.stack.enter_context(patch.object(web, '_get_routing_preset_store', return_value=store))
             fixture.stack.enter_context(patch.object(web, '_get_media_routing_manager', return_value=manager))
             actions = fixture.stack.enter_context(patch.object(web, '_execute_routing_preset_action'))
-            allowed = {'static', 'videohub_page', 'videohub_input_select_page', 'auth_ping', 'auth_touch'}
+            allowed = {'static', 'videohub_page', 'videohub_input_select_page', 'videohub_rooms_page', 'videohub_monitor_page', 'config_api_tokens_page', 'auth_ping', 'auth_touch'}
             def blocked(**kwargs):
                 return web.jsonify(ok=False, error='Disabled in isolated fixture'), 404
             for name in list(web.app.view_functions):
-                if name not in allowed and not name.startswith(('api_videohub', 'api_v1__api_videohub')):
+                if name not in allowed and not name.startswith(('api_videohub', 'api_v1__api_videohub', 'api_config_service_tokens', 'api_v1__api_config_service_tokens')):
                     web.app.view_functions[name] = blocked
 
             def gate():
                 path = web.request.path
+                if path == '/__videohub_ignore_fixture__/room-image' or path.startswith('/media/videohub_room_images/fixture-'):
+                    ratio = 'portrait' if 'portrait' in path else web.request.args.get('shape', 'wide')
+                    width, height = (1800, 600) if ratio == 'wide' else (600, 1200)
+                    return web.Response(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><rect width="100%" height="100%" fill="#9bcfff"/><rect x="5" y="5" width="{width-10}" height="{height-10}" fill="none" stroke="red" stroke-width="10"/><text x="50" y="100" font-size="70">Full room — edges visible</text></svg>', mimetype='image/svg+xml')
+                if path == '/__videohub_ignore_fixture__/set-image':
+                    room = web._load_videohub_rooms_config()['rooms'][0]
+                    room['background_image'] = 'fixture-' + web.request.args.get('shape', 'wide') + '.svg'
+                    return web.jsonify(ok=True)
                 if path == '/__videohub_ignore_fixture__/health':
                     return web.jsonify(fixture='tdeck-videohub-ignore-ui', isolated=True,
                                        writes=fixture.hub.writes, reads=fixture.hub.reads,
@@ -60,6 +68,8 @@ def main():
                                        actions=actions.call_count, routing_preset=identity)
                 if path == '/__videohub_ignore_fixture__/reset':
                     Path(fixture.cfg['videohub_presets_file']).unlink(missing_ok=True)
+                    web._load_videohub_rooms_config()['rooms'][0]['background_image'] = ''
+                    conn = web._db(); conn.execute('DELETE FROM service_tokens'); conn.commit(); conn.close()
                     fixture.hub.writes.clear()
                     fixture.hub.reads = 0
                     fixture.hub.routing = list(range(1, 41))

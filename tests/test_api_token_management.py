@@ -161,6 +161,78 @@ class ApiTokenManagementTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()["error"], "forbidden")
 
+    def test_permissions_edit_keeps_identity_and_changes_current_authorization(self):
+        original = api_security.create_service_token(self.db_path, name='Companion', scopes=['read'], expires_in_days=30)
+        expected = {'scopes': original['scopes'], 'constraints': original['constraints']}
+        with self._secure_context(admin=True):
+            response = self.client.patch('/api/config/service-tokens/' + str(original['id']), headers=self._csrf_headers(),
+                json={'scopes': ['read', 'routing_presets'], 'constraints': {'routing_outputs': [2]}, 'expected': expected, 'confirmed': True})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        updated = response.get_json()['token']
+        self.assertEqual(updated['id'], original['id'])
+        self.assertEqual(updated['expires_at'], original['expires_at'])
+        self.assertNotIn('token', updated); self.assertNotIn('token_hash', updated)
+        record, error = api_security.authenticate_service_token(self.db_path, original['token'], update_last_used=False)
+        self.assertIsNone(error); self.assertIn('routing_presets', record['scopes']); self.assertEqual(record['constraints'], {'routing_outputs': [2]})
+        self.assertIn('security.service_token.permissions', str(self.event_log.call_args_list))
+        self.assertNotIn(original['token'], str(self.event_log.call_args_list))
+
+    def test_permissions_edit_denials_and_conflict_leave_metadata_unchanged(self):
+        original = api_security.create_service_token(self.db_path, name='Restricted', scopes=['read'])
+        expected = {'scopes': original['scopes'], 'constraints': original['constraints']}
+        body = {'scopes': ['timers'], 'constraints': {}, 'expected': expected, 'confirmed': True}
+        path = '/api/config/service-tokens/' + str(original['id'])
+        with self._secure_context(admin=False):
+            self.assertEqual(self.client.patch(path, json=body, headers=self._csrf_headers()).status_code, 403)
+        with self._secure_context(admin=True):
+            headers = self._csrf_headers()
+            self.assertEqual(self.client.patch(path, json=body).status_code, 403)
+            for value in ([], [0], [True], 'all', None):
+                bad = {**body, 'constraints': {'videohub_outputs': value}}
+                self.assertEqual(self.client.patch(path, json=bad, headers=headers).status_code, 400)
+            self.assertEqual(self.client.patch(path, json={**body, 'confirmed': False}, headers=headers).status_code, 400)
+            self.assertEqual(api_security.list_service_tokens(self.db_path)[0]['scopes'], ['read'])
+            self.assertEqual(self.client.patch(path, json=body, headers=headers).status_code, 200)
+            self.assertEqual(self.client.patch(path, json=body, headers=headers).status_code, 409)
+        token = api_security.create_service_token(self.db_path, name='Cannot self-edit', scopes=['*'])
+        with patch.object(webui, '_AUTH_DB_PATH', self.db_path), patch.object(webui, '_auth_cfg', return_value=self._config()):
+            self.assertEqual(self.client.patch(path, json=body, headers={'Authorization': 'Bearer '+token['token']}).status_code, 403)
+
+    def test_permissions_edit_does_not_revive_revoked_token(self):
+        original = api_security.create_service_token(self.db_path, name='Revoked', scopes=['read'])
+        api_security.revoke_service_token(self.db_path, original['id'])
+        with self._secure_context(admin=True):
+            response = self.client.patch('/api/config/service-tokens/' + str(original['id']), headers=self._csrf_headers(),
+                json={'scopes': ['timers'], 'constraints': {}, 'expected': {'scopes':['read'],'constraints':{}}, 'confirmed': True})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(response.get_json()['token']['active'])
+        self.assertEqual(api_security.authenticate_service_token(self.db_path, original['token'])[1], 'revoked_token')
+
+    def test_permissions_reduction_takes_effect_on_next_bearer_request(self):
+        from unittest.mock import Mock
+        original = api_security.create_service_token(self.db_path, name='Reduce', scopes=['read','routing_presets'])
+        store = Mock(); store.list.return_value = []
+        with self._secure_context(admin=True), patch.object(webui, '_get_routing_preset_store', return_value=store):
+            auth = {'Authorization':'Bearer '+original['token']}
+            self.assertEqual(self.client.get('/api/automation/routing-presets', headers=auth).status_code, 200)
+            response = self.client.patch('/api/config/service-tokens/'+str(original['id']), headers=self._csrf_headers(),
+                json={'scopes':['read'],'constraints':{},'expected':{'scopes':original['scopes'],'constraints':{}},'confirmed':True})
+            self.assertEqual(response.status_code, 200, response.get_json())
+            self.assertEqual(self.client.get('/api/automation/routing-presets', headers=auth).status_code, 403)
+
+    def test_permissions_edit_does_not_extend_expired_token(self):
+        import sqlite3
+        from contextlib import closing
+        original = api_security.create_service_token(self.db_path, name='Expired', scopes=['read'])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute('UPDATE service_tokens SET expires_at=? WHERE id=?', ('2020-01-01T00:00:00Z',original['id']));conn.commit()
+        with self._secure_context(admin=True):
+            response = self.client.patch('/api/config/service-tokens/'+str(original['id']), headers=self._csrf_headers(),
+                json={'scopes':['timers'],'constraints':{},'expected':{'scopes':['read'],'constraints':{}},'confirmed':True})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['token']['expires_at'],'2020-01-01T00:00:00Z')
+        self.assertEqual(api_security.authenticate_service_token(self.db_path,original['token'])[1],'expired_token')
+
     def test_rotation_is_atomic_when_replacement_insert_fails(self):
         original = api_security.create_service_token(
             self.db_path,

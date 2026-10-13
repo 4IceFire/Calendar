@@ -478,6 +478,58 @@ def authenticate_service_token(
         conn.close()
 
 
+class ServiceTokenConflict(ValueError):
+    pass
+
+
+def validate_token_permissions(value: dict) -> dict:
+    if not isinstance(value, dict) or set(value) != {'scopes', 'constraints'}:
+        raise ValueError('Supply scopes and constraints only.')
+    scopes, constraints = value['scopes'], value['constraints']
+    if not isinstance(scopes, list) or not scopes or any(not isinstance(s, str) or not s.strip() for s in scopes):
+        raise ValueError('Choose at least one valid scope.')
+    if not isinstance(constraints, dict):
+        raise ValueError('Constraints must be an object.')
+    numeric = {'videohub_outputs', 'videohub_inputs', 'videohub_presets', 'routing_outputs'}
+    for key, values in constraints.items():
+        if key not in SERVICE_TOKEN_CONSTRAINT_KEYS or not isinstance(values, list) or not values:
+            raise ValueError('Restrictions must be nonempty explicit lists; omit a restriction for unrestricted access.')
+        if key in numeric:
+            if any(type(n) is not int or n <= 0 for n in values):
+                raise ValueError('Port and preset restrictions need positive whole numbers.')
+        elif any(not isinstance(v, str) or not v.strip() for v in values):
+            raise ValueError('Restrictions need nonempty strings.')
+    normalized = normalize_scopes(scopes)
+    if not normalized:
+        raise ValueError('Choose at least one valid scope.')
+    return {'scopes': normalized, 'constraints': normalize_constraints(constraints)}
+
+
+def update_service_token_permissions(db_path, token_id, *, scopes, constraints, expected):
+    desired = validate_token_permissions({'scopes': scopes, 'constraints': constraints})
+    expected = validate_token_permissions(expected)
+    ensure_service_token_schema(db_path)
+    conn = sqlite3.connect(str(db_path)); conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT * FROM service_tokens WHERE id=?', (token_id,)).fetchone()
+        if row is None:
+            raise KeyError(token_id)
+        before = _row_to_public_dict(row)
+        if before['invalid_constraints']:
+            raise ValueError('This token has corrupt restrictions; revoke it and create a replacement.')
+        current = {key: before[key] for key in ('scopes', 'constraints')}
+        if current != expected:
+            raise ServiceTokenConflict('Permissions changed in another editor. Refresh before saving.')
+        conn.execute('UPDATE service_tokens SET scopes_json=?, constraints_json=? WHERE id=?',
+                     (json.dumps(desired['scopes']), json.dumps(desired['constraints']), token_id))
+        after = _row_to_public_dict(conn.execute('SELECT * FROM service_tokens WHERE id=?', (token_id,)).fetchone())
+        conn.commit()
+        return current, after
+    finally:
+        conn.close()
+
+
 def token_allows(scopes: Iterable[str], required_scope: str, *, read_only: bool) -> bool:
     granted = {str(scope or "").strip().lower() for scope in scopes}
     if "*" in granted:

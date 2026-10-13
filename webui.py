@@ -12305,6 +12305,29 @@ def api_config_service_tokens_create():
     return jsonify({'ok': True, 'token': record}), 201
 
 
+@app.patch('/api/config/service-tokens/<int:token_id>')
+def api_config_service_tokens_permissions(token_id: int):
+    from api_security import update_service_token_permissions, ServiceTokenConflict
+    try:
+        body = request.get_json(silent=True)
+        if (not isinstance(body, dict) or set(body) != {'scopes', 'constraints', 'expected', 'confirmed'}
+                or body['confirmed'] is not True):
+            raise ValueError('Confirm the scopes and restrictions change, with its original permissions snapshot.')
+        before, record = update_service_token_permissions(_AUTH_DB_PATH, token_id,
+            scopes=body['scopes'], constraints=body['constraints'], expected=body['expected'])
+    except KeyError:
+        return _api_json_error(404, 'not_found', 'Token not found.')
+    except ServiceTokenConflict as error:
+        return _api_json_error(409, 'changed', str(error))
+    except (ValueError, TypeError) as error:
+        return _api_json_error(400, 'invalid_request', str(error))
+    log_event('security.service_token.permissions', f"Updated permissions for token '{record['name']}'",
+              status='success', target_type='service_token', target_id=token_id,
+              details={'token_id': token_id, 'before': before,
+                       'after': {key: record[key] for key in ('scopes', 'constraints')}})
+    return jsonify(ok=True, token=record)
+
+
 @app.post('/api/config/service-tokens/<int:token_id>/rotate')
 def api_config_service_tokens_rotate(token_id: int):
     body = request.get_json(silent=True)

@@ -226,6 +226,21 @@ longer requires the CLI. See `API_REFERENCE.md` for the complete migration
 sequence, temporary expiring legacy flag, v1 endpoint aliases, limits, and
 scope semantics.
 
+### Editing token permissions and full room images
+
+Config → API Tokens → **Edit permissions** changes existing scopes/restrictions
+without issuing a new token or reconfiguring Companion. Confirm added access:
+every holder of that credential gets its current permissions. Cancel makes no
+change; failed edits stay in the dialog, and concurrent edits require refreshing.
+Expiry/revocation are unchanged; already-dispatched work is not cancelled. Rotate
+or revoke instead if the credential may have leaked.
+
+VideoHub Presets now uses a wider desktop workspace and fits complete room images
+without cropping/stretching. Preset view, room editor and monitor share the same
+image coordinate canvas; existing saved percentages are retained. Portrait/wide
+images fit available space and mobile markers remain inside the image. Unassigned
+outputs keep their scrollable grid. No route command runs during fitting/resizing.
+
 ### VideoHub preset outputs: Keep Current Routing and images
 
 On **VideoHub Presets** (`/videohub`), open a preset and click an output in its room.

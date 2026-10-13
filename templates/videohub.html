@@ -18,6 +18,7 @@
 {% block content %}
 <style>
   #vh-page .card{ height: 100%; }
+  @media(min-width:1200px){ #vh-page .col-lg-4{flex:0 0 320px;width:320px;} #vh-page .col-lg-8{flex:1;width:calc(100% - 320px);} }
   #vh-page .col-lg-4 > .card > .card-body{ display:flex; flex-direction:column; min-height:0; }
   #vh-list{ flex:1; min-height:0; overflow:auto; padding-right:.2rem; }
   .vh-preset-row{ display:flex; flex-direction:column; align-items:stretch; gap:.4rem; width:100%; min-width:0; margin-bottom:.5rem; }
@@ -81,6 +82,7 @@
     .vh-marker-title{ font-size: .72rem; }
     .vh-marker-sub{ font-size: .64rem; }
   }
+  .vh-room-stage[data-full-room-image] .vh-marker{min-width:0;max-width:42%;white-space:normal;overflow-wrap:anywhere;}
 </style>
 
 <div id="vh-page"
@@ -137,6 +139,7 @@
   </form></div>
 </div>
 <script src="{{ static_asset('catalog_organization.js') }}"></script>
+<script src="{{ static_asset('videohub_room_frame.js') }}"></script>
 <script>
 let _vhAllowedPresetIds = [];
 let _vhOrganization = {folders: [], items: []};
@@ -428,6 +431,7 @@ function _vhRenderRooms(){
   });
   document.getElementById('vh-selection-note').textContent = notes.join(' ');
   stage.className = 'vh-room-stage' + (_vhRoomId === 'unassigned' ? ' vh-unassigned-grid' : '');
+  if(window.fitVideohubRoomImage) window.fitVideohubRoomImage(stage,bgUrl);
   const outputs = _vhOutputsForRoom(_vhRoomId);
   if(!outputs.length){
     stage.innerHTML = '<div class="vh-room-empty">No outputs in this room.</div>';
@@ -683,6 +687,7 @@ async function _vhGoSelectInput(outputNum){
 }
 
 function _vhWireUI(){
+  const main=document.getElementById('main-content');if(main) main.style.maxWidth='1900px';
   const nameEl = document.getElementById('vh-name');
   if(nameEl){
     nameEl.addEventListener('input', () => {

@@ -325,6 +325,16 @@ The browser management contract is administrator-session only:
   returns a secret or stored hash.
 - `POST /api/config/service-tokens` creates a token with `name`, optional
   `description`, `expires_in_days`, `scopes`, and optional `constraints`.
+- `PATCH /api/config/service-tokens/<id>` edits permissions without replacing the
+  credential. Exact JSON: `{scopes, constraints, expected:{scopes,constraints},
+  confirmed:true}`. Browser/Admin/Config access, CSRF and trusted origin required;
+  service tokens (including `*`) cannot edit themselves. Returns `{ok,token}` with
+  public metadata only. Preserve token identity/hash, expiry and revocation; new
+  requests use current permissions. This does not cancel dispatched work or revive
+  expired/revoked tokens. Present restrictions must be nonempty valid lists; omit
+  a restriction to remove it. Stale permissions snapshot returns 409, malformed or
+  unconfirmed edits 400, missing token 404. Activity Log records actor and before/after
+  permissions, never credential plaintext or hash.
 - `POST /api/config/service-tokens/<id>/rotate` atomically stores a replacement
   and revokes the old token. It accepts `name` and `expires_in_days`.
 - `DELETE /api/config/service-tokens/<id>` immediately revokes a token.

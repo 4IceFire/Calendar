@@ -148,6 +148,7 @@
     .vhm-marker{ min-width: 66px; padding: .16rem .24rem; }
     .vhm-marker-title{ font-size: .64rem; }
   }
+  .vhm-stage[data-full-room-image] .vhm-marker{min-width:0;max-width:42%;white-space:normal;overflow-wrap:anywhere;}
 </style>
 
 <div id="vhm-page">
@@ -188,6 +189,7 @@
   </div>
 </div>
 
+<script src="{{ static_asset('videohub_room_frame.js') }}"></script>
 <script>
 let _vhmLabels = {inputs: [], outputs: [], configured: false};
 let _vhmRoomsCfg = {rooms: [], output_layouts: {}, filtered_inputs: []};
@@ -337,12 +339,13 @@ function _vhmRender(){
           <h2 class="vhm-room-title">${_safeHtml(room.name || room.id)}</h2>
           <div class="vhm-room-meta">${outputs.length} output${outputs.length === 1 ? '' : 's'}</div>
         </div>
-        <div class="vhm-stage" style="${bgUrl ? `background-image:url('${_safeHtml(bgUrl)}');` : ''}">
+        <div class="vhm-stage" data-room-background="${_safeHtml(bgUrl)}" style="${bgUrl ? `background-image:url('${_safeHtml(bgUrl)}');` : ''}">
           ${outputs.length ? markers : '<div class="vhm-empty">No outputs assigned to this room.</div>'}
         </div>
       </section>
     `;
   }).join('');
+  if(window.fitVideohubRoomImage) host.querySelectorAll('[data-room-background]').forEach(el=>window.fitVideohubRoomImage(el,el.dataset.roomBackground));
 }
 
 async function _vhmLoadRooms(){
