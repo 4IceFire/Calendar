@@ -14037,8 +14037,14 @@ def _normalize_trigger_action_spec(raw: dict) -> tuple[dict | None, str | None]:
 _timer_action_lock = threading.Lock()
 _timer_action_jobs: dict[int, threading.Timer] = {}
 _timer_mutation_lock = threading.RLock()
+_stream_delay_execution_lock = threading.Lock()
+_stream_delay_operation_lock = threading.Lock()
+_stream_delay_operations: dict[tuple, dict] = {}
+_STREAM_DELAY_OPERATION_TTL = 24 * 60 * 60
+_STREAM_DELAY_OPERATION_LIMIT = 1024
 _timer_companion_sync_lock = threading.Lock()
 _timer_companion_sync_generation = 0
+_TIMER_COMPANION_DEFAULT = object()
 
 
 def _cancel_timer_action_job(pp_timer_id: int) -> None:
@@ -14051,7 +14057,7 @@ def _cancel_timer_action_job(pp_timer_id: int) -> None:
             pass
 
 
-def _fire_timer_button_presses_now(*, pp_timer_id: int, preset_number: int, preset_name: str, time_str: str, button_presses: list[dict]) -> dict:
+def _fire_timer_button_presses_now(*, pp_timer_id: int, preset_number: int, preset_name: str, time_str: str, button_presses: list[dict], companion=_TIMER_COMPANION_DEFAULT) -> dict:
     """Fire configured Companion button presses immediately.
 
     This is intentionally "immediate on button press" behavior: when the timer
@@ -14085,7 +14091,8 @@ def _fire_timer_button_presses_now(*, pp_timer_id: int, preset_number: int, pres
         pass
 
     try:
-        comp = utils.get_companion() if hasattr(utils, 'get_companion') else None
+        comp = ((utils.get_companion() if hasattr(utils, 'get_companion') else None)
+                if companion is _TIMER_COMPANION_DEFAULT else companion)
     except Exception:
         comp = None
 
@@ -14876,7 +14883,7 @@ def api_update_timer_preset():
     return jsonify(payload), status
 
 
-def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) -> tuple[dict, int]:
+def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list, companion=_TIMER_COMPANION_DEFAULT) -> tuple[dict, int]:
     """Core implementation for applying a timer preset by 1-based preset number.
 
     Returns (payload, http_status).
@@ -14939,6 +14946,7 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
             preset_name=preset_name,
             time_str=time_str,
             button_presses=presses,
+            companion=companion,
         )
     except Exception:
         press_info = {'fired': False, 'count': 0}
@@ -15602,12 +15610,63 @@ def api_prop_stage_stream_delay():
     update = body.get('update_timer', False)
     if type(update) is not bool:
         return jsonify(ok=False, error='update_timer must be a boolean'), 400
+    principal = getattr(g, 'api_principal', {})
+    if update and principal.get('type') == 'service_token':
+        if not token_allows(principal.get('scopes') or [], 'timers', read_only=False):
+            return _api_json_error(403, 'insufficient_scope', "Checked stream delay requires the 'timers' scope.")
+        denied = _api_service_token_constraint_error(principal, '/api/timers/apply', 'POST')
+        if denied is not None:
+            return denied
 
-    # Same ordering as config/import writers; hold through apply so another
-    # request cannot reorder the selected position between saving and applying.
+    operation_id = body.get('operation_id')
+    if (update or operation_id is not None) and (
+            not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', operation_id)):
+        return jsonify(ok=False, error='operation_id must be 16-128 ASCII letters, digits, underscores or hyphens.'), 400
+    key = None
+    snapshot = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    with _stream_delay_operation_lock:
+        now = time.monotonic()
+        for expired in [k for k, value in _stream_delay_operations.items()
+                        if now - value['created'] >= _STREAM_DELAY_OPERATION_TTL and value['result'] is not None]:
+            del _stream_delay_operations[expired]
+        if operation_id is not None:
+            key = (principal.get('key', 'unknown'),
+                   str(session.get('_auth_session_id') or '') if principal.get('type') == 'browser_session' else '',
+                   operation_id)
+            previous = _stream_delay_operations.get(key)
+            if previous is not None:
+                if previous['snapshot'] != snapshot:
+                    return jsonify(ok=False, error='operation_id already used with a different payload.'), 409
+                if previous['result'] is None:
+                    return jsonify(ok=False, error='Stream delay operation in progress; do not replay.'), 409
+                payload, status = previous['result']
+                return jsonify(payload), status
+            if len(_stream_delay_operations) >= _STREAM_DELAY_OPERATION_LIMIT:
+                return jsonify(ok=False, error='Stream delay operation cache full; no actions sent.'), 429
+        if not _stream_delay_execution_lock.acquire(blocking=False):
+            return jsonify(ok=False, error='Stream delay execution already in progress.'), 409
+        if key is not None:
+            _stream_delay_operations[key] = {'created': now, 'snapshot': snapshot, 'result': None}
+    response = app.make_response((jsonify(ok=False, error='Stream delay outcome unknown; do not replay.',
+                                         saved=None, applied=None, sent=None), 500))
+    try:
+        response = app.make_response(_execute_stream_delay(body, delta, update))
+        return response
+    except Exception:
+        # Keep the operation consumed even after an uncertain device/persistence outcome.
+        return response
+    finally:
+        with _stream_delay_operation_lock:
+            if key is not None:
+                _stream_delay_operations[key]['result'] = (response.get_json(), response.status_code)
+            _stream_delay_execution_lock.release()
+
+
+def _execute_stream_delay(body: dict, delta: int, update: bool):
     with _media_operation_lock, _timer_mutation_lock, utils._timer_presets_lock:
-        cfg = utils.get_config()
-        presets = utils.load_timer_presets()
+        cfg = copy.deepcopy(utils.get_config())
+        presets = copy.deepcopy(utils.load_timer_presets())
+        companion = utils.get_companion() if update else None
         number = body.get('preset', cfg.get('stream_delay_preset', 0))
         if type(number) is not int:
             return jsonify(ok=False, error='preset must be an integer'), 400
@@ -15648,32 +15707,36 @@ def api_prop_stage_stream_delay():
                 result.update(ok=False, error='Failed to save timer preset; no actions sent.')
                 return jsonify(result), 500
             result.update(saved=True, preset_time=updated['time'])
-            try:
-                _queue_companion_timer_variable_sync(cfg=cfg, presets=presets)
-            except Exception:
-                result['sync_warning'] = 'Companion variable sync could not be queued.'
-            try:
-                applied, status = _apply_timer_preset_number(preset_number=number, cfg=cfg, presets=presets)
-                result['apply'] = applied
-                press_result = applied.get('button_presses') or {}
-                result['applied'] = bool(status == 200 and applied.get('started') and
-                                         (not presses or (press_result.get('fired') and not press_result.get('fail') and not press_result.get('error'))))
-            except Exception as exc:
-                result['apply'] = {'error': 'Apply failed: ' + type(exc).__name__}
+    if update:
         try:
-            pp = ProPresentor(ip, port)
-            result['sent'] = bool(pp.set_stage_message(message))
-            result['detail'] = getattr(pp, 'last_stage_message_error', None) if not result['sent'] else None
+            _queue_companion_timer_variable_sync(cfg=cfg, presets=presets)
+        except Exception:
+            result['sync_warning'] = 'Companion variable sync could not be queued.'
+        try:
+            applied, status = _apply_timer_preset_number(preset_number=number, cfg=cfg, presets=presets, companion=companion)
+            result['apply'] = applied
+            press_result = applied.get('button_presses') or {}
+            result['applied'] = bool(status == 200 and applied.get('started') and
+                                     (not presses or (press_result.get('fired') and not press_result.get('fail') and not press_result.get('error'))))
         except Exception as exc:
-            result['detail'] = 'Message failed: ' + type(exc).__name__
-        result['ok'] = result['sent'] and (not update or result['applied'])
-        result.update(_timer_state_payload(cfg=cfg, presets=presets, ok=result['ok']))
+            result['apply'] = {'error': 'Apply failed: ' + type(exc).__name__}
+    try:
+        pp = ProPresentor(ip, port)
+        result['sent'] = bool(pp.set_stage_message(message))
+        result['detail'] = getattr(pp, 'last_stage_message_error', None) if not result['sent'] else None
+    except Exception as exc:
+        result['detail'] = 'Message failed: ' + type(exc).__name__
+    result['ok'] = result['sent'] and (not update or result['applied'])
+    result.update(_timer_state_payload(cfg=cfg, presets=presets, ok=result['ok']))
+    try:
         log_event('propresenter.stage.stream_delay',
                   f"Stream delay preset #{number}: saved={result['saved']}, applied={result['applied']}, message={result['sent']}",
                   source='api', status='success' if result['ok'] else 'failure',
                   target_type='timer_preset', target_id=number,
                   details={key: result[key] for key in ('saved', 'applied', 'sent', 'delay_minutes', 'apply', 'detail')})
-        return jsonify(result)
+    except Exception:
+        result['audit_warning'] = 'Activity Log could not record the outcome.'
+    return jsonify(result)
 
 
 @app.route('/api/videohub/ping', methods=['GET'])

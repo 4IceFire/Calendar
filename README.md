@@ -847,6 +847,12 @@ Stage message setup (same page):
 - Feedback reports saved, applied and message outcomes separately. A failed apply/message
   does not undo the saved time. Reload after an uncertain request or stale-edit conflict;
   there is no automatic retry. A repeated explicit click adds to the newly persisted time.
+  The editor and structural/keyboard controls freeze while pending drafts flush and execution
+  completes; selection is re-read after flush so a pending move cannot target another preset.
+  Each explicit click has a fresh operation ID; duplicate requests do not replay commands,
+  including zero/full-day adjustments. The bounded 24-hour cache is process-local (not retained
+  across restart). Reads/config imports remain responsive during device I/O; the original
+  captured preset and endpoints finish without switching targets or automatic replay.
 
 Timer transport uses the vendor's documented `/version`, `GET/PUT /v1/timer/{id}`
 and `GET /v1/timer/{id}/reset|start`. The PUT preserves the full returned identity
@@ -858,6 +864,7 @@ not ProPresenter 21.4 physical behavior or the cause of an instance connection o
 
 Isolated timer regression runner (temporary storage; outbound requests/sockets blocked):
 `python tests/run_timers_isolated.py test_timers_direct test_stream_delay test_stream_delay_update`.
+Actual JavaScript handler regressions: `node --test tests/timers_stream_delay.test.cjs`.
 Browser fixture: `python tests/timers_ui_harness.py --ready-file <scratch>/timers-ready.json`.
 Use a Playwright Python environment to run
 `python tests/timers_browser_check.py --ready-file <scratch>/timers-ready.json --artifacts <scratch>/timer-evidence --browser all`.

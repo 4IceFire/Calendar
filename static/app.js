@@ -2157,6 +2157,28 @@ async function _timersAdjustAllPresets(sign) {
 let _timersRevision = '';
 let _timersDelayBusy = false;
 let _timersDelaySelectionBlocked = false;
+const _timersLockedControls = new Map();
+
+function _timersRefreshEditingLock() {
+  if (!_timersDelayBusy) return;
+  const root = document.getElementById('timers-page');
+  if (!root) return;
+  root.querySelectorAll('input, select, textarea, button').forEach(el => {
+    if (!_timersLockedControls.has(el)) _timersLockedControls.set(el, el.disabled);
+    el.disabled = true;
+  });
+}
+
+function _timersSetDelayBusy(busy) {
+  _timersDelayBusy = busy;
+  const root = document.getElementById('timers-page');
+  if (root) root.setAttribute('aria-busy', busy ? 'true' : 'false');
+  if (busy) _timersRefreshEditingLock();
+  else {
+    _timersLockedControls.forEach((disabled, el) => {el.disabled = disabled;});
+    _timersLockedControls.clear();
+  }
+}
 
 function _timersApplyMutationResponse(data, {render = false} = {}) {
   if (data && data.revision) _timersRevision = data.revision;
@@ -2242,7 +2264,7 @@ function _timersReadPresetFromRow(tr) {
 }
 
 function _timersQueueRowUpdate(tr) {
-  if (!tr) return Promise.resolve({ok: true, skipped: true});
+  if (!tr || tr.isConnected === false) return Promise.resolve({ok: true, skipped: true});
   _timersClearRowSaveTimer(tr);
   const preset = Number(tr.dataset.index) + 1;
   if (!Number.isFinite(preset) || preset < 1) return Promise.resolve({ok: true, skipped: true});
@@ -2264,7 +2286,7 @@ function _timersQueueRowUpdate(tr) {
 }
 
 function _timersMarkRowDirty(tr, {delayMs = 700} = {}) {
-  if (!tr) return;
+  if (!tr || _timersDelayBusy) return;
   tr.dataset.dirty = '1';
   tr.dataset.dirtyVersion = String(++_timersEditVersion);
   _timersClearRowSaveTimer(tr);
@@ -2703,7 +2725,10 @@ function _timersStageSetDelayPreview(presetId, presets) {
 
 function _timersStageSetButtonsEnabled(enabled) {
   const btn = document.getElementById('timers-stage-send');
-  if (btn) btn.disabled = !enabled;
+  if (btn) {
+    if (_timersDelayBusy) _timersLockedControls.set(btn, !enabled);
+    btn.disabled = _timersDelayBusy || !enabled;
+  }
   const delayBtn = document.getElementById('timers-stage-delay-send');
   const delayId = _timersReadDelayPresetFromUI();
   if (delayBtn) delayBtn.disabled = _timersDelayBusy || _timersDelaySelectionBlocked || !(delayId > 0 && delayId <= _timersReadPresetsForStage().length);
@@ -2760,10 +2785,13 @@ async function _timersSendStreamStartMessage() {
 
 async function _timersSendStreamDelayMessage(delayMinutes, presetId) {
   const update = document.getElementById('timers-stage-update-timer').checked;
+  const operationBytes = new Uint8Array(16);
+  crypto.getRandomValues(operationBytes);
+  const operationId = Array.from(operationBytes, byte => byte.toString(16).padStart(2, '0')).join('');
   const res = await fetch('/api/propresenter/stage/stream_delay', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({delay_minutes: delayMinutes, preset: presetId, update_timer: update, revision: _timersRevision}),
+    body: JSON.stringify({delay_minutes: delayMinutes, preset: presetId, update_timer: update, revision: _timersRevision, operation_id: operationId}),
   }).catch(() => {
     throw new Error('Stream delay request failed; saved/applied/message outcome unknown. Reload before another explicit click.');
   });
@@ -2822,6 +2850,7 @@ function _timersRenderPresets(presets) {
   const body = document.getElementById('timers-presets-body');
   if (!body) return;
 
+  Array.from(body.querySelectorAll('tr')).forEach(_timersClearRowSaveTimer);
   body.innerHTML = '';
   (presets || []).forEach((t, idx) => {
     const tr = document.createElement('tr');
@@ -2963,6 +2992,7 @@ function _timersRenderPresets(presets) {
   const stagePresetId = _timersReadStagePresetFromUI();
   _timersStageSetPreview(stagePresetId, presets || []);
   _timersStageSetButtonsEnabled(stagePresetId > 0 && stagePresetId <= (presets || []).length);
+  _timersRefreshEditingLock();
 }
 
 function _timersReadPresetsFromUI() {
@@ -3033,7 +3063,17 @@ async function _timersLoad() {
 }
 
 function _initTimersPage() {
-  if (!document.getElementById('timers-page')) return;
+  const root = document.getElementById('timers-page');
+  if (!root) return;
+  // Capture-phase fallback covers keyboards and structural controls even where
+  // inert is unavailable. Pending pre-click saves still drain normally.
+  ['click', 'input', 'change', 'keydown', 'beforeinput'].forEach(type => {
+    root.addEventListener(type, ev => {
+      if (!_timersDelayBusy) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }, true);
+  });
   // Initial load
   _timersLoad().catch(e => _timersSetStatus(String(e.message || e), 'error'));
 
@@ -3191,16 +3231,17 @@ function _initTimersPage() {
             return;
           }
           if (_timersDelayBusy) return;
-          _timersDelayBusy = true;
-          delaySendBtn.disabled = true;
+          _timersSetDelayBusy(true);
           if (!(await _timersFlushAutoSave({showStatus: false}))) return;
-          await _timersSendStreamDelayMessage(delayMinutes, presetId);
+          const currentPresetId = _timersReadDelayPresetFromUI();
+          if (!currentPresetId) throw new Error('Select a stream delay preset first.');
+          await _timersSendStreamDelayMessage(delayMinutes, currentPresetId);
 
         } catch (e) {
           _timersStageSetDelayHint(String(e.message || e), 'error');
           _timersSetStatus(String(e.message || e), 'error');
         } finally {
-          _timersDelayBusy = false;
+          _timersSetDelayBusy(false);
           const selected = _timersReadDelayPresetFromUI();
           const presets = _timersReadPresetsForStage();
           delaySendBtn.disabled = _timersDelaySelectionBlocked || !(selected > 0 && selected <= presets.length);
