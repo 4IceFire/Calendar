@@ -28,6 +28,9 @@ class FakeVideoHub:
         self.reads += 1
         return self.snapshot()
 
+    def get_routing_state_strict(self):
+        return {'input_count': 40, 'output_count': 40, 'routing': self.routing[:]}
+
     def snapshot(self):
         return {'ok': True, 'configured': True, 'refreshing': False,
                 'inputs': [{'number': n, 'label': f'Input {n}'} for n in range(1, 41)],

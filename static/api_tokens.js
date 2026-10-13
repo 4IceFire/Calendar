@@ -189,19 +189,25 @@
         function (input) { return input.value; }
       );
       if (!checkedScopes.length) throw new Error('Choose at least one permission.');
+      var routingPresets = splitValues(document.getElementById('api-token-routing-presets').value);
+      if(routingPresets.some(function (id) { return !/^[a-f0-9]{32}$/.test(id); })) throw new Error('Routing presets must be exact saved preset IDs, not all.');
+      var routingOutputs = positiveNumbers(document.getElementById('api-token-routing-outputs').value, 'Routing outputs');
+      var extra = {};
+      if(routingPresets.length) extra.routing_presets = routingPresets;
+      if(routingOutputs.length) extra.routing_outputs = routingOutputs;
       return {
         name: document.getElementById('api-token-name').value.trim(),
         description: document.getElementById('api-token-description').value.trim(),
         expires_in_days: Number(document.getElementById('api-token-expiry').value),
         scopes: checkedScopes,
-        constraints: {
+        constraints: Object.assign(extra, {
           allowed_paths: splitValues(document.getElementById('api-token-allowed-paths').value),
           tv_targets: splitValues(document.getElementById('api-token-tv-targets').value),
           videohub_outputs: positiveNumbers(document.getElementById('api-token-vh-outputs').value, 'VideoHub outputs'),
           videohub_inputs: positiveNumbers(document.getElementById('api-token-vh-inputs').value, 'VideoHub inputs'),
           videohub_presets: positiveNumbers(document.getElementById('api-token-vh-presets').value, 'VideoHub presets'),
           atem_sources: splitValues(document.getElementById('api-token-atem-sources').value)
-        }
+        })
       };
     }
 

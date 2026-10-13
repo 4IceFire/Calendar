@@ -31,7 +31,7 @@ def main():
             from unittest.mock import Mock
             fixture.cfg.update(configuration())
             media = FakeMedia()
-            identity = '12345678-1234-4234-8234-123456789abc'
+            identity = 'a' * 32
             item = {'id': identity, 'name': 'Welcome image', 'enabled': True,
                     'output': 9, 'media_id': 'fixture-image', 'actions': [{'path': '/api/timers/1/start'}]}
             store = Mock(); store.get.side_effect = lambda key: dict(item) if key == identity else None
@@ -64,6 +64,7 @@ def main():
                     fixture.hub.reads = 0
                     fixture.hub.routing = list(range(1, 41))
                     fixture.hub.fail_readback = False
+                    fixture.hub.get_routing_state_strict = lambda: {'input_count': 40, 'output_count': 40, 'routing': fixture.hub.routing[:]}
                     fixture.log.reset_mock()
                     media.calls.clear()
                     manager._player_usage = PlayerUsage()
@@ -76,6 +77,9 @@ def main():
                     web.session.clear()
                     web.session.update(_user_id=str(uid), _fresh=True, _auth_session_id=f'fixture-{uid}',
                                        _last_activity=int(time.time()), _csrf='ignore-csrf')
+                    return web.jsonify(ok=True)
+                if path == '/__videohub_ignore_fixture__/small-device':
+                    fixture.hub.get_routing_state_strict = lambda: {'input_count': 8, 'output_count': 4, 'routing': [8, 7, 6, 5]}
                     return web.jsonify(ok=True)
                 if path == '/__videohub_ignore_fixture__/change-live':
                     fixture.hub.routing[0] = 12

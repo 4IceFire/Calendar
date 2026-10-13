@@ -66,7 +66,7 @@ class VideohubApp(AppBase):
 
         name = str(preset.get("name") or "").strip()
         if not name:
-            name = "Unnamed Preset"
+            raise ValueError("Preset name is required")
 
         routes_in: list[VideohubRoute] = []
         raw_routes = preset.get("routes")
@@ -82,6 +82,8 @@ class VideohubApp(AppBase):
         if target_id is not None:
             for i, p in enumerate(presets):
                 if int(p.id) == int(target_id):
+                    if 'expected' in preset and preset['expected'] != p.to_dict():
+                        raise storage.PresetConflict('This preset changed. Reload before editing; your draft is retained.')
                     if bool(getattr(p, 'locked', False)):
                         raise ValueError('preset is locked')
                     updated = VideohubPreset(id=target_id, name=name, routes=routes_in)
@@ -89,6 +91,8 @@ class VideohubApp(AppBase):
                     storage.save_presets(presets, self._presets_file(cfg))
                     return updated
 
+        if target_id is not None:
+            raise storage.PresetConflict('This preset was deleted. Your draft is retained.')
         next_id = storage.next_preset_id(self._presets_file(cfg))
         for p in presets:
             next_id = max(next_id, int(p.id) + 1)

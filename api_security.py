@@ -22,6 +22,7 @@ SERVICE_TOKEN_SCOPES = (
     "timers",
     "props",
     "videohub",
+    "routing_presets",
     "tvs",
     "atem",
     "propresenter",
@@ -40,6 +41,8 @@ SERVICE_TOKEN_CONSTRAINT_KEYS = (
     "videohub_inputs",
     "videohub_presets",
     "atem_sources",
+    "routing_presets",
+    "routing_outputs",
 )
 
 
@@ -99,6 +102,19 @@ def normalize_constraints(constraints: dict | None) -> dict:
         values = sorted({int(item) for item in (raw.get(key) or []) if int(item) > 0})
         if values:
             result[key] = values
+    for key in ('routing_presets', 'routing_outputs'):
+        if key not in raw:
+            continue
+        import re
+        values = raw[key]
+        if not isinstance(values, list) or not values:
+            raise ValueError(f'{key} must be a nonempty explicit list; omit it for unrestricted access.')
+        if key == 'routing_presets':
+            if any(not isinstance(item, str) or not re.fullmatch(r'[a-f0-9]{32}', item) for item in values):
+                raise ValueError('routing_presets needs exact saved preset IDs.')
+        elif any(type(item) is not int or not 1 <= item <= 4096 for item in values):
+            raise ValueError('routing_outputs needs positive integer ports up to 4096.')
+        result[key] = sorted(set(values))
     return result
 
 
@@ -221,10 +237,12 @@ def _row_to_public_dict(row: sqlite3.Row) -> dict:
         scopes = normalize_scopes(json.loads(str(row["scopes_json"] or "[]")))
     except Exception:
         scopes = []
+    invalid_constraints = False
     try:
         constraints = normalize_constraints(json.loads(str(row["constraints_json"] or "{}")))
     except Exception:
         constraints = {}
+        invalid_constraints = True
     now = _utc_now()
     expiry = _parse_timestamp(row["expires_at"])
     return {
@@ -241,7 +259,8 @@ def _row_to_public_dict(row: sqlite3.Row) -> dict:
         "revoked_at": str(row["revoked_at"] or ""),
         "revoked_by": str(row["revoked_by"] or ""),
         "expired": bool(expiry and expiry <= now),
-        "active": not bool(row["revoked_at"]) and not bool(expiry and expiry <= now),
+        "active": not invalid_constraints and not bool(row["revoked_at"]) and not bool(expiry and expiry <= now),
+        "invalid_constraints": invalid_constraints,
     }
 
 
@@ -438,6 +457,8 @@ def authenticate_service_token(
         if row is None:
             return None, "invalid_token"
         public = _row_to_public_dict(row)
+        if public["invalid_constraints"]:
+            return None, "invalid_token"
         if row["revoked_at"]:
             return None, "revoked_token"
         if public["expired"]:

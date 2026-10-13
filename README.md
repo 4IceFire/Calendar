@@ -228,8 +228,17 @@ scope semantics.
 
 ### VideoHub preset outputs: Keep Current Routing and images
 
-On **VideoHub** (`/videohub`), open a preset and click an output in its room.
-Choose **Keep Current Routing**, then **Confirm** and **Save Preset**.
+On **VideoHub Presets** (`/videohub`), open a preset and click an output in its room.
+Choose **Keep Current Routing** to save it immediately—no Confirm or Save step.
+All explicit edits autosave with local Saving/Saved/error feedback. Writes are
+serialized and flushed before switching presets, opening the picker, duplication
+or Apply; failed drafts stay recoverable and cannot silently replace another preset.
+**Duplicate**, beside the name, creates a new unlocked identity preserving routes.
+**New Preset** opens one name/mode dialog: **1-to-1**, **Current Device Routing**,
+or **All Keep Current Routing**. Creation uses actual verified device counts;
+an unavailable/incomplete device snapshot fails rather than using fallback40.
+Opening/cancelling the dialog performs no write. Restricted preset-list editors
+cannot create/duplicate new identities; ask an administrator to create and grant one.
 Kept outputs have a dashed marker and show **Keep Current Routing** instead of an
 input number. The choice is always available, including with filtered inputs;
 selecting a normal input replaces it. Cancel leaves the draft unchanged.
@@ -238,10 +247,10 @@ Keep Current Routing saves explicit `input: null`, not a snapshot of the current
 input. Applying a numeric/keep-only preset from the browser, API, scheduler or
 Companion leaves kept outputs alone. Other routes retain normal readback checks;
 all-keep presets succeed as no-ops. IDs, folders, locks and existing access rules
-are unchanged. **Save From Device** still snapshots actual input numbers.
+are unchanged. **Current Device Routing** in New Preset snapshots actual inputs.
 
 The input selector's distinct **Routing Preset** button opens a searchable
-saved-preset picker. Select a preset, **Confirm**, then **Save Preset**. This saves
+saved-preset picker. Selecting a preset saves immediately. This saves
 an image-only reference *inside the VideoHub preset*, not a live route. Opening,
 searching, selecting, cancelling and saving send no hardware commands. The edited
 VideoHub output is the target even if the routing preset has another fixed output;
@@ -264,6 +273,16 @@ earlier image. Insufficient players, upload failures or readback mismatches stop
 the job with explicit partial-completion feedback. Earlier writes are not undone,
 and there is no automatic replay. Check the outputs before manually applying
 again. This does not isolate manually shared external feeds or other controllers.
+
+Standalone **Routing Preset: Apply** in Companion uses the separate scoped
+`/api/automation/routing-presets` catalog/trigger/job API. It executes the **full**
+saved preset: confirmed image first, then approved actions in order. Add explicit
+`routing_presets` scope to its service token; Config → API Tokens and CLI support
+exact preset/output restrictions (`--routing-preset ID`, `--routing-output N`).
+Fixed destinations cannot be overridden; optional destinations require a selected
+output. Shared-player fallback is denied. Poll until terminal completion; HTTP202
+is only accepted, and uncertain requests are never automatically replayed.
+See `API_REFERENCE.md` → Standalone Routing Preset automation for the exact contract.
 
 Regression and isolated fake-device browser checks:
 ```bash

@@ -3399,6 +3399,9 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
         return {'scope': 'admin', 'pages': ('page:admin',), 'service_tokens': False}
     if p.startswith('/api/config/routing-presets'):
         return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
+    if p == '/api/automation/routing-presets' or re.fullmatch(
+            r'/api/automation/routing-presets/(?:[a-f0-9]{32}/trigger|jobs/[a-f0-9]{32})', p):
+        return {'scope': 'routing_presets', 'pages': (), 'automation_only': True}
     if p.startswith('/api/routing/presets'):
         return {'scope': 'videohub', 'pages': ('page:routing_presets',), 'service_tokens': False}
     if p == '/api/config/atem-media':
@@ -3466,7 +3469,7 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
 def _api_scheduler_path_denied(path: str) -> bool:
     """Keep scheduled actions out of credential and setup administration."""
     p = _api_normalized_path(path)
-    if p.startswith(('/api/admin/', '/api/config', '/api/companion-surfaces-config', '/api/activity-log')):
+    if p.startswith(('/api/admin/', '/api/config', '/api/companion-surfaces-config', '/api/activity-log', '/api/automation/')):
         return True
     if p == '/api/client-errors':
         return True
@@ -3681,7 +3684,12 @@ def _api_browser_resource_check(path: str, method: str):
         is_route = p == '/api/videohub/route'
         if not is_apply and not is_route and not _effective_videohub_can_edit_presets_for_user(user_id):
             return _api_json_error(403, 'forbidden', 'VideoHub editing is not assigned to your group.')
-    preset_match = re.fullmatch(r'/api/videohub/presets/(\d+)/apply', p)
+        creates_identity = (p in ('/api/videohub/presets', '/api/videohub/presets/new')
+                            or p.endswith('/duplicate')
+                            or (p == '/api/videohub/presets/from_device' and not (request.get_json(silent=True) or {}).get('id')))
+        if creates_identity and _effective_videohub_preset_ids_for_user(user_id):
+            return _api_json_error(403, 'forbidden', 'Creating a new preset requires unrestricted preset visibility. Ask an administrator to create and assign it.')
+    preset_match = re.fullmatch(r'/api/videohub/presets/(\d+)(?:/(?:apply|duplicate|lock))?', p)
     if preset_match:
         allowed = _effective_videohub_preset_ids_for_user(user_id)
         if allowed and int(preset_match.group(1)) not in set(allowed):
@@ -3810,7 +3818,7 @@ def _api_security_gate():
         if policy.get('service_tokens') is False:
             return _api_json_error(403, 'forbidden', 'This endpoint accepts browser sessions only.')
         read_only = request.method in ('GET', 'HEAD')
-        if not token_allows(token_record.get('scopes') or [], str(policy['scope']), read_only=read_only):
+        if not token_allows(token_record.get('scopes') or [], str(policy['scope']), read_only=read_only and not policy.get('automation_only')):
             _api_security_event(
                 'security.api.token_scope_denied',
                 'Denied a service token without the required scope',
@@ -3840,6 +3848,8 @@ def _api_security_gate():
             'constraints': token_record.get('constraints') or {},
         }
     elif getattr(current_user, 'is_authenticated', False):
+        if policy.get('automation_only'):
+            return _api_json_error(403, 'forbidden', 'This endpoint requires a scoped service token.')
         try:
             idle_minutes = _effective_idle_timeout_minutes_for_current_user()
             last_activity = int(session.get('_last_activity') or 0)
@@ -7333,7 +7343,7 @@ def api_reference_page():
 
 
 @app.route('/videohub')
-@require_page('page:videohub', 'VideoHub')
+@require_page('page:videohub', 'VideoHub Presets')
 def videohub_page():
     # Allow-list is configured as 1-based preset IDs, per group.
     # Blank/NULL => allow all.
@@ -7357,7 +7367,7 @@ def videohub_page():
 
 
 @app.route('/videohub/rooms')
-@require_page('page:videohub', 'VideoHub')
+@require_page('page:videohub', 'VideoHub Presets')
 def videohub_rooms_page():
     if not _can_manage_videohub_rooms_for_current_user():
         return abort(403)
@@ -7365,7 +7375,7 @@ def videohub_rooms_page():
 
 
 @app.route('/videohub/input-select')
-@require_page('page:videohub', 'VideoHub')
+@require_page('page:videohub', 'VideoHub Presets')
 def videohub_input_select_page():
     return render_template(
         'videohub_input_select.html',
@@ -7375,7 +7385,7 @@ def videohub_input_select_page():
 
 
 @app.route('/videohub/monitor')
-@require_page('page:videohub', 'VideoHub')
+@require_page('page:videohub', 'VideoHub Presets')
 def videohub_monitor_page():
     return render_template('videohub_monitor.html')
 
@@ -8067,6 +8077,7 @@ def _preset_action_permitted(action):
         app.url_map.bind('localhost').match(path, method=action['method'])
         policy = _api_policy(path, action['method'])
         return bool(policy and policy.get('service_tokens') is not False
+                    and not policy.get('automation_only')
                     and policy.get('scope') not in ('admin', 'config')
                     and not _api_scheduler_path_denied(path))
     except Exception:
@@ -8238,6 +8249,129 @@ def api_routing_presets_config(identity=None):
 @require_page('page:routing_presets', 'Routing: Presets')
 def routing_presets_page():
     return render_template('routing_presets.html', hide_connection_status=True)
+
+
+@app.route('/api/automation/routing-presets')
+def api_routing_automation_catalog():
+    principal = _routing_automation_principal()
+    try:
+        constraints = principal.get('constraints', {})
+        presets = []
+        for item in _get_routing_preset_store().list():
+            if not _routing_automation_allowed(item['id'], item['output'], constraints):
+                continue
+            presets.append({key: item[key] for key in ('id', 'revision', 'name', 'description', 'output', 'enabled')})
+            presets[-1]['unavailable_reason'] = None if item['enabled'] else 'disabled'
+        return jsonify(ok=True, presets=presets, execution_window_seconds=300, execution_epoch=_ROUTING_PRESET_CONFIRMATION_EPOCH)
+    except (ValueError, OSError):
+        return _api_json_error(503, 'unavailable', 'Routing presets are unavailable.')
+
+
+def _routing_automation_principal():
+    principal = getattr(g, 'api_principal', {})
+    if (principal.get('type') != 'service_token'
+            or not token_allows(principal.get('scopes', []), 'routing_presets', read_only=False)):
+        abort(403)
+    return principal
+
+
+def _routing_automation_allowed(identity, output, constraints):
+    # Presence is restrictive; empty/malformed persisted lists never mean all.
+    for key, value in (('routing_presets', identity), ('routing_outputs', output),
+                       ('videohub_outputs', output)):
+        if key in constraints and value is not None and value not in constraints[key]:
+            return False
+    return True
+
+
+def _routing_automation_destination(item, requested, constraints):
+    if type(requested) not in (int, type(None)):
+        raise ValueError('Supply an integer output.')
+    if item['output'] is not None:
+        if requested is not None and requested != item['output']:
+            raise ValueError('This preset has a fixed output.')
+        requested = item['output']
+    if type(requested) is not int or not 1 <= requested <= 4096:
+        raise ValueError('Choose a positive output up to 4096.')
+    if not _routing_automation_allowed(item['id'], requested, constraints):
+        abort(403)
+    if _get_media_library().get(item['media_id']).get('temporary'):
+        raise ValueError('The preset image must be saved permanently.')
+    from atem_media import validate_media_config
+    cfg = validate_media_config(utils.get_config())
+    mappings = [m for m in cfg['atem_media_destinations'] if m.get('videohub_input')]
+    inputs = constraints.get('videohub_inputs')
+    if not cfg['atem_media_enabled'] or not mappings:
+        raise ValueError('Image display is not configured.')
+    if inputs is not None and not any(m['videohub_input'] in inputs for m in mappings):
+        abort(403)
+    if not all(_preset_action_permitted(action) for action in item['actions']):
+        raise ValueError('The saved approved actions are no longer available.')
+    return requested, inputs
+
+
+@app.route('/api/automation/routing-presets/<identity>/trigger', methods=['POST'])
+def api_routing_automation_trigger(identity):
+    from atem_media import BusyError
+    from routing_presets import preset_id
+    principal = _routing_automation_principal()
+    try:
+        data = request.get_json(silent=True)
+        if (not isinstance(data, dict) or set(data) - {'revision', 'execution_id', 'issued_at', 'output', 'execution_epoch'}
+                or not {'revision', 'execution_id', 'issued_at', 'execution_epoch'} <= set(data)):
+            raise ValueError('Supply revision, execution_id, issued_at and optional output only.')
+        preset_id(identity); preset_id(data['revision']); preset_id(data['execution_id'])
+        if data['execution_epoch'] != _ROUTING_PRESET_CONFIRMATION_EPOCH:
+            return _api_json_error(409, 'expired', 'The server restarted. Refresh the catalog; never replay an uncertain request.')
+        issued = data['issued_at']
+        if type(issued) is not int or not -30 <= time.time() - issued <= 300:
+            return _api_json_error(409, 'expired', 'The execution request expired; do not replay an uncertain request.')
+        with _media_operation_lock:
+            item = _get_routing_preset_store().get(identity)
+            if not item or not item['enabled']:
+                return _api_json_error(404, 'not_found', 'This preset is deleted or disabled.')
+            if item['revision'] != data['revision']:
+                return _api_json_error(409, 'changed', 'This preset changed. Refresh before a new explicit trigger.')
+            output, inputs = _routing_automation_destination(item, data.get('output'), principal.get('constraints', {}))
+            existing = _routing_preset_runner.get(data['execution_id'])
+            if existing:
+                if (existing['owner'] != principal['key'] or existing['presetId'] != identity
+                        or existing['output'] != output or existing.get('revision') != data['revision']):
+                    return _api_json_error(409, 'conflict', 'This execution ID belongs to a different request.')
+                return jsonify(ok=True, job=_public_routing_preset_job(existing, confirmation=False)), 202
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                raise BusyError('Another display or preset is running.')
+            actor = {**capture_activity_actor(), 'actor_user_id': None,
+                     'actor_username': f"{principal['key']}:{principal['name']}", 'actor_display': principal['name'], 'source': 'api'}
+            manager = _get_media_routing_manager(refresh=True)
+            def completed(job):
+                log_event('routing.preset.apply', f"{item['name']}: {job['message']}",
+                          status='success' if job['status'] == 'succeeded' else 'failure',
+                          target_type='routing_preset', target_id=identity,
+                          details=_public_routing_preset_job(job, confirmation=False), **actor)
+            job = _routing_preset_runner.start(data['execution_id'], item, output, principal['key'],
+                display=lambda callback: manager.display(item['media_id'], output, allowed_inputs=inputs,
+                                                         on_complete=callback, refuse_shared=True),
+                execute=lambda action: _execute_routing_preset_action(action, item, actor), completed=completed)
+            log_event('routing.preset.queued', f"Started preset '{item['name']}' on output {output}",
+                      status='info', target_type='routing_preset', target_id=identity, **actor)
+        return jsonify(ok=True, job=_public_routing_preset_job(job, confirmation=False)), 202
+    except BusyError as error:
+        return _api_json_error(409, 'busy', str(error))
+    except (ValueError, KeyError, OSError, TypeError, RuntimeError) as error:
+        return _api_json_error(400, 'invalid_preset', str(error))
+
+
+@app.route('/api/automation/routing-presets/jobs/<identity>')
+def api_routing_automation_job(identity):
+    principal = _routing_automation_principal()
+    job = _routing_preset_runner.get(identity)
+    if not job:
+        return _api_json_error(404, 'not_found', 'This execution is unavailable. Check the output; never automatically replay.')
+    if (job['owner'] != principal['key'] or not _routing_automation_allowed(
+            job['presetId'], job['output'], principal.get('constraints', {}))):
+        abort(403)
+    return jsonify(ok=True, job=_public_routing_preset_job(job, confirmation=False))
 
 
 @app.route('/api/routing/presets')
@@ -12495,6 +12629,8 @@ def api_videohub_presets_update(preset_id: int):
             details={'preset': preset_dict},
         )
         return jsonify({'ok': True, 'preset': preset_dict})
+    except __import__('package.apps.videohub.storage', fromlist=['PresetConflict']).PresetConflict as e:
+        return jsonify(ok=False, error=str(e)), 409
     except ValueError as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:
@@ -12612,7 +12748,7 @@ def api_videohub_routing_presets():
     _videohub_image_principal()
     try:
         # Fixed catalog destinations are deliberately irrelevant to this picker.
-        return jsonify(ok=True, presets=[{'id': p['id'], 'name': p['name']}
+        return jsonify(ok=True, presets=[{'id': p['id'], 'name': p['name'], 'output': p['output']}
             for p in _get_routing_preset_store().list()
             if p['enabled'] and _routing_preset_allowed(p['id'])])
     except (OSError, ValueError):
@@ -12777,6 +12913,62 @@ def api_videohub_presets_apply(preset_id: int):
         return jsonify({'ok': False, 'error': str(e)}), 400
 
 
+@app.route('/api/videohub/presets/new', methods=['POST'])
+def api_videohub_presets_new():
+    try:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) != {'name', 'mode'} or body['mode'] not in ('identity', 'device', 'keep'):
+            raise ValueError('Choose a name and a new preset mode.')
+        if not isinstance(body['name'], str) or not body['name'].strip():
+            raise ValueError('Preset name is required.')
+        vh = _get_videohub_client_from_config()
+        if vh is None:
+            raise ValueError('VideoHub is not configured.')
+        # Only a real complete read supplies counts or a device snapshot.
+        state = vh.get_routing_state_strict()
+        inputs, outputs, routing = state['input_count'], state['output_count'], state['routing']
+        if (type(inputs) is not int or type(outputs) is not int or not 1 <= inputs <= 65536
+                or not 1 <= outputs <= 65536 or not isinstance(routing, list) or len(routing) != outputs
+                or any(type(n) is not int or not 1 <= n <= inputs for n in routing)):
+            raise ValueError('VideoHub did not provide a complete routing snapshot.')
+        if body['mode'] == 'identity' and outputs > inputs:
+            raise ValueError('1-to-1 needs at least as many inputs as outputs.')
+        routes = [{'output': n, 'input': None if body['mode'] == 'keep' else
+                   (n if body['mode'] == 'identity' else routing[n - 1])} for n in range(1, outputs + 1)]
+        preset = _get_videohub_app().upsert_preset(utils.get_config(), {'name': body['name'], 'routes': routes})
+        log_event('videohub.preset.create', f'Created VideoHub preset #{preset.id}', status='success')
+        return jsonify(ok=True, preset=preset.to_dict(), input_count=inputs, output_count=outputs), 201
+    except (ValueError, KeyError, OSError, RuntimeError, AttributeError) as error:
+        return jsonify(ok=False, error=str(error)), 400
+
+
+@app.route('/api/videohub/presets/<int:preset_id>/duplicate', methods=['POST'])
+def api_videohub_presets_duplicate(preset_id):
+    from package.apps.videohub import storage
+    try:
+        with storage._lock:
+            backend, cfg = _get_videohub_app(), utils.get_config()
+            original = backend.get_preset(cfg, preset_id)
+            if not original:
+                return jsonify(ok=False, error='Preset not found.'), 404
+            names = {p['name'] for p in backend.list_presets(cfg)}
+            name, suffix = original.name + ' (Copy)', 2
+            while name in names:
+                name = original.name + f' (Copy {suffix})'
+                suffix += 1
+            created = backend.upsert_preset(cfg, {'name': name, 'routes': original.to_dict()['routes']})
+            tree = backend.get_organization(cfg)
+            source = next((entry for entry in tree['items'] if entry['id'] == str(preset_id)), None)
+            for entry in tree['items']:
+                if entry['id'] == str(created.id):
+                    entry['folderId'] = source['folderId'] if source else None
+            backend.save_organization(cfg, tree)
+        log_event('videohub.preset.duplicate', f'Duplicated VideoHub preset #{preset_id} as #{created.id}', status='success')
+        return jsonify(ok=True, preset=created.to_dict()), 201
+    except (ValueError, OSError) as error:
+        return jsonify(ok=False, error=str(error)), 400
+
+
 @app.route('/api/videohub/presets/from_device', methods=['POST'])
 def api_videohub_presets_from_device():
     """Pull current routing from the configured VideoHub and save as a preset."""
@@ -12812,11 +13004,10 @@ def api_videohub_presets_from_device():
         target_id = None
 
     try:
-        st = vh.get_state(fallback_count=40) if hasattr(vh, 'get_state') else None
-        routing = (st or {}).get('routing') if isinstance(st, dict) else None
-        if not isinstance(routing, list) or not routing:
-            # fallback identity
-            routing = [i for i in range(1, 41)]
+        st = vh.get_routing_state_strict()
+        routing = st['routing']
+        if not isinstance(routing, list) or len(routing) != st['output_count'] or not routing:
+            raise ValueError('VideoHub did not report every output route.')
 
         routes = []
         for out_n, in_n in enumerate(routing, start=1):
@@ -13017,7 +13208,7 @@ def api_videohub_state():
 
 
 @app.route('/media/videohub_room_images/<path:filename>', methods=['GET'])
-@require_page('page:videohub', 'VideoHub')
+@require_page('page:videohub', 'VideoHub Presets')
 def api_videohub_room_image(filename: str):
     fn = Path(str(filename or '')).name
     if not fn:

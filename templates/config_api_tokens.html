@@ -58,7 +58,7 @@
                 </div>
                 {% endfor %}
               </div>
-              <div class="form-text">Select only what this integration needs. Read permits all read-only API calls.</div>
+              <div class="form-text">Select only what this integration needs. Read permits existing read-only APIs; standalone Routing Presets additionally requires routing_presets.</div>
             </fieldset>
 
             <details class="mb-3">
@@ -87,6 +87,8 @@
                   <input class="form-control" id="api-token-vh-presets" inputmode="numeric" placeholder="2, 5">
                 </div>
               </div>
+              <div class="mb-3"><label class="form-label" for="api-token-routing-presets">Standalone Routing Preset IDs</label><input id="api-token-routing-presets" class="form-control" placeholder="32-character saved IDs, comma-separated"><div class="form-text">Requires routing_presets. Blank is unrestricted; all/empty explicit lists are not accepted.</div></div>
+              <div class="mb-3"><label class="form-label" for="api-token-routing-outputs">Standalone Routing outputs</label><input id="api-token-routing-outputs" class="form-control" inputmode="numeric" placeholder="26, 27"></div>
               <div class="mb-3">
                 <label class="form-label" for="api-token-atem-sources">ATEM source IDs</label>
                 <input class="form-control" id="api-token-atem-sources" placeholder="1, MediaPlayer1">

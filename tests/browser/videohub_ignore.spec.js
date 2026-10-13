@@ -3,6 +3,7 @@ const {installCommonReadMocks, collectPageErrors} = require('./helpers');
 const marker = '/__videohub_ignore_fixture__';
 // Real-auth fixture work can overlap CPU-heavy regression runs.
 test.setTimeout(60000);
+test.use({actionTimeout: 20000});
 const headers = () => ({Origin: new URL(process.env.TDECK_BASE_URL).origin, 'X-CSRF-Token': 'ignore-csrf'});
 
 async function health(page) {return (await (await page.request.get(marker + '/health')).json());}
@@ -20,8 +21,8 @@ async function choose(page, output, input) {
   await page.locator(`.vh-marker[data-output="${output}"]`).click();
   await expect(page.locator('#vhi-grid button')).not.toHaveCount(0);
   await page.locator(`#vhi-grid [data-input="${input}"]`).click();
-  await page.locator('#vhi-confirm').click();
-  await expect(page.locator(`.vh-marker[data-output="${output}"]`)).toBeVisible();
+  await page.waitForURL(url => url.pathname === '/videohub', {timeout: 30000});
+  await expect(page.locator(`.vh-marker[data-output="${output}"]`)).toBeVisible({timeout: 20000});
 }
 
 test.beforeEach(async ({page}) => {
@@ -38,7 +39,6 @@ test('choose Ignore, cancel without mutation, save/reload/edit and apply only re
   await open(page, preset.id);
   await page.locator('.vh-marker[data-output="1"]').click();
   await expect(page.locator('[data-input="ignore"]')).toContainText('Keep Current Routing');
-  await page.locator('[data-input="ignore"]').click();
   await page.locator('#vhi-cancel').click();
   await expect(page.locator('.vh-marker[data-output="1"]')).not.toHaveClass(/vh-marker-ignore/);
   await choose(page, 1, 'ignore');
@@ -46,8 +46,6 @@ test('choose Ignore, cancel without mutation, save/reload/edit and apply only re
   await expect(page.locator('.vh-marker[data-output="1"]')).toHaveClass(/vh-marker-ignore/);
   await expect(page.locator('.vh-marker[data-output="1"]')).toContainText('Keep Current Routing');
   expect((await health(page)).writes).toEqual([]);
-  await page.locator('#vh-save').click();
-  await expect(page.locator('#vh-status')).toContainText('Saved preset');
   let saved = (await (await page.request.get('/api/videohub/presets')).json()).presets[0];
   expect(saved.routes.slice(0, 2)).toEqual([{output: 1, input: null}, {output: 2, input: 7}]);
   await open(page, preset.id);
@@ -85,8 +83,6 @@ test('all-ignore is a no-op and choosing a real input replaces Ignore', async ({
   expect((await health(page)).reads).toBe(0);
   await choose(page, 1, '7');
   await expect(page.locator('.vh-marker[data-output="1"]')).not.toHaveClass(/vh-marker-ignore/);
-  await page.locator('#vh-save').click();
-  await expect(page.locator('#vh-status')).toContainText('Saved preset');
   const saved = (await (await page.request.get('/api/videohub/presets')).json()).presets[0];
   expect(saved.routes[0]).toEqual({output: 1, input: 7});
   expect(saved.routes.slice(1).every(route => route.input === null)).toBe(true);
@@ -99,19 +95,17 @@ test('Routing Preset picker saves image only, cancels without commands and appli
   await open(page, preset.id);
   await page.locator('.vh-marker[data-output="1"]').click();
   await page.getByRole('button', {name: 'Routing Preset', exact: true}).click();
-  await page.getByRole('button', {name: 'Welcome image', exact: true}).click();
+  await page.locator('#vhi-preset-search').fill('Welcome');
   await page.locator('#vhi-cancel').click();
   await expect(page.locator('.vh-marker[data-output="1"]')).toContainText('Keep Current Routing');
   await page.locator('.vh-marker[data-output="1"]').click();
   await page.getByRole('button', {name: 'Routing Preset', exact: true}).click();
-  await page.getByRole('button', {name: 'Welcome image', exact: true}).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({path: test.info().outputPath('videohub-image-picker.png'), fullPage: true});
-  await page.locator('#vhi-confirm').click();
-  await expect(page.locator('.vh-marker[data-output="1"]')).toContainText('Welcome image');
+  await page.getByRole('button', {name: 'Welcome image', exact: true}).click();
+  await page.waitForURL(url => url.pathname === '/videohub', {timeout: 30000});
+  await expect(page.locator('.vh-marker[data-output="1"]')).toContainText('Welcome image', {timeout: 20000});
   await choose(page, 2, '7');
-  await page.locator('#vh-save').click();
-  await expect(page.locator('#vh-status')).toContainText('Saved preset');
   const state = await health(page);
   expect(state.writes).toEqual([]);
   expect(state.images).toEqual([]);
@@ -139,11 +133,11 @@ test('locked and view-only presets display Ignore, reject edits, and retain fail
   await open(page, preset.id);
   await expect(page.locator('.vh-marker[data-output="1"]')).toBeDisabled();
   await expect(page.locator('.vh-marker[data-output="1"]')).toContainText('Keep Current Routing');
-  await expect(page.locator('#vh-save')).toBeDisabled();
+  await expect(page.locator('#vh-name')).toBeDisabled();
   expect((await page.request.put(base, {headers: headers(), data: {name: 'Changed', routes: []}})).status()).toBe(400);
   await page.request.get(marker + '/login?role=operator');
   await open(page, preset.id);
-  await expect(page.locator('#vh-save')).toBeDisabled();
+  await expect(page.locator('#vh-name')).toBeDisabled();
   await expect(page.locator('.vh-marker[data-output="1"]')).toBeDisabled();
   expect((await page.request.put(base, {headers: headers(), data: {name: 'Changed', routes: []}})).status()).toBe(403);
   await page.request.post(marker + '/failure');

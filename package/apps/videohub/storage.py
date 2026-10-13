@@ -15,6 +15,10 @@ DEFAULT_PRESETS_FILE = "videohub_presets.json"
 _lock = threading.RLock()
 
 
+class PresetConflict(ValueError):
+    pass
+
+
 def locked_mutation(function):
     """Serialize read/modify/write operations, including ID allocation."""
     @wraps(function)
@@ -32,7 +36,7 @@ def _coerce_route(value: Any) -> VideohubRoute | None:
         import re
         identity = value['routing_preset']
         if (not isinstance(identity, str)
-                or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', identity)
+                or not re.fullmatch(r'(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', identity)
                 or 'input' in value or value.get('monitoring') or value.get('monitor')):
             raise ValueError('Choose a valid image-only routing preset for a primary output.')
         output = value.get('output')

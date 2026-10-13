@@ -25,10 +25,12 @@ test('homepage save, restore and marker preserve explicit Ignore', () => {
   assert.equal(ctx.run('_vhRouting[0]'), null);
   const routes = JSON.parse(ctx.run('JSON.stringify(_vhRoutesFromRouting())'));
   assert.deepEqual(routes.slice(0, 2), [{output: 1, input: null}, {output: 2, input: 7}]);
-  ctx.stored.vh_draft_test = JSON.stringify({routing: [null, 7], name: 'Mixed'});
+  ctx.run('_vhPresets=[{id:1,name:"Mixed",routes:[{output:1,input:null},{output:2,input:7}]}];');
+  ctx.stored.vh_draft_test = JSON.stringify({id:1, dirty:true, routing: [null, 7], name: 'Mixed'});
   assert.equal(ctx.run('_vhTryLoadDraftFromQuery()'), true);
   assert.equal(ctx.run('_vhRouting[0]'), null);
   ctx.elements['vh-room-tabs'] = {};
+  ctx.elements['vh-selection-note'] = {};
   const markers = [];
   ctx.elements['vh-room-stage'] = {style: {}, appendChild: btn => markers.push(btn)};
   ctx.run('_vhRenderRooms()');
@@ -36,12 +38,28 @@ test('homepage save, restore and marker preserve explicit Ignore', () => {
   assert.match(markers[0].className, /vh-marker-ignore/);
 });
 
+test('switching from a long preset does not inflate the next preset', () => {
+  const ctx = templateContext('videohub.html');
+  ctx.run('_vhRouting=Array(40).fill(1); _vhResetEditorFromPreset({id:2,name:"Small",routes:[{output:1,input:null},{output:4,input:3}]});');
+  assert.equal(ctx.run('_vhRouting.length'), 4);
+});
+
+test('creation adopts authoritative small counts over cached fallback labels', async () => {
+  const ctx = templateContext('videohub.html');
+  ctx.run('_vhLabels.inputs=Array(40).fill("Input"); _vhLabels.outputs=Array(40).fill("Output"); _vhRouting=Array(40).fill(1); _vhLoadPresets=async()=>{}; _vhRenderList=()=>{}; _vhRenderRooms=()=>{}; _vhSaveDraftSession=()=>{}; _vhSaveFeedback=()=>{}; _vhPresets=[{id:2,name:"Small",routes:[{output:1,input:null},{output:4,input:3}]}];');
+  await ctx.run('_vhAdoptCreated({preset:_vhPresets[0],input_count:8,output_count:4})');
+  assert.equal(ctx.run('_vhRouting.length'), 4);
+  assert.equal(ctx.run('_vhLabels.inputs.length'), 8);
+  assert.equal(ctx.run('_vhLabels.outputs.length'), 4);
+});
+
 test('image reference survives save, draft restore and picker confirmation', () => {
   const ctx = templateContext('videohub.html');
   ctx.run("_vhRouting = _vhRoutingFromPreset({routes:[{output:1,routing_preset:'saved-image'}]});");
   assert.deepEqual(JSON.parse(ctx.run('JSON.stringify(_vhRoutesFromRouting()[0])')),
     {output: 1, routing_preset: 'saved-image'});
-  ctx.stored.vh_draft_test = JSON.stringify({routing: [{routing_preset: 'saved-image'}]});
+  ctx.run('_vhPresets=[{id:1,name:"Image",routes:[{output:1,routing_preset:"saved-image"}]}];');
+  ctx.stored.vh_draft_test = JSON.stringify({id:1, dirty:true, routing: [{routing_preset: 'saved-image'}]});
   ctx.run('_vhTryLoadDraftFromQuery()');
   assert.equal(ctx.run('_vhRouting[0].routing_preset'), 'saved-image');
   const picker = templateContext('videohub_input_select.html');
