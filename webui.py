@@ -225,11 +225,8 @@ except Exception:
         "propresenter_ip": "127.0.0.1",
         "propresenter_port": 4000,
         "propresenter_timer_index": 2,
-        "propresenter_is_latest": True,
-        "propresenter_timer_wait_stop_ms": 200,
-        "propresenter_timer_wait_set_ms": 600,
-        "propresenter_timer_wait_reset_ms": 1000,
         "stream_start_preset": 0,
+        "stream_delay_preset": 0,
         "videohub_ip": "172.20.10.11",
         "videohub_port": 9990,
         "videohub_timeout": 2,
@@ -4704,7 +4701,7 @@ def _clear_directory_contents(path: Path) -> tuple[int, list[str]]:
 def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> tuple[list[dict[str, Any]], Path | None]:
     # Share the config-write lock with general/media/Props settings saves.
     # Transport restores setup, never changes the separately authorized Props mode.
-    with _media_operation_lock:
+    with _media_operation_lock, _timer_mutation_lock, utils._timer_presets_lock:
         return _apply_config_transport_import_locked(zip_path, selected_ids)
 
 
@@ -4765,6 +4762,8 @@ def _apply_config_transport_import_locked(zip_path: Path, selected_ids: list[str
                     if not isinstance(restored, dict):
                         raise ValueError('Imported configuration must be an object')
                     restored.pop('propresenter_props_use_macros', None)
+                    for key in utils.RETIRED_TIMER_CONFIG_KEYS:
+                        restored.pop(key, None)
                     target.write_text(json.dumps(restored, ensure_ascii=False), encoding='utf-8')
                 else:
                     with zf.open(member) as src, target.open('wb') as dst:
@@ -11973,6 +11972,8 @@ def api_get_config():
     try:
         cfg = copy.deepcopy(utils.get_config())
         cfg.pop('propresenter_props_use_macros', None)
+        for key in utils.RETIRED_TIMER_CONFIG_KEYS:
+            cfg.pop(key, None)
         # Legacy: global Routing allow-lists are no longer used (now per Access Level).
         try:
             cfg.pop('videohub_allowed_outputs', None)
@@ -12000,7 +12001,7 @@ def api_set_config():
     if not isinstance(new, dict):
         return jsonify(ok=False, error='Configuration must be an object'), 400
     # Retired legacy setting is inert, including stale Config submissions.
-    new = {key: value for key, value in new.items() if key != 'propresenter_props_use_macros'}
+    new = {key: value for key, value in new.items() if key != 'propresenter_props_use_macros' and key not in utils.RETIRED_TIMER_CONFIG_KEYS}
 
     try:
         cfg = copy.deepcopy(utils.get_config())
@@ -12017,6 +12018,8 @@ def api_set_config():
         # general Config form includes an older full snapshot of hidden keys.
         cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS})
         cfg.pop('propresenter_props_use_macros', None)
+        for key in utils.RETIRED_TIMER_CONFIG_KEYS:
+            cfg.pop(key, None)
 
         # Legacy: global Routing allow-lists are no longer used (now per Access Level).
         cfg.pop('videohub_allowed_outputs', None)
@@ -14375,6 +14378,12 @@ def _timer_normalize_preset_list(values) -> tuple[list[dict] | None, str | None]
     return out, None
 
 
+def _timer_revision(cfg: dict, presets: list) -> str:
+    snapshot = {'presets': presets, 'config': {key: cfg.get(key) for key in
+                ('propresenter_ip', 'propresenter_port', 'propresenter_timer_index', 'stream_delay_preset')}}
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 def _timer_state_payload(*, cfg: dict, presets: list, **extra) -> dict:
     try:
         propresenter_timer_index = int(cfg.get('propresenter_timer_index', cfg.get('timer_index', 1)))
@@ -14391,6 +14400,8 @@ def _timer_state_payload(*, cfg: dict, presets: list, **extra) -> dict:
         'ok': True,
         'propresenter_timer_index': propresenter_timer_index,
         'stream_start_preset': stream_start_preset,
+        'stream_delay_preset': _cfg_int(cfg, 'stream_delay_preset', 0, min_value=0),
+        'revision': _timer_revision(cfg, presets),
         'timer_presets': presets,
         'preset_count': len(presets),
     }
@@ -14425,7 +14436,7 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
 
     apply_after: tuple[int, dict, list, dict, object, bool] | None = None
 
-    with _timer_mutation_lock:
+    with _media_operation_lock, _timer_mutation_lock, utils._timer_presets_lock:
         try:
             cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
         except Exception:
@@ -14461,17 +14472,19 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                 presets = normalized or []
                 presets_changed = True
 
-                stream_start_raw = body.get('stream_start_preset')
-                if stream_start_raw is None:
-                    stream_start_raw = body.get('streamStartPreset')
-                if stream_start_raw is not None:
-                    try:
-                        stream_start = 0 if str(stream_start_raw).strip() == '' else int(stream_start_raw)
-                    except Exception:
-                        return {'ok': False, 'error': 'stream_start_preset must be an integer (1-based)'}, 400
-                    if stream_start != 0 and not (1 <= stream_start <= len(presets)):
-                        return {'ok': False, 'error': f'stream_start_preset out of range (1..{len(presets)})'}, 400
-                    config_changes['stream_start_preset'] = stream_start
+                for selection_key, alias in (('stream_start_preset', 'streamStartPreset'),
+                                             ('stream_delay_preset', 'streamDelayPreset')):
+                    raw = body.get(selection_key, body.get(alias))
+                    if raw is not None:
+                        try:
+                            value = 0 if str(raw).strip() == '' else int(raw)
+                        except (TypeError, ValueError):
+                            return {'ok': False, 'error': f'{selection_key} must be an integer (1-based)'}, 400
+                        if value != 0 and not 1 <= value <= len(presets):
+                            return {'ok': False, 'error': f'{selection_key} out of range (1..{len(presets)})'}, 400
+                        config_changes[selection_key] = value
+                    elif _cfg_int(cfg, selection_key, 0) > len(presets):
+                        config_changes[selection_key] = 0
 
                 if _timer_has_ci(body, 'propresenter_timer_index', 'timer_index'):
                     try:
@@ -14580,11 +14593,12 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                     return {'ok': False, 'error': f'preset out of range (1..{len(presets)})', 'preset_count': len(presets)}, 400
                 removed = presets.pop(preset_index)
                 presets_changed = True
-                stream = _cfg_int(cfg, 'stream_start_preset', 0, min_value=0)
-                if stream == preset_number:
-                    config_changes['stream_start_preset'] = 0
-                elif stream > preset_number:
-                    config_changes['stream_start_preset'] = stream - 1
+                for selection_key in ('stream_start_preset', 'stream_delay_preset'):
+                    stream = _cfg_int(cfg, selection_key, 0, min_value=0)
+                    if stream == preset_number:
+                        config_changes[selection_key] = 0
+                    elif stream > preset_number:
+                        config_changes[selection_key] = stream - 1
                 extra.update({'preset': preset_number, 'removed': removed})
 
             elif action == 'move_preset':
@@ -14611,13 +14625,14 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                     item = presets.pop(src - 1)
                     presets.insert(dst - 1, item)
                     presets_changed = True
-                    stream = _cfg_int(cfg, 'stream_start_preset', 0, min_value=0)
-                    if stream == src:
-                        config_changes['stream_start_preset'] = dst
-                    elif src < stream <= dst:
-                        config_changes['stream_start_preset'] = stream - 1
-                    elif dst <= stream < src:
-                        config_changes['stream_start_preset'] = stream + 1
+                    for selection_key in ('stream_start_preset', 'stream_delay_preset'):
+                        stream = _cfg_int(cfg, selection_key, 0, min_value=0)
+                        if stream == src:
+                            config_changes[selection_key] = dst
+                        elif src < stream <= dst:
+                            config_changes[selection_key] = stream - 1
+                        elif dst <= stream < src:
+                            config_changes[selection_key] = stream + 1
                 extra.update({'preset': src, 'to': dst})
 
             elif action == 'adjust_all_presets':
@@ -14671,15 +14686,16 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                     'skipped_presets': skipped,
                 })
 
-            elif action == 'set_stream_start_preset':
+            elif action in ('set_stream_start_preset', 'set_stream_delay_preset'):
                 try:
-                    value = int(body.get('stream_start_preset', body.get('preset', 0)) or 0)
+                    selection_key = action.removeprefix('set_')
+                    value = int(body.get(selection_key, body.get('preset', 0)) or 0)
                 except Exception:
-                    return {'ok': False, 'error': 'stream_start_preset must be an integer (1-based)'}, 400
+                    return {'ok': False, 'error': 'stream preset must be an integer (1-based)'}, 400
                 if value != 0 and not (1 <= value <= len(presets)):
-                    return {'ok': False, 'error': f'stream_start_preset out of range (1..{len(presets)})'}, 400
-                config_changes['stream_start_preset'] = value
-                extra.update({'stream_start_preset': value})
+                    return {'ok': False, 'error': f'stream preset out of range (1..{len(presets)})'}, 400
+                config_changes[selection_key] = value
+                extra.update({selection_key: value})
 
             else:
                 return {'ok': False, 'error': f'unknown timer action: {action}'}, 400
@@ -14711,8 +14727,9 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                     'move_preset': 'timers.preset.move',
                     'adjust_all_presets': 'timers.preset.adjust_all',
                     'set_stream_start_preset': 'timers.stream_start.update',
+                    'set_stream_delay_preset': 'timers.stream_delay.update',
                 }.get(action, f'timers.{action}')
-                preset_target = extra.get('preset') if action != 'set_stream_start_preset' else extra.get('stream_start_preset')
+                preset_target = extra.get(action[4:]) if action.startswith('set_stream_') else extra.get('preset')
                 if action in ('replace_all', 'set_all'):
                     timer_summary = f"Replaced timer presets ({len(presets)} total)"
                     target_type = 'timer_presets'
@@ -14733,8 +14750,8 @@ def _mutate_timers(body: dict) -> tuple[dict, int]:
                     timer_summary = f"Adjusted {extra.get('adjusted_count', 0)} timer presets by {extra.get('delta_minutes')} minutes"
                     target_type = 'timer_presets'
                     preset_target = 'timer_presets.json'
-                elif action == 'set_stream_start_preset':
-                    timer_summary = f"Updated stream start timer preset to #{extra.get('stream_start_preset') or 'none'}"
+                elif action in ('set_stream_start_preset', 'set_stream_delay_preset'):
+                    timer_summary = f"Updated {action[4:].replace('_', ' ')} to #{preset_target or 'none'}"
                     target_type = 'timer_config'
                 else:
                     timer_summary = f"Updated timers ({action})"
@@ -14815,6 +14832,8 @@ def api_get_timers():
     return jsonify({
         'propresenter_timer_index': propresenter_timer_index,
         'stream_start_preset': stream_start_preset,
+        'stream_delay_preset': _cfg_int(cfg, 'stream_delay_preset', 0, min_value=0),
+        'revision': _timer_revision(cfg, presets),
         'timer_presets': presets,
     })
 
@@ -15005,149 +15024,7 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
             200,
         )
 
-    # Some older ProPresenter versions have a bug where a normal `start` right
-    # after setting/resetting a timer doesn't reliably start.
-    # Control behavior via config.json:
-    #   - propresenter_is_latest: true => normal flow (set -> reset -> start)
-    #                             false => legacy workaround flow
-    #   - propresenter_timer_wait_stop_ms (default 200)
-    #   - propresenter_timer_wait_set_ms  (default 600)
-    #   - propresenter_timer_wait_reset_ms(default 1000)
-    is_latest = _cfg_bool(cfg, 'propresenter_is_latest', True)
-    wait_stop_ms = _cfg_int(cfg, 'propresenter_timer_wait_stop_ms', 200, min_value=0, max_value=60000)
-    wait_set_ms = _cfg_int(cfg, 'propresenter_timer_wait_set_ms', 600, min_value=0, max_value=60000)
-    wait_reset_ms = _cfg_int(cfg, 'propresenter_timer_wait_reset_ms', 1000, min_value=0, max_value=60000)
-
     pp = ProPresentor(ip, port)
-
-    if not is_latest:
-        # Legacy workaround sequence:
-        # Stop Timer -> wait -> Set -> wait -> Reset -> wait -> Start
-        stop_ok = bool(pp.timer_operation(pp_timer_id, 'stop'))
-        if not stop_ok:
-            return (
-                {
-                    'ok': True,
-                    'error': 'failed to stop timer (legacy sequence)',
-                    'preset': int(preset_number),
-                    'preset_count': len(presets),
-                    'time': time_str,
-                    'propresenter_timer_index': pp_timer_index,
-                    'propresenter_timer_id': pp_timer_id,
-                    'sequence': 'legacy',
-                    'stop': False,
-                    'set': False,
-                    'reset': False,
-                    'started': False,
-                    'button_presses': press_info,
-                    'propresenter_ip': ip,
-                    'propresenter_port': port,
-                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-                },
-                200,
-            )
-
-        if wait_stop_ms:
-            time.sleep(wait_stop_ms / 1000.0)
-
-        set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
-        if not set_ok:
-            return (
-                {
-                    'ok': True,
-                    'error': 'failed to set timer (legacy sequence)',
-                    'preset': int(preset_number),
-                    'preset_count': len(presets),
-                    'time': time_str,
-                    'propresenter_timer_index': pp_timer_index,
-                    'propresenter_timer_id': pp_timer_id,
-                    'sequence': 'legacy',
-                    'stop': True,
-                    'set': False,
-                    'reset': False,
-                    'started': False,
-                    'button_presses': press_info,
-                    'propresenter_ip': ip,
-                    'propresenter_port': port,
-                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-                },
-                200,
-            )
-
-        if wait_set_ms:
-            time.sleep(wait_set_ms / 1000.0)
-
-        reset_ok = bool(pp.timer_operation(pp_timer_id, 'reset'))
-        if not reset_ok:
-            return (
-                {
-                    'ok': True,
-                    'error': 'timer set, but failed to reset (legacy sequence)',
-                    'preset': int(preset_number),
-                    'preset_count': len(presets),
-                    'time': time_str,
-                    'propresenter_timer_index': pp_timer_index,
-                    'propresenter_timer_id': pp_timer_id,
-                    'sequence': 'legacy',
-                    'stop': True,
-                    'set': True,
-                    'reset': False,
-                    'started': False,
-                    'button_presses': press_info,
-                    'propresenter_ip': ip,
-                    'propresenter_port': port,
-                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-                },
-                200,
-            )
-
-        if wait_reset_ms:
-            time.sleep(wait_reset_ms / 1000.0)
-
-        start_ok = bool(pp.timer_operation(pp_timer_id, 'start'))
-        if not start_ok:
-            return (
-                {
-                    'ok': True,
-                    'error': 'timer set, but failed to start (legacy sequence)',
-                    'preset': int(preset_number),
-                    'preset_count': len(presets),
-                    'time': time_str,
-                    'propresenter_timer_index': pp_timer_index,
-                    'propresenter_timer_id': pp_timer_id,
-                    'sequence': 'legacy',
-                    'stop': True,
-                    'set': True,
-                    'reset': True,
-                    'started': False,
-                    'button_presses': press_info,
-                    'propresenter_ip': ip,
-                    'propresenter_port': port,
-                    'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-                },
-                200,
-            )
-
-        return (
-            {
-                'ok': True,
-                'preset': int(preset_number),
-                'preset_count': len(presets),
-                'time': time_str,
-                'propresenter_timer_index': pp_timer_index,
-                'propresenter_timer_id': pp_timer_id,
-                'sequence': 'legacy',
-                'stop': True,
-                'set': True,
-                'reset': True,
-                'started': True,
-                'button_presses': press_info,
-                'propresenter_ip': ip,
-                'propresenter_port': port,
-                'waits_ms': {'after_stop': wait_stop_ms, 'after_set': wait_set_ms, 'after_reset': wait_reset_ms},
-            },
-            200,
-        )
 
     # Normal flow (latest versions): set -> reset -> start
     set_ok = bool(pp.SetCountdownToTime(pp_timer_id, time_str))
@@ -15156,6 +15033,7 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
             {
                 'ok': True,
                 'error': 'failed to set timer (check ProPresenter connection and timer index)',
+                'detail': getattr(pp, 'last_timer_error', None),
                 'preset': int(preset_number),
                 'preset_count': len(presets),
                 'time': time_str,
@@ -15180,6 +15058,7 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
             {
                 'ok': True,
                 'error': 'timer set, but failed to reset (check ProPresenter timer state/permissions)',
+                'detail': getattr(pp, 'last_timer_error', None),
                 'preset': int(preset_number),
                 'preset_count': len(presets),
                 'time': time_str,
@@ -15204,6 +15083,7 @@ def _apply_timer_preset_number(*, preset_number: int, cfg: dict, presets: list) 
             {
                 'ok': True,
                 'error': 'timer set, but failed to start (check ProPresenter timer state/permissions)',
+                'detail': getattr(pp, 'last_timer_error', None),
                 'preset': int(preset_number),
                 'preset_count': len(presets),
                 'time': time_str,
@@ -15708,91 +15588,92 @@ def api_prop_stage_stream_start():
 
 @app.route('/api/propresenter/stage/stream_delay', methods=['POST'])
 def api_prop_stage_stream_delay():
-    """Send a delayed stream-start stage message based on the configured preset."""
+    """Explicit save-and-apply, or message only. No retries or rollback/replay."""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
-        return jsonify({'ok': False, 'error': 'request body must be a JSON object'}), 400
+        return jsonify(ok=False, error='request body must be a JSON object'), 400
     if 'delay_minutes' not in body:
-        return jsonify({'ok': False, 'error': 'delay_minutes is required'}), 400
-    raw_delay = body.get('delay_minutes')
-    if type(raw_delay) is not int:
-        return jsonify({'ok': False, 'error': 'delay_minutes must be an integer'}), 400
-    delay_minutes = raw_delay
-    if delay_minutes < -24 * 60 or delay_minutes > 24 * 60:
-        return jsonify({'ok': False, 'error': 'delay_minutes must be between -1440 and 1440'}), 400
+        return jsonify(ok=False, error='delay_minutes is required'), 400
+    delta = body['delay_minutes']
+    if type(delta) is not int:
+        return jsonify(ok=False, error='delay_minutes must be an integer'), 400
+    if not -1440 <= delta <= 1440:
+        return jsonify(ok=False, error='delay_minutes must be between -1440 and 1440'), 400
+    update = body.get('update_timer', False)
+    if type(update) is not bool:
+        return jsonify(ok=False, error='update_timer must be a boolean'), 400
 
-    try:
-        presets = list(utils.load_timer_presets()) if hasattr(utils, 'load_timer_presets') else []
-    except Exception:
-        presets = []
-    if not presets:
-        return jsonify({'ok': False, 'error': 'no presets configured (timer_presets.json is empty)'}), 400
+    # Same ordering as config/import writers; hold through apply so another
+    # request cannot reorder the selected position between saving and applying.
+    with _media_operation_lock, _timer_mutation_lock, utils._timer_presets_lock:
+        cfg = utils.get_config()
+        presets = utils.load_timer_presets()
+        number = body.get('preset', cfg.get('stream_delay_preset', 0))
+        if type(number) is not int:
+            return jsonify(ok=False, error='preset must be an integer'), 400
+        if not 1 <= number <= len(presets):
+            return jsonify(ok=False, error='preset is out of range'), 400
+        preset = presets[number - 1]
+        message = _build_stream_delay_message(preset, delta)
+        if not message:
+            return jsonify(ok=False, error='invalid stream_delay_preset time'), 400
+        try:
+            ip = str(cfg.get('propresenter_ip', '127.0.0.1')).strip()
+            port = int(cfg.get('propresenter_port', 1025))
+            timer_index = int(cfg.get('propresenter_timer_index', 1)) if update else 1
+            if not ip or not 1 <= port <= 65535 or timer_index < 1:
+                raise ValueError()
+        except (ValueError, TypeError):
+            return jsonify(ok=False, error='invalid ProPresenter connection or timer index in config'), 400
+        if ProPresentor is None:
+            return jsonify(ok=False, error='propresentor client not available'), 500
+        if update and body.get('revision') != _timer_revision(cfg, presets):
+            return jsonify(ok=False, error='Timers changed; reload before delaying the stream.',
+                           saved=False, applied=False, sent=False), 409
+        presses, error = _timer_normalize_button_presses(preset.get('button_presses'))
+        if update and error:
+            return jsonify(ok=False, error=error, saved=False, applied=False, sent=False), 400
 
-    try:
-        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
-    except Exception:
-        cfg = {}
-    raw_preset = body.get('preset')
-    if raw_preset is None:
-        resolved = _resolve_stream_start_preset(cfg, presets)
-        if not resolved:
-            return jsonify({'ok': False, 'error': 'stream_start_preset not configured'}), 400
-        preset_number, preset = resolved
-    else:
-        if type(raw_preset) is not int:
-            return jsonify({'ok': False, 'error': 'preset must be an integer'}), 400
-        preset_number = raw_preset
-        if preset_number < 1 or preset_number > len(presets):
-            return jsonify({'ok': False, 'error': 'preset is out of range'}), 400
-        preset = presets[preset_number - 1]
-
-    message = _build_stream_delay_message(preset, delay_minutes)
-    if not message:
-        return jsonify({'ok': False, 'error': 'invalid stream_start_preset time'}), 400
-
-    try:
-        ip = str(cfg.get('propresenter_ip', '127.0.0.1'))
-        port = int(cfg.get('propresenter_port', 1025))
-    except Exception:
-        return jsonify({'ok': False, 'error': 'invalid propresenter_ip/propresenter_port in config'}), 500
-    if ProPresentor is None:
-        return jsonify({'ok': False, 'error': 'propresentor client not available'}), 500
-
-    pp = ProPresentor(ip, port)
-    sent = bool(pp.set_stage_message(message))
-    detail = getattr(pp, 'last_stage_message_error', None)
-    try:
-        extra = f" ({detail})" if detail and not sent else ''
-        log_event(
-            'propresenter.stage.stream_delay',
-            f"Sent delayed stream stage message from preset #{preset_number}: {'OK' if sent else 'FAIL'}{extra}",
-            source='api',
-            status='success' if sent else 'failure',
-            target_type='timer_preset',
-            target_id=preset_number,
-            details={
-                'preset': preset_number,
-                'delay_minutes': delay_minutes,
-                'sent': sent,
-                'detail': detail,
-                'message': message,
-            },
-        )
-    except Exception:
-        pass
-
-    return jsonify({
-        'ok': True,
-        'preset_number': preset_number,
-        'preset_name': (preset or {}).get('name', ''),
-        'preset_time': (preset or {}).get('time', ''),
-        'delay_minutes': delay_minutes,
-        'message': message,
-        'sent': sent,
-        'detail': detail if not sent else None,
-        'propresenter_ip': ip,
-        'propresenter_port': port,
-    })
+        result = {'ok': True, 'saved': False, 'applied': False, 'sent': False,
+                  'update_timer': update, 'preset_number': number,
+                  'preset_name': preset.get('name', ''), 'preset_time': preset.get('time', ''),
+                  'delay_minutes': delta, 'message': message, 'apply': None, 'detail': None}
+        if update:
+            updated = dict(preset)
+            updated['time'] = _minutes_to_time_hhmm(_time_hhmm_to_minutes(preset['time']) + delta)
+            presets[number - 1] = updated
+            try:
+                utils.save_timer_presets(presets)
+            except Exception:
+                result.update(ok=False, error='Failed to save timer preset; no actions sent.')
+                return jsonify(result), 500
+            result.update(saved=True, preset_time=updated['time'])
+            try:
+                _queue_companion_timer_variable_sync(cfg=cfg, presets=presets)
+            except Exception:
+                result['sync_warning'] = 'Companion variable sync could not be queued.'
+            try:
+                applied, status = _apply_timer_preset_number(preset_number=number, cfg=cfg, presets=presets)
+                result['apply'] = applied
+                press_result = applied.get('button_presses') or {}
+                result['applied'] = bool(status == 200 and applied.get('started') and
+                                         (not presses or (press_result.get('fired') and not press_result.get('fail') and not press_result.get('error'))))
+            except Exception as exc:
+                result['apply'] = {'error': 'Apply failed: ' + type(exc).__name__}
+        try:
+            pp = ProPresentor(ip, port)
+            result['sent'] = bool(pp.set_stage_message(message))
+            result['detail'] = getattr(pp, 'last_stage_message_error', None) if not result['sent'] else None
+        except Exception as exc:
+            result['detail'] = 'Message failed: ' + type(exc).__name__
+        result['ok'] = result['sent'] and (not update or result['applied'])
+        result.update(_timer_state_payload(cfg=cfg, presets=presets, ok=result['ok']))
+        log_event('propresenter.stage.stream_delay',
+                  f"Stream delay preset #{number}: saved={result['saved']}, applied={result['applied']}, message={result['sent']}",
+                  source='api', status='success' if result['ok'] else 'failure',
+                  target_type='timer_preset', target_id=number,
+                  details={key: result[key] for key in ('saved', 'applied', 'sent', 'delay_minutes', 'apply', 'detail')})
+        return jsonify(result)
 
 
 @app.route('/api/videohub/ping', methods=['GET'])

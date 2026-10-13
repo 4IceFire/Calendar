@@ -124,8 +124,8 @@ tokens can read but cannot trigger. These endpoints never use anonymous legacy a
 
 Props now always triggers the selected prop directly. Missing/unavailable targets
 fail closed. There is no clearing, fallback or automatic retry. Existing
-`propresenter_ip`/`propresenter_port` apply; `propresenter_is_latest` and all timer
-workarounds are unchanged. Discovery reads only `/v1/props`; commands use
+`propresenter_ip`/`propresenter_port` apply. Timer compatibility/wait settings
+are retired independently; Props execution is unchanged. Discovery reads only `/v1/props`; commands use
 `/v1/prop/{uuid}/trigger`. No resource creation, editing or deletion is sent.
 The user reported direct Props working with ProPresenter **17.1**; this agent
 has not independently reproduced that hardware test. Isolated fixture results
@@ -821,11 +821,9 @@ This project can also act as a small “glue” service between Bitfocus Compani
 - `propresenter_ip`: ProPresenter host
 - `propresenter_port`: ProPresenter API port
 - `propresenter_timer_index`: which ProPresenter timer/clock to update
-- `propresenter_is_latest`: set `true` for normal timer flow, set `false` to enable the legacy start workaround sequence
-- `propresenter_timer_wait_stop_ms`: legacy-only delay after stop (default 200ms)
-- `propresenter_timer_wait_set_ms`: legacy-only delay after setting time (default 600ms)
-- `propresenter_timer_wait_reset_ms`: legacy-only delay after reset (default 1000ms)
-- `stream_start_preset`: (optional) 1-based timer preset used to build the stream-start stage message
+- Timer applies always run **set → reset → start**, stopping at the first failed timer step, with no artificial stop/wait sequence. Old `propresenter_is_latest` and `propresenter_timer_wait_*_ms` keys are inert and removed on config load/save/import; they are not editable Config fields.
+- `stream_start_preset`: (optional) 1-based TDeck timer preset used for Stream Start
+- `stream_delay_preset`: independent 1-based **internal TDeck preset** used for Stream Delay (`0` = unselected); both selections follow moves/deletes
 - `companion_ip` / `companion_port`: Companion host/port
 - `companion_timer_name`: prefix for Companion timer-name variables (default: `timer_name_`)
 
@@ -833,13 +831,42 @@ This project can also act as a small “glue” service between Bitfocus Compani
 
 - Run the Web UI: `python webui.py`
 - Open the Timers page: `http://127.0.0.1:<webserver_port>/timers`
-- Add/update **Name** and **Time** rows, then click **Save**
+- Add/update **Name** and **Time** rows; explicit edits auto-save.
 
 Presets are stored in `timer_presets.json`.
 
 Stage message setup (same page):
 - In the **Stage Message** section, choose which preset represents your stream start time.
-- The UI shows a preview like `STREAM START 9:30AM` and has buttons to send/clear the message.
+- The UI shows a preview like `STREAM 9:30AM` and has buttons to send/clear the message.
+- Stream Delay has its own preset selector and signed minute adjustment, wrapping midnight.
+  **Update Timer** is checked by default. **Delay Stream** saves the selected preset's
+  current persisted time plus the adjustment, then applies **that preset** through
+  the normal timer/Companion path and sends `STREAM DELAY - 9:35AM`.
+- Uncheck **Update Timer** for message only: no preset write, timer action or Companion command.
+  Changing selectors, editing minutes, startup and reload never apply a preset.
+- Feedback reports saved, applied and message outcomes separately. A failed apply/message
+  does not undo the saved time. Reload after an uncertain request or stale-edit conflict;
+  there is no automatic retry. A repeated explicit click adds to the newly persisted time.
+
+Timer transport uses the vendor's documented `/version`, `GET/PUT /v1/timer/{id}`
+and `GET /v1/timer/{id}/reset|start`. The PUT preserves the full returned identity
+including its required UUID; countdown-to-time uses seconds plus `am`/`pm`.
+Failure diagnostics identify method/path and HTTP status or exception class, not
+raw response bodies. See https://openapi.propresenter.com/ (the timer schema references
+an identity requiring UUID, name and index). Synthetic tests prove this contract,
+not ProPresenter 21.4 physical behavior or the cause of an instance connection outage.
+
+Isolated timer regression runner (temporary storage; outbound requests/sockets blocked):
+`python tests/run_timers_isolated.py test_timers_direct test_stream_delay test_stream_delay_update`.
+Browser fixture: `python tests/timers_ui_harness.py --ready-file <scratch>/timers-ready.json`.
+Use a Playwright Python environment to run
+`python tests/timers_browser_check.py --ready-file <scratch>/timers-ready.json --artifacts <scratch>/timer-evidence --browser all`.
+It requires the marked loopback fixture and verifies desktop Chromium/Firefox/WebKit,
+mobile Chromium/WebKit emulation, independent persistence, explicit repeated apply,
+message-only mode, partial failures, stale revision rejection and no startup commands.
+Optional `TDECK_BROWSER_CHROMIUM`, `TDECK_BROWSER_FIREFOX`, `TDECK_BROWSER_WEBKIT`
+select already installed executables; private Linux libraries may use command-scoped
+`LD_LIBRARY_PATH`. Never substitute a staging URL or production configuration.
 
 3) Configure Companion
 

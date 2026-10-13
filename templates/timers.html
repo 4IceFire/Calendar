@@ -84,13 +84,21 @@
 							</div>
 							<button id="timers-stage-delay-send" class="btn btn-warning btn-sm">Delay Stream</button>
 						</div>
+                        <label for="timers-stage-delay-preset" class="form-label mb-1">Timer preset</label>
+                        <select id="timers-stage-delay-preset" class="form-select form-select-sm mb-2">
+                            <option value="">Select a timer preset</option>
+                        </select>
+                        <div class="form-check mb-2">
+                            <input id="timers-stage-update-timer" class="form-check-input" type="checkbox" checked>
+                            <label for="timers-stage-update-timer" class="form-check-label">Update Timer</label>
+                        </div>
 						<label for="timers-stage-delay-minutes" class="form-label mb-1">Delay adjustment (minutes)</label>
 						<div class="input-group input-group-sm">
 							<button id="timers-stage-delay-decrease" class="btn btn-outline-secondary" type="button" aria-label="Decrease stream delay by one minute">−</button>
 							<input id="timers-stage-delay-minutes" class="form-control text-center" type="number" min="-1440" max="1440" step="1" value="0" inputmode="numeric" aria-describedby="timers-stage-delay-hint">
 							<button id="timers-stage-delay-increase" class="btn btn-outline-secondary" type="button" aria-label="Increase stream delay by one minute">+</button>
 						</div>
-						<div id="timers-stage-delay-hint" class="form-text text-muted">Adjust by one minute, then send the selected preset's delayed stream message.</div>
+						<div id="timers-stage-delay-hint" class="form-text text-muted">Update Timer saves the adjusted time and applies this preset, including its Companion presses. Uncheck for message only.</div>
 						<div class="timer-stage-output mt-3">
 							<div class="small text-muted">Preview</div>
 							<div id="timers-stage-delay-preview" class="timer-stage-preview mt-1"></div>

@@ -51,8 +51,8 @@ are captured atomically with revision validation and never remapped or replayed.
 
 There is no Props settings endpoint or enabled execution mode. The old config
 key `propresenter_props_use_macros` is inert, omitted from Config reads, and
-stripped on normalized config save/import. Timer `propresenter_is_latest` is
-untouched. For installed Companion 0.5.0, GET retains a deprecated constant
+stripped on normalized config save/import. Timer compatibility/wait settings are
+retired independently (see Timers); Props behavior is not changed by that removal. For installed Companion 0.5.0, GET retains a deprecated constant
 `use_macros:false` and trigger POST optionally accepts that exact boolean false
 field. True, null, numeric/string values and unknown fields are rejected, not
 interpreted as modes. Companion 0.5.1 sends only `{position,revision}`; it rejects
@@ -464,7 +464,8 @@ Trigger entry shape (simplified):
 - **GET** `/api/timers`
 - **Returns:**
   - `propresenter_timer_index` (1-based index)
-  - `stream_start_preset` (1-based index, or `0` when not configured)
+  - `stream_start_preset` / `stream_delay_preset` (independent 1-based internal TDeck preset selections; `0` = unselected)
+  - `revision` (opaque snapshot of presets plus relevant delay/ProPresenter settings)
   - `timer_presets` (array)
 
 ### Save timer presets + ProPresenter timer index
@@ -484,7 +485,8 @@ Trigger entry shape (simplified):
 }
 ```
 - **Notes:** Presets are persisted to `timer_presets.json` (not stored inline in `config.json`).
-  - `stream_start_preset` is optional. Use `0` or omit to disable stream-start stage messages.
+  - `stream_start_preset` and `stream_delay_preset` are optional independent selections. `0` clears a selection; omission preserves it unless out of range after replacement.
+  - `POST /api/timers/mutate` actions `set_stream_start_preset` / `set_stream_delay_preset` take `preset` (1-based, or `0`) and save selection only. Move/delete follows both selections without device commands.
 
 ### Update one timer preset time (no full list required)
 - **PATCH** (or **POST**) `/api/timers/preset`
@@ -510,7 +512,7 @@ Trigger entry shape (simplified):
   - JSON body: `{ "preset": 1 }`
   - Query string: `?preset=1`
 - **Notes:** `preset` is always **1-based** (1 selects the first preset).
-- **Returns:** JSON describing what happened (button presses fired + ProPresenter timer set/reset/start attempts).
+- **Returns:** JSON describing what happened (button presses fired + ProPresenter timer set/reset/start attempts). Timer sequence is always direct set → reset → start, no artificial waits; subsequent timer steps stop on failure. Legacy `ok:true` alone is not hardware success: inspect `set`, `reset`, `started`, `button_presses` and `error`/`detail`.
 
 ---
 
@@ -566,6 +568,17 @@ Timer selection is either:
 - **POST** `/api/propresenter/stage/stream_start`
 - **Body:** none required.
 - **Notes:** Uses `stream_start_preset` and `timer_presets` to build a message like `STREAM 9:30AM`.
+
+### Delay stream, optionally save and apply the selected preset
+- **POST** `/api/propresenter/stage/stream_delay`
+- **Body:** `{ "preset": 2, "delay_minutes": 5, "update_timer": true, "revision": "<GET /api/timers revision>" }`
+- `preset` is an internal TDeck preset position (not a ProPresenter timer ID). Omission uses `stream_delay_preset`, never Stream Start.
+- `delay_minutes` must be a JSON integer in -1440..1440. `update_timer` must be a JSON boolean; omission defaults to **false** for compatibility with message-only API callers. The Timers UI defaults its **Update Timer** checkbox to checked and sends it explicitly.
+- Checked: validate selection/time/connection/actions/revision before writes, save the adjusted preset time, apply the same preset through normal Companion + ProPresenter execution, then send the stage message. Preserve other fields/order/settings. Unchecked: send the adjusted message only, without storage/timer/Companion writes.
+- Checked requests require the current `revision`; missing/stale revision returns **409** before writes/commands. Serialization uses the normal config/import/timer storage coordination. This is process-local coordination, not a cross-process hardware transaction; do not run a second writer against the same files.
+- Returns `saved`, `applied`, `sent`, `preset_time`, `message`, nested `apply` (timer step and Companion results), updated `timer_presets`, selections and `revision`. `applied` requires timer started and configured presses completed successfully. A partial device/message failure returns **200** with `ok:false` and honest states; storage failure returns **500**, validation **400**.
+- Save is not rolled back on apply/message failure. Sending the stage message is still attempted after an apply failure. HTTP acceptance is not proof of device display. No automatic replay; obtain/read the current snapshot before another explicit click.
+- Timer compatibility flag and wait keys are retired, hidden and stripped on normalized config load/save/import. Timer PUT includes the vendor-required UUID/name/index identity from the timer GET; diagnostics expose failed method/path/status or exception class.
 
 ### Clear stage message
 - **POST** `/api/propresenter/stage/clear`

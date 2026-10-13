@@ -49,7 +49,7 @@ class StreamDelayTests(unittest.TestCase):
 
     def test_stream_delay_endpoint_sends_adjusted_selected_preset_message(self):
         config = {
-            "stream_start_preset": 1,
+            "stream_start_preset": 1, "stream_delay_preset": 1,
             "propresenter_ip": "10.0.0.15",
             "propresenter_port": 1025,
         }
@@ -68,7 +68,7 @@ class StreamDelayTests(unittest.TestCase):
 
     def test_stream_delay_endpoint_uses_explicitly_selected_preset(self):
         config = {
-            "stream_start_preset": 1,
+            "stream_start_preset": 1, "stream_delay_preset": 1,
             "propresenter_ip": "10.0.0.15",
             "propresenter_port": 1025,
         }
@@ -104,7 +104,7 @@ class StreamDelayTests(unittest.TestCase):
         self.assertEqual(response.get_json()["error"], "delay_minutes must be an integer")
 
     def test_stream_delay_endpoint_rejects_fractional_values_and_non_object_json(self):
-        config = {"stream_start_preset": 1, "propresenter_ip": "10.0.0.15", "propresenter_port": 1025}
+        config = {"stream_start_preset": 1, "stream_delay_preset": 1, "propresenter_ip": "10.0.0.15", "propresenter_port": 1025}
         with (
             patch.object(webui, "_auth_enabled", return_value=False),
             patch.object(webui.utils, "get_config", return_value=config),
