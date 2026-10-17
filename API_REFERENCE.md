@@ -180,6 +180,57 @@ of submitting a new confirmation automatically. States are `loading`, `confirmat
 rollback; a device API may accept a command asynchronously. Partial results remain
 visible in job status and Activity Log. No actions run on preset save or startup.
 
+## Standalone Routing Preset automation
+
+Separate from the browser-only confirmation endpoints above. All three endpoints
+also have `/api/v1/` aliases and require a Bearer token with explicit
+`routing_presets` scope (`*` is administrator-wide); `read` and `videohub` do not
+implicitly grant it. Browser sessions, scheduler and saved-action principals are
+denied. Never use the browser `/prepare` or `/apply` flow for Companion.
+
+- `GET /api/automation/routing-presets` returns `{ok:true,presets:[...],
+  execution_window_seconds:300,execution_epoch:<hex64>}`. Each entry contains
+  `id` and `revision` (opaque hex32), `name`, `description`, `output` (positive
+  integer or **null**), `enabled` (boolean), and `unavailable_reason` (**null**
+  or `"disabled"`). No images, secrets or action bodies are exposed.
+- `POST /api/automation/routing-presets/<id>/trigger` requires exact JSON
+  `{revision,execution_id,issued_at,execution_epoch}` plus optional `output`.
+  Revision and freshly random execution ID are hex32; issued_at is integer Unix
+  seconds, at most 300 seconds old or 30 seconds ahead. Use the catalog epoch.
+  For a fixed destination omit output (null is also accepted); any differing
+  output is rejected. For an optional destination choose integer output 1–4096;
+  real coordinator device-count validation still applies. Returns HTTP202
+  `{ok:true,job:{id,presetId,name,output,status,message,imageDisplayed,actionsCompleted}}`.
+- `GET /api/automation/routing-presets/jobs/<execution_id>` returns that job
+  only to its exact initiating token identity and current resource constraints.
+  States are `loading`, `actions`, `succeeded`, `failed`. **202 is not success**.
+
+Constraints `routing_presets:[hex32...]` and `routing_outputs:[positive integer...]`
+are optional; omitted means unrestricted. If present they must be nonempty valid
+lists—empty, null, all and malformed forms reject rather than widen access.
+Existing `allowed_paths`, `videohub_outputs` and `videohub_inputs` also apply.
+The catalog filters preset/fixed-output constraints; optional outputs are checked
+at trigger. Revoked/expired/rotated/corrupt tokens fail authentication. Completion
+Activity Log and delegated actions include token identity and name, never plaintext.
+
+The real MediaRoutingManager requires an **exclusive eligible player** for
+unattended display; shared fallback is refused without uploads or receiver changes.
+Only confirmed image/player/route success permits immutable saved actions, in order.
+First action failure stops remaining actions, retains partial completion, and
+never rolls back or automatically repeats. Jobs are bounded, process-local and
+owner-scoped. The runner retains up to 500 recent jobs for 600 seconds (longer
+than request validity). Same execution identity/owner/preset/revision/output returns
+the existing job; conflicting reuse returns 409. A server epoch change invalidates
+old requests. After an uncertain POST, **poll the existing execution ID, never
+re-POST or generate another ID automatically**. Missing jobs after restart/expiry
+mean unknown outcome; inspect outputs before a new explicit action.
+
+Errors: 401 token authentication, 403 scope/owner/constraints, 400 invalid fields,
+fixed override or setup, 404 deleted/disabled/missing execution, 409 stale revision,
+expired epoch/time, execution conflict or busy. Existing 413/429 limits remain.
+Ordinary numeric VideoHub Companion actions stay supported; image-bearing
+VideoHub automation remains deliberately unsupported.
+
 ## Administrator user testing
 
 `POST /admin/users/<id>/view-as` starts an interactive browser view using the
@@ -274,6 +325,16 @@ The browser management contract is administrator-session only:
   returns a secret or stored hash.
 - `POST /api/config/service-tokens` creates a token with `name`, optional
   `description`, `expires_in_days`, `scopes`, and optional `constraints`.
+- `PATCH /api/config/service-tokens/<id>` edits permissions without replacing the
+  credential. Exact JSON: `{scopes, constraints, expected:{scopes,constraints},
+  confirmed:true}`. Browser/Admin/Config access, CSRF and trusted origin required;
+  service tokens (including `*`) cannot edit themselves. Returns `{ok,token}` with
+  public metadata only. Preserve token identity/hash, expiry and revocation; new
+  requests use current permissions. This does not cancel dispatched work or revive
+  expired/revoked tokens. Present restrictions must be nonempty valid lists; omit
+  a restriction to remove it. Stale permissions snapshot returns 409, malformed or
+  unconfirmed edits 400, missing token 404. Activity Log records actor and before/after
+  permissions, never credential plaintext or hash.
 - `POST /api/config/service-tokens/<id>/rotate` atomically stores a replacement
   and revokes the old token. It accepts `name` and `expires_in_days`.
 - `DELETE /api/config/service-tokens/<id>` immediately revokes a token.

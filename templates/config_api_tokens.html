@@ -58,7 +58,7 @@
                 </div>
                 {% endfor %}
               </div>
-              <div class="form-text">Select only what this integration needs. Read permits all read-only API calls.</div>
+              <div class="form-text">Select only what this integration needs. Read permits existing read-only APIs; standalone Routing Presets additionally requires routing_presets.</div>
             </fieldset>
 
             <details class="mb-3">
@@ -87,6 +87,8 @@
                   <input class="form-control" id="api-token-vh-presets" inputmode="numeric" placeholder="2, 5">
                 </div>
               </div>
+              <div class="mb-3"><label class="form-label" for="api-token-routing-presets">Standalone Routing Preset IDs</label><input id="api-token-routing-presets" class="form-control" placeholder="32-character saved IDs, comma-separated"><div class="form-text">Requires routing_presets. Blank is unrestricted; all/empty explicit lists are not accepted.</div></div>
+              <div class="mb-3"><label class="form-label" for="api-token-routing-outputs">Standalone Routing outputs</label><input id="api-token-routing-outputs" class="form-control" inputmode="numeric" placeholder="26, 27"></div>
               <div class="mb-3">
                 <label class="form-label" for="api-token-atem-sources">ATEM source IDs</label>
                 <input class="form-control" id="api-token-atem-sources" placeholder="1, MediaPlayer1">
@@ -128,6 +130,21 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <div class="modal fade" id="api-token-edit-modal" tabindex="-1" aria-labelledby="api-token-edit-title" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg"><div class="modal-content">
+      <form id="api-token-edit-form" style="display:flex;flex-direction:column;max-height:calc(100vh - 4rem);overflow:hidden;min-height:0">
+        <div class="modal-header"><h2 class="modal-title fs-5" id="api-token-edit-title">Edit permissions</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <p>Keep the existing token. Changes apply to subsequent requests by everyone holding it. Expiry and revocation are unchanged; dispatched work is not cancelled.</p>
+          <div id="api-token-edit-fields"></div>
+          <div class="form-check"><input id="api-token-edit-confirmed" class="form-check-input" type="checkbox" required><label class="form-check-label" for="api-token-edit-confirmed">I confirm these permission changes, including any added access.</label></div>
+          <div id="api-token-edit-error" class="small text-danger mt-2" role="status" aria-live="polite"></div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary" id="api-token-edit-save">Save permissions</button></div>
+      </form>
+    </div></div>
   </div>
 
   <div class="modal fade" id="api-token-rotate-modal" tabindex="-1" aria-labelledby="api-token-rotate-title" aria-hidden="true">

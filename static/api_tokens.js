@@ -23,6 +23,11 @@
     var rotateModal = window.bootstrap.Modal.getOrCreateInstance(rotateModalElement);
     var secretModal = window.bootstrap.Modal.getOrCreateInstance(secretModalElement);
     var tokensById = {};
+    var editElement = document.getElementById('api-token-edit-modal');
+    var editForm = document.getElementById('api-token-edit-form');
+    var editModal = window.bootstrap.Modal.getOrCreateInstance(editElement);
+    var editToken = null;
+    var editSaving = false;
 
     function clearElement(element) {
       while (element.firstChild) element.removeChild(element.firstChild);
@@ -133,6 +138,8 @@
 
         var actionCell = document.createElement('td');
         actionCell.className = 'text-end text-nowrap';
+        actionCell.appendChild(makeActionButton('Edit permissions', 'outline-primary', 'edit', token.id, false));
+        actionCell.appendChild(document.createTextNode(' '));
         actionCell.appendChild(makeActionButton('Rotate', 'outline-warning', 'rotate', token.id, !token.active));
         actionCell.appendChild(document.createTextNode(' '));
         actionCell.appendChild(makeActionButton('Revoke', 'outline-danger', 'revoke', token.id, Boolean(token.revoked_at)));
@@ -183,27 +190,75 @@
       });
     }
 
-    function creationPayload() {
+    function permissionsPayload(form, prefix) {
       var checkedScopes = Array.prototype.map.call(
-        createForm.querySelectorAll('input[name="scopes"]:checked'),
+        form.querySelectorAll('input[name="scopes"]:checked'),
         function (input) { return input.value; }
       );
       if (!checkedScopes.length) throw new Error('Choose at least one permission.');
+      var routingPresets = splitValues(document.getElementById(prefix + 'routing-presets').value);
+      if(routingPresets.some(function (id) { return !/^[a-f0-9]{32}$/.test(id); })) throw new Error('Routing presets must be exact saved preset IDs, not all.');
+      var routingOutputs = positiveNumbers(document.getElementById(prefix + 'routing-outputs').value, 'Routing outputs');
+      var extra = {};
+      if(routingPresets.length) extra.routing_presets = routingPresets;
+      if(routingOutputs.length) extra.routing_outputs = routingOutputs;
       return {
-        name: document.getElementById('api-token-name').value.trim(),
-        description: document.getElementById('api-token-description').value.trim(),
-        expires_in_days: Number(document.getElementById('api-token-expiry').value),
         scopes: checkedScopes,
-        constraints: {
-          allowed_paths: splitValues(document.getElementById('api-token-allowed-paths').value),
-          tv_targets: splitValues(document.getElementById('api-token-tv-targets').value),
-          videohub_outputs: positiveNumbers(document.getElementById('api-token-vh-outputs').value, 'VideoHub outputs'),
-          videohub_inputs: positiveNumbers(document.getElementById('api-token-vh-inputs').value, 'VideoHub inputs'),
-          videohub_presets: positiveNumbers(document.getElementById('api-token-vh-presets').value, 'VideoHub presets'),
-          atem_sources: splitValues(document.getElementById('api-token-atem-sources').value)
-        }
+        constraints: Object.assign(extra, {
+          allowed_paths: splitValues(document.getElementById(prefix + 'allowed-paths').value),
+          tv_targets: splitValues(document.getElementById(prefix + 'tv-targets').value),
+          videohub_outputs: positiveNumbers(document.getElementById(prefix + 'vh-outputs').value, 'VideoHub outputs'),
+          videohub_inputs: positiveNumbers(document.getElementById(prefix + 'vh-inputs').value, 'VideoHub inputs'),
+          videohub_presets: positiveNumbers(document.getElementById(prefix + 'vh-presets').value, 'VideoHub presets'),
+          atem_sources: splitValues(document.getElementById(prefix + 'atem-sources').value)
+        })
       };
     }
+
+    function creationPayload() {
+      return Object.assign({name:document.getElementById('api-token-name').value.trim(),
+        description:document.getElementById('api-token-description').value.trim(),
+        expires_in_days:Number(document.getElementById('api-token-expiry').value)}, permissionsPayload(createForm, 'api-token-'));
+    }
+
+    function openPermissions(token) {
+      editToken = {id:token.id, scopes:token.scopes.slice(), constraints:JSON.parse(JSON.stringify(token.constraints || {}))};
+      document.getElementById('api-token-edit-title').textContent = 'Edit permissions — ' + token.name;
+      document.getElementById('api-token-edit-error').textContent = '';
+      document.getElementById('api-token-edit-confirmed').checked = false;
+      var slot = document.getElementById('api-token-edit-fields'); clearElement(slot);
+      [createForm.querySelector('fieldset'), createForm.querySelector('details')].forEach(function(source){
+        var copy = source.cloneNode(true);
+        if(copy.tagName === 'DETAILS') copy.open = Object.keys(token.constraints || {}).length > 0;
+        Array.prototype.forEach.call(copy.querySelectorAll('[id],[for]'), function(el){
+          ['id','for'].forEach(function(attr){if(el.hasAttribute(attr)) el.setAttribute(attr,el.getAttribute(attr).replace('api-token-','api-token-edit-'));});
+        });
+        slot.appendChild(copy);
+      });
+      var star = document.createElement('div'); star.className='form-check';
+      var check=document.createElement('input'); check.type='checkbox';check.name='scopes';check.value='*';check.id='api-token-edit-scope-all';check.className='form-check-input';
+      var label=document.createElement('label');label.htmlFor=check.id;label.className='form-check-label';label.textContent='* — all API scopes';star.appendChild(check);star.appendChild(label);
+      slot.querySelector('fieldset').appendChild(star);
+      Array.prototype.forEach.call(editForm.querySelectorAll('input[name="scopes"]'),function(el){el.checked=token.scopes.indexOf(el.value)>=0;});
+      var fields={allowed_paths:'allowed-paths',tv_targets:'tv-targets',videohub_outputs:'vh-outputs',videohub_inputs:'vh-inputs',videohub_presets:'vh-presets',atem_sources:'atem-sources',routing_presets:'routing-presets',routing_outputs:'routing-outputs'};
+      Object.keys(fields).forEach(function(key){document.getElementById('api-token-edit-'+fields[key]).value=(token.constraints[key] || []).join(', ');});
+      editModal.show();
+    }
+    editElement.addEventListener('hide.bs.modal', function(event){if(editSaving) event.preventDefault();});
+    editForm.addEventListener('submit', async function(event){
+      event.preventDefault(); if(editSaving || !editForm.reportValidity()) return;
+      var error=document.getElementById('api-token-edit-error');
+      try {
+        var value=permissionsPayload(editForm,'api-token-edit-');
+        Object.keys(value.constraints).forEach(function(key){if(!value.constraints[key].length) delete value.constraints[key];});
+        value.expected={scopes:editToken.scopes,constraints:editToken.constraints};value.confirmed=true;
+        editElement.focus();editSaving=true;editForm.setAttribute('aria-busy','true');error.textContent='Saving…';
+        Array.prototype.forEach.call(editForm.querySelectorAll('input,textarea,select,button'),function(el){el.disabled=true;});
+        await apiRequest('/api/config/service-tokens/'+editToken.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)});
+        editSaving=false;editModal.hide();await loadTokens();setAlert('Permissions updated. The existing token is unchanged.','success');
+      } catch(e) {error.textContent=String(e.message || e);}
+      finally {editSaving=false;editForm.setAttribute('aria-busy','false');Array.prototype.forEach.call(editForm.querySelectorAll('input,textarea,select,button'),function(el){el.disabled=false;});}
+    });
 
     function showSecret(token, message) {
       secretInput.value = token.token || '';
@@ -241,6 +296,7 @@
       if (!button) return;
       var token = tokensById[String(button.dataset.tokenId)];
       if (!token) return;
+      if (button.dataset.tokenAction === 'edit') { openPermissions(token); return; }
       if (button.dataset.tokenAction === 'rotate') {
         document.getElementById('api-token-rotate-id').value = String(token.id);
         document.getElementById('api-token-rotate-name').value = token.name || '';

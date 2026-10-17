@@ -135,7 +135,7 @@
           {% if not auth_enabled or can_access('page:timers') %}<a class="nav-link{% if request.path.startswith('/timers') %} active{% endif %}" href="/timers">Timers</a>{% endif %}
           {% if not auth_enabled or can_access('page:props') %}<a class="nav-link{% if request.path.startswith('/props') %} active{% endif %}" href="/props">Props</a>{% endif %}
           {% if not auth_enabled or can_access('page:calendar') %}<a class="nav-link{% if request.path.startswith('/calendar') %} active{% endif %}" href="/calendar">Schedule</a>{% endif %}
-          {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub</a>{% endif %}
+          {% if not auth_enabled or can_access('page:videohub') %}<a class="nav-link{% if request.path.startswith('/videohub') %} active{% endif %}" href="/videohub">VideoHub Presets</a>{% endif %}
           {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Record Audio</a>{% endif %}
           {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') or request.path in ('/media', '/media/upload') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
           {% if not auth_enabled or can_access('page:pixie_controls') %}<a class="nav-link{% if request.path.startswith('/pixie') %} active{% endif %}" href="/pixie">Pixie Controls</a>{% endif %}

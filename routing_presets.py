@@ -177,7 +177,7 @@ class RoutingPresetRunner:
             if self._active:
                 raise BusyError('Another preset is running. Please wait for it to finish.')
             job = {'id': identity, 'presetId': preset['id'], 'name': preset['name'], 'mediaId': preset['media_id'],
-                   'output': output, 'owner': owner, 'status': 'loading', 'message': 'Displaying the preset image…',
+                   'output': output, 'owner': owner, 'revision': preset.get('revision'), 'status': 'loading', 'message': 'Displaying the preset image…',
                    'imageDisplayed': False, 'actionsCompleted': 0, 'createdAt': time.time()}
             # Confirmations expire in 5 minutes. Retain executions longer to
             # prevent a retried confirmation from executing its actions twice.

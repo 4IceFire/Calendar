@@ -871,6 +871,8 @@ def main(argv=None):
     token_create.add_argument("--videohub-output", action="append", type=int, default=[], help="Limit routing to this 1-based output")
     token_create.add_argument("--videohub-input", action="append", type=int, default=[], help="Limit routing to this 1-based input")
     token_create.add_argument("--videohub-preset", action="append", type=int, default=[], help="Limit preset application to this preset ID")
+    token_create.add_argument("--routing-preset", action="append", default=[], help="Limit standalone Routing Presets to this exact saved ID")
+    token_create.add_argument("--routing-output", action="append", type=int, default=[], help="Limit standalone Routing Presets to this 1-based output")
     token_create.add_argument("--atem-source", action="append", default=[], help="Limit ATEM writes to this source ID")
 
     token_sub.add_parser("list", help="List token metadata (never plaintext tokens)")
@@ -901,6 +903,8 @@ def main(argv=None):
                         "videohub_inputs": args.videohub_input,
                         "videohub_presets": args.videohub_preset,
                         "atem_sources": args.atem_source,
+                        **({"routing_presets": args.routing_preset} if args.routing_preset else {}),
+                        **({"routing_outputs": args.routing_output} if args.routing_output else {}),
                     },
                 )
             except ValueError as exc:

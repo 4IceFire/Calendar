@@ -126,7 +126,7 @@ class MediaRoutingManager:
         self._active_id = None
 
     def display(self, media_id, output, allowed_inputs=None, on_complete=None, *, allow_shared_player=False,
-                shared_confirmation=None):
+                shared_confirmation=None, refuse_shared=False):
         """Queue a display; authorization for the target belongs to the caller.
 
         Confirmed presets may update a player already feeding other outputs,
@@ -160,7 +160,7 @@ class MediaRoutingManager:
             deadline = time.monotonic() + self._job_timeout
             threading.Thread(target=self._run,
                              args=(job_id, cfg, destinations, allowed, deadline, on_complete, allow_shared_player,
-                                   copy.deepcopy(shared_confirmation)),
+                                   copy.deepcopy(shared_confirmation)), kwargs={'refuse_shared': refuse_shared},
                              name="tdeck-media-display", daemon=True).start()
             return result
         except Exception:

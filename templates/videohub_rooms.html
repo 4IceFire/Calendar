@@ -61,6 +61,7 @@
     .vhr-stage{ height: 46vh; min-height: 260px; }
     .vhr-marker{ min-width: 64px; font-size: .66rem; padding: .18rem .28rem; }
   }
+  .vhr-stage[data-full-room-image] .vhr-marker{min-width:0;max-width:42%;white-space:normal;overflow-wrap:anywhere;}
 </style>
 
 <div id="vhr-page">
@@ -131,6 +132,7 @@
   </div>
 </div>
 
+<script src="{{ static_asset('videohub_room_frame.js') }}"></script>
 <script>
 let _vhrLabels = {inputs: [], outputs: []};
 let _vhrCfg = {rooms: [], output_layouts: {}, filtered_inputs: []};
@@ -248,12 +250,14 @@ function _vhrRenderRoomEditor(){
   if(delBtn) delBtn.disabled = !hasRoom;
   if(!stage) return;
   if(!hasRoom){
+    if(window.fitVideohubRoomImage) window.fitVideohubRoomImage(stage,'');
     stage.style.backgroundImage = 'none';
     stage.innerHTML = '<div class="p-3 text-muted">Create a room to begin.</div>';
     return;
   }
   const bg = String(room.background_url || '');
   stage.style.backgroundImage = bg ? `url("${_safeHtml(bg)}")` : 'none';
+  if(window.fitVideohubRoomImage) window.fitVideohubRoomImage(stage,bg);
   const outputs = _vhrOutputsForRoom(room.id);
   stage.innerHTML = '';
   if(!outputs.length){
