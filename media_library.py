@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -208,15 +209,19 @@ class MediaLibrary:
     def _asset_path(self, image_id: str, thumbnail: bool = False) -> Path:
         folder = self.root / ("thumbnails" if thumbnail else "images")
         path = folder / f"{_validate_id(image_id)}.png"
-        if not path.resolve().is_relative_to(self.root):
+        if folder.is_symlink() or path.is_symlink() or not path.resolve().is_relative_to(self.root):
             raise OSError("Media library image path is outside its storage directory")
         return path
 
-    def list(self) -> list[dict]:
+    def list(self, *, include_asset_status: bool = False) -> list[dict]:
+        """Read the catalogue once, optionally deriving flags under its root lock."""
         with self._lock:
-            return sorted(self._read().values(), key=lambda item: (
+            items = sorted(self._read().values(), key=lambda item: (
                 not item["preset"], item["name"].casefold(), item["created_at"], item["id"]
             ))
+            if include_asset_status:
+                return [{**item, **self._asset_status(item['id'])} for item in items]
+            return items
 
     def get(self, image_id: str) -> dict:
         with self._lock:
@@ -225,14 +230,14 @@ class MediaLibrary:
                 raise KeyError("Image not found")
             return dict(entry)
 
-    def _check_upload_capacity(self, entries: dict[str, dict], additional_bytes: int = 0) -> None:
+    def _check_upload_capacity(self, entries: dict[str, dict], additional_bytes: int = 0, *, replacing=None) -> None:
         """Check actual assets, including thumbnails/orphans, under the root lock.
 
         Existing libraries above these limits remain readable and deletable.
         A second check after encoding accounts for compressed-image expansion
         and changes to free space made by other applications during decoding.
         """
-        if len(entries) >= MAX_LIBRARY_IMAGES:
+        if replacing is None and len(entries) >= MAX_LIBRARY_IMAGES:
             raise ValueError("Media library has reached its image limit. Ask an administrator to remove unused images")
         stored_bytes = 0
         for folder_name in ("images", "thumbnails"):
@@ -242,11 +247,17 @@ class MediaLibrary:
             for path in folder.iterdir():
                 if path.is_file():
                     stored_bytes += path.stat().st_size
-        if stored_bytes >= MAX_LIBRARY_BYTES or stored_bytes + additional_bytes > MAX_LIBRARY_BYTES:
+        if replacing is not None:
+            for thumbnail in (False, True):
+                path = self._asset_path(replacing, thumbnail)
+                if path.is_file():
+                    stored_bytes -= path.stat().st_size
+        if ((replacing is None and stored_bytes >= MAX_LIBRARY_BYTES)
+                or stored_bytes + additional_bytes > MAX_LIBRARY_BYTES):
             raise ValueError("Media library has reached its storage limit. Ask an administrator to remove unused images")
         # Atomic index replacement needs space for the old and new index at once.
         index_bytes = self._index.stat().st_size if self._index.exists() else 0
-        required_free = MIN_FREE_DISK_BYTES + additional_bytes + index_bytes + 4096
+        required_free = MIN_FREE_DISK_BYTES + additional_bytes + index_bytes * (2 if replacing else 1) + 4096
         if shutil.disk_usage(self.root).free < required_free:
             raise ValueError("The server is low on free storage. Ask an administrator to free space before uploading")
 
@@ -295,6 +306,99 @@ class MediaLibrary:
                 original_path.unlink(missing_ok=True)
                 thumbnail_path.unlink(missing_ok=True)
                 raise
+            return dict(entry)
+
+    def _asset_status(self, image_id: str) -> dict:
+        """Derive flags for an already-read entry while holding the root lock."""
+        return {'file_missing': not self._asset_path(image_id).is_file(),
+                'thumbnail_missing': not self._asset_path(image_id, True).is_file()}
+
+    def asset_status(self, image_id: str) -> dict:
+        """Validate catalogue membership and return flags, never filesystem paths."""
+        with self._lock:
+            self.get(image_id)
+            return self._asset_status(image_id)
+
+    def replace(self, image_id: str, stream: BinaryIO) -> dict:
+        """Replace pixels without changing identity, provenance or retention."""
+        with self._lock:
+            entries = self._read()
+            image_id = _validate_id(image_id)
+            if image_id not in entries:
+                raise KeyError("Image not found")
+            self._check_upload_capacity(entries, replacing=image_id)
+            content = stream.read(MAX_UPLOAD_BYTES + 1)
+            if not isinstance(content, bytes) or not content:
+                raise ValueError("Image file is empty or unreadable")
+            if len(content) > MAX_UPLOAD_BYTES:
+                raise ValueError("Image exceeds the 20 MB upload limit")
+            with _decode(content) as image:
+                width, height = image.size
+                encoded = _png(image)
+                with image.copy() as thumbnail:
+                    thumbnail.thumbnail(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                    preview = _png(thumbnail)
+            self._check_upload_capacity(entries, len(encoded) + len(preview), replacing=image_id)
+            entry = {**entries[image_id], 'width': width, 'height': height, 'size_bytes': len(encoded)}
+            paths = [self._asset_path(image_id), self._asset_path(image_id, True)]
+            moved = []
+            written = []
+            index_backup = self._index.with_suffix(f'.replace-{uuid.uuid4().hex}.tmp')
+            index_saved = False
+            try:
+                # Keep metadata recoverable even if a save reports failure
+                # after publishing its new index. Restore without using _save.
+                shutil.copyfile(self._index, index_backup)
+                index_saved = True
+                # Rename old assets rather than copying decoded buffers; retain
+                # their exact bytes (or absence) until the index commits.
+                for path in paths:
+                    if path.exists():
+                        backup = path.with_suffix(f'.replace-{uuid.uuid4().hex}.tmp')
+                        os.replace(path, backup)
+                        moved.append((path, backup))
+                for path, data in zip(paths, (encoded, preview)):
+                    written.append(path)
+                    _atomic_write(path, data)
+                entries[image_id] = entry
+                self._save(entries)
+            except Exception as error:
+                # Restoration is best-effort, not a filesystem transaction.
+                # Copy rather than consume backups until every independent
+                # restore succeeds, so a partial rollback remains recoverable.
+                restoration_failed = False
+                originals = {path for path, _ in moved}
+                for path in written:
+                    if path not in originals:
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            restoration_failed = True
+                restores = list(reversed(moved))
+                if index_saved:
+                    restores.append((self._index, index_backup))
+                for path, backup in restores:
+                    try:
+                        shutil.copyfile(backup, path)
+                    except OSError:
+                        restoration_failed = True
+                if restoration_failed:
+                    raise OSError('Media replacement rollback incomplete; recovery backups retained') from error
+                for backup in [index_backup, *(backup for _, backup in moved)]:
+                    try:
+                        backup.unlink(missing_ok=True)
+                    except OSError:
+                        logging.getLogger(__name__).warning(
+                            'Media replacement rolled back; backup cleanup failed; leftover retained')
+                raise
+            # Successful _save is the commit boundary. Cleanup must not turn
+            # committed pixels/metadata into a reported replacement failure.
+            for backup in [index_backup, *(backup for _, backup in moved)]:
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    logging.getLogger(__name__).warning(
+                        'Media replacement committed; backup cleanup failed; leftover retained')
             return dict(entry)
 
     def update(self, image_id: str, name: str, preset: bool = False, *, keep=False) -> dict:

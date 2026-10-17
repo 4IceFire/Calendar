@@ -341,10 +341,17 @@ except Exception:
 
     utils = _StubUtils()
 
+
+def _is_media_upload_path(path: str) -> bool:
+    """All image-byte endpoints share preparse limits and admission."""
+    path = _api_normalized_path(path)
+    return path == '/api/media/upload' or bool(re.fullmatch(r'/api/media/[^/]+/replace', path))
+
+
 class _TDeckRequest(Request):
     def _get_file_stream(self, total_content_length, content_type, filename=None, content_length=None):
         stream = super()._get_file_stream(total_content_length, content_type, filename, content_length)
-        if self.path in ('/api/media/upload', '/api/v1/media/upload'):
+        if _is_media_upload_path(self.path):
             # A rejected multipart parse can fail before Werkzeug publishes
             # request.files. Retain those partial streams for prompt cleanup.
             self.__dict__.setdefault('_media_parser_streams', []).append(stream)
@@ -3188,7 +3195,7 @@ def _validate_csrf() -> bool:
         # without parsing an untrusted multipart body first; retain form-token
         # support for callers that do not send the header.
         header = request.headers.get('X-CSRF-Token')
-        if _api_normalized_path() == '/api/media/upload' and header is not None:
+        if _is_media_upload_path(request.path) and header is not None:
             sent = header
         else:
             sent = request.form.get('_csrf') or header
@@ -3630,7 +3637,7 @@ def _api_same_origin_request() -> bool:
 
 def _api_request_within_size_limit(path: str) -> tuple[bool, int]:
     cfg = _auth_cfg()
-    upload = path.startswith('/api/config/import/') or path.endswith('/background') or path == '/api/media/upload'
+    upload = path.startswith('/api/config/import/') or path.endswith('/background') or _is_media_upload_path(path)
     key = 'api_upload_max_request_bytes' if upload else 'api_max_request_bytes'
     default_limit = 64 * 1024 * 1024 if upload else 2 * 1024 * 1024
     try:
@@ -3884,12 +3891,13 @@ def _api_security_gate():
             )
             return _api_json_error(403, 'forbidden', 'Your groups do not grant access to this API capability.')
         if request.method in _API_MUTATING_METHODS:
-            if normalized == '/api/media/upload':
+            if _is_media_upload_path(normalized):
                 # These checks must precede form-based CSRF validation, which
                 # can otherwise parse uploads from a read-only media account
                 # or an untrusted browser origin before rejecting them.
-                if not _media_permissions()['upload']:
-                    return _media_action_denied('upload')
+                permission = 'upload' if normalized == '/api/media/upload' else 'manage'
+                if not _media_permissions()[permission]:
+                    return _media_action_denied(permission)
                 if not _api_same_origin_request():
                     _api_security_event(
                         'security.api.origin_denied',
@@ -4085,16 +4093,16 @@ def _view_as_request_gate():
 @app.before_request
 def _auth_gate():
     p = request.path or ''
-    if _api_normalized_path(p) == '/api/media/upload':
+    if _is_media_upload_path(p):
         # Enforce streaming multipart size before authentication/CSRF accesses
         # request.form, including bodies with no Content-Length header.
         from media_library import MAX_UPLOAD_BYTES
         _, upload_limit = _api_request_within_size_limit('/api/media/upload')
         request.max_content_length = min(upload_limit, MAX_UPLOAD_BYTES + 1024 * 1024)
-        # One image, its name, temporary flag and optional form CSRF token. Keep
-        # parser buffering above Werkzeug's 64 KiB read size while bounding
+        # New uploads allow name/temporary; replacements allow only file/CSRF.
+        # Keep parser buffering above Werkzeug's 64 KiB read size while bounding
         # text fields and multipart headers independently of the image bytes.
-        request.max_form_parts = 4
+        request.max_form_parts = 4 if _api_normalized_path(p) == '/api/media/upload' else 2
         request.max_form_memory_size = 128 * 1024
 
     view_as_response = _view_as_request_gate()
@@ -7818,16 +7826,28 @@ def _media_action_denied(action: str):
     return _api_json_error(403, 'forbidden', message)
 
 
-def _media_item_payload(item: dict) -> dict:
+def _media_item_payload(item: dict, *, status=None) -> dict:
     item = dict(item)
     if not can_access('page:media_library'):
         item.pop('uploaded_by', None)
         item.pop('uploaded_by_id', None)
+    if status is None:
+        try:
+            status = _get_media_library().asset_status(item['id'])
+        except KeyError:
+            # Delete responses retain the removed metadata but both assets are gone.
+            status = {'file_missing': True, 'thumbnail_missing': True}
     return {
-        **item,
+        **item, **status,
         'url': url_for('media_image', media_id=item['id']),
         'thumbnail_url': url_for('media_thumbnail', media_id=item['id']),
     }
+
+
+def _media_catalog_payload(*, temporary=False) -> list[dict]:
+    return [_media_item_payload(item, status={key: item[key] for key in ('file_missing', 'thumbnail_missing')})
+            for item in _get_media_library().list(include_asset_status=True)
+            if bool(item.get('temporary')) == temporary]
 
 
 def _media_authorized_item(media_id):
@@ -7876,7 +7896,8 @@ def _media_api_failure(action: str, error: Exception, status_code: int = 400):
         message, status_code = 'The media operation could not finish. Check the Activity Log.', 503
     else:
         message = str(error)
-    log_event(action, message, status='failure', details={'error': str(error)})
+    details = {'error_type': type(error).__name__} if action == 'media.image.replace' else {'error': str(error)}
+    log_event(action, message, status='failure', details=details)
     return jsonify({'ok': False, 'error': message}), status_code
 
 
@@ -8213,7 +8234,7 @@ def api_routing_presets_config(identity=None):
             store = _get_routing_preset_store()
             if request.method == 'GET':
                 return jsonify(ok=True, presets=store.list(),
-                               images=[_media_item_payload(item) for item in _get_media_library().list() if not item.get('temporary')],
+                               images=_media_catalog_payload(),
                                outputs=_get_videohub_state_snapshot().get('outputs', []))
             if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
                 return _api_json_error(409, 'busy', 'Wait for the current display or preset to finish.')
@@ -8530,8 +8551,7 @@ def api_media_list():
             return _media_action_denied('manage')
         _cleanup_temporary_media()
         return jsonify({
-            'ok': True, 'items': [_media_item_payload(item) for item in _get_media_library().list()
-                                 if bool(item.get('temporary')) == (collection == 'temporary')],
+            'ok': True, 'items': _media_catalog_payload(temporary=collection == 'temporary'),
             'permissions': _media_permissions(),
         })
     except (ValueError, OSError, RuntimeError) as error:
@@ -8581,6 +8601,36 @@ def api_media_upload():
         return jsonify({'ok': True, 'item': _media_item_payload(item)}), 201
     except (ValueError, OSError, RuntimeError) as error:
         return _media_api_failure('media.image.upload', error)
+
+
+@app.route('/api/media/<media_id>/replace', methods=['POST'])
+def api_media_replace(media_id: str):
+    if not _media_permissions()['manage']:
+        return _media_action_denied('manage')
+    principal_key = (f'user:{current_user.get_id()}' if getattr(current_user, 'is_authenticated', False)
+                     else f'address:{request.remote_addr or "unknown"}')
+    admission_error = _admit_media_upload(principal_key)
+    if admission_error is not None:
+        return admission_error
+    try:
+        with _media_operation_lock:
+            if _active_media_job().get('status') in _MEDIA_ACTIVE_JOBS:
+                log_event('media.image.replace', 'Replacement blocked by an active image job', status='failure')
+                return _api_json_error(409, 'busy', 'An image job is active. Wait for it to finish.')
+            if (request.mimetype != 'multipart/form-data' or set(request.files) != {'file'}
+                    or len(request.files.getlist('file')) != 1 or set(request.form) - {'_csrf'}
+                    or any(len(request.form.getlist(key)) != 1 for key in request.form)
+                    or any(len(value) > 1024 for value in request.form.values())):
+                raise ValueError('Upload exactly one image file and optional form CSRF token.')
+            upload = request.files['file']
+            item = _get_media_library().replace(media_id, upload.stream)
+            payload = _media_item_payload(item)
+        log_event('media.image.replace', 'Replaced image pixels', status='success',
+                  target_type='media_image', target_id=item['id'],
+                  details={'width': item['width'], 'height': item['height'], 'size_bytes': item['size_bytes']})
+        return jsonify({'ok': True, 'item': payload})
+    except (KeyError, ValueError, OSError, RuntimeError) as error:
+        return _media_api_failure('media.image.replace', error)
 
 
 @app.route('/api/media/<media_id>', methods=['PATCH', 'DELETE'])

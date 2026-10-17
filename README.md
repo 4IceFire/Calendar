@@ -472,6 +472,22 @@ deletion. Older uploads retain their original time and show an unknown uploader.
 Managers can rename, delete, or **Keep in saved library** a temporary image.
 Keeping it preserves its original attribution and makes it available in Routing.
 
+To change an existing graphic or repair a missing file, select its entry in
+**Media Library**, choose a file under **Replace image**, then explicitly select
+**Replace image**. The replacement keeps the same image ID, name and routing-preset
+links; it does not create a duplicate or load anything into the ATEM. Existing
+presets use the new file the next time they are applied. The original uploader,
+upload time and temporary/permanent retention status remain unchanged.
+
+A **File missing** warning means the catalogue entry still exists but its image
+file is absent on the server. A missing thumbnail is reported separately.
+Re-upload the original or a replacement into that entry rather than deleting and
+recreating it. TDeck cannot reconstruct lost image pixels from the catalogue or
+an empty ATEM slot. Replacement validates the same file-size, format and pixel
+limits as a new upload and is refused while a media display job is active.
+Errors appear beside the replacement controls; a failed request does not retry
+itself or discard your selected file.
+
 Routing uploads start with **Temporary image** checked. Users with permanent-save
 permission can untick it; other uploaders always upload temporarily. Temporary
 images do not appear in the Routing picker or preset image choices. Their uploader
@@ -520,6 +536,13 @@ under `media_library/` beside the application on Windows, or `/data/media_librar
 when `/data` exists on Linux. Set `TDECK_MEDIA_DIR` in the server environment to
 use another durable folder. Back up this entire folder; the existing Config ZIP
 does not yet include the image library. Uploaded media stays out of Git.
+When switching older branches, their ignore rules may not protect this runtime
+folder. Keep `media_library/` in the installation's local `.git/info/exclude`
+as branch-independent protection against ordinary untracked-file cleanup.
+This is not a backup and does not protect against cleanup explicitly including
+ignored files or manual deletion. For stronger separation, use a durable
+`TDECK_MEDIA_DIR` outside the checkout; migrate and back up existing data before
+changing that setting.
 
 ### Routing presets
 
