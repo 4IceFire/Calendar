@@ -15516,7 +15516,7 @@ def api_prop_set_timer():
 
     do_reset = bool(body.get('reset', False))
     reset_ok = None
-    if do_reset:
+    if do_reset and set_ok:
         reset_ok = bool(pp.timer_operation(timer_id, 'reset'))
 
     try:

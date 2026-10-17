@@ -63,7 +63,7 @@ class DirectTimerTests(unittest.TestCase):
                 response._content = b''
                 if request.method == 'GET' and request.url.endswith('/timer/1'):
                     response.status_code = 200
-                    response._content = json.dumps({'id': {'uuid': 'synthetic-uuid', 'name': 'Service', 'index': 1}}).encode()
+                    response._content = json.dumps(getattr(self, 'payload', {'id': {'uuid': 'synthetic-uuid', 'name': 'Service', 'index': 1}})).encode()
                 if request.method == 'PUT':
                     data = json.loads(request.body)
                     response.status_code = 200 if data['id']['uuid'] == 'synthetic-uuid' else 400
@@ -85,22 +85,24 @@ class DirectTimerTests(unittest.TestCase):
             response = webui.app.test_client().post('/api/timers/apply', json={'preset': 1})
         self.assertTrue(response.get_json()['started'])
         self.assertEqual([(m, u.split('/v1/')[1]) for m, u, b, t in transport.calls],
-                         [('GET', 'timer/1'), ('PUT', 'timer/1'), ('GET', 'timer/1/reset'), ('GET', 'timer/1/start')])
-        self.assertTrue(all(t == 2.0 for m, u, b, t in transport.calls))
+                         [('GET', 'timer/1'), ('PUT', 'timer/1'), ('GET', 'timer/1'), ('GET', 'timer/1/reset'), ('GET', 'timer/1/start')])
+        self.assertTrue(all(0 < t <= 2.0 for m, u, b, t in transport.calls))
         self.assertEqual(transport.payload['count_down_to_time'], {'time_of_day': 0, 'period': 'pm'})
 
     def test_http_payload_preserves_required_uuid(self):
         pp = ProPresentor('fake.invalid', 1025)
         identity = {'uuid': '942C3FC3-C4B2-44F7-A55D-4CC913BB8A5D', 'name': 'Service', 'index': 1}
         pp.session = Mock()
+        written = []
         def strict_transport(method, url, **kwargs):
             if method == 'GET':
-                return Mock(status_code=200, json=lambda: {'id': identity})
+                return Mock(status_code=200, json=lambda: written[-1] if written else {'id': identity})
             data = kwargs['json']
+            written.append(data)
             return Mock(status_code=200 if data['id'] == identity else 400)
         pp.session.request.side_effect = strict_transport
         self.assertTrue(pp.SetCountdownToTime(1, '13:30'))
-        self.assertEqual(pp.session.request.call_args.kwargs['json']['count_down_to_time'],
+        self.assertEqual(written[-1]['count_down_to_time'],
                          {'time_of_day': 5400, 'period': 'pm'})
         self.assertEqual(pp.session.request.call_args.args[1], 'http://fake.invalid:1025/v1/timer/1')
 

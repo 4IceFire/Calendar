@@ -855,7 +855,7 @@ This project can also act as a small “glue” service between Bitfocus Compani
 - `propresenter_ip`: ProPresenter host
 - `propresenter_port`: ProPresenter API port
 - `propresenter_timer_index`: which ProPresenter timer/clock to update
-- Timer applies always run **set → reset → start**, stopping at the first failed timer step, with no artificial stop/wait sequence. Old `propresenter_is_latest` and `propresenter_timer_wait_*_ms` keys are inert and removed on config load/save/import; they are not editable Config fields.
+- Timer applies run **set → confirm saved target → reset → start**, stopping at the first failed step. ProPresenter on macOS can acknowledge a PUT before its timer model changes; resetting immediately can lose that edit. TDeck polls read-only timer details for at most the client timeout (normally two seconds), checking the original UUID and requested target before proceeding. Immediate confirmation adds no fixed delay; confirmation failure never retries a write or sends reset/start. Old `propresenter_is_latest` and `propresenter_timer_wait_*_ms` keys remain inert and removed on config load/save/import; no legacy stop/wait settings are restored.
 - `stream_start_preset`: (optional) 1-based TDeck timer preset used for Stream Start
 - `stream_delay_preset`: independent 1-based **internal TDeck preset** used for Stream Delay (`0` = unselected); both selections follow moves/deletes
 - `companion_ip` / `companion_port`: Companion host/port
@@ -897,11 +897,13 @@ and `GET /v1/timer/{id}/reset|start`. The PUT preserves the full returned identi
 including its required UUID; countdown-to-time uses seconds plus `am`/`pm`.
 Failure diagnostics identify method/path and HTTP status or exception class, not
 raw response bodies. See https://openapi.propresenter.com/ (the timer schema references
-an identity requiring UUID, name and index). Synthetic tests prove this contract,
-not ProPresenter 21.4 physical behavior or the cause of an instance connection outage.
+an identity requiring UUID, name and index). Synthetic tests cover delayed model
+publication, immediate confirmation, identity changes, malformed/unavailable reads,
+confirmation timeout and stopping the apply sequence before reset/start on failure.
+They do not prove physical stage-display output.
 
 Isolated timer regression runner (temporary storage; outbound requests/sockets blocked):
-`python tests/run_timers_isolated.py test_timers_direct test_stream_delay test_stream_delay_update`.
+`python tests/run_timers_isolated.py test_propresenter_timer_confirmation test_timers_direct test_stream_delay test_stream_delay_update`.
 Actual JavaScript handler regressions: `node --test tests/timers_stream_delay.test.cjs`.
 Browser fixture: `python tests/timers_ui_harness.py --ready-file <scratch>/timers-ready.json`.
 Use a Playwright Python environment to run

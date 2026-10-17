@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, time as dt_time
 from typing import Optional, Any, Dict, Literal
 import json
+import time as clock
 
 import requests
 
@@ -215,7 +216,8 @@ class ProPresentor:
         """One bounded request; never retry an uncertain device command."""
         self.last_timer_error = None
         try:
-            response = self.session.request(method, self._build_api_url(path), timeout=self.timeout, **kwargs)
+            timeout = kwargs.pop('timeout', self.timeout)
+            response = self.session.request(method, self._build_api_url(path), timeout=timeout, **kwargs)
             if 200 <= response.status_code < 300:
                 return response
             self.last_timer_error = f"{method} /v1/{path}: HTTP {response.status_code}"
@@ -308,7 +310,37 @@ class ProPresentor:
         }
         }
 
-        return self._timer_request("PUT", f"timer/{index}", json=data) is not None
+        if self._timer_request("PUT", f"timer/{index}", json=data) is None:
+            return False
+
+        # macOS can acknowledge an edit before publishing the new timer model.
+        # Resetting immediately can restore the old model and lose that edit.
+        # Confirm the write with bounded reads, never another PUT or a replay.
+        deadline = clock.monotonic() + self.timeout
+        while True:
+            remaining = deadline - clock.monotonic()
+            if remaining <= 0:
+                self.last_timer_error = f"GET /v1/timer/{index}: timer update not confirmed before timeout"
+                return False
+            response = self._timer_request('GET', f'timer/{index}', timeout=remaining)
+            if response is None:
+                return False
+            try:
+                actual = response.json()
+                if clock.monotonic() >= deadline:
+                    self.last_timer_error = f"GET /v1/timer/{index}: timer update not confirmed before timeout"
+                    return False
+                if not isinstance(actual, dict) or not isinstance(actual.get('id'), dict):
+                    raise ValueError('invalid timer model')
+                if actual['id'].get('uuid') != identity['uuid']:
+                    self.last_timer_error = f"GET /v1/timer/{index}: timer identity changed during update"
+                    return False
+                if actual.get('count_down_to_time') == data['count_down_to_time']:
+                    return True
+            except (ValueError, TypeError, AttributeError):
+                self.last_timer_error = f"GET /v1/timer/{index}: invalid JSON timer response"
+                return False
+            clock.sleep(min(0.05, max(0.0, deadline - clock.monotonic())))
 
     def SetTimer(self, index: int, t: dt_time) -> bool:
         """Compatibility helper used by the web UI.
