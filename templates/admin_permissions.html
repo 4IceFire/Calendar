@@ -193,6 +193,9 @@
                                 <button type="button" class="nav-link active" role="tab" id="group-{{ g.id }}-tab-general"
                                   data-permission-tab="general" data-permission-page="" aria-controls="group-{{ g.id }}-panel-general"
                                   aria-selected="true" tabindex="0">General</button>
+                                <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-tvs"
+                                  data-permission-tab="tvs" data-permission-any-pages="page:tv_controls page:tv_diagnostics" aria-controls="group-{{ g.id }}-panel-tvs"
+                                  aria-selected="false" tabindex="-1" {% if 'page:tv_controls' not in group_to_pages.get(g.id, []) and 'page:tv_diagnostics' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>TVs</button>
                                 <button type="button" class="nav-link" role="tab" id="group-{{ g.id }}-tab-props"
                                   data-permission-tab="props" data-permission-page="page:props" aria-controls="group-{{ g.id }}-panel-props"
                                   aria-selected="false" tabindex="-1" {% if 'page:props' not in group_to_pages.get(g.id, []) %}hidden{% endif %}>Props</button>
@@ -231,6 +234,10 @@
                                        placeholder="inherit / 0 / 5">
                               </div>
                             </div>
+                          </section>
+                          <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-tvs" tabindex="0"
+                            data-permission-panel="tvs" aria-labelledby="group-{{ g.id }}-tab-tvs" hidden>
+                            {% include '_tv_permissions.html' %}
                           </section>
                           <section class="group-permission-panel" role="tabpanel" id="group-{{ g.id }}-panel-props" tabindex="0"
                             data-permission-panel="props" aria-labelledby="group-{{ g.id }}-tab-props" hidden>

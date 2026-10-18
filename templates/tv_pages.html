@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% set page_title = 'TV Diagnostics' if diagnostics else 'TV Controls' %}
+{% set page_subtitle = 'Device-reported building overview' if diagnostics else 'Choose a room and an individual TV' %}
+{% block head_extra %}<link rel="stylesheet" href="{{ static_asset('tv_pages.css') }}">{% endblock %}
+{% block content %}
+<div id="tv-pages" data-mode="{{ 'diagnostics' if diagnostics else 'controls' }}">
+  <p class="text-muted">Observed values come from TV feedback, not sent commands. Stale and unknown values are not confirmation. External audio levels may be unavailable.</p>
+  <div id="tv-message" role="status" aria-live="polite"></div>
+  {% if diagnostics %}
+  <div id="tv-overview" aria-label="Building TV diagnostics" aria-busy="true"></div>
+  {% else %}
+  <div class="tv-control-layout">
+    <section class="card"><div class="card-body">
+      <label for="tv-room" class="form-label">Room</label><select id="tv-room" class="form-select mb-3"><option value="">Choose a room</option></select>
+      <label for="tv-choice" class="form-label">TV</label><select id="tv-choice" class="form-select"><option value="">Choose a TV</option></select>
+      <p class="form-text mt-3">Controls affect only the selected TV. Room setup is managed separately in TV Setup.</p>
+      {% if can_access('page:config') %}<a href="/config/tvs">TV Setup and media mapping</a>{% endif %}
+    </div></section>
+    <section id="tv-remote" class="card" hidden><div class="card-body">
+      <h2 id="tv-name" class="h4"></h2><div id="tv-observed" class="mb-3"></div>
+      <div id="tv-failures" class="mb-3" role="status"></div>
+      <div class="tv-power"><button type="button" class="btn btn-success" id="tv-power-on">Power on</button><button type="button" class="btn btn-outline-danger" id="tv-power-off">Power off</button></div>
+      <hr><h3 class="h6">Volume</h3>
+      <div class="tv-volume"><button type="button" id="tv-volume-down" class="btn btn-outline-secondary" aria-label="Volume down">−</button><button type="button" id="tv-volume-up" class="btn btn-outline-secondary" aria-label="Volume up">+</button></div>
+      <p class="form-text">One relative key per press. External audio response is unverified; no repeated-key fallback.</p>
+      <form id="tv-volume-form" class="d-flex gap-2"><label for="tv-volume-level" class="visually-hidden">Absolute volume</label><input type="number" min="0" max="100" id="tv-volume-level" class="form-control" placeholder="0–100"><button class="btn btn-outline-primary" type="submit" id="tv-volume-set">Set volume</button></form>
+      <hr><form id="tv-source-form"><label for="tv-source" class="form-label">TV input</label><div class="d-flex gap-2"><select id="tv-source" class="form-select"></select><button class="btn btn-primary" type="submit">Change input</button></div></form>
+      <div id="tv-command" class="mt-3" aria-live="polite"></div>
+      <hr><h3 class="h6">Media Library</h3><p id="tv-media-help" class="form-text"></p><a id="tv-media" class="btn btn-outline-primary" hidden>Select media</a>
+    </div></section>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ static_asset('tv_pages.js') }}"></script>{% endblock %}

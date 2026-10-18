@@ -3,10 +3,13 @@ function initializeMediaPage() {
   if (!root) return;
   const el = function(id) { return document.getElementById(id); };
   const output = Number(root.dataset.output) || null;
+  const tvId = root.dataset.tv || '';
+  const displayApi = tvId ? '/api/tv-media/' + encodeURIComponent(tvId) + '/display' : '/api/media/display';
+  const listApi = tvId ? '/api/tv-media/' + encodeURIComponent(tvId) + '/images' : '/api/media';
   const canDisplay = root.dataset.canDisplay === 'true' && !!output;
   const uploadPage = root.dataset.uploadPage === 'true';
   const libraryPath = '/media' + (output ? '?output=' + output : '');
-  const storageKey = 'tdeck.media.display.' + (output || 'library');
+  const storageKey = 'tdeck.media.display.' + (tvId ? 'tv.' + tvId : (output || 'library'));
   let items = [];
   let chosen = null;
   let uploaded = false;
@@ -105,7 +108,7 @@ function initializeMediaPage() {
       stopPoll();
       clearProgress();
       progress('Image displayed. Returning to outputs…', false, false);
-      window.location.assign('/routing?media_job=' + encodeURIComponent(job.id));
+      window.location.assign(tvId ? '/tv-controls' : '/routing?media_job=' + encodeURIComponent(job.id));
       return;
     }
     if (job.status === 'failed' || job.status === 'cancelled') {
@@ -131,7 +134,7 @@ function initializeMediaPage() {
     pollInFlight = true;
     const expectedId = jobId;
     try {
-      const data = await request('/api/media/display/' + encodeURIComponent(expectedId));
+      const data = await request(displayApi + '/' + encodeURIComponent(expectedId));
       if (jobId !== expectedId || !pageActive) return;
       pollDelay = 1000;
       acceptJob(data.job);
@@ -161,8 +164,9 @@ function initializeMediaPage() {
     updateControls();
     try {
       const body = {media_id: item.id, output: output};
+      if (tvId) delete body.output;
       if (sharedConfirmation) body.shared_confirmation = sharedConfirmation;
-      const data = await request('/api/media/display', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      const data = await request(displayApi, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
       acceptJob(data.job);
     } catch (error) {
       busy = false;
@@ -220,7 +224,7 @@ function initializeMediaPage() {
     if (libraryInFlight) return;
     libraryInFlight = true;
     show(el('media-library-retry'), false);
-    try { const data = await request('/api/media'); items = data.items || []; renderLibrary(); }
+    try { const data = await request(listApi); items = data.items || []; renderLibrary(); }
     catch (error) { text(el('media-library-status'), 'Could not load images. ' + errorMessage(error)); show(el('media-library-retry'), true); }
     finally { libraryInFlight = false; el('media-grid').setAttribute('aria-busy', 'false'); }
   }

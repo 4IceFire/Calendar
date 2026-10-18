@@ -4031,6 +4031,8 @@ function _initAccessLevelsPage() {
     form.querySelectorAll('[data-permission-tab]').forEach(tab => {
       const pageKey = tab.getAttribute('data-permission-page');
       tab.hidden = !!pageKey && !pageKeys.has(pageKey);
+      const alternatives = tab.getAttribute('data-permission-any-pages');
+      if (alternatives) tab.hidden = !alternatives.split(' ').some(function(key) { return pageKeys.has(key); });
     });
     _selectPermissionTab(form, selected ? selected.getAttribute('data-permission-tab') : 'general');
     form.querySelectorAll('[data-routing-media-upload]').forEach(row => {
@@ -4067,6 +4069,10 @@ function _initAccessLevelsPage() {
     if (!roleId) return null;
 
     const pageKeys = Array.from(form.querySelectorAll('input[type="checkbox"][name="page_keys"]:checked')).map(cb => String(cb.value));
+    form.querySelectorAll('[data-tv-retained-grant]').forEach(function(input) {
+      const exists = Array.from(form.querySelectorAll('input[type="checkbox"][name="page_keys"]')).some(function(cb) { return cb.value === input.value; });
+      if (!exists && pageKeys.indexOf(input.value) === -1) pageKeys.push(input.value);
+    });
     const idleTimeoutEl = form.querySelector('input[name="auth_idle_timeout_minutes_override_role"]');
     const outEl = form.querySelector('input[name="videohub_allowed_outputs_role"]');
     const inEl = form.querySelector('input[name="videohub_allowed_inputs_role"]');

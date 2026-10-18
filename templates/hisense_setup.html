@@ -12,7 +12,8 @@
 
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
     <div>
-      <h2 class="h5 mb-1">TV groups and order</h2>
+      <h2 class="h5 mb-1">TV rooms and order</h2>
+      <div class="small text-muted">Existing groups are rooms. IDs and Companion group targets are unchanged. Assign room access in Group Permissions.</div>
       <div class="small text-muted">Each TV belongs to one group or Ungrouped. Use its dropdown to move it, and the arrow buttons to set its order inside that group.</div>
       <div class="small text-muted mt-1">Run preflight for a read-only check of network, protocol, authentication, paired identity and TV state. It never changes power, volume, mute or source.</div>
     </div>
@@ -31,10 +32,17 @@
     <button type="button" class="btn btn-primary" id="hisense-save">Save and restart TV service</button>
     <button type="button" class="btn btn-outline-secondary" id="hisense-refresh">Refresh status</button>
   </div>
+  <section class="card mt-4" id="tv-mapping-setup"><div class="card-body">
+    <h2 class="h5">Media signal paths</h2>
+    <p class="form-text">Map each TV to its real VideoHub output and TV feed input. Leave unmapped until wiring is verified. Saving never routes, loads media, powers a TV or changes its input. Configure ATEM players and their VideoHub feeds in Media Setup first.</p>
+    <div id="tv-mapping-rows"></div><button type="button" id="tv-mapping-save" class="btn btn-outline-primary mt-3">Save media mappings</button>
+    <p id="tv-mapping-status" class="mt-2" role="status"></p>
+  </div></section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 {{ super() }}
 <script src="{{ static_asset('hisense_setup.js') }}"></script>
+<script src="{{ static_asset('tv_mapping.js') }}"></script>
 {% endblock %}

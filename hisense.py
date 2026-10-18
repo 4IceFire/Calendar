@@ -17,9 +17,10 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+from tv_observation import Observation
 
 try:
-    from pyvidaa import VidaaTV
+    from vidaa_observed import ObservedVidaaTV as VidaaTV
     from pyvidaa.protocol import AuthMethod, detect_protocol, get_auth_method
     from pyvidaa.topics import TOPIC_SET_SOURCE, get_topic
     from pyvidaa.wol import wake_tv
@@ -292,6 +293,7 @@ class _Command:
     value: Any = None
     done: threading.Event | None = None
     result: dict[str, Any] | None = None
+    actor: dict[str, Any] | None = None
 
 
 class HisenseTvController:
@@ -309,6 +311,12 @@ class HisenseTvController:
     ) -> None:
         self.config = config
         self.service_config = service_config
+        self.observation = Observation()
+        self.fast_until = 0.0
+        self.visible_until = 0.0
+        self._read_failure = False
+        self.outcome_callback = None
+        self.actor_provider = None
         self._client_factory = client_factory or VidaaTV
         self._wake = wake_function or wake_tv
         self._protocol_detector = (
@@ -319,6 +327,7 @@ class HisenseTvController:
         self._reachability_probe = reachability_probe or _tcp_reachability_probe
         self._expected_off_callback = expected_off_callback
         self._client: Any = None
+        self._client_generation = 0
         self._queue: queue.Queue[_Command] = queue.Queue()
         self._stop = threading.Event()
         self._wake_worker = threading.Event()
@@ -388,6 +397,8 @@ class HisenseTvController:
             "authMode": self.config.auth_mode,
             "configuredCertificateProfile": self.config.certificate_profile,
             **state,
+            "observation": self.observation.snapshot(),
+            "readFailure": self._read_failure,
         }
 
     def submit(self, action: str, value: Any = None, *, wait: float = 0.0) -> dict[str, Any]:
@@ -408,6 +419,8 @@ class HisenseTvController:
                     "repairSteps": [],
                 }
         command = _Command(action=action, value=value, done=threading.Event() if wait > 0 else None)
+        if self.actor_provider:
+            command.actor = self.actor_provider()
         self._queue.put(command)
         self._wake_worker.set()
         if command.done is None:
@@ -428,6 +441,17 @@ class HisenseTvController:
                 continue
 
             if self._is_expected_off():
+                # Read-only wake detection: physical remotes/other controllers
+                # must not leave the TV intentionally-off forever. Never WOL.
+                now = time.monotonic()
+                # Retain the legacy quiet/off contract unless a visible
+                # observation page explicitly holds the shared polling lease.
+                interval = 2.0
+                if now < self.visible_until and now - max(self._last_poll, self._last_connect_attempt) >= interval:
+                    if self._is_connected():
+                        self._poll()
+                    else:
+                        self._connect(allow_expected_off=True)
                 self._wake_worker.wait(0.5)
                 self._wake_worker.clear()
                 continue
@@ -446,7 +470,7 @@ class HisenseTvController:
                 if now - self._last_connect_attempt >= self.service_config.reconnect_interval:
                     self._connect()
             elif now - self._last_poll >= (
-                2.0 if self._pending_power_on else self.service_config.poll_interval
+                2.0 if self._pending_power_on or time.monotonic() < self.fast_until else self.service_config.poll_interval
             ):
                 self._poll()
             self._wake_worker.wait(0.5)
@@ -903,6 +927,13 @@ class HisenseTvController:
         # renames the TV in TDeck.  This also preserves approvals created by
         # the earlier bridge, which used companion_<ip-with-underscores>.
         protocol_client_id = f"companion_{re.sub(r'[^a-zA-Z0-9]+', '_', self.config.host).strip('_')}"
+        with self._lock:
+            self._client_generation += 1
+            generation = self._client_generation
+        def observed(state):
+            with self._lock:
+                if generation == self._client_generation:
+                    self._on_state_change(state)
         return self._client_factory(
             host=self.config.host,
             port=self.config.port,
@@ -920,11 +951,11 @@ class HisenseTvController:
             # pyvidaa historically calls this parameter mac_address, but it is
             # the case-sensitive paired-client UUID for dynamic auth.
             mac_address=self.config.uuid or None,
-            on_state_change=self._on_state_change,
+            on_state_change=observed,
         )
 
-    def _connect(self) -> bool:
-        if self._is_expected_off():
+    def _connect(self, *, allow_expected_off: bool = False) -> bool:
+        if self._is_expected_off() and not allow_expected_off:
             return False
         self._last_connect_attempt = time.monotonic()
         self._disconnect(clear_error=False)
@@ -975,6 +1006,8 @@ class HisenseTvController:
         return False
 
     def _disconnect(self, *, clear_error: bool = False) -> None:
+        with self._lock:
+            self._client_generation += 1
         client, self._client = self._client, None
         if client is not None:
             try:
@@ -1117,6 +1150,8 @@ class HisenseTvController:
         try:
             client = self._ensure_connected()
             state = client.get_state(timeout=2.0) or {}
+            if not getattr(type(client), 'strict_observations', False):
+                self._on_state_change(state)
             if self._pending_power_on and state:
                 if state.get("statetype") == "fake_sleep_0":
                     if not self._power_key_sent:
@@ -1127,6 +1162,9 @@ class HisenseTvController:
                 else:
                     self._clear_pending_power_on()
             volume = client.get_volume(timeout=2.0)
+            read_failure = not state and volume is None
+            if not getattr(type(client), 'strict_observations', False) and isinstance(volume, (int, float)):
+                self.observation.volume({'volume_value': volume})
             updates: dict[str, Any] = {
                 "power": "off" if state.get("statetype") == "fake_sleep_0" else ("on" if state else "unknown"),
                 "volume": volume,
@@ -1150,9 +1188,22 @@ class HisenseTvController:
                 updates["model"] = str(info.get("model_name") or info.get("modelName") or info.get("model") or "")
             with self._lock:
                 self._state.update(updates)
+            self._read_outcome(read_failure)
         except Exception as exc:
+            self._read_outcome(True)
             self._set_error(str(exc))
             self._disconnect(clear_error=False)
+
+    def _read_outcome(self, failed: bool) -> None:
+        changed = failed != self._read_failure
+        self._read_failure = failed
+        if failed and changed:
+            self.observation.failure('status_read')
+        if changed and self.outcome_callback:
+            try:
+                self.outcome_callback('status_read', self.config.id, {'ok': not failed}, {'source': 'system'})
+            except Exception:
+                pass
 
     @staticmethod
     def _normalize_sources(sources: list[Any]) -> list[dict[str, str]]:
@@ -1170,6 +1221,18 @@ class HisenseTvController:
     def _on_state_change(self, state: dict[str, Any]) -> None:
         if not isinstance(state, dict):
             return
+        if state.get('_tdeck_volume'):
+            self.observation.volume(state)
+            with self._lock:
+                self._state['volume'] = self.observation.fields['volume']['value']
+            return
+        # Authentication/status metadata is not evidence of physical power.
+        if state.get('statetype') and state['statetype'] not in ('authentication', 'error'):
+            self.observation.report('power', 'off' if state['statetype'] == 'fake_sleep_0' else 'on')
+            if state['statetype'] != 'fake_sleep_0' and self._is_expected_off():
+                self._set_expected_off(False)
+        if state.get('sourceid') or state.get('sourcename'):
+            self.observation.report('source', str(state.get('sourceid') or state.get('sourcename')))
         updates: dict[str, Any] = {"lastSeen": time.time(), "connected": True}
         if state.get("statetype"):
             updates["power"] = "off" if state.get("statetype") == "fake_sleep_0" else "on"
@@ -1195,6 +1258,9 @@ class HisenseTvController:
     def _execute_command(self, command: _Command) -> None:
         try:
             action, value = command.action, command.value
+            if action not in ('preflight', 'pair_request', 'pair_submit', 'reconnect'):
+                self.observation.request(action, value)
+                self.fast_until = time.monotonic() + 20
             if action == "preflight":
                 report = self._run_preflight()
                 command.result = {
@@ -1234,9 +1300,6 @@ class HisenseTvController:
                 elif action == "volume_set":
                     level = max(0, min(100, int(value)))
                     ok = bool(client.set_volume(level))
-                    if ok:
-                        with self._lock:
-                            self._state["volume"] = level
                 elif action == "volume_up":
                     ok = bool(client.volume_up())
                 elif action == "volume_down":
@@ -1257,8 +1320,13 @@ class HisenseTvController:
                     raise ValueError(f"Unknown TV command: {action}")
             if not ok:
                 raise RuntimeError("TV rejected the command")
+            if action in ('volume_set', 'volume_up', 'volume_down', 'mute', 'source'):
+                self._poll()
             status = self.status()
             command.result = {"ok": True, "accepted": True, "tv": status}
+            if action not in ('pair_request', 'pair_submit', 'preflight', 'reconnect'):
+                confirmed = (status.get('observation', {}).get('command') or {}).get('status') == 'confirmed'
+                command.result.update({'pending': not confirmed, 'confirmed': confirmed})
             if action == "power_on":
                 pending = bool(status.get("powerOnPending"))
                 command.result.update({
@@ -1266,9 +1334,16 @@ class HisenseTvController:
                     "confirmed": bool(not pending and status.get("power") == "on"),
                 })
         except Exception as exc:
-            self._set_error(str(exc))
-            command.result = {"ok": False, "error": str(exc), "tv": self.status()}
+            self.observation.failure(command.action)
+            safe_error = 'PIN must be exactly four digits' if command.action == 'pair_submit' and isinstance(exc, ValueError) else 'TV operation failed; check connection or setup'
+            self._set_error(safe_error)
+            command.result = {"ok": False, "error": safe_error, "tv": self.status()}
         finally:
+            if self.outcome_callback and command.action not in ('pair_request', 'pair_submit'):
+                try:
+                    self.outcome_callback(command.action, self.config.id, command.result, command.actor or {})
+                except Exception:
+                    pass
             if command.done:
                 command.done.set()
 
@@ -1289,9 +1364,6 @@ class HisenseTvController:
             return bool(client.set_source(source_id))
         topic = get_topic(TOPIC_SET_SOURCE, client.client_id)
         ok = bool(client._publish(topic, {"sourceid": source_id}))
-        if ok:
-            with self._lock:
-                self._state["source"] = source_id
         return ok
 
     @staticmethod

@@ -2564,7 +2564,7 @@ def _bootstrap_default_users_roles() -> None:
                     all_pages = ['page:home', *all_pages]
 
                 if not td_has:
-                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin', 'page:props', 'page:props_configure') and not k.startswith('page:media')]
+                    td_pages = [k for k in all_pages if k not in ('page:config', 'page:admin', 'page:props', 'page:props_configure', 'page:tv_controls', 'page:tv_diagnostics') and not k.startswith('page:media')]
                     _set_group_pages(td_group_id, td_pages)
                 if not sp_has:
                     sp_pages = [k for k in all_pages if k in ('page:home', 'page:timers')]
@@ -3084,6 +3084,8 @@ _PAGE_LANDING_PATHS = (
     ('page:routing', '/routing'),
     ('page:media', '/media'),
     ('page:pixie_controls', '/pixie'),
+    ('page:tv_controls', '/tv-controls'),
+    ('page:tv_diagnostics', '/tv-diagnostics'),
     ('page:digico_mixer', '/personal-mixes'),
     ('page:surface_controls', '/surface-controls'),
     ('page:templates', '/templates'),
@@ -3388,6 +3390,13 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
     verb = str(method or 'GET').upper()
     write = verb in _API_MUTATING_METHODS
 
+    if p.startswith('/api/tv-pages/'):
+        return {'scope': 'tvs', 'pages': ('page:tv_controls', 'page:tv_diagnostics'), 'service_tokens': False}
+    if p.startswith('/api/tv-media/'):
+        return {'scope': 'tvs', 'pages': ('page:tv_controls',), 'service_tokens': False}
+    if p == '/api/config/tv-media-mappings':
+        return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
+
     if p in ('/api/props', '/api/props/trigger', '/api/props/library/trigger',
              '/api/props/library', '/api/props/order', '/api/props/catalog/refresh'):
         setup = p in ('/api/props/library', '/api/props/catalog/refresh')
@@ -3426,7 +3435,7 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
     if p.startswith('/api/hisense/config') or '/pair/' in p or p.endswith('/preflight'):
         return {'scope': 'tvs', 'pages': ('page:config',)}
     if p.startswith('/api/tvs') or p.startswith('/api/tv-targets'):
-        return {'scope': 'tvs', 'pages': ('page:config',)}
+        return {'scope': 'tvs', 'pages': ('page:config', 'page:tv_controls') if write else ('page:config', 'page:tv_controls', 'page:tv_diagnostics')}
     if p.startswith('/api/pixie/config') or p in ('/api/pixie/discover', '/api/pixie/homes'):
         return {'scope': 'pixie', 'pages': ('page:config',)}
     if p.startswith('/api/pixie/'):
@@ -4775,6 +4784,8 @@ def _apply_config_transport_import_locked(zip_path: Path, selected_ids: list[str
                     if not isinstance(restored, dict):
                         raise ValueError('Imported configuration must be an object')
                     restored.pop('propresenter_props_use_macros', None)
+                    from tv_pages import validate_mappings
+                    restored['hisense_media_mappings'] = validate_mappings(restored.get('hisense_media_mappings', {}), restored)
                     target.write_text(json.dumps(restored, ensure_ascii=False), encoding='utf-8')
                 else:
                     with zf.open(member) as src, target.open('wb') as dst:
@@ -4993,7 +5004,11 @@ def _get_hisense_manager_from_config():
     except Exception:
         cfg = {}
     try:
-        return _hisense_manager_factory(cfg, base_dir=Path.cwd())
+        manager = _hisense_manager_factory(cfg, base_dir=Path.cwd())
+        for controller in getattr(manager, 'controllers', {}).values():
+            controller.actor_provider = _capture_hisense_actor
+            controller.outcome_callback = _hisense_worker_outcome
+        return manager
     except Exception:
         return None
 
@@ -10683,6 +10698,27 @@ def api_scheduler_status():
     return jsonify(_probe_scheduler_status(cfg))
 
 
+def _capture_hisense_actor():
+    actor = capture_activity_actor()
+    actor['source'] = _activity_source_default()
+    return actor
+
+
+def _hisense_worker_outcome(action, tv_id, result, actor):
+    result = result or {}
+    if action == 'status_read':
+        log_event('hisense.feedback', f'TV {tv_id}: feedback ' + ('recovered' if result.get('ok') else 'read failed'),
+                  status='info' if result.get('ok') else 'failure', target_type='hisense_tv', target_id=tv_id, **actor)
+        return
+    observation = (result.get('tv') or {}).get('observation') or {}
+    command = observation.get('command') or {}
+    confirmed = command.get('status') == 'confirmed'
+    log_event('hisense.command.complete', f'TV {tv_id}: {action} ' + ('failed' if not result.get('ok') else ('confirmed' if confirmed else 'accepted; feedback unconfirmed')),
+              status='failure' if not result.get('ok') else ('success' if confirmed else 'warning'),
+              target_type='hisense_tv', target_id=tv_id,
+              details={'operation': action, 'confirmed': confirmed, 'accepted': bool(result.get('ok'))}, **actor)
+
+
 def _hisense_manager_or_error():
     manager = _get_hisense_manager_from_config()
     if manager is None:
@@ -10691,6 +10727,8 @@ def _hisense_manager_or_error():
 
 
 def _hisense_log(action: str, tv_id: str, *, value: Any = None, result: dict | None = None) -> None:
+    # Pairing values are secrets; raw transport diagnostics can contain tokens.
+    value = value if action == 'volume_set' and isinstance(value, int) else None
     ok = bool((result or {}).get('ok', False))
     pending = bool((result or {}).get('pending', False))
     is_group = str(tv_id).startswith('group:')
@@ -10704,7 +10742,9 @@ def _hisense_log(action: str, tv_id: str, *, value: Any = None, result: dict | N
             status='warning' if ok and pending else ('success' if ok else 'failure'),
             target_type='hisense_tv_group' if is_group else 'hisense_tv',
             target_id=tv_id,
-            details={'action': action, 'value': value, 'result': result or {}},
+            details={'action': action, 'value': value, 'result': {
+                key: (result or {}).get(key) for key in ('ok', 'accepted', 'pending', 'confirmed')
+            }},
         )
     except Exception:
         pass
@@ -12149,7 +12189,7 @@ def api_set_config():
         # merge provided values
         # Media setup is saved through its validated browser-only editor. The
         # general Config form includes an older full snapshot of hidden keys.
-        cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS})
+        cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS and key != 'hisense_media_mappings'})
         cfg.pop('propresenter_props_use_macros', None)
 
         # Legacy: global Routing allow-lists are no longer used (now per Access Level).
@@ -16492,6 +16532,9 @@ def _get_props_service():
     return _props_routes.get_props_service(sys.modules[__name__])
 
 _props_routes.register(sys.modules[__name__])
+
+import tv_pages as _tv_pages
+_tv_pages.register(sys.modules[__name__])
 
 _register_api_v1_aliases()
 

@@ -139,6 +139,8 @@
           {% if not auth_enabled or can_access('page:atem_audio') %}<a class="nav-link{% if request.path.startswith('/foyer-audio') %} active{% endif %}" href="/foyer-audio">Record Audio</a>{% endif %}
           {% if not auth_enabled or can_access('page:routing') %}<a class="nav-link{% if request.path.startswith('/routing') or request.path in ('/media', '/media/upload') %} active{% endif %}" href="/routing">Routing</a>{% endif %}
           {% if not auth_enabled or can_access('page:pixie_controls') %}<a class="nav-link{% if request.path.startswith('/pixie') %} active{% endif %}" href="/pixie">Pixie Controls</a>{% endif %}
+          {% if not auth_enabled or can_access('page:tv_controls') %}<a class="nav-link{% if request.path.startswith('/tv-controls') %} active{% endif %}" href="/tv-controls">TV Controls</a>{% endif %}
+          {% if not auth_enabled or can_access('page:tv_diagnostics') %}<a class="nav-link{% if request.path == '/tv-diagnostics' %} active{% endif %}" href="/tv-diagnostics">TV Diagnostics</a>{% endif %}
           {% if not auth_enabled or can_access('page:digico_mixer') %}<a class="nav-link{% if request.path.startswith('/personal-mixes') %} active{% endif %}" href="/personal-mixes">Personal Mixes</a>{% endif %}
           {% if not auth_enabled or can_access('page:surface_controls') %}<a class="nav-link{% if request.path.startswith('/surface-controls') %} active{% endif %}" href="/surface-controls">Surface Controls</a>{% endif %}
         </nav>

@@ -1,0 +1,14 @@
+<p class="form-text">Requires TV Controls or TV Diagnostics in this same group. No selection grants no TVs. Existing TV groups are rooms; moving a TV revokes its old room grant. Room selection alone does not grant its TVs. TV Controls includes selecting saved Media Library images for mapped TVs, not general Routing or library management.</p>
+{% for room in tv_permission_rooms %}
+<fieldset class="mb-3"><legend class="h6">{{ room.name }}</legend>
+  {% set roomkey = 'tvroom:' ~ room.id %}
+  <label class="d-block"><input type="checkbox" name="page_keys" value="{{ roomkey }}" {% if roomkey in group_to_pages.get(g.id, []) %}checked{% endif %}> Allow room</label>
+  {% set allkey = 'tvdevice:' ~ room.id ~ ':*' %}
+  <label class="d-block ms-3"><input type="checkbox" name="page_keys" value="{{ allkey }}" {% if allkey in group_to_pages.get(g.id, []) %}checked{% endif %}> All current and future TVs in this room</label>
+  {% for tv in room.tvs %}{% set tvkey = 'tvdevice:' ~ room.id ~ ':' ~ tv.id %}
+  <label class="d-block ms-3"><input type="checkbox" name="page_keys" value="{{ tvkey }}" {% if tvkey in group_to_pages.get(g.id, []) %}checked{% endif %}> {{ tv.name }}</label>
+  {% endfor %}
+</fieldset>{% endfor %}
+{% for key in group_to_pages.get(g.id, []) %}{% if key.startswith('tvroom:') or key.startswith('tvdevice:') %}
+<input type="hidden" data-tv-retained-grant value="{{ key }}">
+{% endif %}{% endfor %}
