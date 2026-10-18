@@ -96,6 +96,20 @@ class TvSecurityTests(unittest.TestCase):
         self.fx.cfg['hisense_media_mappings']['foyer']['output'] = 2
         self.assertEqual(self.client.get(path).status_code, 403)
 
+    def test_tv_media_catalog_reuses_batched_missing_asset_flags(self):
+        import io
+        from unittest.mock import patch
+        image_bytes = self.fx.library.path(self.fx.image['id']).read_bytes()
+        for number in range(7):
+            self.fx.library.upload(io.BytesIO(image_bytes), 'fixture.png', 'Extra ' + str(number))
+        with patch.object(self.fx.library, '_read', wraps=self.fx.library._read) as reads:
+            response = self.client.get('/api/tv-media/foyer/images')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json['items']), 8)
+        self.assertLessEqual(reads.call_count, 3)
+        self.assertTrue(all('file_missing' in item and 'thumbnail_missing' in item for item in response.json['items']))
+        self.assertNotIn('uploaded_by', str(response.json))
+
     def test_shared_player_confirmation_and_changed_allocation_fail_closed(self):
         self.fx.cfg['atem_media_destinations'].append({'player': 4, 'label': 'Media B', 'slots': [43, 44], 'videohub_input': 8})
         self.fx.hub.routing[:] = [1, 7, 8]

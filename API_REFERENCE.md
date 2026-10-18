@@ -51,8 +51,8 @@ are captured atomically with revision validation and never remapped or replayed.
 
 There is no Props settings endpoint or enabled execution mode. The old config
 key `propresenter_props_use_macros` is inert, omitted from Config reads, and
-stripped on normalized config save/import. Timer `propresenter_is_latest` is
-untouched. For installed Companion 0.5.0, GET retains a deprecated constant
+stripped on normalized config save/import. Timer compatibility/wait settings are
+retired independently (see Timers); Props behavior is not changed by that removal. For installed Companion 0.5.0, GET retains a deprecated constant
 `use_macros:false` and trigger POST optionally accepts that exact boolean false
 field. True, null, numeric/string values and unknown fields are rejected, not
 interpreted as modes. Companion 0.5.1 sends only `{position,revision}`; it rejects
@@ -90,8 +90,9 @@ and same-origin checks. Image numbers in configuration and responses are 1-based
 
 | Method and path | Access | Contract |
 | --- | --- | --- |
-| `GET /api/media` | Routing Media, Media Library or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, `created_at`, `temporary`, `expires_at`, `url` and `thumbnail_url`. Defaults to saved images. `?collection=temporary` and uploader fields (`uploaded_by`, `uploaded_by_id`) require Media Library access. |
+| `GET /api/media` | Routing Media, Media Library or Config | `{ok, items, permissions}`; each item has `id`, `name`, `preset`, dimensions, size, `created_at`, `temporary`, `expires_at`, `url`, `thumbnail_url`, `file_missing` and `thumbnail_missing`. Missing flags describe on-disk asset availability, not ATEM still-slot state. Defaults to saved images. `?collection=temporary` and uploader fields (`uploaded_by`, `uploaded_by_id`) require Media Library access. |
 | `POST /api/media/upload` | Media Library, or Routing Media + upload | Multipart `file`, optional `name` and string `temporary` (`true` by default); `false` additionally requires `page:media_save` or Media Library; returns `201 {ok, item}`. JPEG/PNG/WebP/HEIC/HEIF, 20 MiB, 40 MP. Saving does not display the image. |
+| `POST /api/media/<id>/replace` | Media Library | Multipart `file` plus optional CSRF only; returns `200 {ok, item}`. Replaces or repairs the PNG and thumbnail in the existing entry, preserving its ID, name, preset references, original upload attribution/time and retention status. Same file/format/pixel/storage limits as upload; 409 while any media job is active. Saving never displays the replacement or issues hardware commands. |
 | `PATCH /api/media/<id>` | Media Library | JSON `name`, boolean `preset` and/or boolean `keep`; `keep: true` promotes a temporary image without changing its upload attribution/time; returns `{ok, item}`. |
 | `DELETE /api/media/<id>` | Media Library | Removes the local image. Active displays/loads and references from saved routing presets return 409. Does not clear ATEM stills. |
 | `POST /api/media/display` | Routing + Media | JSON `{"media_id":"<id>","output":1}` with optional signed `shared_confirmation` from a pending job; returns `202 {ok,job}`. Validates output and mapped input against the user's Routing allow-lists. Server chooses the player/input; arbitrary overrides are rejected. ATEM AUX routing is never changed. |
@@ -525,7 +526,8 @@ Trigger entry shape (simplified):
 - **GET** `/api/timers`
 - **Returns:**
   - `propresenter_timer_index` (1-based index)
-  - `stream_start_preset` (1-based index, or `0` when not configured)
+  - `stream_start_preset` / `stream_delay_preset` (independent 1-based internal TDeck preset selections; `0` = unselected)
+  - `revision` (opaque snapshot of presets plus relevant delay/ProPresenter settings)
   - `timer_presets` (array)
 
 ### Save timer presets + ProPresenter timer index
@@ -545,7 +547,8 @@ Trigger entry shape (simplified):
 }
 ```
 - **Notes:** Presets are persisted to `timer_presets.json` (not stored inline in `config.json`).
-  - `stream_start_preset` is optional. Use `0` or omit to disable stream-start stage messages.
+  - `stream_start_preset` and `stream_delay_preset` are optional independent selections. `0` clears a selection; omission preserves it unless out of range after replacement.
+  - `POST /api/timers/mutate` actions `set_stream_start_preset` / `set_stream_delay_preset` take `preset` (1-based, or `0`) and save selection only. Move/delete follows both selections without device commands.
 
 ### Update one timer preset time (no full list required)
 - **PATCH** (or **POST**) `/api/timers/preset`
@@ -571,7 +574,7 @@ Trigger entry shape (simplified):
   - JSON body: `{ "preset": 1 }`
   - Query string: `?preset=1`
 - **Notes:** `preset` is always **1-based** (1 selects the first preset).
-- **Returns:** JSON describing what happened (button presses fired + ProPresenter timer set/reset/start attempts).
+- **Returns:** JSON describing what happened (button presses fired + ProPresenter timer set/reset/start attempts). Timer sequence is always direct set → reset → start, no artificial waits; subsequent timer steps stop on failure. Legacy `ok:true` alone is not hardware success: inspect `set`, `reset`, `started`, `button_presses` and `error`/`detail`.
 
 ---
 
@@ -627,6 +630,19 @@ Timer selection is either:
 - **POST** `/api/propresenter/stage/stream_start`
 - **Body:** none required.
 - **Notes:** Uses `stream_start_preset` and `timer_presets` to build a message like `STREAM 9:30AM`.
+
+### Delay stream, optionally save and apply the selected preset
+- **POST** `/api/propresenter/stage/stream_delay`
+- **Body:** `{ "preset": 2, "delay_minutes": 5, "update_timer": true, "revision": "<GET /api/timers revision>", "operation_id": "<fresh per-click identifier>" }`
+- `preset` is an internal TDeck preset position (not a ProPresenter timer ID). Omission uses `stream_delay_preset`, never Stream Start.
+- `delay_minutes` must be a JSON integer in -1440..1440. `update_timer` must be a JSON boolean; omission defaults to **false** for compatibility with message-only API callers. The Timers UI defaults its **Update Timer** checkbox to checked and sends it explicitly.
+- Checked: validate selection/time/connection/actions/revision before writes, save the adjusted preset time, apply the same preset through normal Companion + ProPresenter execution, then send the stage message. Preserve other fields/order/settings. Unchecked: send the adjusted message only, without storage/timer/Companion writes.
+- Checked requests require `propresenter` **and** `timers` service-token scopes (or existing Timers browser rights). Token action constraints must also allow both `POST /api/timers/mutate` (save authority) and `POST /api/timers/apply`; message-only retains its existing authorization.
+- Checked requests require the current `revision`; missing/stale revision returns **409** before writes/commands. A shared nonblocking execution reservation returns **409** for competing stream-delay execution, ordinary preset applies, update-and-apply mutations and direct ProPresenter timer set/start/stop/reset (including in-process scheduler dispatch). Busy update-and-apply requests save nothing. Nested execution in the same call chain reuses the reservation. Config/import/timer locks protect validation, immutable snapshot capture and save only, never device I/O; reads and config/import writes remain responsive. Execution and queued Companion variable sync use captured preset/settings/Companion client even across concurrent reorders or endpoint changes. Response state describes that executed snapshot, not later concurrent writes. This is process-local coordination, not a cross-process hardware transaction; do not run a second writer against the same files.
+- Checked requests additionally require `operation_id`: 16–128 ASCII letters, digits, `_` or `-`. Message-only callers may omit it for backward compatibility, or supply it for deduplication. Use a fresh identifier for each explicit click (including 0 or ±1440 minutes); reuse the **same identifier and exact payload** only to obtain that operation's cached outcome. IDs are isolated by principal/browser session and bound to the payload; changed payload returns **409**, in-flight duplicates return **409**, terminal duplicates return the original result without commands. Unknown outcomes are consumed, never automatically replayed. The bounded process-local cache retains completed operations for 24 hours, up to 1024 entries; unexpired entries are not evicted (full cache returns **429** before commands). Deduplication does not survive process restart or expiry; do not retry an uncertain command beyond that window.
+- Returns `saved`, `applied`, `sent`, `preset_time`, `message`, nested `apply` (timer step and Companion results), updated `timer_presets`, selections and `revision`. `applied` requires timer started and configured presses completed successfully. A partial device/message failure returns **200** with `ok:false` and honest states; storage failure returns **500**, validation **400**.
+- Save is not rolled back on apply/message failure. Sending the stage message is still attempted after an apply failure. HTTP acceptance is not proof of device display. No automatic replay; obtain/read the current snapshot before another explicit click.
+- Timer compatibility flag and wait keys are retired, hidden and stripped on normalized config load/save/import. Timer PUT includes the vendor-required UUID/name/index identity from the timer GET; diagnostics expose failed method/path/status or exception class.
 
 ### Clear stage message
 - **POST** `/api/propresenter/stage/clear`

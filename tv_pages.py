@@ -154,7 +154,9 @@ def register(w):
                                  media_permissions={'upload': False, 'save': False}, retention_days=7)
 
     def media_item(item, tv_id):
-        result = w._media_item_payload(item)
+        # The shared catalogue has already applied missing-file flags and
+        # uploader-field permissions in one bounded index read.
+        result = dict(item)
         result['url'] = '/tv-media/' + tv_id + '/' + item['id'] + '/image'
         result['thumbnail_url'] = '/tv-media/' + tv_id + '/' + item['id'] + '/thumbnail'
         return result
@@ -170,7 +172,7 @@ def register(w):
     @app.get('/api/tv-media/<tv_id>/images')
     def tv_media_list(tv_id):
         authorize(tv_id)
-        return jsonify({'ok': True, 'items': [media_item(item, tv_id) for item in w._get_media_library().list() if not item.get('temporary')]})
+        return jsonify({'ok': True, 'items': [media_item(item, tv_id) for item in w._media_catalog_payload()]})
 
     @app.get('/tv-media/<tv_id>/<media_id>/<kind>')
     @w.require_page('page:tv_controls', 'TV Controls')

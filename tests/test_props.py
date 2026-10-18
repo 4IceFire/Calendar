@@ -302,7 +302,7 @@ class PropsWebTests(unittest.TestCase):
             restored = json.loads(target.read_text())
             self.assertNotIn('propresenter_props_use_macros', restored)
             self.assertTrue(restored['debug'])
-            self.assertIs(restored['propresenter_is_latest'], False)
+            self.assertNotIn('propresenter_is_latest', restored)
 
     def test_config_zip_exports_imports_validated_props_and_fresh_revision(self):
         import os, zipfile, json

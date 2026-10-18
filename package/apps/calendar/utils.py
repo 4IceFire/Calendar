@@ -58,13 +58,10 @@ _defaults = {
     # Timers app defaults
     # Which ProPresenter timer to control
     "propresenter_timer_index": 2,
-    "propresenter_is_latest": True,
-    "propresenter_timer_wait_stop_ms": 200,
-    "propresenter_timer_wait_set_ms": 600,
-    "propresenter_timer_wait_reset_ms": 1000,
     # Timer preset (1-based) used to build the stream-start stage message.
     # 0 means "not configured".
     "stream_start_preset": 0,
+    "stream_delay_preset": 0,
     # Web UI port
     "webserver_port": 5000,
     "poll_interval": 1,
@@ -209,7 +206,10 @@ def _coerce_timer_preset(value: Any) -> Dict[str, Any] | None:
     if not n:
         n = t
 
-    out: Dict[str, Any] = {"time": t, "name": n}
+    out: Dict[str, Any] = dict(value) if isinstance(value, dict) else {}
+    out.update({"time": t, "name": n})
+    for key in ('button_presses', 'buttonPresses', 'actions'):
+        out.pop(key, None)
     if presses:
         out['button_presses'] = presses
     return out  # type: ignore[return-value]
@@ -315,6 +315,10 @@ def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
         return _defaults.copy()
 
     changed = False
+    for key in RETIRED_TIMER_CONFIG_KEYS:
+        if key in data:
+            data.pop(key)
+            changed = True
 
     # Backward-compatible migrations for older web server config keys.
     # - `server_port` -> `webserver_port`
@@ -374,8 +378,14 @@ def load_config(path: str = CONFIG_FILE) -> Dict[str, Any]:
     return data
 
 
+RETIRED_TIMER_CONFIG_KEYS = frozenset({
+    "propresenter_is_latest", "propresenter_timer_wait_stop_ms",
+    "propresenter_timer_wait_set_ms", "propresenter_timer_wait_reset_ms",
+})
+
+
 def save_config(cfg: Dict[str, Any], path: str = CONFIG_FILE) -> None:
-    cfg = {key: value for key, value in cfg.items() if key != "propresenter_props_use_macros"}
+    cfg = {key: value for key, value in cfg.items() if key != "propresenter_props_use_macros" and key not in RETIRED_TIMER_CONFIG_KEYS}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 

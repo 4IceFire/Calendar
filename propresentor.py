@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, time as dt_time
 from typing import Optional, Any, Dict, Literal
 import json
+import time as clock
 
 import requests
 
@@ -60,6 +61,7 @@ class ProPresentor:
         self.debug = bool(debug)
         self._connected = False
         self.last_stage_message_error: str | None = None
+        self.last_timer_error: str | None = None
 
         if verify_on_init:
             self._connected = self.check_connection()
@@ -210,17 +212,21 @@ class ProPresentor:
     def delete_timer(self, timer_id: int | str) -> bool:
         return self.delete_command(f"timer/{timer_id}")
 
-    def timer_operation(self, timer_id: int | str, operation: TimerOperation) -> bool:
-        # Some ProPresenter operations return 204 No Content (empty body).
-        # Treat any 2xx as success.
+    def _timer_request(self, method: str, path: str, **kwargs):
+        """One bounded request; never retry an uncertain device command."""
+        self.last_timer_error = None
         try:
-            url = self._build_api_url(f"timer/{timer_id}/{operation}")
-            self._dbg(f"GET {url}")
-            resp = self.session.get(url, timeout=self.timeout)
-            self._dbg(f"-> {resp.status_code}")
-            return 200 <= resp.status_code < 300
-        except Exception:
-            return False
+            timeout = kwargs.pop('timeout', self.timeout)
+            response = self.session.request(method, self._build_api_url(path), timeout=timeout, **kwargs)
+            if 200 <= response.status_code < 300:
+                return response
+            self.last_timer_error = f"{method} /v1/{path}: HTTP {response.status_code}"
+        except requests.RequestException as exc:
+            self.last_timer_error = f"{method} /v1/{path}: {type(exc).__name__}"
+        return None
+
+    def timer_operation(self, timer_id: int | str, operation: TimerOperation) -> bool:
+        return self._timer_request('GET', f'timer/{timer_id}/{operation}') is not None
 
     def set_timer_and_operation(self, timer_id: int | str, operation: TimerOperation, payload: dict) -> bool:
         return self.put_command(f"timer/{timer_id}/{operation}", json=payload)
@@ -268,16 +274,18 @@ class ProPresentor:
     def SetCountdownToTime(self, index, timeStr) -> bool:
         time = datetime.strptime(timeStr, "%H:%M")
 
-        try:
-            resp = self.session.get(self._build_api_url(f"timer/{index}"), timeout=self.timeout)
-            if not (200 <= resp.status_code < 300):
-                return False
-            name = (resp.json() or {}).get("id", {}).get("name")
-            if not name:
-                return False
-        except Exception:
+        response = self._timer_request('GET', f'timer/{index}')
+        if response is None:
             return False
-        
+        try:
+            identity = (response.json() or {}).get('id', {})
+            if not isinstance(identity, dict) or not all(key in identity for key in ('uuid', 'name', 'index')):
+                self.last_timer_error = f"GET /v1/timer/{index}: missing timer identity"
+                return False
+        except (ValueError, TypeError, AttributeError):
+            self.last_timer_error = f"GET /v1/timer/{index}: invalid JSON timer response"
+            return False
+
         time_of_day = ""
         seconds = 0
         
@@ -294,10 +302,7 @@ class ProPresentor:
             return False
 
         data = {
-        "id": {
-            "name": name,
-            "index": index
-        },
+        "id": dict(identity),
         "allows_overrun": True,
         "count_down_to_time": {
             "time_of_day": seconds,
@@ -305,7 +310,37 @@ class ProPresentor:
         }
         }
 
-        return self.put_command(f"timer/{index}", json=data)
+        if self._timer_request("PUT", f"timer/{index}", json=data) is None:
+            return False
+
+        # macOS can acknowledge an edit before publishing the new timer model.
+        # Resetting immediately can restore the old model and lose that edit.
+        # Confirm the write with bounded reads, never another PUT or a replay.
+        deadline = clock.monotonic() + self.timeout
+        while True:
+            remaining = deadline - clock.monotonic()
+            if remaining <= 0:
+                self.last_timer_error = f"GET /v1/timer/{index}: timer update not confirmed before timeout"
+                return False
+            response = self._timer_request('GET', f'timer/{index}', timeout=remaining)
+            if response is None:
+                return False
+            try:
+                actual = response.json()
+                if clock.monotonic() >= deadline:
+                    self.last_timer_error = f"GET /v1/timer/{index}: timer update not confirmed before timeout"
+                    return False
+                if not isinstance(actual, dict) or not isinstance(actual.get('id'), dict):
+                    raise ValueError('invalid timer model')
+                if actual['id'].get('uuid') != identity['uuid']:
+                    self.last_timer_error = f"GET /v1/timer/{index}: timer identity changed during update"
+                    return False
+                if actual.get('count_down_to_time') == data['count_down_to_time']:
+                    return True
+            except (ValueError, TypeError, AttributeError):
+                self.last_timer_error = f"GET /v1/timer/{index}: invalid JSON timer response"
+                return False
+            clock.sleep(min(0.05, max(0.0, deadline - clock.monotonic())))
 
     def SetTimer(self, index: int, t: dt_time) -> bool:
         """Compatibility helper used by the web UI.

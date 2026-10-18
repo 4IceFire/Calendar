@@ -72,7 +72,7 @@ class DirectContractTests(unittest.TestCase):
             result = f.client.post('/api/config', json={'propresenter_props_use_macros': True, 'debug': True})
         self.assertEqual(result.status_code, 200, result.data)
         self.assertNotIn('propresenter_props_use_macros', captured[0])
-        self.assertIs(captured[0]['propresenter_is_latest'], False)
+        self.assertNotIn('propresenter_is_latest', captured[0])
         self.assertTrue(captured[0]['debug'])
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / 'config.json'
@@ -80,7 +80,7 @@ class DirectContractTests(unittest.TestCase):
             utils.save_config(source, str(path))
             saved = json.loads(path.read_text())
             self.assertNotIn('propresenter_props_use_macros', saved)
-            self.assertIs(saved['propresenter_is_latest'], False)
+            self.assertNotIn('propresenter_is_latest', saved)
             self.assertIn('propresenter_props_use_macros', source)
         f.pp.get_command.assert_not_called()
 

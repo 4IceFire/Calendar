@@ -989,6 +989,8 @@ function _renderConfigGroups(cfg) {
 
   // Legacy keys that should not be edited anymore.
   const hiddenKeys = new Set([
+    'propresenter_is_latest', 'propresenter_timer_wait_stop_ms',
+    'propresenter_timer_wait_set_ms', 'propresenter_timer_wait_reset_ms',
     'atem_media_enabled', 'atem_media_node_path', 'atem_media_destinations', 'media_temporary_retention_days',
     'videohub_allowed_outputs',
     'videohub_allowed_inputs',
@@ -1014,12 +1016,7 @@ function _renderConfigGroups(cfg) {
     'auth_lockout_failed_attempts',
     'flask_secret_key',
   ];
-  const proPresenterTimingKeys = [
-    'propresenter_is_latest',
-    'propresenter_timer_wait_stop_ms',
-    'propresenter_timer_wait_set_ms',
-    'propresenter_timer_wait_reset_ms',
-  ];
+
 
   const baseGroups = [
     {
@@ -1149,27 +1146,6 @@ function _renderConfigGroups(cfg) {
         }
       },
     });
-  }
-
-  // ProPresenter: render timing-related keys as a nested sub-box.
-  const proPresenterPanel = Array.from(panels.querySelectorAll('[data-group-id]'))
-    .find(p => String(p.dataset.groupId) === _groupIdFromTitle('ProPresenter'));
-  if (proPresenterPanel) {
-    const body = proPresenterPanel.querySelector('.card-body');
-    const presentTimingKeys = proPresenterTimingKeys.filter(k => Object.prototype.hasOwnProperty.call(cfg, k));
-    if (body && presentTimingKeys.length) {
-      for (const k of presentTimingKeys) used.add(k);
-      const sub = document.createElement('div');
-      sub.className = 'border rounded p-2 mt-2 bg-body-tertiary';
-      const h = document.createElement('div');
-      h.className = 'fw-semibold mb-2';
-      h.textContent = 'Timings';
-      sub.appendChild(h);
-      for (const k of presentTimingKeys) {
-        sub.appendChild(_renderConfigField(k, cfg[k]));
-      }
-      body.appendChild(sub);
-    }
   }
 
   const atemPanel = Array.from(panels.querySelectorAll('[data-group-id]'))
@@ -2178,12 +2154,40 @@ async function _timersAdjustAllPresets(sign) {
   return !!(!result || result.ok !== false);
 }
 
+let _timersRevision = '';
+let _timersDelayBusy = false;
+let _timersDelaySelectionBlocked = false;
+const _timersLockedControls = new Map();
+
+function _timersRefreshEditingLock() {
+  if (!_timersDelayBusy) return;
+  const root = document.getElementById('timers-page');
+  if (!root) return;
+  root.querySelectorAll('input, select, textarea, button').forEach(el => {
+    if (!_timersLockedControls.has(el)) _timersLockedControls.set(el, el.disabled);
+    el.disabled = true;
+  });
+}
+
+function _timersSetDelayBusy(busy) {
+  _timersDelayBusy = busy;
+  const root = document.getElementById('timers-page');
+  if (root) root.setAttribute('aria-busy', busy ? 'true' : 'false');
+  if (busy) _timersRefreshEditingLock();
+  else {
+    _timersLockedControls.forEach((disabled, el) => {el.disabled = disabled;});
+    _timersLockedControls.clear();
+  }
+}
+
 function _timersApplyMutationResponse(data, {render = false} = {}) {
+  if (data && data.revision) _timersRevision = data.revision;
   const presets = Array.isArray(data && data.timer_presets) ? data.timer_presets : _timersReadPresetsFromUI();
   const responseStagePreset = data && data.stream_start_preset;
   const selectedStagePreset = responseStagePreset == null ? _timersReadStagePresetFromUI() : responseStagePreset;
   const stagePreset = Number(selectedStagePreset == null ? 0 : selectedStagePreset);
   _timersSetLastSaved(presets, stagePreset);
+  _timersApplyDelayPresetId(data && data.stream_delay_preset, presets);
   if (render) {
     _timersRenderPresets(presets);
     _timersApplyStagePresetId(stagePreset);
@@ -2260,7 +2264,7 @@ function _timersReadPresetFromRow(tr) {
 }
 
 function _timersQueueRowUpdate(tr) {
-  if (!tr) return Promise.resolve({ok: true, skipped: true});
+  if (!tr || tr.isConnected === false) return Promise.resolve({ok: true, skipped: true});
   _timersClearRowSaveTimer(tr);
   const preset = Number(tr.dataset.index) + 1;
   if (!Number.isFinite(preset) || preset < 1) return Promise.resolve({ok: true, skipped: true});
@@ -2282,7 +2286,7 @@ function _timersQueueRowUpdate(tr) {
 }
 
 function _timersMarkRowDirty(tr, {delayMs = 700} = {}) {
-  if (!tr) return;
+  if (!tr || _timersDelayBusy) return;
   tr.dataset.dirty = '1';
   tr.dataset.dirtyVersion = String(++_timersEditVersion);
   _timersClearRowSaveTimer(tr);
@@ -2611,22 +2615,24 @@ function _timersStagePresetLabel(preset, id) {
 }
 
 function _timersStageRenderOptions(presets) {
-  const select = document.getElementById('timers-stage-preset');
-  if (!select) return;
-  const selectedId = _timersReadStagePresetFromUI();
-  select.innerHTML = '';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = 'Select a timer preset';
-  select.appendChild(placeholder);
-  (presets || []).forEach((p, idx) => {
-    const opt = document.createElement('option');
-    opt.value = String(idx + 1);
-    opt.textContent = _timersStagePresetLabel(p, idx + 1);
-    select.appendChild(opt);
-  });
-  if (selectedId > 0 && selectedId <= (presets || []).length) {
-    select.value = String(selectedId);
+  for (const selectId of ['timers-stage-preset', 'timers-stage-delay-preset']) {
+    const select = document.getElementById(selectId);
+    if (!select) continue;
+    const selectedId = Number(select.value) || 0;
+    select.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select a timer preset';
+    select.appendChild(placeholder);
+    (presets || []).forEach((p, idx) => {
+      const opt = document.createElement('option');
+      opt.value = String(idx + 1);
+      opt.textContent = _timersStagePresetLabel(p, idx + 1);
+      select.appendChild(opt);
+    });
+    if (selectedId > 0 && selectedId <= (presets || []).length) {
+      select.value = String(selectedId);
+    }
   }
 }
 
@@ -2661,12 +2667,12 @@ function _timersStageSetPreview(presetId, presets) {
   const id = Number(presetId) || 0;
   if (id < 1 || id > (presets || []).length) {
     el.textContent = 'STREAM 9:30AM';
-    _timersStageSetDelayPreview(0, presets);
+    _timersStageSetDelayPreview(_timersReadDelayPresetFromUI(), presets);
     return;
   }
   const msg = _timersStageMessageForPreset(presets[id - 1]);
   el.textContent = msg || 'STREAM 9:30AM';
-  _timersStageSetDelayPreview(id, presets);
+  _timersStageSetDelayPreview(_timersReadDelayPresetFromUI(), presets);
 }
 
 function _timersStageReadDelayMinutes() {
@@ -2711,7 +2717,7 @@ function _timersStageSetDelayPreview(presetId, presets) {
     return;
   }
   if (id < 1 || id > (presets || []).length) {
-    el.textContent = 'STREAM DELAY - 9:30AM';
+    el.textContent = 'Select a stream delay preset.';
     return;
   }
   el.textContent = _timersStageDelayMessageForPreset(presets[id - 1], delayMinutes) || 'STREAM DELAY - 9:30AM';
@@ -2719,9 +2725,26 @@ function _timersStageSetDelayPreview(presetId, presets) {
 
 function _timersStageSetButtonsEnabled(enabled) {
   const btn = document.getElementById('timers-stage-send');
-  if (btn) btn.disabled = !enabled;
+  if (btn) {
+    if (_timersDelayBusy) _timersLockedControls.set(btn, !enabled);
+    btn.disabled = _timersDelayBusy || !enabled;
+  }
   const delayBtn = document.getElementById('timers-stage-delay-send');
-  if (delayBtn) delayBtn.disabled = !enabled;
+  const delayId = _timersReadDelayPresetFromUI();
+  if (delayBtn) delayBtn.disabled = _timersDelayBusy || _timersDelaySelectionBlocked || !(delayId > 0 && delayId <= _timersReadPresetsForStage().length);
+}
+
+function _timersReadDelayPresetFromUI() {
+  const select = document.getElementById('timers-stage-delay-preset');
+  return select ? Number(select.value) || 0 : 0;
+}
+
+function _timersApplyDelayPresetId(presetId, presets) {
+  _timersStageRenderOptions(presets);
+  const select = document.getElementById('timers-stage-delay-preset');
+  if (select && presetId != null) select.value = presetId > 0 && presetId <= presets.length ? String(presetId) : '';
+  _timersStageSetDelayPreview(_timersReadDelayPresetFromUI(), presets);
+  _timersStageSetButtonsEnabled(_timersReadStagePresetFromUI() > 0);
 }
 
 function _timersApplyStagePresetId(presetId) {
@@ -2761,17 +2784,30 @@ async function _timersSendStreamStartMessage() {
 }
 
 async function _timersSendStreamDelayMessage(delayMinutes, presetId) {
+  const update = document.getElementById('timers-stage-update-timer').checked;
+  const operationBytes = new Uint8Array(16);
+  crypto.getRandomValues(operationBytes);
+  const operationId = Array.from(operationBytes, byte => byte.toString(16).padStart(2, '0')).join('');
   const res = await fetch('/api/propresenter/stage/stream_delay', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({delay_minutes: delayMinutes, preset: presetId}),
+    body: JSON.stringify({delay_minutes: delayMinutes, preset: presetId, update_timer: update, revision: _timersRevision, operation_id: operationId}),
+  }).catch(() => {
+    throw new Error('Stream delay request failed; saved/applied/message outcome unknown. Reload before another explicit click.');
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) {
-    throw new Error(data.error || 'Stream delay message failed');
-  }
-  if (!data.sent) {
-    throw new Error(data.detail || 'Stream delay message failed to send');
+  const data = await res.json().catch(() => {
+    throw new Error('Invalid stream delay response; saved/applied/message outcome unknown. Reload before another explicit click.');
+  });
+  if (data.timer_presets) _timersApplyMutationResponse(data, {render: true});
+  if (!res.ok) throw new Error(data.error || 'Request failed; outcome may be unknown. Reload before another explicit click.');
+  if (data.saved) {
+    const summary = `Preset saved; ${data.applied ? 'applied' : 'apply incomplete'}; message ${data.sent ? 'sent' : 'failed'}.`;
+    const detail = (data.apply && (data.apply.detail || data.apply.error)) || data.detail || '';
+    _timersStageSetDelayHint(summary + (detail ? ' ' + detail : ''), data.ok ? 'ok' : 'error');
+  } else if (data.sent) {
+    _timersStageSetDelayHint('Message sent; preset unchanged.', 'ok');
+  } else {
+    _timersStageSetDelayHint(data.error || data.detail || 'Message failed; preset unchanged.', 'error');
   }
   return data;
 }
@@ -2814,6 +2850,7 @@ function _timersRenderPresets(presets) {
   const body = document.getElementById('timers-presets-body');
   if (!body) return;
 
+  Array.from(body.querySelectorAll('tr')).forEach(_timersClearRowSaveTimer);
   body.innerHTML = '';
   (presets || []).forEach((t, idx) => {
     const tr = document.createElement('tr');
@@ -2955,6 +2992,7 @@ function _timersRenderPresets(presets) {
   const stagePresetId = _timersReadStagePresetFromUI();
   _timersStageSetPreview(stagePresetId, presets || []);
   _timersStageSetButtonsEnabled(stagePresetId > 0 && stagePresetId <= (presets || []).length);
+  _timersRefreshEditingLock();
 }
 
 function _timersReadPresetsFromUI() {
@@ -3017,13 +3055,25 @@ async function _timersLoad() {
 
   const presets = data.timer_presets || [];
   const stagePreset = Number(data.stream_start_preset || 0);
+  _timersRevision = data.revision || '';
   _timersSetLastSaved(presets, stagePreset);
   _timersRenderPresets(presets);
   _timersApplyStagePresetId(stagePreset);
+  _timersApplyDelayPresetId(data.stream_delay_preset, presets);
 }
 
 function _initTimersPage() {
-  if (!document.getElementById('timers-page')) return;
+  const root = document.getElementById('timers-page');
+  if (!root) return;
+  // Capture-phase fallback covers keyboards and structural controls even where
+  // inert is unavailable. Pending pre-click saves still drain normally.
+  ['click', 'input', 'change', 'keydown', 'beforeinput'].forEach(type => {
+    root.addEventListener(type, ev => {
+      if (!_timersDelayBusy) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }, true);
+  });
   // Initial load
   _timersLoad().catch(e => _timersSetStatus(String(e.message || e), 'error'));
 
@@ -3113,23 +3163,46 @@ function _initTimersPage() {
     });
   }
 
+  const delaySelect = document.getElementById('timers-stage-delay-preset');
+  if (delaySelect) delaySelect.addEventListener('change', () => {
+    const preset = _timersReadDelayPresetFromUI();
+    _timersDelaySelectionBlocked = true;
+    _timersStageSetButtonsEnabled(_timersReadStagePresetFromUI() > 0);
+    _timersStageSetDelayPreview(preset, _timersReadPresetsForStage());
+    _timersStageSetDelayHint('Saving selection...', '');
+    _timersQueueMutation({action: 'set_stream_delay_preset', preset}).then(result => {
+      _timersDelaySelectionBlocked = !!(result && result.ok === false);
+      _timersStageSetButtonsEnabled(_timersReadStagePresetFromUI() > 0);
+      _timersStageSetDelayHint(_timersDelaySelectionBlocked ? result.error : (preset ? 'Update Timer saves and applies this preset; uncheck for message only.' : 'Select a stream delay preset.'), _timersDelaySelectionBlocked ? 'error' : '');
+    });
+  });
+  const updateTimer = document.getElementById('timers-stage-update-timer');
+  if (updateTimer) updateTimer.addEventListener('change', () => {
+    _timersStageSetDelayHint(updateTimer.checked ? 'Save adjusted time and apply preset, including Companion presses.' : 'Message only; preset and timer unchanged.', '');
+  });
   const delayInput = document.getElementById('timers-stage-delay-minutes');
+  let lastDelayInput = delayInput ? delayInput.value : '';
   const delayDecreaseBtn = document.getElementById('timers-stage-delay-decrease');
   const delayIncreaseBtn = document.getElementById('timers-stage-delay-increase');
   const delaySendBtn = document.getElementById('timers-stage-delay-send');
   const updateDelayPreview = () => {
     const presets = _timersReadPresetsForStage();
-    _timersStageSetDelayPreview(_timersReadStagePresetFromUI(), presets);
+    _timersStageSetDelayPreview(_timersReadDelayPresetFromUI(), presets);
   };
   const adjustDelayMinutes = (change) => {
     const current = _timersStageReadDelayMinutes();
     const next = Math.max(-1440, Math.min(1440, (current === null ? 0 : current) + change));
     if (delayInput) delayInput.value = String(next);
+    lastDelayInput = String(next);
     _timersStageSetDelayHint('Adjust by one minute, then send the selected preset\'s delayed stream message.', '');
     updateDelayPreview();
   };
   if (delayInput) {
     delayInput.addEventListener('input', () => {
+      // Safari can repeat an unchanged input event on blur after Apply. Do not
+      // erase the action outcome unless the operator actually changes minutes.
+      if (delayInput.value === lastDelayInput) return;
+      lastDelayInput = delayInput.value;
       const value = _timersStageReadDelayMinutes();
       _timersStageSetDelayHint(
         value === null ? 'Enter a whole number from -1440 to 1440.' : 'Adjust by one minute, then send the selected preset\'s delayed stream message.',
@@ -3143,29 +3216,35 @@ function _initTimersPage() {
   if (delaySendBtn) {
     delaySendBtn.addEventListener('click', (ev) => {
       ev.preventDefault();
+      if (_timersDelayBusy || _timersDelaySelectionBlocked) return;
       (async () => {
         _timersClearStatus();
         try {
-          const presetId = _timersReadStagePresetFromUI();
+          const presetId = _timersReadDelayPresetFromUI();
           const delayMinutes = _timersStageReadDelayMinutes();
           if (!presetId) {
-            _timersSetStatus('Select a stream start preset first.', 'error');
+            _timersSetStatus('Select a stream delay preset first.', 'error');
             return;
           }
           if (delayMinutes === null) {
             _timersStageSetDelayHint('Enter a whole number from -1440 to 1440.', 'error');
             return;
           }
-          delaySendBtn.disabled = true;
-          const data = await _timersSendStreamDelayMessage(delayMinutes, presetId);
-          _timersStageSetDelayHint(`Sent ${data.message || 'stream delay message'}.`, 'ok');
+          if (_timersDelayBusy) return;
+          _timersSetDelayBusy(true);
+          if (!(await _timersFlushAutoSave({showStatus: false}))) return;
+          const currentPresetId = _timersReadDelayPresetFromUI();
+          if (!currentPresetId) throw new Error('Select a stream delay preset first.');
+          await _timersSendStreamDelayMessage(delayMinutes, currentPresetId);
+
         } catch (e) {
           _timersStageSetDelayHint(String(e.message || e), 'error');
           _timersSetStatus(String(e.message || e), 'error');
         } finally {
-          const selected = _timersReadStagePresetFromUI();
+          _timersSetDelayBusy(false);
+          const selected = _timersReadDelayPresetFromUI();
           const presets = _timersReadPresetsForStage();
-          delaySendBtn.disabled = !(selected > 0 && selected <= presets.length);
+          delaySendBtn.disabled = _timersDelaySelectionBlocked || !(selected > 0 && selected <= presets.length);
         }
       })();
     });

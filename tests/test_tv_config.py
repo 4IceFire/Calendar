@@ -37,6 +37,16 @@ class TvConfigTests(unittest.TestCase):
         cfg.pop('hisense_media_mappings')
         self.assertEqual(self.import_config(cfg)['hisense_media_mappings'], {})
 
+    def test_import_preserves_tv_mapping_validation_and_retires_old_timer_settings(self):
+        cfg = copy.deepcopy(self.fx.cfg)
+        cfg['hisense_media_mappings']['foyer']['source'] = ' HDMI1 '
+        for key in self.w.utils.RETIRED_TIMER_CONFIG_KEYS:
+            cfg[key] = True
+        restored = self.import_config(cfg)
+        self.assertEqual(restored['hisense_media_mappings']['foyer'], {'output': 1, 'source': 'HDMI1'})
+        for key in self.w.utils.RETIRED_TIMER_CONFIG_KEYS:
+            self.assertNotIn(key, restored)
+
     def test_invalid_mapping_import_fails_before_config_replacement(self):
         for invalid in (None, [], {'foyer': None}, {'foyer': {'output': True, 'source': 'HDMI1'}}, {'private-absent': {'output': 1, 'source': 'HDMI1'}}, {'foyer': {'output': 1, 'source': '   '}}):
             with self.subTest(mapping=invalid):

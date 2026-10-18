@@ -16,6 +16,8 @@ function initializeMediaConfigPage() {
   let libraryInFlight = false;
   let uploadInFlight = false;
   let editInFlight = false;
+  let replaceInFlight = false;
+  const previewVersions = {};
   let loadInFlight = false;
   let setupInFlight = false;
   let destinationSequence = 0;
@@ -55,7 +57,7 @@ function initializeMediaConfigPage() {
     if (controller) {
       settings.signal = controller.signal;
       // The ATEM upload runs as a background job; an HTTP call should remain short.
-      timeout = setTimeout(function() { controller.abort(); }, path === '/api/media/upload' ? 60000 : 15000);
+      timeout = setTimeout(function() { controller.abort(); }, path === '/api/media/upload' || /\/replace$/.test(path) ? 60000 : 15000);
     }
     try {
       const response = await fetch(path, settings);
@@ -79,24 +81,35 @@ function initializeMediaConfigPage() {
   }
 
   function updateControls() {
+    const replacing = replaceInFlight;
+    if (el('media-search')) el('media-search').disabled = replacing;
+    if (el('media-refresh-library')) el('media-refresh-library').disabled = libraryInFlight || replacing;
+    if (el('media-grid')) Array.prototype.forEach.call(el('media-grid').querySelectorAll('.media-tile'), function(tile) { tile.disabled = replacing; });
+    if (el('media-replace-button')) {
+      const blocked = replacing || libraryInFlight || uploadInFlight || editInFlight || loadInFlight || activeJob() || !permissions.manage || !selectedItem();
+      el('media-replace-file').disabled = blocked;
+      el('media-replace-button').disabled = blocked || !el('media-replace-file').files.length;
+      el('media-replace-form').setAttribute('aria-busy', replacing ? 'true' : 'false');
+      text(el('media-replace-button'), replacing ? 'Replacing…' : 'Replace image');
+    }
     ['media-saved-tab', 'media-temporary-tab'].forEach(function(id) {
-      if (el(id)) el(id).disabled = libraryInFlight || uploadInFlight || editInFlight;
+      if (el(id)) el(id).disabled = libraryInFlight || uploadInFlight || editInFlight || replacing;
     });
-    if (el('media-keep-image')) el('media-keep-image').disabled = editInFlight || !selectedItem();
+    if (el('media-keep-image')) el('media-keep-image').disabled = editInFlight || replacing || !selectedItem();
     if (el('media-upload-button')) {
-      el('media-upload-button').disabled = uploadInFlight || !permissions.upload;
-      el('media-upload-file').disabled = uploadInFlight || !permissions.upload;
-      el('media-upload-name').disabled = uploadInFlight || !permissions.upload;
+      el('media-upload-button').disabled = uploadInFlight || replacing || !permissions.upload;
+      el('media-upload-file').disabled = uploadInFlight || replacing || !permissions.upload;
+      el('media-upload-name').disabled = uploadInFlight || replacing || !permissions.upload;
       text(el('media-upload-button'), uploadInFlight ? 'Uploading…' : 'Upload to library');
     }
     if (el('media-save-image')) {
-      const disabled = editInFlight || !permissions.manage || !selectedItem();
+      const disabled = editInFlight || replacing || !permissions.manage || !selectedItem();
       ['media-save-image', 'media-delete-image', 'media-edit-name'].forEach(function(id) { el(id).disabled = disabled; });
     }
     if (!el('media-load-button')) return;
     const hasPlayers = !!(state && state.destinations && state.destinations.length);
     const busy = loadInFlight || activeJob();
-    el('media-player').disabled = !hasPlayers || busy || !permissions.load;
+    el('media-player').disabled = !hasPlayers || busy || replacing || !permissions.load;
     let help = 'The image is fitted to the switcher format and loaded into the chosen player.';
     if (!stateValid) help = 'Waiting for a current ATEM media status.';
     else if (!state.enabled) help = 'ATEM media uploads are disabled. Ask someone with Config access to enable them.';
@@ -105,9 +118,11 @@ function initializeMediaConfigPage() {
     else if (!hasPlayers) help = 'No media players are configured. Ask someone with Config access to reserve players and still slots.';
     else if (busy) help = 'An image is loading. Wait for this job to finish before loading another.';
     else if (!selectedItem()) help = 'Select an image from the library.';
+    else if (selectedItem().file_missing === true) help = 'This image file is missing. Replace the image to repair this entry before loading it.';
+    else if (replacing) help = 'Wait for the replacement to finish before loading an image.';
     else if (!el('media-player').value) help = 'Choose a media player.';
     text(el('media-load-help'), help);
-    el('media-load-button').disabled = !permissions.load || !stateValid || !state || !state.enabled || !state.connected || state.ready === false || !hasPlayers || !selectedItem() || !el('media-player').value || busy;
+    el('media-load-button').disabled = replacing || !permissions.load || !stateValid || !state || !state.enabled || !state.connected || state.ready === false || !hasPlayers || !selectedItem() || selectedItem().file_missing === true || !el('media-player').value || busy;
     text(el('media-load-button'), busy ? 'Loading into ATEM…' : 'Load selected image');
   }
 
@@ -127,7 +142,7 @@ function initializeMediaConfigPage() {
     text(el('media-collection-help'), collection === 'temporary' ? 'Temporary uploads are only listed here. Keep an image to make it available in Routing.' : 'Saved images are available to choose in Routing.');
   }
   function changeCollection(kind) {
-    if (libraryInFlight || uploadInFlight || editInFlight || kind === collection) return;
+    if (libraryInFlight || uploadInFlight || editInFlight || replaceInFlight || kind === collection) return;
     collection = kind;
     selectedId = '';
     items = [];
@@ -138,7 +153,7 @@ function initializeMediaConfigPage() {
   }
   async function keepImage() {
     const item = selectedItem();
-    if (!item || !item.temporary || editInFlight) return;
+    if (!item || !item.temporary || editInFlight || replaceInFlight) return;
     editInFlight = true;
     updateControls();
     try {
@@ -168,10 +183,18 @@ function initializeMediaConfigPage() {
       tile.dataset.mediaId = item.id;
       tile.setAttribute('aria-pressed', item.id === selectedId ? 'true' : 'false');
       tile.setAttribute('aria-label', 'Select ' + item.name);
-      const picture = node('img', 'media-tile-image');
-      picture.src = item.thumbnail_url;
-      picture.alt = '';
-      picture.loading = 'lazy';
+      const missing = item.file_missing === true || item.thumbnail_missing === true;
+      const picture = node(missing ? 'span' : 'img', 'media-tile-image' + (missing ? ' media-image-placeholder' : ''));
+      if (missing) {
+        picture.textContent = item.file_missing === true ? 'Image file missing' : 'Preview missing';
+      } else {
+        picture.alt = '';
+        picture.loading = 'lazy';
+        picture.addEventListener('error', function() {
+          if (picture.parentNode) picture.parentNode.replaceChild(node('span', 'media-tile-image media-image-placeholder', 'Preview unavailable'), picture);
+        });
+        picture.src = previewUrl(item.thumbnail_url, item.id);
+      }
       const caption = node('span', 'media-tile-caption');
       caption.appendChild(node('span', 'media-tile-name', item.name));
       caption.appendChild(node('span', 'media-tile-meta', item.uploaded_by || 'Unknown uploader'));
@@ -185,7 +208,11 @@ function initializeMediaConfigPage() {
   }
 
   function selectImage(id) {
-    if (editInFlight) return;
+    if (editInFlight || replaceInFlight) return;
+    if (id !== selectedId && el('media-replace-file')) {
+      el('media-replace-file').value = '';
+      replacementMessage('', '');
+    }
     selectedId = id;
     Array.prototype.forEach.call(el('media-grid').querySelectorAll('.media-tile'), function(tile) {
       tile.setAttribute('aria-pressed', tile.dataset.mediaId === id ? 'true' : 'false');
@@ -197,8 +224,14 @@ function initializeMediaConfigPage() {
     show(el('media-selection-empty'), !item);
     show(el('media-selection-content'), !!item);
     if (item) {
-      el('media-preview-image').src = item.url;
-      el('media-preview-image').alt = item.name;
+      const preview = el('media-preview-image');
+      const missing = item.file_missing === true;
+      show(preview, !missing);
+      show(el('media-preview-placeholder'), missing);
+      text(el('media-preview-placeholder'), missing ? 'Image file missing. Replace the image to repair this entry.' : '');
+      if (missing) preview.removeAttribute('src');
+      else preview.src = previewUrl(item.url, item.id);
+      preview.alt = item.name;
       text(el('media-selected-name'), item.name);
       text(el('media-selected-details'), item.width + ' × ' + item.height + ' · ' + formatBytes(item.size_bytes));
       text(el('media-selected-uploader'), 'Uploaded by: ' + (item.uploaded_by || 'Unknown (older upload)'));
@@ -220,7 +253,7 @@ function initializeMediaConfigPage() {
   }
 
   async function refreshLibrary() {
-    if (libraryInFlight || uploadInFlight || editInFlight) return;
+    if (libraryInFlight || uploadInFlight || editInFlight || replaceInFlight) return;
     libraryInFlight = true;
     updateControls();
     const revision = libraryRevision;
@@ -358,7 +391,7 @@ function initializeMediaConfigPage() {
 
   async function uploadImage(event) {
     event.preventDefault();
-    if (uploadInFlight || !permissions.upload) return;
+    if (uploadInFlight || replaceInFlight || !permissions.upload) return;
     const file = el('media-upload-file').files[0];
     if (!file) return;
     const form = new FormData();
@@ -392,7 +425,7 @@ function initializeMediaConfigPage() {
   async function saveImage(event) {
     event.preventDefault();
     const item = selectedItem();
-    if (!item || editInFlight || !permissions.manage) return;
+    if (!item || editInFlight || replaceInFlight || !permissions.manage) return;
     const name = el('media-edit-name').value.trim();
     if (!name) { message('Enter a name for the image.', 'warning'); return; }
     const body = { name: name, preset: !!selectedItem().preset };
@@ -414,7 +447,7 @@ function initializeMediaConfigPage() {
   }
   async function deleteImage() {
     const item = selectedItem();
-    if (!item || editInFlight || !permissions.manage) return;
+    if (!item || editInFlight || replaceInFlight || !permissions.manage) return;
     if (!window.confirm('Delete “' + item.name + '” from the TDeck library? This does not clear any image already loaded into ATEM.')) return;
     editInFlight = true;
     updateControls();
@@ -435,7 +468,7 @@ function initializeMediaConfigPage() {
   }
   async function loadImage() {
     const item = selectedItem();
-    if (!item || el('media-load-button').disabled || loadInFlight) return;
+    if (!item || replaceInFlight || el('media-load-button').disabled || loadInFlight) return;
     loadInFlight = true;
     updateControls();
     try {
@@ -453,6 +486,53 @@ function initializeMediaConfigPage() {
       loadInFlight = false;
       updateControls();
       refreshState();
+    }
+  }
+
+  function previewUrl(value, id) {
+    if (!previewVersions[id]) return value;
+    try {
+      const url = new URL(value, window.location.href);
+      if (url.origin !== window.location.origin) return '';
+      url.searchParams.set('media_refresh', previewVersions[id]);
+      return url.pathname + url.search + url.hash;
+    } catch (_error) { return ''; }
+  }
+  function replacementMessage(value, kind) {
+    const box = el('media-replace-status');
+    if (!box) return;
+    box.className = 'mt-2 media-wrap' + (kind ? ' text-' + kind : '');
+    text(box, value);
+  }
+  async function replaceImage(event) {
+    event.preventDefault();
+    const item = selectedItem();
+    const input = el('media-replace-file');
+    if (!item || !input || !input.files.length || !permissions.manage || replaceInFlight || libraryInFlight || uploadInFlight || editInFlight || loadInFlight || activeJob()) return;
+    // Capture identity and file before yielding: a late response must never
+    // update a different selected entry. There is deliberately no retry.
+    const id = item.id;
+    const file = input.files[0];
+    const form = new FormData();
+    form.append('file', file);
+    replaceInFlight = true;
+    replacementMessage('Replacing “' + item.name + '”… No hardware will be changed.', 'muted');
+    updateControls();
+    try {
+      const data = await request('/api/media/' + encodeURIComponent(id) + '/replace', {method: 'POST', body: form});
+      if (data.ok !== true || !data.item || data.item.id !== id) throw new Error('The server did not confirm the original image entry. Refresh the library to check it before trying again.');
+      libraryRevision += 1;
+      previewVersions[id] = String(Date.now());
+      items = items.map(function(current) { return current.id === id ? data.item : current; });
+      input.value = '';
+      renderLibrary();
+      renderSelection();
+      replacementMessage('Image replaced. The library entry and preset links are unchanged. No image was loaded into ATEM.', 'success');
+    } catch (error) {
+      replacementMessage('Could not confirm replacement. ' + errorMessage(error) + ' Your chosen file has been kept. Nothing will be retried automatically.', 'danger');
+    } finally {
+      replaceInFlight = false;
+      updateControls();
     }
   }
 
@@ -600,6 +680,14 @@ function initializeMediaConfigPage() {
   if (el('media-refresh-state')) el('media-refresh-state').addEventListener('click', refreshState);
   if (el('media-upload-form')) el('media-upload-form').addEventListener('submit', uploadImage);
   if (el('media-edit-form')) el('media-edit-form').addEventListener('submit', saveImage);
+  if (el('media-replace-form')) el('media-replace-form').addEventListener('submit', replaceImage);
+  if (el('media-replace-file')) el('media-replace-file').addEventListener('change', function() { replacementMessage('', ''); updateControls(); });
+  if (el('media-preview-image')) el('media-preview-image').addEventListener('error', function() {
+    show(el('media-preview-image'), false);
+    el('media-preview-image').removeAttribute('src');
+    text(el('media-preview-placeholder'), 'Image preview unavailable. Refresh the library to check this entry.');
+    show(el('media-preview-placeholder'), true);
+  });
   if (el('media-delete-image')) el('media-delete-image').addEventListener('click', deleteImage);
   if (el('media-load-button')) el('media-load-button').addEventListener('click', loadImage);
   if (el('media-player')) el('media-player').addEventListener('change', function() { renderPlayerDetail(); updateControls(); });

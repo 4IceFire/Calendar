@@ -14,6 +14,8 @@ It supports:
 
 ## What this app does
 
+For the stable-main/testing-branch policy, merged-branch cleanup and protection of runtime data during version changes, see [Development workflow and data safety](docs/development-workflow.md).
+
 - You define events in an `events.json`-style file (configurable via `config.json`).
 - Each event has one or more **triggers**:
   - `BEFORE` (N minutes before the event)
@@ -124,8 +126,8 @@ tokens can read but cannot trigger. These endpoints never use anonymous legacy a
 
 Props now always triggers the selected prop directly. Missing/unavailable targets
 fail closed. There is no clearing, fallback or automatic retry. Existing
-`propresenter_ip`/`propresenter_port` apply; `propresenter_is_latest` and all timer
-workarounds are unchanged. Discovery reads only `/v1/props`; commands use
+`propresenter_ip`/`propresenter_port` apply. Timer compatibility/wait settings
+are retired independently; Props execution is unchanged. Discovery reads only `/v1/props`; commands use
 `/v1/prop/{uuid}/trigger`. No resource creation, editing or deletion is sent.
 The user reported direct Props working with ProPresenter **17.1**; this agent
 has not independently reproduced that hardware test. Isolated fixture results
@@ -479,6 +481,22 @@ deletion. Older uploads retain their original time and show an unknown uploader.
 Managers can rename, delete, or **Keep in saved library** a temporary image.
 Keeping it preserves its original attribution and makes it available in Routing.
 
+To change an existing graphic or repair a missing file, select its entry in
+**Media Library**, choose a file under **Replace image**, then explicitly select
+**Replace image**. The replacement keeps the same image ID, name and routing-preset
+links; it does not create a duplicate or load anything into the ATEM. Existing
+presets use the new file the next time they are applied. The original uploader,
+upload time and temporary/permanent retention status remain unchanged.
+
+A **File missing** warning means the catalogue entry still exists but its image
+file is absent on the server. A missing thumbnail is reported separately.
+Re-upload the original or a replacement into that entry rather than deleting and
+recreating it. TDeck cannot reconstruct lost image pixels from the catalogue or
+an empty ATEM slot. Replacement validates the same file-size, format and pixel
+limits as a new upload and is refused while a media display job is active.
+Errors appear beside the replacement controls; a failed request does not retry
+itself or discard your selected file.
+
 Routing uploads start with **Temporary image** checked. Users with permanent-save
 permission can untick it; other uploaders always upload temporarily. Temporary
 images do not appear in the Routing picker or preset image choices. Their uploader
@@ -527,6 +545,13 @@ under `media_library/` beside the application on Windows, or `/data/media_librar
 when `/data` exists on Linux. Set `TDECK_MEDIA_DIR` in the server environment to
 use another durable folder. Back up this entire folder; the existing Config ZIP
 does not yet include the image library. Uploaded media stays out of Git.
+When switching older branches, their ignore rules may not protect this runtime
+folder. Keep `media_library/` in the installation's local `.git/info/exclude`
+as branch-independent protection against ordinary untracked-file cleanup.
+This is not a backup and does not protect against cleanup explicitly including
+ignored files or manual deletion. For stronger separation, use a durable
+`TDECK_MEDIA_DIR` outside the checkout; migrate and back up existing data before
+changing that setting.
 
 ### Routing presets
 
@@ -862,11 +887,9 @@ This project can also act as a small “glue” service between Bitfocus Compani
 - `propresenter_ip`: ProPresenter host
 - `propresenter_port`: ProPresenter API port
 - `propresenter_timer_index`: which ProPresenter timer/clock to update
-- `propresenter_is_latest`: set `true` for normal timer flow, set `false` to enable the legacy start workaround sequence
-- `propresenter_timer_wait_stop_ms`: legacy-only delay after stop (default 200ms)
-- `propresenter_timer_wait_set_ms`: legacy-only delay after setting time (default 600ms)
-- `propresenter_timer_wait_reset_ms`: legacy-only delay after reset (default 1000ms)
-- `stream_start_preset`: (optional) 1-based timer preset used to build the stream-start stage message
+- Timer applies run **set → confirm saved target → reset → start**, stopping at the first failed step. ProPresenter on macOS can acknowledge a PUT before its timer model changes; resetting immediately can lose that edit. TDeck polls read-only timer details for at most the client timeout (normally two seconds), checking the original UUID and requested target before proceeding. Immediate confirmation adds no fixed delay; confirmation failure never retries a write or sends reset/start. Old `propresenter_is_latest` and `propresenter_timer_wait_*_ms` keys remain inert and removed on config load/save/import; no legacy stop/wait settings are restored.
+- `stream_start_preset`: (optional) 1-based TDeck timer preset used for Stream Start
+- `stream_delay_preset`: independent 1-based **internal TDeck preset** used for Stream Delay (`0` = unselected); both selections follow moves/deletes
 - `companion_ip` / `companion_port`: Companion host/port
 - `companion_timer_name`: prefix for Companion timer-name variables (default: `timer_name_`)
 
@@ -874,13 +897,55 @@ This project can also act as a small “glue” service between Bitfocus Compani
 
 - Run the Web UI: `python webui.py`
 - Open the Timers page: `http://127.0.0.1:<webserver_port>/timers`
-- Add/update **Name** and **Time** rows, then click **Save**
+- Add/update **Name** and **Time** rows; explicit edits auto-save.
 
 Presets are stored in `timer_presets.json`.
 
 Stage message setup (same page):
 - In the **Stage Message** section, choose which preset represents your stream start time.
-- The UI shows a preview like `STREAM START 9:30AM` and has buttons to send/clear the message.
+- The UI shows a preview like `STREAM 9:30AM` and has buttons to send/clear the message.
+- Stream Delay has its own preset selector and signed minute adjustment, wrapping midnight.
+  **Update Timer** is checked by default. **Delay Stream** saves the selected preset's
+  current persisted time plus the adjustment, then applies **that preset** through
+  the normal timer/Companion path and sends `STREAM DELAY - 9:35AM`.
+- Uncheck **Update Timer** for message only: no preset write, timer action or Companion command.
+  Changing selectors, editing minutes, startup and reload never apply a preset.
+- Feedback reports saved, applied and message outcomes separately. A failed apply/message
+  does not undo the saved time. Reload after an uncertain request or stale-edit conflict;
+  there is no automatic retry. A repeated explicit click adds to the newly persisted time.
+  The editor and structural/keyboard controls freeze while pending drafts flush and execution
+  completes; selection is re-read after flush so a pending move cannot target another preset.
+  Each explicit click has a fresh operation ID; duplicate requests do not replay commands,
+  including zero/full-day adjustments. The bounded 24-hour cache is process-local (not retained
+  across restart). Reads/config imports remain responsive during device I/O; the original
+  captured preset and endpoints (including queued Companion variable writes) finish without
+  switching targets or automatic replay. Timer applies, update-and-apply and direct timer
+  controls share a nonblocking process-local reservation; contention returns 409 before
+  commands or update-and-apply storage changes. Checked-delay tokens need both timers
+  mutation and apply path authority; message-only permissions are unchanged.
+
+Timer transport uses the vendor's documented `/version`, `GET/PUT /v1/timer/{id}`
+and `GET /v1/timer/{id}/reset|start`. The PUT preserves the full returned identity
+including its required UUID; countdown-to-time uses seconds plus `am`/`pm`.
+Failure diagnostics identify method/path and HTTP status or exception class, not
+raw response bodies. See https://openapi.propresenter.com/ (the timer schema references
+an identity requiring UUID, name and index). Synthetic tests cover delayed model
+publication, immediate confirmation, identity changes, malformed/unavailable reads,
+confirmation timeout and stopping the apply sequence before reset/start on failure.
+They do not prove physical stage-display output.
+
+Isolated timer regression runner (temporary storage; outbound requests/sockets blocked):
+`python tests/run_timers_isolated.py test_propresenter_timer_confirmation test_timers_direct test_stream_delay test_stream_delay_update`.
+Actual JavaScript handler regressions: `node --test tests/timers_stream_delay.test.cjs`.
+Browser fixture: `python tests/timers_ui_harness.py --ready-file <scratch>/timers-ready.json`.
+Use a Playwright Python environment to run
+`python tests/timers_browser_check.py --ready-file <scratch>/timers-ready.json --artifacts <scratch>/timer-evidence --browser all`.
+It requires the marked loopback fixture and verifies desktop Chromium/Firefox/WebKit,
+mobile Chromium/WebKit emulation, independent persistence, explicit repeated apply,
+message-only mode, partial failures, stale revision rejection and no startup commands.
+Optional `TDECK_BROWSER_CHROMIUM`, `TDECK_BROWSER_FIREFOX`, `TDECK_BROWSER_WEBKIT`
+select already installed executables; private Linux libraries may use command-scoped
+`LD_LIBRARY_PATH`. Never substitute a staging URL or production configuration.
 
 3) Configure Companion
 
