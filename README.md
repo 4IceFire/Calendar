@@ -643,7 +643,7 @@ Setup:
 2. Enable the integration and enter the SD9 IP and OSC port (normally `9000`).
 3. Choose a free local UDP listen port (default `8000`). Allow that UDP port through the TDeck computer's firewall when using native iPad/OSC relay devices.
 4. Wait for discovery to report the input-channel and AUX counts.
-5. Use the **AUXes** and **Channels** tabs to set visibility and labels, choose a unified icon for each AUX and input (plus a colour for each AUX), and arrange items with the arrow buttons. A channel's optional **Section heading** appears immediately above that channel and applies visually until the next heading.
+5. Use the **AUXes** and **Channels** tabs to set visibility and labels, choose a unified icon for each AUX and input (plus a colour for each AUX), and arrange items with the arrow buttons. A channel's optional **Section heading** begins a group in the Personal Mixes tab strip; following inputs without a heading stay in that section. Inputs before the first heading appear under **Inputs**. Section and input ordering remain the configured order.
 6. In **Permissions → Groups**, grant **Personal Mixes** and optionally select which AUXes that group may control. No AUX selection means all enabled AUXes.
 7. Team members open `/personal-mixes`, sign in, and choose their assigned mix.
 
@@ -653,6 +653,7 @@ Operational notes:
 
 - Run only one TDeck/OSCWebMixer instance on the configured local UDP port.
 - A low-rate heartbeat keeps desk status accurate while nobody is moving a fader.
+- Choose a group in the horizontal tab strip directly below **Mixing / Change / Desk online** to show only its inputs. Swipe/scroll the strip for more groups; both the header and tabs remain available while scrolling a long mix. With a keyboard, Tab enters the selected group tab; Left/Right wraps through groups and Home/End selects the first/last group. Tab then enters the selected panel and its controls. Group selection is local navigation, not a device command; old collapsed-section preferences are ignored. The selected group remains selected when changing AUXes or receiving polling updates. An empty input configuration shows a message instead of empty group tabs.
 - Personal-mix faders stream coalesced updates while they move and send a final value when released.
 - Every channel has a mute/unmute control that reads its initial state from the selected AUX before it can be changed.
 - Personal Mix polling uses revision-only responses while a mix is unchanged, and hidden browser tabs stop polling. Fader writes remain immediate and do not wait for the read poll.
@@ -798,7 +799,30 @@ Run the OSC codec, desk-simulator integration and protected web API tests with:
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-`tests/digico_ui_harness.py` starts a self-contained simulated desk and TDeck site on `http://127.0.0.1:5057` for local browser checks. It does not write its changes to the production `config.json`.
+For Personal Mixes regressions without checkout-auth changes or real hardware:
+
+```sh
+python tests/run_personal_mix_tabs_isolated.py test_digico test_digico_webui test_frontend_compatibility test_api_security test_client_telemetry
+npm ci --ignore-scripts
+node --test tests/*.test.cjs
+python tests/personal_mix_tabs_ui_harness.py --ready-file <private-scratch>/mix-tabs-ready.json
+# In another terminal, set TDECK_BASE_URL to the URL in that ready file:
+npx playwright test tests/browser/personal_mix_tabs.spec.js --workers=1
+```
+
+The browser harness uses a loopback ephemeral port, temporary synthetic users/data,
+and a fake DiGiCo desk. It blocks outbound HTTP and socket writes before application
+import, redirects the default checkout auth database during cold import, and disables
+unrelated routes. Tests require its `tdeck-personal-mix-tabs` marker, a successful
+reset and unchanged checkout-auth metadata. Use all five browser projects: desktop
+Chromium/Firefox/WebKit and mobile Chromium/WebKit emulations. Tests cover ordered
+single-group visibility, deep-scroll sticky position, 320px contained tab overflow,
+keyboard access, empty/unnamed/repeated headings, polling/readback, AUX selection,
+actual fake-device level/pan/mute writes and permission denials. Startup, selection
+and navigation must perform no device writes. The Python runner blocks non-loopback
+sockets and HTTP, retaining loopback UDP for its desk and external-relay simulators.
+Keep fixture data/ready files under private scratch storage (on Linux, `$TMPDIR`)
+and never point these tests at shared staging or production hardware.
 
 For group editor browser checks, run `python tests/permissions_ui_harness.py`.
 This uses a temporary database and simulated catalogs, with outbound hardware
