@@ -113,6 +113,27 @@ class IntegrationStatusSnapshotTests(unittest.TestCase):
             ['atem.connection.disconnected', 'atem.connection.connected'],
         )
 
+    def test_digico_offline_is_informational_and_recovery_is_logged(self):
+        self.connectivity['digico'] = True
+        webui._log_connectivity_change('digico', False, detail='desk:9001')
+        event = self.logs.call_args
+        self.assertEqual(event.args[0], 'digico.connection.disconnected')
+        self.assertEqual(event.kwargs['status'], 'info')
+        self.assertFalse(event.kwargs['details']['connected'])
+        self.assertIn('OFFLINE', event.args[1])
+        webui._log_connectivity_change('digico', False)
+        self.assertEqual(self.logs.call_count, 1)
+        webui._log_connectivity_change('digico', True)
+        self.assertEqual(self.logs.call_args.kwargs['status'], 'success')
+        self.assertEqual(self.logs.call_args.args[0], 'digico.connection.connected')
+
+    def test_other_integrations_still_warn_when_offline(self):
+        for service in ('companion', 'propresenter', 'videohub', 'atem', 'hisense', 'pixie'):
+            with self.subTest(service=service):
+                self.connectivity[service] = True
+                webui._log_connectivity_change(service, False)
+                self.assertEqual(self.logs.call_args.kwargs['status'], 'warning')
+
     def test_fresh_snapshot_does_not_probe_hardware(self):
         now = time.time()
         payload = {'ok': True, 'ts': now, 'atem': {'connected': True}}

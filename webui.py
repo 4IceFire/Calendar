@@ -5346,7 +5346,9 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
             f'{service}.connection.{"connected" if bool(connected) else "disconnected"}',
             f"{label} is now {state}{suffix}",
             source='system',
-            status='success' if bool(connected) else 'warning',
+            # The sound desk is routinely powered down between services.
+            # Keep its offline state visible without raising an activity alert.
+            status='success' if bool(connected) else ('info' if service == 'digico' else 'warning'),
             target_type='integration',
             target_id=str(service or label or ''),
             details={'service': service, 'label': label, 'connected': bool(connected), 'state': state, 'detail': detail},
