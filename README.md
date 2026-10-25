@@ -353,6 +353,13 @@ are Admin-only until assigned. Preset access does not grant general media browsi
 or uploads. Grants combine across groups, and the normal output/media-input
 restrictions still apply.
 
+Routine browser API idle expiry appears as an **informational** Activity Log entry
+naming the timed-out user, with their authenticated user ID/username retained and
+the request IP/path stored as metadata. The expired session is still signed out,
+and its API request returns HTTP 401 `session_expired`; refresh and sign in again.
+Other security rejection levels are unchanged. Regression check:
+`python -m unittest discover -s tests -p test_session_idle_activity.py -v`.
+
 To test another user's experience, sign in with an account in the **Admin**
 group, open **Permissions → Users → select a user**, and choose **View as user**.
 The banner identifies the user being tested and provides **Return to admin**.

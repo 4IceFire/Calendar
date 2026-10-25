@@ -3858,9 +3858,13 @@ def _api_security_gate():
             idle_minutes = _effective_idle_timeout_minutes_for_current_user()
             last_activity = int(session.get('_last_activity') or 0)
             if idle_minutes is not None and last_activity and (int(time.time()) - last_activity) > (idle_minutes * 60):
+                # Persist the authenticated actor before logout clears it.
+                actor_display = _activity_current_actor()[2]
+                _api_security_event('security.api.session_idle',
+                                    f'Browser session for {actor_display} expired due to inactivity',
+                                    status='info')
                 logout_user()
                 session.clear()
-                _api_security_event('security.api.session_idle', 'Rejected an API request from an expired browser session')
                 return _api_json_error(401, 'session_expired', 'The browser session expired due to inactivity.')
         except Exception:
             pass
