@@ -21,8 +21,11 @@ assign new IDs; creation/duplication is denied before saving, without grant chan
 An image reference uses the selected VideoHub output, not its catalog destination.
 A differing destination is an informative notice, not a blocking save error. It
 never changes the catalog or executes that source preset's extra actions. Applying
-an image-bearing VideoHub preset is browser-only. Ordinary numeric/Keep presets
-remain compatible with Companion and scheduling; all Keep is a no-op.
+an image-bearing VideoHub preset supports browser Apply and Companion's existing
+Apply Preset API with a `videohub`-scoped token and all applicable preset, port,
+path and nested-reference constraints. Poll the 202 job with the exact initiating
+token/session; never automatically repeat Apply. Scheduler/delegated image Apply
+remains denied. Numeric/Keep presets still support scheduling; all Keep is a no-op.
 
 Standalone Routing Preset automation instead applies the full saved preset,
 confirmed image first then ordered approved actions. It requires its own explicit

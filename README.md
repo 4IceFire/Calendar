@@ -272,13 +272,23 @@ VideoHub output is the target even if the routing preset has another fixed outpu
 its catalog configuration remains unchanged. **Apply Preset** displays only its
 saved image and never executes that routing preset's extra API actions.
 
-Image-bearing presets require an explicit browser session with VideoHub access,
-Routing Presets access and the individually granted routing preset, plus allowed
-target outputs and mapped media inputs. Permissions, current enabled state and
-saved-image availability are checked at Apply. Deleted, disabled or inaccessible
-references fail rather than turning into a normal input. Token/Companion,
-scheduler and delegated API-action triggers are deliberately unsupported for
-image-bearing VideoHub presets; ordinary numeric/keep-only automation is unchanged.
+Image-bearing presets support browser Apply (VideoHub and Routing Presets page
+access, individual preset grants, CSRF/trusted origin) and Companion's existing
+Apply Preset API with a `videohub`-scoped service token. Tokens retain their
+allowed-path, VideoHub preset/output/input constraints and, when present,
+`routing_presets`/`routing_outputs` constraints on nested image references and
+selected outputs. No extra routing scope or browser grants are required for this
+image-only capability. Every numeric and image target is authorized before any
+hardware writes; enabled references and permanent image files must exist.
+Scheduler, delegated API actions and standalone backend/CLI image-bearing Apply
+remain unsupported. Ordinary numeric/keep-only automation is unchanged.
+
+Image Apply returns **202 accepted**, not completed. Poll the returned job at
+`GET /api/videohub/presets/<id>/jobs/<job_id>` (or `/api/v1/...`) using the exact
+initiating token or browser session. Reads recheck current scope and resource
+constraints; revoked/expired tokens cannot poll, and owners cannot read each
+other's jobs. No generic media/setup/image access is granted. Never automatically
+repeat an uncertain Apply POST.
 
 An image-bearing Apply queues one asynchronous job covering all its outputs.
 Numeric routes run and verify first; images then load, verify and route under one
