@@ -282,11 +282,27 @@
     label.htmlFor = `digico-${field}-${channel}`;
     input.id = label.htmlFor;
     updateSliderVisual(input, value, field);
+    const capabilities = state.config && state.config.capabilities;
+    if (capabilities && capabilities[field] === false) {
+      input.disabled = true;
+      input.title = 'Unavailable with this mixer provider';
+      value.textContent = 'Unavailable';
+    } else if (state.config && state.config.provider === 'dlive') {
+      input.disabled = true;
+      value.textContent = 'Awaiting desk';
+    }
     control.append(label, input);
     return {element: control, input, value};
   }
 
   function updateSendToggle(control, sendOn) {
+    if (state.config && state.config.capabilities && state.config.capabilities.sendOn === false) {
+      control.button.disabled = true;
+      control.button.classList.remove('is-loading');
+      control.button.textContent = 'Unavailable';
+      control.button.setAttribute('aria-label', 'Per-send mute unavailable with this mixer provider');
+      return;
+    }
     const known = typeof sendOn === 'boolean';
     if (known) control.sendOn = sendOn;
     control.button.disabled = !known || control.busy;
@@ -483,6 +499,10 @@
     for (const channel of payload.channels || []) {
       const controls = state.channelControls.get(Number(channel.channel));
       if (!controls) continue;
+      if (state.config && state.config.provider === 'dlive') {
+        controls.level.input.disabled = channel.level == null || channel.stale === true;
+        if (controls.level.input.disabled) controls.level.value.textContent = 'Stale / unavailable';
+      }
       if (typeof channel.sendOn === 'boolean' && !controls.send.busy && Date.now() >= controls.send.holdUntil) {
         updateSendToggle(controls.send, channel.sendOn);
       }
@@ -495,9 +515,15 @@
         updateSliderVisual(controls.pan.input, controls.pan.value, 'pan');
       }
     }
-    if (payload.status && payload.status.connected) {
+    updateStatusNotice(payload.status || {});
+  }
+
+  function updateStatusNotice(status) {
+    if (status.pollingWarning) {
+      showNotice(status.pollingWarning, 'warning');
+    } else if (status.connected) {
       state.errorSince = 0;
-      showNotice('', 'secondary');
+      showNotice((state.config && state.config.capabilityNotice) || '', 'secondary');
     } else if (!state.errorSince) {
       state.errorSince = Date.now();
     } else if ((Date.now() - state.errorSince) > 4000) {
@@ -539,6 +565,7 @@
       if (!state.selectedAux || Number(state.selectedAux.channel) !== selectedAux) return;
       if (payload.unchanged) {
         setConnection(payload.status || {});
+        updateStatusNotice(payload.status || {});
         return;
       }
       applyAuxState(payload);
@@ -570,7 +597,7 @@
         showPicker();
       }
       if (!auxes.length) showNotice('No enabled AUXes are available. Ask a TDeck administrator to check desk discovery, AUX setup and your group permissions.', 'warning');
-      else showNotice('', 'secondary');
+      else showNotice(payload.capabilityNotice || '', 'secondary');
     } catch (error) {
       setConnection({running: false, connected: false});
       showNotice(error.status === 401 ? 'Your session has expired. Sign in again to continue.' : (error.message || 'Could not load the desk configuration.'), 'danger');

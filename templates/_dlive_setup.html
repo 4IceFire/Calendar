@@ -1,0 +1,20 @@
+<section id="dlive-setup" hidden>
+  <p>Use the MixRack network address (for example DM32), not an audio, gigaACE or ME port. Surface S5000 network access is possible; verify the endpoint and firmware before enabling.</p>
+  <div class="alert alert-warning">Mapping is manual: confirm each AUX's mono/stereo ordinal against the show. dLive uses different AUX IDs from DiGiCo; review group grants before allowing performers access. Saving or reading names never changes audio.</div>
+  <div class="form-check form-switch mb-3"><input id="dlive-enabled" type="checkbox" class="form-check-input"><label for="dlive-enabled" class="form-check-label">Enable dLive Personal Mixes</label></div>
+  <div class="row g-3 mb-3">
+    <div class="col-md-6"><label for="dlive-ip" class="form-label">MixRack IP or hostname</label><input id="dlive-ip" class="form-control" autocomplete="off"></div>
+    <div class="col-md-3"><label for="dlive-port" class="form-label">MIDI TCP port</label><input id="dlive-port" class="form-control" type="number" min="1" max="65535" value="51325"></div>
+    <div class="col-md-3"><label for="dlive-midi-channel" class="form-label">Base MIDI channel (1–12)</label><input id="dlive-midi-channel" class="form-control" type="number" min="1" max="12" value="1"></div>
+  </div>
+  <p class="text-muted">MixRack plain TCP: 51325. V2.0+ Surface plain TCP: 51328. TLS ports 51327/51329 and profile authentication are not supported: do not disable site security to use this provider. Use only an approved isolated control network. Enable MIDI Send and Receive in Utility / Control / MIDI.</p>
+  <h3 class="h6">AUX mappings</h3>
+  <p class="text-muted">Mono AUX IDs are 1000 + bus; stereo AUX IDs are 2000 + bus. These are mono/stereo AUX ordinals, not physical output sockets or fader-strip positions.</p>
+  <div id="dlive-aux-mappings" class="vstack gap-2 mb-2"></div>
+  <button id="dlive-add-aux" class="btn btn-sm btn-outline-secondary mb-4" type="button">Add AUX</button>
+  <h3 class="h6">Input mappings</h3>
+  <p class="text-muted">Add only inputs performers may mix. Section headings retain the existing Personal Mix group tabs.</p>
+  <div id="dlive-input-mappings" class="vstack gap-2 mb-2"></div>
+  <button id="dlive-add-input" class="btn btn-sm btn-outline-secondary mb-3" type="button">Add input</button>
+  <p class="text-muted">Send levels and read-only desk names are supported. Per-send mute, pan, metering and ME-1 remote control are unavailable; no whole-input mute is substituted. AUX master level/mute are available through the scoped API only, keeping the performer layout unchanged.</p>
+</section>

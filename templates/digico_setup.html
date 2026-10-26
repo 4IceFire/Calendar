@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% set page_title = 'DiGiCo Mixer Setup' %}
-{% set page_subtitle = 'Connection, Personal Mix layout, permissions and native OSC relay' %}
+{% set page_title = 'Personal Mixes Setup' %}
+{% set page_subtitle = 'Choose a mixer, map AUXes and arrange personal mixes' %}
 {% set config_active_tab = 'digico' %}
 
 {% block head_extra %}
@@ -36,6 +36,13 @@
     <section id="digico-tab-connection" class="tab-pane fade show active">
       <div class="card tdeck-soft"><div class="card-body">
         <h2 class="h5">Desk connection</h2>
+        <label class="form-label" for="personal-mix-provider">Mixer provider</label>
+        <select id="personal-mix-provider" class="form-select mb-3">
+          <option value="digico">DiGiCo SD / Quantum (OSC)</option>
+          <option value="dlive">Allen &amp; Heath dLive (MIDI over TCP)</option>
+        </select>
+        {% include '_dlive_setup.html' %}
+        <div id="digico-legacy-connection">
         <p class="text-muted">TDeck uses one shared UDP socket for the SD9. Browsers communicate with TDeck over HTTP, so additional phones do not consume DiGiCo device connections.</p>
         <div class="form-check form-switch mb-3">
           <input id="digico-enabled" class="form-check-input" type="checkbox">
@@ -57,6 +64,7 @@
         <div class="d-flex flex-wrap gap-2 mt-4">
           <button id="digico-restart" class="btn btn-outline-secondary" type="button">Restart Connection</button>
           <button id="digico-discover" class="btn btn-outline-secondary" type="button">Rediscover Desk</button>
+        </div>
         </div>
       </div></div>
     </section>
@@ -98,5 +106,6 @@
 
 {% block scripts %}
   <script src="{{ static_asset('digico_icons.js') }}"></script>
+  <script src="{{ static_asset('dlive_setup.js') }}"></script>
   <script src="{{ static_asset('digico_setup.js') }}"></script>
 {% endblock %}

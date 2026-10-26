@@ -8,7 +8,7 @@ It supports:
 - A **scheduler** that watches an events JSON file and executes triggers.
 - A **CLI** (`cli.py`) for starting/stopping the scheduler and managing events.
 - A **Web UI** (`webui.py`) for editing events and templates in a browser.
-- A **DiGiCo Personal Mixes** web app that lets multiple phones mix permitted AUXes through one shared SD9 OSC connection.
+- A **Personal Mixes** web app that lets multiple phones mix permitted AUXes through one shared DiGiCo SD9 OSC or Allen & Heath dLive MIDI/TCP connection.
 - A native **Hisense / VIDAA TV service** for individual and ordered-group power, absolute volume, source selection, pairing, protocol detection, and automatic reconnect.
 - A direct **Pixie Controls** web app for permission-scoped auditorium lighting, individual device faders/on-off controls, and scenes through one Pixie Plus Gateway.
 
@@ -374,7 +374,7 @@ session revocation or loss of Admin access ends the test; changes that invalidat
 the target's account also stop it. Switching identities refreshes the form
 security token, so reload any other TDeck tabs before using them.
 
-DiGiCo settings are managed from **Config → DiGiCo Mixer**. They are stored in `config.json` and therefore travel with the normal TDeck config export/import.
+Mixer settings are managed from **Config → Personal Mixes** (`/config/digico`). They are stored in `config.json` and travel with normal config transport. dLive imports are disabled pending explicit commissioning; generic Config saves cannot switch provider or retarget dLive. See [dLive setup and commissioning](docs/DLIVE_PERSONAL_MIXES.md).
 
 Hisense TVs are managed from **Config → TVs**. TDeck connects directly to each TV's VIDAA MQTT service; a separate Mosquitto broker and Companion Generic MQTT connection are not required. Normal setup only asks for a TV name, stable IP address, and the TV's MAC address. Saving automatically enables the service, while the backend handles polling, reconnects, protocol/authentication detection, and selection of installed legacy/current VIDAA support files.
 
@@ -652,11 +652,21 @@ terminal set `TDECK_BASE_URL=http://127.0.0.1:5063` and run
 
 ## DiGiCo Personal Mixes
 
+Personal Mixes now has a selectable Allen & Heath dLive provider while retaining
+the existing performer layout and group tabs. DiGiCo remains the default and
+the following OSC instructions remain applicable to that provider. See
+[dLive setup, supported capabilities, API and commissioning](docs/DLIVE_PERSONAL_MIXES.md)
+and [implementation/test evidence](DLIVE_IMPLEMENTATION_STATUS.md). dLive supports
+mono/stereo AUX send levels and AUX master level/mute (API), with manual bus
+mapping and asynchronous readback. Per-send mute/pan, input meters, ME-1 and TLS
+authentication are explicitly unsupported; whole-input mutes are never a
+personal-send substitute.
+
 TDeck can act as the one remote device connected to a DiGiCo console while serving a separate browser mixer to multiple worship-team devices. The desk-side connection is standard OSC over UDP; browsers use TDeck's normal HTTP server and do not open their own desk sockets.
 
 Setup:
 
-1. Open **Config → DiGiCo Mixer**.
+1. Open **Config → Personal Mixes** and select **DiGiCo SD / Quantum**.
 2. Enable the integration and enter the SD9 IP and OSC port (normally `9000`).
 3. Choose a free local UDP listen port (default `8000`). Allow that UDP port through the TDeck computer's firewall when using native iPad/OSC relay devices.
 4. Wait for discovery to report the input-channel and AUX counts.

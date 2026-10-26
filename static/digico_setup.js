@@ -35,6 +35,7 @@
   }
 
   function setConnectionFields(config) {
+    if (window.TDeckDLiveSetup) window.TDeckDLiveSetup.render(config);
     field('digico-enabled').checked = !!config.digico_enabled;
     field('digico-ip').value = config.digico_ip || '';
     field('digico-port').value = config.digico_port == null ? 9000 : config.digico_port;
@@ -432,8 +433,9 @@
     if (!full) return;
     const config = payload.config || {};
     setConnectionFields(config);
-    renderMixerItems('aux', combinedItems((payload.discovered || {}).auxes, config.digico_auxes, 'aux'));
-    renderMixerItems('channel', combinedItems((payload.discovered || {}).channels, config.digico_channels, 'channel'));
+    const discovered = config.personal_mix_provider === 'dlive' ? {} : (payload.discovered || {});
+    renderMixerItems('aux', combinedItems(discovered.auxes, config.digico_auxes, 'aux'));
+    renderMixerItems('channel', combinedItems(discovered.channels, config.digico_channels, 'channel'));
     renderDevices(config.digico_external_devices);
     state.initialized = true;
     state.dirty = false;
@@ -484,6 +486,7 @@
 
   function collectConfig() {
     return {
+      ...(window.TDeckDLiveSetup ? window.TDeckDLiveSetup.collect() : {}),
       digico_enabled: !!field('digico-enabled').checked,
       digico_ip: value('digico-ip').trim(),
       digico_port: numberValue('digico-port', 9000),
@@ -501,7 +504,7 @@
   async function saveSetup() {
     const button = field('digico-setup-save');
     button.disabled = true;
-    setMessage('Saving configuration and restarting the DiGiCo connection…', 'info');
+    setMessage('Saving Personal Mixes configuration…', 'info');
     try {
       await requestJson('/api/digico/setup', {
         method: 'POST',
@@ -509,7 +512,7 @@
         body: JSON.stringify(collectConfig()),
       });
       state.dirty = false;
-      setMessage('DiGiCo setup saved. Desk discovery has restarted.', 'success');
+      setMessage('Personal Mixes setup saved. Connection restarted; no audio commands sent.', 'success');
       await loadSetup(true);
     } catch (error) {
       setMessage(error.message || 'Could not save DiGiCo setup.', 'danger');

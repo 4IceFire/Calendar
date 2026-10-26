@@ -245,7 +245,7 @@
                             data-permission-panel="digico" aria-labelledby="group-{{ g.id }}-tab-digico" hidden>
                             <div class="row g-3">
                               <div class="col-12">
-                                <div class="fw-semibold">Personal Mix AUX access (DiGiCo)</div>
+                                <div class="fw-semibold">Personal Mix AUX access</div>
                                 <div class="small text-muted">No selected AUXes means this group can mix every enabled AUX. Access is enforced by the TDeck API.</div>
                               </div>
                               {% if digico_auxes %}
@@ -262,7 +262,7 @@
                                 {% endfor %}
                               {% else %}
                                 <div class="col-12">
-                                  <div class="text-muted small">No AUXes have been discovered yet. Configure and connect the desk from DiGiCo Setup, then return here.</div>
+                                  <div class="text-muted small">No AUXes are mapped yet. Configure the mixer from Personal Mixes Setup, then return here.</div>
                                 </div>
                               {% endif %}
                             </div>

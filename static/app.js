@@ -124,7 +124,7 @@ async function updateStatusIndicators() {
     const digicoIndicator = document.getElementById('digico-indicator');
     const digicoEnabled = !!(data && data.digico && data.digico.enabled);
     if (digicoIndicator) digicoIndicator.classList.toggle('d-none', !digicoEnabled);
-    if (digicoEnabled) _applyServiceIndicator('digico', 'DiGiCo', !!data.digico.connected);
+    if (digicoEnabled) _applyServiceIndicator('digico', 'Personal Mixes', !!data.digico.connected);
     _applyServiceIndicator('atem', 'Switcher', !!(data && data.atem && data.atem.connected));
     const pixieIndicator = document.getElementById('pixie-indicator');
     const pixie = (data && data.pixie) || {};
@@ -149,7 +149,7 @@ async function updateStatusIndicators() {
       {label: 'Switcher', connected: !!(data && data.atem && data.atem.connected)},
     ];
     if (digicoEnabled) {
-      services.push({label: 'DiGiCo', connected: !!data.digico.connected});
+      services.push({label: 'Personal Mixes', connected: !!data.digico.connected});
     }
     if (pixieEnabled) {
       services.push({label: 'Pixie', connected: !!data.pixie.connected});
@@ -159,7 +159,7 @@ async function updateStatusIndicators() {
     _applyServiceIndicatorUnknown('companion', 'Companion');
     _applyServiceIndicatorUnknown('propresenter', 'ProPresenter');
     _applyServiceIndicatorUnknown('videohub', 'VideoHub');
-    _applyServiceIndicatorUnknown('digico', 'DiGiCo');
+    _applyServiceIndicatorUnknown('digico', 'Personal Mixes');
     _applyServiceIndicatorUnknown('atem', 'Switcher');
     _applyServiceIndicatorUnknown('pixie', 'Pixie');
     _applyMobileConnectionSummary(null);
@@ -994,7 +994,11 @@ function _renderConfigGroups(cfg) {
     'atem_media_enabled', 'atem_media_node_path', 'atem_media_destinations', 'media_temporary_retention_days',
     'videohub_allowed_outputs',
     'videohub_allowed_inputs',
-    // Managed by the dedicated DiGiCo Mixer setup page.
+    // Managed by the validated Personal Mixes setup page.
+    'personal_mix_provider',
+    'dlive_enabled', 'dlive_ip', 'dlive_port', 'dlive_midi_channel',
+    'dlive_request_interval', 'dlive_retry_interval', 'dlive_stale_after',
+    'dlive_auxes', 'dlive_channels',
     'digico_enabled',
     'digico_ip',
     'digico_port',
