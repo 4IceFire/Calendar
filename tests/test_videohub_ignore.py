@@ -230,10 +230,6 @@ class VideoHubIgnoreApiTests(unittest.TestCase):
                 self.assertEqual(self.client.post(path, headers=self.headers).status_code, 403)
             with patch.object(self.webui, '_effective_videohub_allowlists_for_user', return_value=([], [7])):
                 self.assertEqual(self.client.post(path, headers=self.headers).status_code, 403)
-            token = api_security.create_service_token(self.webui._AUTH_DB_PATH, name='image denied', scopes=['videohub'])
-            other = self.webui.app.test_client()
-            response = other.post(path.replace('/api/', '/api/v1/'), headers={'Authorization': 'Bearer ' + token['token']})
-            self.assertEqual(response.status_code, 403, response.get_json())
             self.assertFalse(self.webui._execute_scheduler_internal_action({'method': 'POST', 'path': path}))
             manager.assert_not_called()
         self.assertEqual(self.hub.writes, [])

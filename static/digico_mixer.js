@@ -9,6 +9,7 @@
   const auxGrid = document.getElementById('digico-aux-grid');
   const channelSection = document.getElementById('digico-channel-section');
   const channelGroups = document.getElementById('digico-channel-groups');
+  const groupTabs = document.getElementById('digico-group-tabs');
   const auxChange = document.getElementById('digico-aux-change');
   const auxLabel = document.getElementById('digico-aux-current-label');
   const auxIcon = document.getElementById('digico-aux-current-icon');
@@ -16,12 +17,12 @@
   const snapshot = document.getElementById('digico-snapshot');
   const retry = document.getElementById('digico-mixer-retry');
   const navbar = document.querySelector('.tdeck-navbar');
+  const sticky = root.querySelector('.digico-mixer-sticky');
   const iconSystem = window.TDeckDigicoIcons;
   const CONTROL_SEND_INTERVAL_MS = 40;
   const INPUT_METER_POLL_MS = 250;
   const LEVEL_UNITY_SLIDER = 0.5;
   const LEVEL_UNITY_LEGACY_SLIDER = Math.pow(100, 0.9) / 100;
-  const COLLAPSED_SECTIONS_KEY = 'tdeck.digico.collapsed-sections';
 
   function syncStickyOffset() {
     if (navbar) root.style.setProperty('--digico-navbar-height', `${navbar.getBoundingClientRect().height}px`);
@@ -33,6 +34,8 @@
   const state = {
     config: null,
     selectedAux: null,
+    selectedGroup: null,
+    groups: [],
     pollBusy: false,
     meterBusy: false,
     configBusy: false,
@@ -332,20 +335,18 @@
     return control;
   }
 
-  function collapsedSections() {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem(COLLAPSED_SECTIONS_KEY) || '[]');
-      return new Set(Array.isArray(saved) ? saved.map(String) : []);
-    } catch (error) {
-      return new Set();
+  function selectGroup(key, reveal) {
+    state.selectedGroup = key;
+    for (const group of state.groups) {
+      const selected = group.key === key;
+      group.tab.setAttribute('aria-selected', String(selected));
+      group.tab.tabIndex = selected ? 0 : -1;
+      group.panel.hidden = !selected;
     }
-  }
-
-  function saveSectionState(key, collapsed) {
-    const saved = collapsedSections();
-    if (collapsed) saved.add(key);
-    else saved.delete(key);
-    try { window.localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify(Array.from(saved))); } catch (error) { /* ignore */ }
+    if (reveal) {
+      const offset = channelSection.getBoundingClientRect().top - sticky.getBoundingClientRect().bottom;
+      if (offset < 0) window.scrollBy(0, offset);
+    }
   }
 
   function buildInputMeter(channel) {
@@ -389,6 +390,8 @@
   function buildChannels(channels) {
     state.channelControls.clear();
     channelGroups.textContent = '';
+    groupTabs.textContent = '';
+    state.groups = [];
     const sections = [];
     const titleCounts = new Map();
     let section = null;
@@ -399,33 +402,48 @@
         const title = headingText || 'Inputs';
         const occurrence = (titleCounts.get(title) || 0) + 1;
         titleCounts.set(title, occurrence);
-        section = {title, key: `${title.toLowerCase()}-${occurrence}`, channels: []};
+        section = {title, key: JSON.stringify([title, occurrence]), channels: []};
         sections.push(section);
       }
       section.channels.push(channel);
       previousHeading = headingText;
     }
 
-    const collapsed = collapsedSections();
+    groupTabs.classList.toggle('d-none', !sections.length);
+    if (!sections.length) {
+      const empty = document.createElement('p');
+      empty.className = 'digico-config-empty';
+      empty.textContent = 'No enabled inputs are available for this mix.';
+      channelGroups.appendChild(empty);
+      state.selectedGroup = null;
+    }
     for (const channelSectionData of sections) {
-      const group = document.createElement('details');
+      // DOM IDs are independent of operator-supplied section text.
+      const sectionId = state.groups.length;
+      const group = document.createElement('div');
       group.className = 'digico-channel-group';
-      group.open = !collapsed.has(channelSectionData.key);
-      const heading = document.createElement('summary');
-      heading.className = 'digico-channel-group-title';
+      group.id = `digico-panel-${sectionId}`;
+      group.setAttribute('role', 'tabpanel');
+      group.setAttribute('aria-labelledby', `digico-tab-${sectionId}`);
+      group.tabIndex = 0;
+      const heading = document.createElement('button');
+      heading.type = 'button';
+      heading.className = 'digico-group-tab';
+      heading.id = `digico-tab-${sectionId}`;
+      heading.setAttribute('role', 'tab');
+      heading.setAttribute('aria-controls', group.id);
       const headingLabel = document.createElement('span');
       headingLabel.textContent = channelSectionData.title;
       const count = document.createElement('span');
       count.className = 'digico-channel-group-count';
       count.textContent = `${channelSectionData.channels.length} input${channelSectionData.channels.length === 1 ? '' : 's'}`;
-      const collapseIcon = document.createElement('span');
-      collapseIcon.className = 'digico-collapse-icon';
-      collapseIcon.setAttribute('aria-hidden', 'true');
-      heading.append(headingLabel, count, collapseIcon);
+      heading.append(headingLabel, count);
+      groupTabs.appendChild(heading);
+      state.groups.push({key: channelSectionData.key, tab: heading, panel: group});
+      heading.addEventListener('click', () => selectGroup(channelSectionData.key, true));
       const list = document.createElement('div');
       list.className = 'digico-channel-list';
-      group.append(heading, list);
-      group.addEventListener('toggle', () => saveSectionState(channelSectionData.key, !group.open));
+      group.appendChild(list);
       channelGroups.appendChild(group);
 
       for (const channel of channelSectionData.channels) {
@@ -454,6 +472,8 @@
         list.appendChild(row);
       }
     }
+    const selected = state.groups.find(group => group.key === state.selectedGroup) || state.groups[0];
+    if (selected) selectGroup(selected.key);
   }
 
   function applyAuxState(payload) {
@@ -559,6 +579,22 @@
       state.configBusy = false;
     }
   }
+
+  groupTabs.addEventListener('keydown', event => {
+    const index = state.groups.findIndex(group => group.tab === event.target);
+    if (index < 0) return;
+    let next;
+    if (event.key === 'ArrowRight') next = (index + 1) % state.groups.length;
+    else if (event.key === 'ArrowLeft') next = (index + state.groups.length - 1) % state.groups.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = state.groups.length - 1;
+    else return;
+    event.preventDefault();
+    const group = state.groups[next];
+    selectGroup(group.key, true);
+    group.tab.focus({preventScroll: true});
+    group.tab.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  });
 
   auxChange.addEventListener('click', showPicker);
   retry.addEventListener('click', () => loadConfig(false));

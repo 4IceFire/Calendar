@@ -3867,9 +3867,13 @@ def _api_security_gate():
             idle_minutes = _effective_idle_timeout_minutes_for_current_user()
             last_activity = int(session.get('_last_activity') or 0)
             if idle_minutes is not None and last_activity and (int(time.time()) - last_activity) > (idle_minutes * 60):
+                # Persist the authenticated actor before logout clears it.
+                actor_display = _activity_current_actor()[2]
+                _api_security_event('security.api.session_idle',
+                                    f'Browser session for {actor_display} expired due to inactivity',
+                                    status='info')
                 logout_user()
                 session.clear()
-                _api_security_event('security.api.session_idle', 'Rejected an API request from an expired browser session')
                 return _api_json_error(401, 'session_expired', 'The browser session expired due to inactivity.')
         except Exception:
             pass
@@ -5361,7 +5365,9 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
             f'{service}.connection.{"connected" if bool(connected) else "disconnected"}',
             f"{label} is now {state}{suffix}",
             source='system',
-            status='success' if bool(connected) else 'warning',
+            # The sound desk is routinely powered down between services.
+            # Keep its offline state visible without raising an activity alert.
+            status='success' if bool(connected) else ('info' if service == 'digico' else 'warning'),
             target_type='integration',
             target_id=str(service or label or ''),
             details={'service': service, 'label': label, 'connected': bool(connected), 'state': state, 'detail': detail},
@@ -12830,27 +12836,71 @@ def api_videohub_presets_lock(preset_id: int):
 _videohub_image_jobs = {}
 
 
-def _videohub_image_principal():
-    # This narrow capability never inherits scheduler/token/delegated actions.
+def _videohub_image_principal(*, allow_token=False):
+    principal = getattr(g, 'api_principal', {})
+    if allow_token and principal.get('type') == 'service_token':
+        # Job reads require control scope too, never the generic read scope.
+        if not token_allows(principal.get('scopes', []), 'videohub', read_only=False):
+            abort(403)
+        return principal
     if _api_request_is_automation_principal():
-        abort(403, description='Image-bearing VideoHub presets require browser Apply Preset; automation is unsupported.')
+        abort(403, description='This image capability does not permit automation.')
     if not can_access('page:videohub') or not can_access('page:routing_presets'):
         abort(403)
+    return None
 
 
-def _videohub_image_selection(identity, output):
-    if not _routing_preset_allowed(identity):
+def _videohub_image_owner():
+    principal = getattr(g, 'api_principal', {})
+    if principal.get('type') == 'service_token':
+        return ('service_token', principal['id'])
+    return ('browser', _preset_owner())
+
+
+def _videohub_image_access(preset):
+    principal = _videohub_image_principal(allow_token=True)
+    if principal is not None:
+        constraints = principal['constraints']
+        allowed = constraints.get('videohub_presets', [])
+        outputs = constraints.get('videohub_outputs', [])
+        inputs = constraints.get('videohub_inputs', [])
+    else:
+        uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
+        allowed = _effective_videohub_preset_ids_for_user(uid) if uid is not None else []
+        outputs, inputs = _effective_videohub_allowlists_for_user(uid)
+    if allowed and preset.id not in allowed:
         abort(403)
+    for route in preset.routes:
+        if outputs and route.output not in outputs:
+            abort(403)
+        if route.input is not None and inputs and route.input not in inputs:
+            abort(403)
+    return principal, inputs
+
+
+def _videohub_image_selection(identity, output, *, principal=None, inputs=None, cfg=None):
+    if principal is not None:
+        constraints = principal['constraints']
+        if (constraints.get('routing_presets') and identity not in constraints['routing_presets']
+                or constraints.get('routing_outputs') and output not in constraints['routing_outputs']):
+            abort(403)
+        target = output
+    else:
+        if not _routing_preset_allowed(identity):
+            abort(403)
+        target, inputs = _media_output_access(output)
     item = _get_routing_preset_store().get(identity)
     if not item or not item['enabled']:
         raise ValueError('The selected routing preset is unavailable, deleted or disabled.')
     # Override only this typed image usage, never the catalog or ordinary flow.
-    target, inputs = _media_output_access(output)
-    image = _get_media_library().get(item['media_id'])
+    library = _get_media_library()
+    image = library.get(item['media_id'])
     if image.get('temporary'):
         raise ValueError('The routing preset image is not a saved image.')
+    if library.asset_status(item['media_id']).get('file_missing') is True:
+        raise ValueError('The routing preset image file is missing.')
     from atem_media import validate_media_config
-    cfg = validate_media_config(utils.get_config())
+    cfg = validate_media_config(cfg if cfg is not None else utils.get_config())
     mappings = [m for m in cfg['atem_media_destinations'] if m.get('videohub_input')]
     if not cfg['atem_media_enabled'] or not mappings:
         raise ValueError('Image display is not configured.')
@@ -12877,23 +12927,21 @@ def _public_videohub_image_job(job):
 
 def _apply_videohub_images(app_inst, cfg, preset):
     from package.apps.videohub.models import VideohubPreset
-    _videohub_image_principal()
     with _media_operation_lock:
+        cfg, preset = copy.deepcopy(cfg), copy.deepcopy(preset)
+        principal, inputs = _videohub_image_access(preset)
         if len({r.output for r in preset.routes}) != len(preset.routes):
             raise ValueError('Image-bearing presets require distinct output entries.')
-        selections = [_videohub_image_selection(r.routing_preset, r.output)
+        selections = [_videohub_image_selection(r.routing_preset, r.output,
+                          principal=principal, inputs=inputs, cfg=cfg)
                       for r in preset.routes if r.routing_preset is not None]
-        uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
-        outputs, inputs = _effective_videohub_allowlists_for_user(uid)
-        for route in preset.routes:
-            if outputs and route.output not in outputs:
-                abort(403)
-            if route.input is not None and inputs and route.input not in inputs:
-                abort(403)
         numeric = VideohubPreset(preset.id, preset.name,
                                 [r for r in preset.routes if r.routing_preset is None], preset.locked)
-        owner = _preset_owner()
-        actor = capture_activity_actor()
+        owner = _videohub_image_owner()
+        actor = ({'actor_user_id': None,
+                  'actor_username': f"token:{principal['id']}:{principal['name']}",
+                  'actor_display': f"Service token: {principal['name']}", 'source': 'companion'}
+                 if principal is not None else {**capture_activity_actor(), 'source': 'web'})
         manager = _get_media_routing_manager(refresh=True)
 
         def completed(job):
@@ -12918,22 +12966,22 @@ def _apply_videohub_images(app_inst, cfg, preset):
 
 @app.route('/api/videohub/presets/<int:preset_id>/jobs/<job_id>')
 def api_videohub_image_job(preset_id, job_id):
-    _videohub_image_principal()
+    _videohub_image_principal(allow_token=True)
     with _media_operation_lock:
         record = _videohub_image_jobs.get(job_id)
         if not record:
             return _api_json_error(404, 'not_found', 'The preset job is unavailable. Check outputs before applying again.')
         owner, preset, manager = record
-        if owner != _preset_owner() or preset.id != preset_id:
+        if owner != _videohub_image_owner() or preset.id != preset_id:
             abort(403)
-        uid = int(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else None
-        allowed = _effective_videohub_preset_ids_for_user(uid) if uid is not None else []
-        if allowed and preset_id not in allowed:
-            abort(403)
+        principal, inputs = _videohub_image_access(preset)
         for route in preset.routes:
-            _media_output_access(route.output)
-            if route.routing_preset and not _routing_preset_allowed(route.routing_preset):
-                abort(403)
+            if route.routing_preset:
+                try:
+                    _videohub_image_selection(route.routing_preset, route.output,
+                                              principal=principal, inputs=inputs)
+                except (KeyError, ValueError, OSError):
+                    abort(403)
         try:
             return jsonify(ok=True, job=_public_videohub_image_job(manager.get_job(job_id)))
         except KeyError:
