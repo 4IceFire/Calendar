@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--ready-file', required=True)
     parser.add_argument('--evidence-dir', required=True)
     parser.add_argument('--project', default='all')
+    parser.add_argument('--navigation-only', action='store_true')
     args = parser.parse_args()
     ready = json.loads(Path(args.ready_file).read_text()); base = ready['url']
     assert ready['fixture'] == 'tdeck-tv-isolated' and urlparse(base).hostname == '127.0.0.1'
@@ -43,6 +44,11 @@ def main():
             page.goto(base + '/login'); page.locator('[name=username]').fill('operator-tv'); page.locator('[name=password]').fill('fixture-password'); page.get_by_role('button', name='Sign in', exact=True).click()
             page.wait_for_url('**/tv-controls')
             page.locator('[data-room=ground]').click(); page.locator('[data-tv=foyer]').click()
+            if args.navigation_only:
+                page.locator('#tv-back').click()
+                expect(page.locator('[data-tv=foyer]')).to_be_visible()
+                assert page.url.endswith('/tv-controls')
+                page.locator('[data-tv=foyer]').click()
             for width, height in [(390, 700), (320, 640)]:
                 page.set_viewport_size({'width': width, 'height': height})
                 page.evaluate("document.documentElement.style.setProperty('scroll-behavior','auto','important');scrollTo(0,0)")
@@ -54,10 +60,27 @@ def main():
                 assert observed['y'] + observed['height'] <= controls['y'], 'TV status must precede all remote controls'
             if not device: page.set_viewport_size({'width': 1440, 'height': 1000})
             page.goto(base + '/tv-diagnostics')
-            expect(page.locator('a[data-tv-id=foyer]')).to_have_attribute('href', '/tv-controls?tv=foyer')
-            page.locator('a[data-tv-id=foyer]').click(); page.wait_for_url('**/tv-controls?tv=foyer')
+            expect(page.locator('a[data-tv-id=foyer]')).to_have_attribute('href', '/tv-controls?tv=foyer&from=diagnostics')
+            page.locator('a[data-tv-id=foyer]').click(); page.wait_for_url('**/tv-controls?tv=foyer&from=diagnostics')
+            expect(page.locator('#tv-remote-controls')).to_be_enabled()
+            page.locator('#tv-back').click(); page.wait_for_url('**/tv-diagnostics')
+            expect(page.locator('a[data-tv-id=foyer]')).to_be_visible()
+            assert context.request.get(base + '/__tv_fixture').json()['commands']['foyer'] == []
+            page.locator('a[data-tv-id=foyer]').click(); page.wait_for_url('**/tv-controls?tv=foyer&from=diagnostics')
             expect(page.locator('#tv-name')).to_have_text('Ground Foyer (simulated)')
             expect(page.locator('#tv-remote-controls')).to_be_enabled()
+            if args.navigation_only:
+                page.reload(); expect(page.locator('#tv-remote-controls')).to_be_enabled()
+                page.locator('#tv-back').click(); page.wait_for_url('**/tv-diagnostics')
+                expect(page.locator('a[data-tv-id=foyer]')).to_be_visible()
+                assert all(not values for values in context.request.get(base + '/__tv_fixture').json()['commands'].values())
+                cancelled = [error for error in errors if cancelled_poll_error(error, engine=engine, base=base, lifecycle=error['lifecycle'], request_methods=error['request_methods'])]
+                unexpected = [error for error in errors if error not in cancelled]
+                window_errors = [event for lifecycle in watches for event in lifecycle if event['event'] in ('error', 'unhandledrejection')]
+                assert not unexpected and not window_errors, (unexpected, window_errors)
+                results.append({'project': name, 'passed': True, 'navigation_only': True, 'no_device_commands': True, 'page_errors': unexpected, 'window_errors': window_errors, 'expected_cancelled_poll_errors': cancelled})
+                (output / 'results.json').write_text(json.dumps(results, indent=2))
+                context.close(); browser.close(); continue
             slider = page.locator('#tv-volume-level')
             expect(slider).to_have_attribute('type', 'range')
             expect(slider).to_have_value('25')

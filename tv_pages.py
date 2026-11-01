@@ -356,7 +356,8 @@ def register(w):
         selected_tv = request.args.get('tv', '')
         if selected_tv:
             authorize(selected_tv)
-        return w.render_template('tv_pages.html', diagnostics=False, selected_tv=selected_tv)
+        return_to = 'diagnostics' if request.args.get('from') == 'diagnostics' and w.can_access('page:tv_diagnostics') else ''
+        return w.render_template('tv_pages.html', diagnostics=False, selected_tv=selected_tv, return_to=return_to)
 
     @app.get('/api/tv-pages/state')
     def tv_page_state():

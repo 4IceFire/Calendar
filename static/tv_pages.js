@@ -65,7 +65,7 @@ function initializeTvPages() {
         const power = observation(tv, 'power');
         const known = !power.stale && (power.value === 'on' || power.value === 'off');
         const row = node(tv.canControl ? 'a' : 'article', '', 'tv-map-tv tv-power-' + (known ? power.value : 'unknown'));
-        if (tv.canControl) { row.href = '/tv-controls?tv=' + encodeURIComponent(tv.id); row.setAttribute('aria-label', 'Control ' + tv.name); }
+        if (tv.canControl) { row.href = '/tv-controls?tv=' + encodeURIComponent(tv.id) + '&from=diagnostics'; row.setAttribute('aria-label', 'Control ' + tv.name); }
         row.dataset.tvId = tv.id;
         const screen = node('div', '', 'tv-map-screen'); screen.appendChild(view.icon('tv')); row.appendChild(screen);
         row.appendChild(node('h3', tv.name, 'tv-map-name'));
@@ -225,7 +225,11 @@ function initializeTvPages() {
   }
   if (!diagnostic) {
     root.querySelectorAll('[data-icon]').forEach(function(n) { n.appendChild(view.icon(n.dataset.icon)); });
-    el('tv-back').addEventListener('click', function() { if (!busy) { tvId = ''; render(); el('tv-selection-back').focus(); } });
+    el('tv-back').addEventListener('click', function() {
+      if (busy) return;
+      if (root.dataset.returnTo === 'diagnostics') { window.location.assign('/tv-diagnostics'); return; }
+      tvId = ''; render(); el('tv-selection-back').focus();
+    });
     el('tv-selection-back').addEventListener('click', function() { if (!busy) { tvId = ''; roomId = ''; render(); const first = el('tv-room-tiles').querySelector('button'); if (first) first.focus(); } });
     el('tv-power-on').addEventListener('click', function() { command('power', {state: 'on'}); });
     el('tv-power-off').addEventListener('click', function() { command('power', {state: 'off'}); });

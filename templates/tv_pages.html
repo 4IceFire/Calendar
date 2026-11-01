@@ -3,7 +3,7 @@
 {% set page_subtitle = 'Device-reported room overview' if diagnostics else 'Choose a room, then a TV' %}
 {% block head_extra %}<link rel="stylesheet" href="{{ static_asset('tv_pages.css') }}">{% endblock %}
 {% block content %}
-<div id="tv-pages" data-mode="{{ 'diagnostics' if diagnostics else 'controls' }}" data-step="rooms" data-selected-tv="{{ selected_tv|default('') }}">
+<div id="tv-pages" data-mode="{{ 'diagnostics' if diagnostics else 'controls' }}" data-step="rooms" data-selected-tv="{{ selected_tv|default('') }}" data-return-to="{{ return_to|default('') }}">
   <div id="tv-message" role="status" aria-live="polite"></div>
   {% if diagnostics %}
   <div class="tv-page-tools"><span class="text-muted small">Reported feedback · unknown or stale power is neutral</span>{% if can_access('page:config') %}<a href="/config/tv-rooms" class="btn btn-outline-secondary">Configure room pictures</a>{% endif %}</div>

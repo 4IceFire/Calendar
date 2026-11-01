@@ -17,7 +17,7 @@
 
 The grants are stored in the existing `group_pages` table as `tvroom:<room_id>` and `tvdevice:<room_id>:<tv_id>` (or `:*`), not in a second room-assignment database. Ungrouped uses `@ungrouped`, a root identity that cannot collide with existing normalized Hisense group IDs. These are resource grants, not extra top-level pages.
 
-Click a diagnostic TV to open `/tv-controls?tv=<stable-id>` directly on its remote, with no command sent. Links appear only for TVs currently allowed by that user’s independent TV Controls grants; Diagnostics-only readers retain a non-interactive monitor. The destination rechecks current scope before rendering.
+Click a diagnostic TV to open `/tv-controls?tv=<stable-id>` directly on its remote, with no command sent. Links appear only for TVs currently allowed by that user’s independent TV Controls grants; Diagnostics-only readers retain a non-interactive monitor. The destination rechecks current scope before rendering. Remotes opened from Diagnostics carry a fixed `from=diagnostics` marker so the remote’s Back button returns to Diagnostics (also after reload); ordinary room/TV selection still returns to its TV list. No arbitrary return URLs are accepted.
 
 The absolute volume slider previews a requested value while dragging and sends one command on release/change, including the iOS/WebKit track-tap fallback. Keyboard arrows use the same commit path; duplicate release/change events do not replay it. Background feedback never moves a held slider or becomes a requested value. Pending/ignored commands keep separate reported feedback. When absolute volume is stale, unknown or external/unverified, the slider is disabled with Unavailable rather than inventing zero; relative +/- remain available.
 
