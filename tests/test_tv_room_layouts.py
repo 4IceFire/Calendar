@@ -146,3 +146,51 @@ class RoomLayoutTests(unittest.TestCase):
         (directory / ('b' * 32 + '.png')).symlink_to(secret)
         self.assertEqual(self.admin.get('/tv-room-images/ground/' + 'b' * 32 + '.png').status_code, 404)
         self.assertEqual(self.fx.w.app.test_client().get('/tv-room-images/ground/' + 'b' * 32 + '.png').status_code, 302)
+
+
+    def test_diagnostics_navigation_only_links_current_control_scope(self):
+        operator = self.fx.client()
+        response = operator.get('/api/tv-pages/state?mode=diagnostics')
+        self.assertTrue(response.json['tvs'][0]['canControl'])
+        reader = self.fx.client('reader-tv')
+        self.assertTrue(all(not tv['canControl'] for tv in reader.get('/api/tv-pages/state?mode=diagnostics').json['tvs']))
+        selected = operator.get('/tv-controls?tv=foyer')
+        self.assertEqual(selected.status_code, 200)
+        self.assertIn(b'data-selected-tv="foyer"', selected.data)
+        self.assertEqual(operator.get('/tv-controls?tv=private').status_code, 403)
+        self.assertEqual(reader.get('/tv-controls?tv=foyer').status_code, 403)
+        self.assertTrue(all(not fake.commands for fake in self.fx.clients.values()))
+
+
+    def test_room_picture_preview_is_small_private_and_permission_checked(self):
+        import hashlib
+        import tv_pages
+        data = io.BytesIO()
+        Image.effect_noise((1800, 1200), 80).convert('RGB').save(data, format='PNG')
+        response = self.admin.post('/api/config/tv-room-layouts/background', data={'file': (io.BytesIO(data.getvalue()), 'photo.png')}, headers=self.fx.headers(self.admin))
+        self.assertEqual(response.status_code, 200, response.data)
+        filename = response.json['image']; original = tv_pages.image_path(filename)
+        original_hash = hashlib.sha256(original.read_bytes()).hexdigest()
+        self.assertEqual(self.admin.put('/api/config/tv-room-layouts', json={'layouts': {'ground': {'background': filename, 'positions': {}}}}, headers=self.fx.headers(self.admin)).status_code, 200)
+        operator = self.fx.client(); url = '/tv-room-images/ground/' + filename + '?preview=1'
+        response = operator.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, 'image/jpeg')
+        self.assertTrue(response.data.startswith(b'\xff\xd8'))
+        self.assertLess(len(response.data), original.stat().st_size / 2)
+        with Image.open(io.BytesIO(response.data)) as preview:
+            self.assertLessEqual(max(preview.size), 1280)
+            self.assertFalse(preview.getexif())
+        etag = response.headers['ETag']; response.close()
+        cached = operator.get(url, headers={'If-None-Match': etag})
+        self.assertEqual(cached.status_code, 304)
+        self.assertIn('private', cached.headers['Cache-Control'])
+        self.assertIn('no-cache', cached.headers['Cache-Control']); cached.close()
+        conn = self.fx.w._db()
+        try:
+            conn.execute("DELETE FROM group_pages WHERE group_id=2 AND page_key='tvdevice:ground:foyer'"); conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(operator.get(url, headers={'If-None-Match': etag}).status_code, 403)
+        self.assertEqual(hashlib.sha256(original.read_bytes()).hexdigest(), original_hash)
+        self.assertTrue(all(not fake.commands for fake in self.fx.clients.values()))

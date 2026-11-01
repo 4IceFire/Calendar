@@ -82,6 +82,16 @@ def main():
             page.unroute('**/api/tvs/hall/volume')
             assert context.request.get(base + '/__tv_fixture').json()['commands'] == before
             page.goto(base + '/tv-diagnostics'); expect(page.locator('#tv-overview')).to_have_attribute('aria-busy', 'false')
+            image = page.locator('.tv-room-section').first.locator('.tv-room-picture > img')
+            expect(image).to_be_visible()
+            page.wait_for_function("document.querySelector('.tv-room-picture > img').complete && document.querySelector('.tv-room-picture > img').naturalWidth > 0")
+            page.evaluate("window.__tvRoomImage = document.querySelector('.tv-room-picture > img')")
+            photo_requests = []
+            page.on('request', lambda request: photo_requests.append(request.url) if '/tv-room-images/' in request.url else None)
+            for _ in range(3):
+                with page.expect_response(lambda response: '/api/tv-pages/state' in response.url): pass
+            assert page.evaluate("window.__tvRoomImage === document.querySelector('.tv-room-picture > img')"), 'polling must retain the decoded room image'
+            assert not photo_requests, ('polling re-requested the background', photo_requests)
             expect(page.locator('.tv-positioned[data-tv-id=foyer]')).to_be_visible()
             expect(page.locator('.tv-positioned[data-tv-id=foyer] .tv-map-power')).to_contain_text('On')
             expect(page.locator('.tv-positioned[data-tv-id=foyer] .tv-map-volume')).to_have_text('Volume 25')

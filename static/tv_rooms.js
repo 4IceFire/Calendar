@@ -7,7 +7,7 @@ function initializeTvRooms() {
   function layout() { if (!layouts[roomId]) layouts[roomId] = {positions: {}}; return layouts[roomId]; }
   function message(text) { el('tv-editor-status').textContent = text; }
   function changed() { dirty = true; message('Unsaved changes.'); }
-  function imageUrl(image) { return '/tv-room-images/' + encodeURIComponent(roomId) + '/' + image; }
+  function imageUrl(image) { return '/tv-room-images/' + encodeURIComponent(roomId) + '/' + image + '?preview=1'; }
   function controls() {
     el('tv-editor-room').disabled = busy || !rooms.length; el('tv-editor-tools').disabled = busy || !room();
     el('tv-room-save').disabled = busy || !room(); el('tv-position-fields').disabled = busy || !selected;

@@ -4,7 +4,7 @@
 {% block head_extra %}<link rel="stylesheet" href="{{ static_asset('tv_pages.css') }}">{% endblock %}
 {% block content %}
 <div id="tv-room-editor" aria-busy="true">
-  <div class="tv-page-tools"><a href="/tv-diagnostics">← TV Diagnostics</a><a href="/config/tvs">TV Setup and room membership</a></div>
+  <div class="tv-page-tools"><a href="/tv-diagnostics" class="btn btn-outline-secondary">← TV Diagnostics</a><a href="/config/tvs" class="btn btn-outline-secondary">TV Setup and room membership</a></div>
   <div class="tv-editor-layout">
     <section class="tv-editor-sidebar" aria-label="Room picture settings">
       <div><label class="form-label" for="tv-editor-room">Room</label><select id="tv-editor-room" class="form-select" disabled></select></div>

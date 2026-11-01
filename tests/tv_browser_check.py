@@ -125,10 +125,9 @@ def main():
             expect(page.locator('#tv-command')).to_contain_text('power off')
             expect(page.locator('#tv-command')).to_contain_text('pending')
             assert context.request.post(base + '/__tv_fixture/state', data={'volume': 25, 'source': 'HDMI1'}).ok
-            expect(page.locator('#tv-volume-set')).to_be_enabled()
-            page.locator('#tv-volume-level').fill('31')
+            expect(page.locator('#tv-volume-level')).to_be_enabled()
             command_start = time.monotonic()
-            page.locator('#tv-volume-set').click()
+            page.locator('#tv-volume-level').evaluate("n => {n.value='31';n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));}")
             expect(page.locator('#tv-command')).to_contain_text('confirmed')
             command_render_ms = round((time.monotonic() - command_start) * 1000)
             observed = context.request.get(base + '/api/tv-pages/state').json()['tvs'][0]['observation']
@@ -137,8 +136,7 @@ def main():
             page.locator('[data-source=HDMI2]').click()
             expect(page.locator('#tv-observed')).to_contain_text('HDMI2')
             assert context.request.post(base + '/__tv_fixture/state', data={'ignore': True}).ok
-            page.locator('#tv-volume-level').fill('32')
-            page.locator('#tv-volume-set').click()
+            page.locator('#tv-volume-level').evaluate("n => {n.value='32';n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));}")
             expect(page.locator('#tv-command')).to_contain_text('pending')
             expect(page.locator('#tv-observed')).to_contain_text('31')
             assert context.request.post(base + '/__tv_fixture/state', data={'ignore': False}).ok

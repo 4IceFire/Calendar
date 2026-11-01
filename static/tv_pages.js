@@ -6,6 +6,8 @@ function initializeTvPages() {
   let snapshot = {rooms: [], tvs: []};
   let roomId = '', tvId = '', busy = false, active = true, timer = null, inFlight = false, signature = '';
   let pendingRead = null, localFailure = null;
+  let initialTv = root.dataset.selectedTv || '';
+  let volumeDraft = null, volumeEditing = false, volumeGestureTv = '';
   const view = window.TvRoomView;
   function node(tag, text, cls) { const n = document.createElement(tag); n.textContent = text || ''; if (cls) n.className = cls; return n; }
   function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
@@ -32,7 +34,9 @@ function initializeTvPages() {
     ['power', 'volume', 'source'].forEach(function(key) {
       const cell = node('div', '', 'tv-reading');
       cell.appendChild(node('span', key === 'source' ? 'Input' : key.charAt(0).toUpperCase() + key.slice(1), 'text-muted small'));
-      cell.appendChild(node('strong', value(tv, key)));
+      const field = observation(tv, key);
+      const staleLabel = key !== 'volume' && field.stale && field.value !== null && field.value !== undefined && field.value !== '' ? ' · stale' : '';
+      cell.appendChild(node('strong', value(tv, key) + staleLabel));
       cell.appendChild(node('small', age(observation(tv, key)), 'text-muted'));
       box.appendChild(cell);
     });
@@ -40,20 +44,28 @@ function initializeTvPages() {
   }
   function renderOverview() {
     const box = el('tv-overview');
-    const opened = {}; box.querySelectorAll('details[data-room]').forEach(function(n) { opened[n.dataset.room] = n.open; });
+    const opened = {}, pictures = {};
+    box.querySelectorAll('details[data-room]').forEach(function(n) { opened[n.dataset.room] = n.open; });
+    box.querySelectorAll('.tv-room-section').forEach(function(section) { pictures[section.dataset.roomId] = section.querySelector('.tv-room-picture'); });
     clear(box);
     snapshot.rooms.forEach(function(room) {
-      const section = node('section', '', 'tv-room-section');
+      const section = node('section', '', 'tv-room-section'); section.dataset.roomId = room.id;
       section.appendChild(node('h2', room.name, 'h5'));
       const layout = room.layout || {positions: {}};
-      const picture = view.canvas(layout.backgroundUrl, room.name);
+      const url = layout.backgroundUrl || '';
+      const previous = pictures[room.id];
+      const picture = previous && previous.dataset.backgroundUrl === url ? previous : view.canvas(url, room.name);
+      picture.dataset.backgroundUrl = url;
+      picture.querySelectorAll('.tv-map-tv').forEach(function(item) { item.parentNode.removeChild(item); });
+      const image = picture.querySelector('img'); if (image) image.alt = room.name + ' room picture';
       const unplaced = node('div', '', 'tv-unplaced');
       room.tvIds.forEach(function(id) {
         const tv = snapshot.tvs.find(function(item) { return item.id === id; });
         if (!tv) return;
         const power = observation(tv, 'power');
         const known = !power.stale && (power.value === 'on' || power.value === 'off');
-        const row = node('article', '', 'tv-map-tv tv-power-' + (known ? power.value : 'unknown'));
+        const row = node(tv.canControl ? 'a' : 'article', '', 'tv-map-tv tv-power-' + (known ? power.value : 'unknown'));
+        if (tv.canControl) { row.href = '/tv-controls?tv=' + encodeURIComponent(tv.id); row.setAttribute('aria-label', 'Control ' + tv.name); }
         row.dataset.tvId = tv.id;
         const screen = node('div', '', 'tv-map-screen'); screen.appendChild(view.icon('tv')); row.appendChild(screen);
         row.appendChild(node('h3', tv.name, 'tv-map-name'));
@@ -97,6 +109,7 @@ function initializeTvPages() {
     if (!room) { roomId = ''; tvId = ''; }
     if (room && room.tvIds.indexOf(tvId) === -1) tvId = '';
     root.dataset.step = tvId ? 'remote' : (roomId ? 'tvs' : 'rooms');
+    const main = root.closest('main'); if (main) main.classList.toggle('tv-controls-active', !!tvId);
     el('tv-selection-back').hidden = !roomId; el('tv-room-tiles').hidden = !!roomId; el('tv-choice-tiles').hidden = !roomId;
     el('tv-selection-title').textContent = room ? room.name : 'Rooms';
     const next = JSON.stringify([snapshot.rooms, snapshot.tvs.map(function(tv) { return [tv.id, tv.name]; }), roomId, tvId]);
@@ -118,18 +131,29 @@ function initializeTvPages() {
     const tv = chosen(); el('tv-remote').setAttribute('aria-disabled', String(!tv));
     el('tv-remote-controls').disabled = !tv || busy; el('tv-back').disabled = !tv || busy;
     if (!tv) {
-      localFailure = null;
-      el('tv-name').textContent = 'Choose a TV'; el('tv-source-tiles').dataset.signature = ''; clear(el('tv-source-tiles')); clear(el('tv-observed')); clear(el('tv-failures'));
+      localFailure = null; volumeDraft = null; volumeEditing = false;
+      el('tv-name').textContent = 'Choose a TV'; el('tv-source-tiles').dataset.signature = ''; clear(el('tv-source-tiles')); clear(el('tv-observed')); clear(el('tv-observed-details')); clear(el('tv-failures'));
       el('tv-command').textContent = ''; el('tv-media').hidden = true; el('tv-media').removeAttribute('href');
+      el('tv-media-unavailable').hidden = false; el('tv-media-unavailable').textContent = 'Select a TV to choose media.';
+      el('tv-volume-level').disabled = true; el('tv-volume-value').textContent = 'Unavailable';
       el('tv-media-help').textContent = 'Select a room and TV to enable the remote.'; return;
     }
     el('tv-name').textContent = tv.name;
     clear(el('tv-observed')); el('tv-observed').appendChild(node('p', status(tv), 'text-muted small mb-2')); el('tv-observed').appendChild(readings(tv));
+    el('tv-observed').dataset.audio = tv.observation && tv.observation.audio || '';
+    clear(el('tv-observed-details')); el('tv-observed-details').appendChild(readings(tv));
     errors(tv, el('tv-failures'));
     if (tv.readError || (tv.observation && tv.observation.command && tv.observation.command.status === 'failed')) el('tv-feedback-details').open = true;
     const freshVolume = observation(tv, 'volume');
-    el('tv-volume-set').disabled = busy || freshVolume.stale || typeof freshVolume.value !== 'number';
-    el('tv-volume-level').disabled = el('tv-volume-set').disabled;
+    const slider = el('tv-volume-level');
+    const volumeAvailable = !freshVolume.stale && typeof freshVolume.value === 'number' && tv.observation.audio !== 'external-unverified';
+    slider.disabled = busy || !volumeAvailable;
+    if (slider.dataset.volumeTv !== tv.id) { volumeDraft = null; volumeEditing = false; slider.dataset.volumeTv = tv.id; }
+    if (!volumeAvailable) { volumeDraft = null; volumeEditing = false; }
+    if (volumeDraft && volumeDraft.tv === tv.id && !volumeEditing && !busy && volumeAvailable && freshVolume.value === volumeDraft.value) volumeDraft = null;
+    if (volumeAvailable && !volumeEditing && !volumeDraft) slider.value = String(freshVolume.value);
+    el('tv-volume-value').textContent = !volumeAvailable ? 'Unavailable' : (volumeDraft ? volumeDraft.value + ' requested' : String(freshVolume.value));
+    slider.setAttribute('aria-valuetext', !volumeAvailable ? 'Volume unavailable or unverified' : (volumeDraft ? 'Requested ' + volumeDraft.value + '; reported ' + freshVolume.value : 'Reported volume ' + freshVolume.value));
     const sources = el('tv-source-tiles');
     const sourceSignature = JSON.stringify([tv.id, tv.sources]);
     if (sources.dataset.signature !== sourceSignature) {
@@ -145,6 +169,8 @@ function initializeTvPages() {
     if (!busy) el('tv-command').textContent = commandState ? 'Requested ' + commandState.operation.replace(/_/g, ' ') + (commandState.requested !== null ? ' ' + commandState.requested : '') + ' · ' + commandState.status + (commandState.status === 'pending' ? ' — awaiting fresh TV feedback' : '') : '';
     if (!busy && localFailure && localFailure.tv === tv.id) el('tv-command').textContent = localFailure.message;
     el('tv-media').hidden = !tv.mediaMapping;
+    el('tv-media-unavailable').hidden = !!tv.mediaMapping;
+    el('tv-media-unavailable').textContent = 'Media not configured for this TV.';
     if (tv.mediaMapping) {
       el('tv-media').href = '/tv-controls/' + encodeURIComponent(tv.id) + '/media';
       el('tv-media-help').textContent = 'Feed input: ' + tv.mediaMapping.source + '. Media does not change TV power or input.';
@@ -152,6 +178,11 @@ function initializeTvPages() {
   }
   function render() {
     if (diagnostic) { renderOverview(); return; }
+    if (initialTv) {
+      const room = snapshot.rooms.find(function(item) { return item.tvIds.indexOf(initialTv) !== -1; });
+      if (room) { roomId = room.id; tvId = initialTv; }
+      initialTv = '';
+    }
     if (!chosen()) tvId = '';
     renderSelection(); renderRemote();
   }
@@ -181,6 +212,7 @@ function initializeTvPages() {
   async function command(action, body) {
     if (busy || !chosen()) return;
     const target = tvId; busy = true; localFailure = null;
+    if (action === 'volume' && body.level === undefined) { volumeDraft = null; volumeEditing = false; }
     el('tv-remote-controls').disabled = true; el('tv-back').disabled = true;
     root.querySelectorAll('#tv-selection button').forEach(function(n) { n.disabled = true; });
     el('tv-command').textContent = 'Sending request — not yet confirmed';
@@ -199,7 +231,32 @@ function initializeTvPages() {
     el('tv-power-off').addEventListener('click', function() { command('power', {state: 'off'}); });
     el('tv-volume-up').addEventListener('click', function() { command('volume', {action: 'up'}); });
     el('tv-volume-down').addEventListener('click', function() { command('volume', {action: 'down'}); });
-    el('tv-volume-form').addEventListener('submit', function(event) { event.preventDefault(); if (el('tv-volume-level').value !== '') command('volume', {level: Number(el('tv-volume-level').value)}); });
+    const slider = el('tv-volume-level');
+    slider.addEventListener('pointerdown', function() { if (!slider.disabled) { volumeGestureTv = tvId; volumeEditing = true; } });
+    slider.addEventListener('input', function() {
+      if (slider.disabled || busy || !chosen() || (volumeGestureTv && volumeGestureTv !== tvId)) return;
+      const level = Number(slider.value);
+      if (!Number.isInteger(level) || level < 0 || level > 100) return;
+      volumeEditing = true; volumeDraft = {tv: tvId, value: level, dirty: true};
+      el('tv-volume-value').textContent = level + ' requested';
+      slider.setAttribute('aria-valuetext', 'Requested volume ' + level);
+    });
+    slider.addEventListener('change', function() {
+      volumeEditing = false;
+      if (slider.disabled || busy || !volumeDraft || !volumeDraft.dirty || volumeDraft.tv !== tvId || (volumeGestureTv && volumeGestureTv !== tvId)) return;
+      volumeDraft.dirty = false;
+      command('volume', {level: volumeDraft.value});
+    });
+    // iOS/WebKit can emit input but no change for a tap on the track.
+    // Commit once after release; the dirty flag deduplicates native change.
+    slider.addEventListener('pointerup', function() {
+      const target = volumeGestureTv;
+      setTimeout(function() {
+        if (target && target === tvId && volumeGestureTv === target) slider.dispatchEvent(new Event('change', {bubbles: true}));
+        volumeGestureTv = '';
+      }, 0);
+    });
+    slider.addEventListener('pointercancel', function() { volumeGestureTv = ''; volumeDraft = null; volumeEditing = false; renderRemote(); });
   }
   document.addEventListener('visibilitychange', function() { if (timer) clearTimeout(timer); if (document.hidden && pendingRead) pendingRead.abort(); if (!document.hidden) poll(); });
   // WebKit can reject a pending read during navigation policy checks,

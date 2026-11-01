@@ -79,9 +79,57 @@ def image_path(filename):
     return path
 
 
+_room_image_lock = threading.RLock()
+
+
+def preview_image_path(filename):
+    """Small local display derivative; preserve the uploaded original."""
+    from PIL import Image
+    original = image_path(filename)
+    with _room_image_lock:
+        folder = images_dir() / 'previews'
+        if folder.is_symlink():
+            raise ValueError('Invalid room preview directory.')
+        folder.mkdir(exist_ok=True)
+        cached = folder / (original.stem + '.jpg')
+        if cached.is_symlink():
+            raise ValueError('Invalid room preview file.')
+        if cached.is_file() and cached.stat().st_mtime_ns >= original.stat().st_mtime_ns:
+            return cached
+        if original.stat().st_size > 10 * 1024 * 1024:
+            raise ValueError('Room image exceeds the image limit.')
+        with Image.open(original) as image:
+            if image.width * image.height > 16_000_000:
+                raise ValueError('Room image exceeds the pixel limit.')
+            image.load()
+            preview = image.convert('RGB')
+            preview.thumbnail((1280, 1280))
+            preview.info.clear()
+            encoded = io.BytesIO()
+            preview.save(encoded, format='JPEG', quality=82, optimize=True, progressive=True)
+        content = encoded.getvalue()
+        if len(content) > 2 * 1024 * 1024:
+            raise ValueError('Room preview exceeds the cache entry limit.')
+        assets = [entry for entry in folder.glob('*.jpg') if entry != cached and re.fullmatch(r'[a-f0-9]{32}\.jpg', entry.name) and entry.is_file() and not entry.is_symlink()]
+        total = sum(entry.stat().st_size for entry in assets)
+        for entry in sorted(assets, key=lambda entry: entry.stat().st_mtime_ns):
+            if total + len(content) <= 16 * 1024 * 1024:
+                break
+            total -= entry.stat().st_size
+            entry.unlink()
+        temporary = folder / (uuid.uuid4().hex + '.tmp')
+        try:
+            with temporary.open('xb') as stream:
+                stream.write(content)
+            temporary.replace(cached)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return cached
+
+
 def background_url(room, layout):
     filename = layout.get('background')
-    return '/tv-room-images/' + quote(room, safe='') + '/' + filename if filename else ''
+    return '/tv-room-images/' + quote(room, safe='') + '/' + filename + '?preview=1' if filename else ''
 
 
 def validate_layouts(value, cfg):
@@ -175,11 +223,13 @@ def register(w):
         if error:
             return error
         snapshot = manager.status()
+        controls = ids('page:tv_controls') if w.can_access('page:tv_controls') else set()
         tvs = []
         for tv in snapshot.get('tvs', []):
             if tv['id'] not in allowed:
                 continue
             item = public_tv(tv)
+            item['canControl'] = tv['id'] in controls
             try:
                 item['mediaMapping'] = mapping(tv['id'])
             except ValueError:
@@ -254,11 +304,12 @@ def register(w):
             if current_layouts(cfg).get(room_id, {}).get('background') != filename:
                 abort(404)
         try:
-            path = image_path(filename)
-        except ValueError:
+            preview = request.args.get('preview') == '1'
+            path = preview_image_path(filename) if preview else image_path(filename)
+        except (ValueError, OSError):
             abort(404)
-        response = send_file(path, mimetype='image/png', conditional=True)
-        response.headers['Cache-Control'] = 'private, no-store'
+        response = send_file(path, mimetype='image/jpeg' if preview else 'image/png', conditional=True)
+        response.headers['Cache-Control'] = 'private, no-cache'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         return response
     tv_room_image._required_any_page_keys = ('page:config', 'page:tv_controls', 'page:tv_diagnostics')
@@ -302,7 +353,10 @@ def register(w):
     @app.get('/tv-controls')
     @w.require_page('page:tv_controls', 'TV Controls')
     def tv_controls():
-        return w.render_template('tv_pages.html', diagnostics=False)
+        selected_tv = request.args.get('tv', '')
+        if selected_tv:
+            authorize(selected_tv)
+        return w.render_template('tv_pages.html', diagnostics=False, selected_tv=selected_tv)
 
     @app.get('/api/tv-pages/state')
     def tv_page_state():
