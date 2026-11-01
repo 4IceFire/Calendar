@@ -49,7 +49,7 @@ Dedicated saves and config imports share validation; imports persist the canonic
 
 ## Feedback and soundbars
 
-The installed dependency inspected during implementation was **pyvidaa 2.1.0**. Its original `get_state` and `get_volume` can return cached values after a timeout; its volume handler does not forward volume broadcasts through `on_state_change`. The adapter in `vidaa_observed.py` observes actual MQTT receipts, including unchanged repeated reports, instead. Cached getter fallbacks do not renew field timestamps or confirm commands. Old connection-generation callbacks are ignored.
+The installed dependency inspected during implementation was **pyvidaa 2.1.0**. Its original `get_state` and `get_volume` can return cached values after a timeout; its volume handler does not forward volume broadcasts through `on_state_change`. The adapter in `vidaa_observed.py` separates fresh MQTT receipts from explicit TV-broker snapshot queries. Cached getter fallbacks and retained subscription replays do not renew physical-field timestamps or confirm commands. Retained last-reported values carry `provenance: broker_retained` with an unknown physical sample time; a recent live observation takes precedence. Both replaced-client generations and reconnects of the same Paho client invalidate outstanding read waits.
 
 - Main-speaker type-0 numeric reports in the supported 0–100 scale provide numeric volume.
 - Mute-only reports do not renew numeric volume freshness.
@@ -66,6 +66,21 @@ Primary-source cross-check: `warrenrees/pyvidaa`'s `pyvidaa/client.py` agrees wi
 One serialized worker per TV owns push feedback and hardware reads. Commands receive immediate bounded readback; visible pages keep a five-second shared fast-poll lease with a two-second scheduling target. Idle polling uses the existing configured cadence. Browsers normally refresh the shared snapshot once a second and stop while hidden; opening more browsers does not create more hardware pollers. Read timeouts and reconnect attempts can lengthen device latency. Field observations become stale after 15 seconds; requests without matching fresh feedback become mismatch/unconfirmed after 15 seconds. No universal near-live latency is promised.
 
 Intentional-off TVs stay quiet on startup and while idle. While an observation page holds the shared fast-poll lease they are checked read-only, without waking them, so a fresh physical-remote on report can clear the intentional-off marker. Requests/observation/failure metadata are process/manager-local. Bounded per-TV failures (ten entries, repeated read failures deduplicated) remain separate from healthy polls. Activity Log records attributed terminal commands and read failure/recovery transitions; it survives manager replacement/restarts.
+
+## Power control and observation are separate
+
+A stricter telemetry getter must not silently remove the older control path. Native power decisions use `get_power_state()` to request the TV broker's current last-reported state, including firmware that ignores `gettvstate` but replays its retained state on subscription. This is a control precondition, not a new physical sample. Ordinary state/volume reads remain strict, and broker snapshots cannot confirm a requested command.
+
+- **On, reported already on:** no power key or wake packet is needed. A retained reply still does not constitute fresh physical confirmation.
+- **On, connected and explicitly reported standby:** `wake_from_standby()` requires a minimum two-second continuous reported-standby interval measured from receipt time, waits outside the controller/transport locks, and re-queries after waiting. It revalidates the transport epoch, latest snapshot and receipt ordering under the publication lock before at most one `KEY_POWER`. This preserves the MQTT wake path used by the older controller without a blind toggle or invented freshness. The same guard is used after a pending WoL request reconnects to a TV still reporting standby.
+- **On, unknown/unreachable:** use the existing Wake-on-LAN sender; never substitute an unguarded power key. Unknown, authentication, error and source-only packets cannot authorize a key. A successful socket send proves dispatch only, not wake.
+- **Uncertain key publication:** consume the attempt even if publication fails or raises, including when fallback WoL also fails. Pending expiry, reconnects, repeated polls and new On requests do not rearm the toggle. Rearming requires a live On receipt or a successful explicit Off intent, not a retained replay. Guarded wake outcomes distinguish `sent`, `attempted_failed`, `already_on` and `unknown` explicitly.
+- **Authentication and in-flight replies:** a real authentication-required topic invalidates authorization while its inherited parser is still running. Both power guards check authoritative authentication readiness and latest receipt/parser completion under the final publication lock; an already-arrived contrary or unparsed power message cannot be bypassed.
+- **Off:** request a broker snapshot and, under the publication lock, revalidate against newer standby/error receipts before sending at most one key. Already-reported standby is a no-op. Wait at most 1.5 seconds for a non-retained standby event; accepted dispatch without that event remains unconfirmed.
+
+Retained On replay never clears persisted intentional-off state or overrides recent live Off in the legacy/Companion projection. A live physical On report or an explicit operator On action can clear intentional-off state. Companion and browser routes still share the same serialized controller; the module does not have an independent WoL implementation. Keep the existing UDP sender, saved MACs, pairing identities and API action/target contracts unchanged.
+
+These guards have isolated regression coverage, not a claim of completed site commissioning. An observable, separately approved physical test is required before describing the repaired On/Off workflow as working on a particular TV. Preserve the owner's chosen production branch until a tested release is explicitly approved.
 
 ## API and development boundaries
 

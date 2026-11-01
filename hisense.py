@@ -873,16 +873,25 @@ class HisenseTvController:
         ))
         try:
             client = self._client
-            state_payload = client.get_state(timeout=2.0) if client is not None else None
+            getter = (client.get_power_state if client is not None
+                      and callable(getattr(type(client), 'get_power_state', None))
+                      else client.get_state if client is not None else None)
+            state_payload = getter(timeout=2.0) if getter is not None else None
             if not isinstance(state_payload, dict) or not state_payload:
                 raise RuntimeError("TV returned no state data")
+            retained = state_payload.get('_tdeck_retained') is True
+            if retained:
+                self._on_state_change(state_payload)
             with self._lock:
-                self._state.update({"lastSeen": time.time(), "connected": True, "lastError": ""})
+                self._state.update({"connected": True, "lastError": ""})
+                if not retained:
+                    self._state['lastSeen'] = time.time()
             checks.append(self._preflight_check(
                 "capability-read",
                 "Harmless state read",
                 "pass",
-                "Authenticated TV state was read without changing power, volume, mute, or source",
+                "TV broker last-reported state was read; its physical sample time is unknown"
+                if retained else "Authenticated TV state was read without changing power, volume, mute, or source",
             ))
         except Exception:
             self._set_error("Authenticated state read failed")
@@ -1068,6 +1077,7 @@ class HisenseTvController:
 
     def _mark_powered_off(self) -> None:
         self._clear_pending_power_on()
+        self._power_key_sent = False  # Successful explicit OFF starts a different intent.
         self._set_expected_off(True)
         self._disconnect(clear_error=True)
 
@@ -1075,7 +1085,8 @@ class HisenseTvController:
         self._pending_power_on = False
         self._power_on_started = 0.0
         self._last_wake_attempt = 0.0
-        self._power_key_sent = False
+        # Pending-request bookkeeping is not evidence a toggle did not execute.
+        # Keep the consumed key across failed WoL, expiry, and reconnect.
 
     def _send_wake_packets(self) -> bool:
         if not self.config.mac or self._wake is None:
@@ -1086,6 +1097,37 @@ class HisenseTvController:
             return bool(self._wake(self.config.mac, subnet))
         except Exception:
             return False
+
+    def _try_power_on_key(self, client, state) -> str:
+        guarded = callable(getattr(type(client), 'wake_from_standby', None))
+        with self._lock:
+            if self._power_key_sent or not self._pending_power_on:
+                return 'unknown'
+            if guarded:
+                # Reserve before I/O: a live On callback may complete while
+                # the helper returns, and its rearm must remain authoritative.
+                self._power_key_sent = True
+        if guarded:
+            try:
+                outcome = client.wake_from_standby(cancelled=lambda: (
+                    self._stop.is_set() or not self._pending_power_on or self._client is not client))
+            except Exception:
+                outcome = 'attempted_failed'
+            if outcome in ('unknown', 'already_on'):
+                # These outcomes explicitly guarantee no key was attempted.
+                with self._lock:
+                    self._power_key_sent = False
+            return outcome
+        if (not getattr(type(client), 'strict_observations', False)
+                and not getattr(type(client), 'wake_uses_wol', False)
+                and state.get('statetype') == 'fake_sleep_0'
+                and state.get('_tdeck_retained') is not True):
+            self._power_key_sent = True  # Consume uncertain/failed publishes too.
+            try:
+                return 'sent' if client.send_key('KEY_POWER') else 'attempted_failed'
+            except Exception:
+                return 'attempted_failed'
+        return 'unknown'
 
     def _begin_power_on(self) -> bool:
         self._set_expected_off(False)
@@ -1100,20 +1142,27 @@ class HisenseTvController:
         observed_state: dict[str, Any] = {}
         if client is not None:
             try:
-                observed_state = client.get_state(timeout=2.0) or {}
+                getter = (client.get_power_state if callable(getattr(type(client), 'get_power_state', None))
+                          else client.get_state)
+                observed_state = getter(timeout=2.0) or {}
+                if observed_state and (observed_state.get('_tdeck_retained') is True
+                                       or not getattr(type(client), 'strict_observations', False)):
+                    self._on_state_change(observed_state)
             except Exception:
                 observed_state = {}
 
-        if observed_state and observed_state.get("statetype") != "fake_sleep_0":
+        state_type = observed_state.get('statetype')
+        if isinstance(state_type, str) and state_type and not state_type.lower().startswith(('auth', 'error')) and state_type != "fake_sleep_0":
             self._clear_pending_power_on()
             with self._lock:
                 self._state.update({
                     "connected": True,
-                    "power": "on",
                     "lastError": "",
-                    "lastSeen": time.time(),
                     "compatibilityStatus": "Connected",
                 })
+                if observed_state.get('_tdeck_retained') is not True:
+                    self._state['power'] = 'on'
+                    self._state['lastSeen'] = time.time()
             return True
 
         if not self.config.mac:
@@ -1122,18 +1171,10 @@ class HisenseTvController:
         self._pending_power_on = True
         self._power_on_started = time.monotonic()
         self._last_wake_attempt = self._power_on_started
-        self._power_key_sent = False
-        command_sent = False
-
-        # KEY_POWER is a toggle on these TVs. It is safe only after this same
-        # connection has explicitly reported standby; an empty/timed-out state
-        # must fall back to Wake-on-LAN instead.
-        if client is not None and observed_state.get("statetype") == "fake_sleep_0":
-            try:
-                command_sent = bool(client.send_key("KEY_POWER"))
-                self._power_key_sent = command_sent
-            except Exception:
-                command_sent = False
+        outcome = self._try_power_on_key(client, observed_state) if client is not None else 'unknown'
+        command_sent = outcome in ('sent', 'already_on')
+        if outcome == 'already_on':
+            self._clear_pending_power_on()
 
         if not command_sent:
             command_sent = self._send_wake_packets()
@@ -1164,15 +1205,16 @@ class HisenseTvController:
         try:
             client = self._ensure_connected()
             state = client.get_state(timeout=2.0) or {}
+            if (not state and self._pending_power_on
+                    and callable(getattr(type(client), 'get_power_state', None))):
+                state = client.get_power_state(timeout=1.0) or {}
+                if state.get('_tdeck_retained') is True:
+                    self._on_state_change(state)
             if not getattr(type(client), 'strict_observations', False):
                 self._on_state_change(state)
             if self._pending_power_on and state:
                 if state.get("statetype") == "fake_sleep_0":
-                    if not self._power_key_sent:
-                        # The fresh state above proves the TV is off, so one
-                        # toggle-key command is safe. Never retry it without a
-                        # new explicit standby observation.
-                        self._power_key_sent = bool(client.send_key("KEY_POWER"))
+                    self._try_power_on_key(client, state)
                 else:
                     self._clear_pending_power_on()
             volume = client.get_volume(timeout=2.0)
@@ -1255,20 +1297,26 @@ class HisenseTvController:
             with self._lock:
                 self._state['volume'] = self.observation.fields['volume']['value']
             return
+        retained = state.get('_tdeck_retained') is True
         # Authentication/status metadata is not evidence of physical power.
         if state.get('statetype') and state['statetype'] not in ('authentication', 'error'):
-            self.observation.report('power', 'off' if state['statetype'] == 'fake_sleep_0' else 'on')
-            if state['statetype'] != 'fake_sleep_0' and self._is_expected_off():
+            self.observation.report('power', 'off' if state['statetype'] == 'fake_sleep_0' else 'on', retained=retained)
+            if not retained and state_type != 'fake_sleep_0' and state_type.lower() != 'unknown':
+                self._power_key_sent = False  # A physical ON receipt ends the consumed wake cycle.
+            if not retained and state['statetype'] != 'fake_sleep_0' and self._is_expected_off():
                 self._set_expected_off(False)
         if state.get('sourceid') or state.get('sourcename'):
-            self.observation.report('source', str(state.get('sourceid') or state.get('sourcename')))
-        updates: dict[str, Any] = {"lastSeen": time.time(), "connected": True}
+            self.observation.report('source', str(state.get('sourceid') or state.get('sourcename')), retained=retained)
+        fields = self.observation.snapshot()['fields']
+        updates: dict[str, Any] = {"connected": True}
+        if not retained:
+            updates['lastSeen'] = time.time()
         if state.get("statetype"):
-            updates["power"] = "off" if state.get("statetype") == "fake_sleep_0" else "on"
-            if state.get("statetype") != "fake_sleep_0":
+            updates["power"] = fields['power']['value']
+            if fields['power']['value'] == 'on':
                 self._clear_pending_power_on()
         if state.get("sourceid") or state.get("sourcename"):
-            updates["source"] = str(state.get("sourceid") or state.get("sourcename"))
+            updates["source"] = fields['source']['value']
         with self._lock:
             if self._state.get("expectedOff"):
                 updates.update({
@@ -1360,7 +1408,7 @@ class HisenseTvController:
                 pending = bool(status.get("powerOnPending"))
                 command.result.update({
                     "pending": pending,
-                    "confirmed": bool(not pending and status.get("power") == "on"),
+                    "confirmed": confirmed,
                 })
         except Exception as exc:
             self.observation.failure(command.action)

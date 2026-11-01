@@ -22,10 +22,18 @@ class Observation:
         self.failures = []
         self.audio = 'unknown'
 
-    def report(self, field, value, *, at=None):
+    def report(self, field, value, *, at=None, retained=False):
         at = time.time() if at is None else at
         with self.lock:
             previous = self.fields[field]['sampledAt']
+            if retained:
+                # A subscription replay has no producer timestamp. Keep a recent
+                # real sample; otherwise expose the broker's value as last-known.
+                # Neither case advances freshness or confirms an operation.
+                if previous is None or at - previous > 15:
+                    self.fields[field] = {'value': value, 'sampledAt': None,
+                                          'provenance': 'broker_retained'}
+                return
             if previous is not None and at < previous:
                 return
             self.fields[field] = {'value': value, 'sampledAt': at}
@@ -49,20 +57,21 @@ class Observation:
         at = time.time() if at is None else at
         kind = payload.get('volume_type', 0)
         value = next((payload[key] for key in ('volume_value', 'volume', 'value') if key in payload), None)
+        retained = payload.get('_tdeck_retained') is True
         if kind == 2:
             if value in (0, 1):
-                self.report('muted', value == 1, at=at)
+                self.report('muted', value == 1, at=at, retained=retained)
             return
         with self.lock:
             previous = self.fields['volume']['sampledAt']
-            if previous is not None and at < previous:
+            if previous is not None and (at < previous or (retained and at - previous <= 15)):
                 return
             if kind != 0:
                 self.audio = 'external-unverified'
-                self.report('volume', None, at=at)
+                self.report('volume', None, at=at, retained=retained)
             elif main_volume(payload) is not None:
                 self.audio = 'tv-speaker'
-                self.report('volume', main_volume(payload), at=at)
+                self.report('volume', main_volume(payload), at=at, retained=retained)
 
     def request(self, operation, value, *, at=None):
         field, desired = {'power_on': ('power', 'on'), 'power_off': ('power', 'off'),

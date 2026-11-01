@@ -177,6 +177,33 @@ class HisensePreflightTests(unittest.TestCase):
         self.assertTrue(any(read[0] == "state" for read in client.reads))
         self.assertEqual(client.mutations, [])
 
+    def test_broker_snapshot_preflight_is_ready_without_fabricating_fresh_power(self):
+        class SnapshotVidaa(_ReadOnlyVidaa):
+            strict_observations = True
+            def get_state(self, timeout=0):
+                return None
+            def get_power_state(self, timeout=0):
+                self.reads.append(('snapshot', timeout))
+                return {'statetype': 'sourceswitch', 'sourceid': 'HDMI1',
+                        '_tdeck_retained': True}
+        manager = self._manager(client_factory=SnapshotVidaa)
+        try:
+            controller = manager.get('diagnostic-tv')
+            self.assertTrue(controller._connect())
+            before = controller.status()['lastSeen']
+            controller.observation.request('power_on', None)
+            report = controller._run_preflight()
+            status = controller.status()
+            client = SnapshotVidaa.instances[-1]
+        finally:
+            manager.close()
+        self.assertTrue(report['ready'], report)
+        self.assertIn('last-reported', self._check(report, 'capability-read')['detail'])
+        self.assertEqual(status['lastSeen'], before)
+        self.assertIsNone(status['observation']['fields']['power']['sampledAt'])
+        self.assertEqual(status['observation']['command']['status'], 'pending')
+        self.assertEqual(client.mutations, [])
+
     def test_unreachable_tv_skips_authentication(self):
         manager = self._manager(protocol=1000, reachable=False)
         try:
