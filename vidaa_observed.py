@@ -167,6 +167,10 @@ class ObservedVidaaTV(VidaaTV):
                 self._standby_event.set()
             # Mute/alternate-audio observations do not complete main-volume reads.
             if kind == 'volume' and main_volume(payload) is None:
+                if payload.get('volume_type', 0) != 2:
+                    # A new non-main/invalid level revokes a captured numeric
+                    # precondition; mute-only feedback leaves it unchanged.
+                    self._receipts['volume'] = None
                 return
             if serial > self._read_starts[kind]:
                 self._receipts[kind] = payload
@@ -295,6 +299,31 @@ class ObservedVidaaTV(VidaaTV):
         if not state or not state.get('statetype'):
             return None
         return state
+
+    def volume_up(self):
+        return self.adjust_volume(1)
+
+    def volume_down(self):
+        return self.adjust_volume(-1)
+
+    def adjust_volume(self, step, *, before_write=lambda baseline, target: None, timeout=2.0):
+        """Use fresh main-speaker feedback; accepted volume keys can be ignored."""
+        epoch = self._transport_epoch
+        level = self.get_volume(timeout=timeout)
+        with self._transport_lock:
+            if (epoch != self._transport_epoch or not self._connected
+                    or self._auth_inflight or self.needs_authentication()):
+                return False
+            if level is None:
+                # Preserve existing external/unknown-volume key passthrough,
+                # without inventing a numeric target or a confirmation baseline.
+                before_write(None, None)
+                return self.send_key('KEY_VOLUMEUP' if step > 0 else 'KEY_VOLUMEDOWN')
+            if main_volume(self._receipts['volume'] or {}) != level:
+                return False
+            target = max(0, min(100, level + step))
+            before_write(level, target)
+            return self.set_volume(target)
 
     def get_volume(self, timeout=2.0):
         payload = self._fresh('volume', TOPIC_GET_VOLUME, timeout)

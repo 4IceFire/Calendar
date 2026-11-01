@@ -1336,7 +1336,7 @@ class HisenseTvController:
         try:
             action, value = command.action, command.value
             if action not in ('preflight', 'pair_request', 'pair_submit', 'reconnect'):
-                self.observation.request(action, value)
+                self.observation.request(action, value, defer_confirmation=action in ('volume_up', 'volume_down'))
                 self.fast_until = time.monotonic() + 20
             if action == "preflight":
                 report = self._run_preflight()
@@ -1377,10 +1377,15 @@ class HisenseTvController:
                 elif action == "volume_set":
                     level = max(0, min(100, int(value)))
                     ok = bool(client.set_volume(level))
-                elif action == "volume_up":
-                    ok = bool(client.volume_up())
-                elif action == "volume_down":
-                    ok = bool(client.volume_down())
+                elif action in ('volume_up', 'volume_down'):
+                    if callable(getattr(type(client), 'adjust_volume', None)):
+                        ok = bool(client.adjust_volume(
+                            1 if action == 'volume_up' else -1,
+                            before_write=self.observation.volume_dispatch))
+                    else:
+                        # Keep third-party/fake clients' existing relative controls.
+                        self.observation.request(action, value)
+                        ok = bool(getattr(client, action)())
                 elif action == "mute":
                     ok = bool(client.mute())
                 elif action == "source":

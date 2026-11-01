@@ -38,12 +38,15 @@ class Observation:
                 return
             self.fields[field] = {'value': value, 'sampledAt': at}
             cmd = self.command
-            if cmd and cmd['status'] == 'pending' and cmd['field'] == field and at > cmd['requestedAt']:
+            if (cmd and not cmd.get('awaitingDispatch') and cmd['status'] == 'pending'
+                    and cmd['field'] == field and at > cmd['requestedAt']):
                 if ((cmd['operation'] in ('volume_up', 'volume_down') and cmd.get('baseline') is None)
                         or (cmd['operation'] == 'mute' and cmd['requested'] is None)):
                     return
                 cmd['observedAt'] = at
-                if cmd['operation'] in ('volume_up', 'volume_down'):
+                if 'target' in cmd:
+                    cmd['matches'] = value == cmd['target']
+                elif cmd['operation'] in ('volume_up', 'volume_down'):
                     baseline = cmd.get('baseline')
                     direction = 1 if cmd['operation'] == 'volume_up' else -1
                     cmd['matches'] = (baseline is not None and isinstance(value, (int, float))
@@ -73,7 +76,7 @@ class Observation:
                 self.audio = 'tv-speaker'
                 self.report('volume', main_volume(payload), at=at, retained=retained)
 
-    def request(self, operation, value, *, at=None):
+    def request(self, operation, value, *, at=None, defer_confirmation=False):
         field, desired = {'power_on': ('power', 'on'), 'power_off': ('power', 'off'),
                           'volume_set': ('volume', value), 'source': ('source', value),
                           'volume_up': ('volume', None), 'volume_down': ('volume', None),
@@ -89,6 +92,15 @@ class Observation:
                             'requestedAt': at, 'status': 'pending'}
             if operation in ('volume_up', 'volume_down'):
                 self.command['baseline'] = baseline
+                if defer_confirmation:
+                    self.command['awaitingDispatch'] = True
+
+    def volume_dispatch(self, baseline, target):
+        """Arm only after the native pre-read, immediately before its one write."""
+        with self.lock:
+            if self.command and self.command.get('awaitingDispatch'):
+                self.command.update({'awaitingDispatch': False, 'baseline': baseline,
+                                     'target': target, 'requestedAt': time.time()})
 
     def failure(self, operation, *, at=None):
         with self.lock:

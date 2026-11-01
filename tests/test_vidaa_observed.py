@@ -23,6 +23,24 @@ class PowerSnapshotTests(unittest.TestCase):
         self.tv._on_message(self.broker if client is None else client, None,
                             SimpleNamespace(topic=topic, payload=json.dumps(payload).encode(), retain=retained))
 
+    def test_relative_volume_uses_fresh_main_level_and_absolute_write_not_ignored_key(self):
+        from pyvidaa.topics import TOPIC_GET_VOLUME, TOPIC_SET_VOLUME
+        level = [0]
+        def publish(topic, payload):
+            if topic == get_topic(TOPIC_GET_VOLUME, 'fixture'):
+                self.receipt({'volume_type': 0, 'volume_value': level[0]},
+                             topic='/remoteapp/mobile/broadcast/ui_service/volume')
+            elif topic == get_topic(TOPIC_SET_VOLUME, 'fixture'):
+                level[0] = int(payload)
+            # The commissioned firmware accepts but ignores volume keys.
+            return SimpleNamespace(rc=0)
+        self.broker.publish.side_effect = publish
+        self.assertTrue(self.tv.volume_up())
+        self.assertEqual(level[0], 1)
+        self.assertTrue(self.tv.volume_down())
+        self.assertEqual(level[0], 0)
+        self.assertEqual([c.args[1] for c in self.broker.publish.call_args_list], ['', '1', '', '0'])
+
     def test_guarded_wake_revalidates_newer_source_only_under_publication_lock(self):
         self.broker.subscribe.side_effect = lambda _: (self.receipt({'statetype': 'fake_sleep_0'}, retained=True) or (0, 1))
         with patch('vidaa_observed.time.monotonic', return_value=100) as clock:
