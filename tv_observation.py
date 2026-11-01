@@ -31,8 +31,17 @@ class Observation:
             self.fields[field] = {'value': value, 'sampledAt': at}
             cmd = self.command
             if cmd and cmd['status'] == 'pending' and cmd['field'] == field and at > cmd['requestedAt']:
+                if ((cmd['operation'] in ('volume_up', 'volume_down') and cmd.get('baseline') is None)
+                        or (cmd['operation'] == 'mute' and cmd['requested'] is None)):
+                    return
                 cmd['observedAt'] = at
-                cmd['matches'] = value == cmd['requested']
+                if cmd['operation'] in ('volume_up', 'volume_down'):
+                    baseline = cmd.get('baseline')
+                    direction = 1 if cmd['operation'] == 'volume_up' else -1
+                    cmd['matches'] = (baseline is not None and isinstance(value, (int, float))
+                                      and not isinstance(value, bool) and direction * (value - baseline) > 0)
+                else:
+                    cmd['matches'] = value == cmd['requested']
                 if cmd['matches'] and value is not None:
                     cmd['status'] = 'confirmed'
 
@@ -57,10 +66,20 @@ class Observation:
 
     def request(self, operation, value, *, at=None):
         field, desired = {'power_on': ('power', 'on'), 'power_off': ('power', 'off'),
-                          'volume_set': ('volume', value), 'source': ('source', value)}.get(operation, (None, None))
+                          'volume_set': ('volume', value), 'source': ('source', value),
+                          'volume_up': ('volume', None), 'volume_down': ('volume', None),
+                          'mute': ('muted', None)}.get(operation, (None, None))
+        at = time.time() if at is None else at
         with self.lock:
+            previous = self.fields.get(field) or {}
+            stamp = previous.get('sampledAt')
+            baseline = previous.get('value') if stamp is not None and 0 <= at - stamp <= 15 else None
+            if operation == 'mute' and isinstance(baseline, bool):
+                desired = not baseline
             self.command = {'operation': operation, 'field': field, 'requested': desired,
-                            'requestedAt': time.time() if at is None else at, 'status': 'pending'}
+                            'requestedAt': at, 'status': 'pending'}
+            if operation in ('volume_up', 'volume_down'):
+                self.command['baseline'] = baseline
 
     def failure(self, operation, *, at=None):
         with self.lock:

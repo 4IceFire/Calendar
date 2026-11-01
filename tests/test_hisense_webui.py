@@ -97,6 +97,13 @@ class HisenseWebApiTests(unittest.TestCase):
         self.addCleanup(self.log.stop)
         self.client = webui.app.test_client()
 
+    def test_feedback_log_keeps_safe_failure_reason_not_transport_secrets(self):
+        for reason, expected in (('feedback_timeout', 'feedback_timeout'), ('password=PRIVATE', 'feedback_failed')):
+            webui._hisense_worker_outcome('status_read', 'test-tv', {'ok': False, 'reason': reason, 'error': 'token=PRIVATE'}, {'source': 'system'})
+            details = self.log_event.call_args.kwargs.get('details') or {}
+            self.assertEqual(details.get('reason'), expected)
+            self.assertNotIn('PRIVATE', str(self.log_event.call_args))
+
     def test_page_status_and_controls(self):
         page = self.client.get("/config/tvs")
         self.assertEqual(page.status_code, 200)

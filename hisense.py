@@ -315,6 +315,8 @@ class HisenseTvController:
         self.fast_until = 0.0
         self.visible_until = 0.0
         self._read_failure = False
+        self._read_failure_reason = ''
+        self._read_outcome_generation = 0
         self.outcome_callback = None
         self.actor_provider = None
         self._client_factory = client_factory or VidaaTV
@@ -325,6 +327,7 @@ class HisenseTvController:
             else (detect_protocol if client_factory is None else None)
         )
         self._reachability_probe = reachability_probe or _tcp_reachability_probe
+        self._check_connect_reachability = client_factory is None or reachability_probe is not None
         self._expected_off_callback = expected_off_callback
         self._client: Any = None
         self._client_generation = 0
@@ -399,6 +402,7 @@ class HisenseTvController:
             **state,
             "observation": self.observation.snapshot(),
             "readFailure": self._read_failure,
+            "readFailureReason": self._read_failure_reason,
         }
 
     def submit(self, action: str, value: Any = None, *, wait: float = 0.0) -> dict[str, Any]:
@@ -959,6 +963,13 @@ class HisenseTvController:
             return False
         self._last_connect_attempt = time.monotonic()
         self._disconnect(clear_error=False)
+        if self._check_connect_reachability and not self._reachability()[0]:
+            if not self._is_expected_off():
+                self._set_error('TV control port is unreachable. Check power, network and configured IP before pairing.')
+                with self._lock:
+                    self._state['compatibilityStatus'] = 'Unreachable'
+                self._read_outcome(True, 'control_unreachable')
+            return False
         protocol_version = self._detect_protocol_version()
         profiles = self._certificate_candidates(protocol_version)
         if not profiles:
@@ -1147,6 +1158,9 @@ class HisenseTvController:
 
     def _poll(self, *, full: bool = False) -> None:
         self._last_poll = time.monotonic()
+        read_started = time.time()
+        client = None
+        read_outcome_generation = self._read_outcome_generation
         try:
             client = self._ensure_connected()
             state = client.get_state(timeout=2.0) or {}
@@ -1162,17 +1176,19 @@ class HisenseTvController:
                 else:
                     self._clear_pending_power_on()
             volume = client.get_volume(timeout=2.0)
-            read_failure = not state and volume is None
             if not getattr(type(client), 'strict_observations', False) and isinstance(volume, (int, float)):
                 self.observation.volume({'volume_value': volume})
+            fields = self.observation.snapshot()['fields']
+            received = any(field['sampledAt'] is not None and field['sampledAt'] >= read_started for field in fields.values())
+            read_failure = not state and volume is None and not received
             updates: dict[str, Any] = {
-                "power": "off" if state.get("statetype") == "fake_sleep_0" else ("on" if state else "unknown"),
                 "volume": volume,
                 "muted": bool(getattr(client, "is_muted", False)),
-                "lastSeen": time.time(),
                 "lastError": "",
                 "connected": True,
             }
+            if received:
+                updates["lastSeen"] = max(field["sampledAt"] or 0 for field in fields.values())
             if self._pending_power_on:
                 updates["compatibilityStatus"] = "Power on requested; awaiting TV confirmation"
             elif state:
@@ -1187,21 +1203,31 @@ class HisenseTvController:
                 info = client.get_device_info(timeout=2.0) or client.get_tv_info(timeout=2.0) or {}
                 updates["model"] = str(info.get("model_name") or info.get("modelName") or info.get("model") or "")
             with self._lock:
+                if "lastSeen" in updates:
+                    updates["lastSeen"] = max(self._state.get("lastSeen") or 0, updates["lastSeen"])
                 self._state.update(updates)
             self._read_outcome(read_failure)
-        except Exception as exc:
-            self._read_outcome(True)
-            self._set_error(str(exc))
+        except Exception:
+            # Only preserve an explicit diagnosis made during this attempt.
+            diagnosed = (client is None
+                         and self._read_outcome_generation != read_outcome_generation
+                         and self._read_failure_reason == 'control_unreachable')
+            if not diagnosed:
+                self._read_outcome(True, 'connection_failed' if client is None else 'feedback_error')
+                self._set_error('TV feedback request failed; check connection or setup')
             self._disconnect(clear_error=False)
 
-    def _read_outcome(self, failed: bool) -> None:
-        changed = failed != self._read_failure
+    def _read_outcome(self, failed: bool, reason: str = 'feedback_timeout') -> None:
+        self._read_outcome_generation += 1
+        reason = reason if failed else ''
+        changed = failed != self._read_failure or reason != self._read_failure_reason
         self._read_failure = failed
+        self._read_failure_reason = reason
         if failed and changed:
             self.observation.failure('status_read')
         if changed and self.outcome_callback:
             try:
-                self.outcome_callback('status_read', self.config.id, {'ok': not failed}, {'source': 'system'})
+                self.outcome_callback('status_read', self.config.id, {'ok': not failed, 'reason': reason}, {'source': 'system'})
             except Exception:
                 pass
 
@@ -1219,7 +1245,10 @@ class HisenseTvController:
         return result or list(DEFAULT_SOURCES)
 
     def _on_state_change(self, state: dict[str, Any]) -> None:
-        if not isinstance(state, dict):
+        if not isinstance(state, dict) or not state:
+            return
+        state_type = state.get('statetype')
+        if state_type is not None and (not isinstance(state_type, str) or state_type.lower().startswith('auth') or state_type.lower() == 'error'):
             return
         if state.get('_tdeck_volume'):
             self.observation.volume(state)

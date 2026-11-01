@@ -10771,8 +10771,12 @@ def _capture_hisense_actor():
 def _hisense_worker_outcome(action, tv_id, result, actor):
     result = result or {}
     if action == 'status_read':
+        reason = result.get('reason')
+        if reason not in ('feedback_timeout', 'feedback_error', 'connection_failed', 'control_unreachable'):
+            reason = 'feedback_failed'
         log_event('hisense.feedback', f'TV {tv_id}: feedback ' + ('recovered' if result.get('ok') else 'read failed'),
-                  status='info' if result.get('ok') else 'failure', target_type='hisense_tv', target_id=tv_id, **actor)
+                  status='info' if result.get('ok') else 'failure', target_type='hisense_tv', target_id=tv_id,
+                  details={'reason': 'recovered' if result.get('ok') else reason}, **actor)
         return
     observation = (result.get('tv') or {}).get('observation') or {}
     command = observation.get('command') or {}

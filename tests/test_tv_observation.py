@@ -3,6 +3,33 @@ from tv_observation import Observation
 
 
 class ObservationTests(unittest.TestCase):
+    def test_relative_volume_and_mute_confirm_from_fresh_matching_feedback(self):
+        for operation, field, before, after in (
+            ('volume_up', 'volume', 20, 22),
+            ('volume_down', 'volume', 20, 18),
+            ('mute', 'muted', False, True),
+        ):
+            with self.subTest(operation=operation):
+                state = Observation()
+                state.report(field, before, at=10)
+                state.request(operation, None, at=11)
+                state.report(field, after, at=12)
+                self.assertEqual(state.snapshot(now=13)['command']['status'], 'confirmed')
+
+    def test_relative_commands_with_unknown_or_stale_baselines_stay_unconfirmed(self):
+        for operation, field, initial, report in (
+            ('volume_up', 'volume', 20, 21), ('volume_down', 'volume', 20, 19),
+            ('mute', 'muted', False, True),
+        ):
+            for stamp in (None, 10):
+                with self.subTest(operation=operation, stamp=stamp):
+                    state = Observation()
+                    if stamp is not None:
+                        state.report(field, initial, at=stamp)
+                    state.request(operation, None, at=40)
+                    state.report(field, report, at=41)
+                    self.assertEqual(state.snapshot(now=60)['command']['status'], 'unconfirmed')
+
     def test_old_audio_report_cannot_change_newer_audio_classification(self):
         state = Observation()
         state.volume({'volume_type': 1, 'volume_value': 44}, at=20)
