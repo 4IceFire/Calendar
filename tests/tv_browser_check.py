@@ -93,12 +93,26 @@ def main():
             page.get_by_role('button', name='Sign in', exact=True).click()
             page.wait_for_url('**/tv-controls')
             phase[0] = 'controls'
-            expect(page.locator('#tv-room option[value=ground]')).to_have_count(1)
+            expect(page.locator('[data-room=ground]')).to_be_visible()
+            if not device:
+                expect(page.locator('#tv-remote')).to_be_visible()
+                expect(page.locator('#tv-power-on')).to_be_disabled()
+            else:
+                expect(page.locator('#tv-remote')).not_to_be_visible()
+            capture(page, output / (name + '-room-tiles.png'))
             assert context.request.get(base + '/__tv_fixture').json()['commands']['foyer'] == []
-            page.select_option('#tv-room', 'ground')
-            page.select_option('#tv-choice', 'foyer')
+            page.locator('[data-room=ground]').click()
+            expect(page.locator('[data-tv=private]')).to_have_count(0)
+            page.locator('[data-tv=foyer]').click()
             expect(page.locator('#tv-remote')).to_be_visible()
-            expect(page.locator('#tv-choice option[value=private]')).to_have_count(0)
+            expect(page.locator('#tv-pages select')).to_have_count(0)
+            page.locator('#tv-back').click()
+            expect(page.locator('[data-tv=foyer]')).to_be_visible()
+            page.locator('#tv-selection-back').click()
+            expect(page.locator('[data-room=ground]')).to_be_visible()
+            page.locator('[data-room=ground]').click()
+            page.locator('[data-tv=foyer]').click()
+            expect(page.locator('[data-source=HDMI1] svg')).to_have_count(1)
             assert context.request.get(base + '/__tv_fixture').json()['commands']['foyer'] == []
             with page.expect_response(lambda response: response.url.endswith('/api/tvs/foyer/power') and response.request.method == 'POST') as power:
                 page.locator('#tv-power-on').click()
@@ -120,8 +134,7 @@ def main():
             observed = context.request.get(base + '/api/tv-pages/state').json()['tvs'][0]['observation']
             report_ms = round((observed['fields']['volume']['sampledAt'] - observed['command']['requestedAt']) * 1000)
             expect(page.locator('#tv-observed')).to_contain_text('31')
-            page.select_option('#tv-source', 'HDMI2')
-            page.get_by_role('button', name='Change input', exact=True).click()
+            page.locator('[data-source=HDMI2]').click()
             expect(page.locator('#tv-observed')).to_contain_text('HDMI2')
             assert context.request.post(base + '/__tv_fixture/state', data={'ignore': True}).ok
             page.locator('#tv-volume-level').fill('32')
@@ -183,9 +196,10 @@ def main():
                 capture(page, output / 'wide-diagnostics.png')
                 page.set_viewport_size({'width': 320, 'height': 800})
                 page.goto(base + '/tv-controls')
-                page.select_option('#tv-room', 'ground'); page.select_option('#tv-choice', 'foyer')
+                page.locator('[data-room=ground]').click(); page.locator('[data-tv=foyer]').click()
                 expect(page.locator('#tv-remote')).to_be_visible()
                 assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
+                assert page.locator('#tv-observed .tv-reading').nth(1).bounding_box()['width'] >= 200, 'external volume feedback must not wrap into a narrow column'
                 capture(page, output / 'narrow-320-controls.png')
                 admin_context = browser.new_context(viewport={'width': 1440, 'height': 1000})
                 admin = admin_context.new_page()

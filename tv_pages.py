@@ -1,10 +1,16 @@
 """Room-scoped TV interfaces. Existing TV groups ARE rooms; IDs never change."""
 import copy
+import math
+import io
+import uuid
+import warnings
+from pathlib import Path
+from urllib.parse import quote
 import re
 import threading
 import time
 from functools import wraps
-from flask import abort, jsonify, request, g
+from flask import abort, jsonify, request, g, send_file
 from flask_login import current_user
 
 
@@ -57,6 +63,72 @@ def validate_mappings(value, cfg):
             raise ValueError('Invalid TV media mapping. Choose an existing TV, positive output and feed input ID.')
         result[ident] = {'output': feed['output'], 'source': feed['source'].strip()}
     return result
+
+
+def images_dir():
+    return Path(__file__).resolve().parent / 'tv_room_images'
+
+
+def image_path(filename):
+    if not isinstance(filename, str) or not re.fullmatch(r'[a-f0-9]{32}\.png', filename):
+        raise ValueError('Choose an uploaded room image.')
+    root = images_dir().resolve()
+    path = root / filename
+    if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+        raise ValueError('Room image is missing. Upload it again.')
+    return path
+
+
+def background_url(room, layout):
+    filename = layout.get('background')
+    return '/tv-room-images/' + quote(room, safe='') + '/' + filename if filename else ''
+
+
+def validate_layouts(value, cfg):
+    """Positions belong to existing TVs in existing rooms, not VideoHub outputs."""
+    if not isinstance(value, dict):
+        raise ValueError('Room layouts must be an object.')
+    rooms = {room['id']: {tv['id'] for tv in room['tvs']} for room in room_catalog(cfg)}
+    clean = {}
+    for ident, layout in value.items():
+        if ident not in rooms or not isinstance(layout, dict) or set(layout) - {'positions', 'background'}:
+            raise ValueError('Choose an existing TV room.')
+        positions = layout.get('positions', {})
+        if not isinstance(positions, dict):
+            raise ValueError('TV positions must be an object.')
+        for tv, point in positions.items():
+            if tv not in rooms[ident] or not isinstance(point, dict) or set(point) != {'x', 'y'}:
+                raise ValueError('Positions must refer to TVs in this room.')
+            if any(isinstance(v, bool) or not isinstance(v, (float, int)) or not 0 <= v <= 1 or not math.isfinite(v) for v in point.values()):
+                raise ValueError('Positions must be normalized numbers between 0 and 1.')
+        result = {'positions': copy.deepcopy(positions)}
+        if layout.get('background'):
+            if not isinstance(layout['background'], str) or not re.fullmatch(r'[a-f0-9]{32}\.png', layout['background']):
+                raise ValueError('Choose an uploaded room image.')
+            result['background'] = layout['background']
+        clean[ident] = result
+    return clean
+
+
+def current_layouts(cfg):
+    # Removed rooms/moved TVs must never break the page or leak old positions.
+    clean = {}
+    saved = cfg.get('hisense_room_layouts', {})
+    if isinstance(saved, dict):
+        for room in room_catalog(cfg):
+            if room['id'] not in saved:
+                continue
+            value = saved[room['id']]
+            if not isinstance(value, dict):
+                continue
+            value = copy.deepcopy(value)
+            members = {tv['id'] for tv in room['tvs']}
+            value['positions'] = {key: point for key, point in value.get('positions', {}).items() if key in members} if isinstance(value.get('positions', {}), dict) else {}
+            try:
+                clean.update(validate_layouts({room['id']: value}, cfg))
+            except ValueError:
+                pass
+    return clean
 
 
 def register(w):
@@ -121,8 +193,106 @@ def register(w):
         for room in room_catalog(w.utils.get_config()):
             members = [tv['id'] for tv in room['tvs'] if tv['id'] in allowed]
             if members:
-                rooms.append({'id': room['id'], 'name': room['name'], 'tvIds': members})
+                layout = current_layouts(w.utils.get_config()).get(room['id'], {'positions': {}})
+                layout['positions'] = {key: point for key, point in layout['positions'].items() if key in members}
+                layout['backgroundUrl'] = background_url(room['id'], layout)
+                rooms.append({'id': room['id'], 'name': room['name'], 'tvIds': members, 'layout': layout})
         return jsonify({'ok': True, 'tvs': tvs, 'rooms': rooms})
+
+    @app.post('/api/config/tv-room-layouts/background')
+    def tv_room_background_upload():
+        from PIL import Image, ImageOps, UnidentifiedImageError
+        principal = 'user:' + str(current_user.get_id()) if getattr(current_user, 'is_authenticated', False) else 'address:' + str(request.remote_addr or 'unknown')
+        admission_error = w._admit_media_upload(principal)
+        if admission_error is not None:
+            return admission_error
+        upload = request.files.get('file')
+        if upload is None or set(request.files) != {'file'} or len(request.files.getlist('file')) != 1 or set(request.form) - {'_csrf'}:
+            abort(400)
+        content = upload.read(10 * 1024 * 1024 + 1)
+        if len(content) > 10 * 1024 * 1024:
+            abort(413)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(content)) as source:
+                    if source.format not in ('JPEG', 'PNG', 'WEBP') or source.width * source.height > 16_000_000 or getattr(source, 'n_frames', 1) != 1:
+                        raise ValueError('Use a still JPEG, PNG or WebP up to 16 megapixels.')
+                    source.load()
+                    normalized = ImageOps.exif_transpose(source).convert('RGB')
+                    normalized.thumbnail((3840, 2160))
+                    normalized.info.clear()
+                    encoded = io.BytesIO()
+                    normalized.save(encoded, format='PNG')
+        except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+            return jsonify({'ok': False, 'error': 'Use a valid still JPEG, PNG or WebP up to 10 MB and 16 megapixels.'}), 400
+        content = encoded.getvalue()
+        if len(content) > 10 * 1024 * 1024:
+            abort(413)
+        with w._media_operation_lock:
+            folder = images_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            assets = [p for p in folder.glob('*.png') if p.is_file() and not p.is_symlink()]
+            if len(assets) >= 100 or sum(p.stat().st_size for p in assets) + len(content) > 100 * 1024 * 1024:
+                return jsonify({'ok': False, 'error': 'Room image storage is full (100 images / 100 MB). Ask an administrator to archive unused room images.'}), 409
+            filename = uuid.uuid4().hex + '.png'
+            path = folder / filename
+            # Exclusive creation; no caller-selected paths, extensions or metadata.
+            with path.open('xb') as stream:
+                stream.write(content)
+        w.log_event('hisense.room.image', 'Uploaded a TV room background (not assigned until Save)', status='success')
+        return jsonify({'ok': True, 'image': filename})
+
+    @app.get('/tv-room-images/<room_id>/<filename>')
+    def tv_room_image(room_id, filename):
+        cfg = w.utils.get_config()
+        if not w.can_access('page:config'):
+            permitted = set().union(*(ids(page) for page in ('page:tv_controls', 'page:tv_diagnostics') if w.can_access(page)))
+            room = next((room for room in room_catalog(cfg) if room['id'] == room_id), None)
+            if not room or not any(tv['id'] in permitted for tv in room['tvs']):
+                abort(403)
+            if current_layouts(cfg).get(room_id, {}).get('background') != filename:
+                abort(404)
+        try:
+            path = image_path(filename)
+        except ValueError:
+            abort(404)
+        response = send_file(path, mimetype='image/png', conditional=True)
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+    tv_room_image._required_any_page_keys = ('page:config', 'page:tv_controls', 'page:tv_diagnostics')
+
+    @app.get('/config/tv-rooms')
+    @w.require_page('page:config', 'TV Room Pictures')
+    def tv_room_editor():
+        return w.render_template('tv_rooms.html')
+
+    @app.route('/api/config/tv-room-layouts', methods=['GET', 'PUT'])
+    def tv_room_layouts():
+        if request.method == 'GET':
+            cfg = w.utils.get_config()
+            return jsonify({'ok': True, 'layouts': current_layouts(cfg),
+                            'images': sorted(p.name for p in images_dir().glob('*.png') if re.fullmatch(r'[a-f0-9]{32}\.png', p.name) and p.is_file() and not p.is_symlink())[:100],
+                            'rooms': [{'id': room['id'], 'name': room['name'],
+                                       'tvs': [{'id': tv['id'], 'name': tv.get('name', tv['id'])} for tv in room['tvs']]}
+                                      for room in room_catalog(cfg)]})
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or set(data) != {'layouts'}:
+            abort(400)
+        with w._media_operation_lock:
+            cfg = w.utils.get_config()
+            try:
+                cfg['hisense_room_layouts'] = validate_layouts(data['layouts'], cfg)
+                for layout in cfg['hisense_room_layouts'].values():
+                    if layout.get('background'):
+                        image_path(layout['background'])
+            except ValueError as error:
+                return jsonify({'ok': False, 'error': str(error)}), 400
+            w.utils.save_config(cfg)
+            w.utils.reload_config(force=True)
+        w.log_event('hisense.room.layout', 'Saved TV room pictures and positions (no device commands)', status='success')
+        return jsonify({'ok': True})
 
     @app.get('/tv-diagnostics')
     @w.require_page('page:tv_diagnostics', 'TV Diagnostics')

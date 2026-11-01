@@ -2,8 +2,8 @@
 
 ## Operator workflow
 
-- **TV Diagnostics** is a read-only building overview, grouped by the rooms you may see. Each TV shows reported power, volume and input with its own observation time. Command failures remain visible after connectivity recovers.
-- **TV Controls** lets you choose a room, then one TV. Power on and Power off are explicit actions, not a toggle. Volume and input controls affect only that TV. Choosing a room/TV sends no commands.
+- **TV Diagnostics** is a read-only room-picture overview, limited to rooms/TVs you may see. Positioned TV icons show reported power (green On, red Off, neutral Unknown/Stale with text), a volume bar and numeric value below, and the current input. Missing/unplaced TVs appear below the picture, never disappear. Feedback details retain command failures and observation times; a failed refresh immediately makes displayed feedback unverified.
+- **TV Controls** uses distinct room and TV icon tiles, then an individual remote. On mobile, Back returns to the room’s TVs; Rooms returns to room selection. Desktop keeps selection on the left and the remote on the right, grey/disabled until a TV is selected. Power on/off remain explicit, not a blind toggle. Volume and every available input have direct buttons (no input dropdown, directional pad or channel controls). Selection and navigation send no commands.
 - Unknown, stale, pending and unconfirmed are not zero, off or successful execution. A request being accepted by the transport does not prove the TV obeyed it. Off requested means intentional-off bookkeeping, not a physical off measurement. The legacy API's top-level expected-off power value remains compatible; the new pages use the separate `observation` fields.
 - Failure messages identify the operation and time without exposing transport credentials. Active connection/read failures are separate from historical command failures. The latest request can be pending, confirmed, mismatch, unconfirmed or failed. Relative key commands without a verifiable absolute result may remain unconfirmed.
 - Do not repeatedly retry an uncertain action. Check the screen and feedback first.
@@ -16,6 +16,20 @@
 4. Room and TV grants must be in the same group as the requested page grant. Valid scoped access unions across groups; an unrelated group's room or TV grant cannot supply a missing half. Moving a TV to another room immediately removes access through its old room grant. Saved hidden settings remain stored.
 
 The grants are stored in the existing `group_pages` table as `tvroom:<room_id>` and `tvdevice:<room_id>:<tv_id>` (or `:*`), not in a second room-assignment database. Ungrouped uses `@ungrouped`, a root identity that cannot collide with existing normalized Hisense group IDs. These are resource grants, not extra top-level pages.
+
+## Configure diagnostic room pictures
+
+Open **TV Diagnostics → Configure room pictures** (or `/config/tv-rooms`) with existing **Config** access. This does not require a new grant or protected Admin membership. TV Setup still owns room names and membership; this editor never uses VideoHub output membership.
+
+1. Choose an existing TV room, then upload a still JPEG/PNG/WebP or select an already uploaded room picture. File choice alone does not upload; Upload stores a local picture, and Save explicitly assigns it to the diagnostic room. No external image URLs or filesystem paths are accepted.
+2. Select a TV and tap/click the picture to place it; drag it, use arrow keys (Shift = larger step), or enter Across/Down percentages. Unplace returns it to the fallback list. Changes stay as drafts across room selection until **Save room layout**; leaving with unsaved changes warns. Nothing here powers, routes or controls a TV.
+3. Save, then reopen Diagnostics. Coordinates are normalized 0–1 within the canvas’s safe card-centre area, so edge placements remain visible responsively. Keep TVs separated in the editor; intentionally overlapping saved locations are not automatically rearranged. Narrow screens abbreviate long TV names visually; their complete names remain in the accessible heading and hover title. Missing images show an explicit fallback, not a broken/empty page.
+
+Metadata lives in `config.json` as `hisense_room_layouts: {"<existing-room-id>": {"background": "<server-generated-id>.png", "positions": {"<existing-tv-id>": {"x": 0.25, "y": 0.65}}}}`. Moving/deleting TVs filters obsolete positions from reads and cannot grant access. Dedicated saves and config imports validate room membership, finite normalized coordinates and safe image IDs; generic Config submissions preserve dedicated edits. Existing room/TV IDs and permissions do not change. Automation config imports may not change this browser-owned metadata; unrelated existing config transport remains unchanged.
+
+Uploaded backgrounds live in the ignored app-local **`tv_room_images/`** folder, separate from VideoHub room media. Back up this folder **alongside `config.json`**. Config ZIP includes the metadata in `config.json`, but **does not include this folder**; copy it separately when migrating/restoring. Missing restored assets remain explicitly unavailable until uploaded again. No new database or dependency is introduced (Pillow is already used for Media Library).
+
+Uploads are decoded/normalized to metadata-free PNG (JPEG/PNG/WebP only, one frame, 10 MB input/output, 16 megapixels, maximum normalized dimensions 3840×2160). Streaming multipart limits apply before parsing, partial streams are closed on rejection, and the existing upload admission/rate guard bounds concurrent decoders. Local room-image storage is capped at 100 images/100 MB; older images remain reusable, never automatically deleted. An administrator can archive unused files after backing up metadata. Image reads require a current authorized room/TV (or Config), use private/no-store and nosniff, and reject symlinks/traversal. Setup APIs and v1 aliases are browser-only, Config/CSRF/origin protected; tokens and scheduler are denied. Activity Log records picture uploads and layout saves, not file choice or placement drafts.
 
 ## Display saved Media Library content
 
@@ -59,5 +73,6 @@ New `/api/tv-pages/*`, `/api/tv-media/*` and `/api/config/tv-media-mappings` rou
 - Also run existing Hisense, media/coordinator, API security/token, group, impersonation, Activity Log, frontend and related regression suites.
 - `python tests/tv_ui_harness.py --ready-file <private-scratch>/tv-ready.json`
 - With Playwright tooling: `python tests/tv_browser_check.py --ready-file <private-scratch>/tv-ready.json --evidence-dir <private-scratch>/tv-evidence`
+- Room picture/editor checks: `python tests/tv_rooms_browser_check.py --ready-file <private-scratch>/tv-ready.json --evidence-dir <private-scratch>/tv-room-evidence` (same five projects; run serially against the shared fixture).
 
 The harness binds loopback port zero, blocks outbound sockets before app import and uses temporary auth/config/media plus fake TV/ATEM/VideoHub transports. It redirects the app's checkout-relative default auth DB during cold import, not only after initialization. Browser verification requires its exact marker and a successful reset. It exercises real page and resource permissions, explicit individual actions, accepted-but-ignored requests, readback/failures, shared existing media flow, mapping save/readback, delayed CSRF-script startup, desktop/mobile layout and screenshots. Console checks allow only the deliberately induced command HTTP 502 and reject unexpected errors. Do not run against staging/production or interpret simulated latency as hardware performance. Keep runtime/evidence outside the repository.

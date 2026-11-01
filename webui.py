@@ -351,7 +351,7 @@ def _is_media_upload_path(path: str) -> bool:
 class _TDeckRequest(Request):
     def _get_file_stream(self, total_content_length, content_type, filename=None, content_length=None):
         stream = super()._get_file_stream(total_content_length, content_type, filename, content_length)
-        if _is_media_upload_path(self.path):
+        if _is_media_upload_path(self.path) or _api_normalized_path(self.path) == '/api/config/tv-room-layouts/background':
             # A rejected multipart parse can fail before Werkzeug publishes
             # request.files. Retain those partial streams for prompt cleanup.
             self.__dict__.setdefault('_media_parser_streams', []).append(stream)
@@ -3197,7 +3197,7 @@ def _validate_csrf() -> bool:
         # without parsing an untrusted multipart body first; retain form-token
         # support for callers that do not send the header.
         header = request.headers.get('X-CSRF-Token')
-        if _is_media_upload_path(request.path) and header is not None:
+        if (_is_media_upload_path(request.path) or _api_normalized_path(request.path) == '/api/config/tv-room-layouts/background') and header is not None:
             sent = header
         else:
             sent = request.form.get('_csrf') or header
@@ -3398,7 +3398,7 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
         return {'scope': 'tvs', 'pages': ('page:tv_controls', 'page:tv_diagnostics'), 'service_tokens': False}
     if p.startswith('/api/tv-media/'):
         return {'scope': 'tvs', 'pages': ('page:tv_controls',), 'service_tokens': False}
-    if p == '/api/config/tv-media-mappings':
+    if p == '/api/config/tv-media-mappings' or p.startswith('/api/config/tv-room-layouts'):
         return {'scope': 'config', 'pages': ('page:config',), 'service_tokens': False}
 
     if p in ('/api/props', '/api/props/trigger', '/api/props/library/trigger',
@@ -4106,6 +4106,10 @@ def _view_as_request_gate():
 @app.before_request
 def _auth_gate():
     p = request.path or ''
+    if _api_normalized_path(p) == '/api/config/tv-room-layouts/background':
+        request.max_content_length = 11 * 1024 * 1024
+        request.max_form_parts = 2
+        request.max_form_memory_size = 128 * 1024
     if _is_media_upload_path(p):
         # Enforce streaming multipart size before authentication/CSRF accesses
         # request.form, including bodies with no Content-Length header.
@@ -4793,8 +4797,13 @@ def _apply_config_transport_import_locked(zip_path: Path, selected_ids: list[str
                     if not isinstance(restored, dict):
                         raise ValueError('Imported configuration must be an object')
                     restored.pop('propresenter_props_use_macros', None)
-                    from tv_pages import validate_mappings
+                    from tv_pages import validate_mappings, validate_layouts
                     restored['hisense_media_mappings'] = validate_mappings(restored.get('hisense_media_mappings', {}), restored)
+                    restored['hisense_room_layouts'] = validate_layouts(restored.get('hisense_room_layouts', {}), restored)
+                    if _api_request_is_automation_principal():
+                        from tv_pages import current_layouts
+                        if restored['hisense_room_layouts'] != current_layouts(utils.get_config()):
+                            raise ValueError('TV room layout changes require a Config browser session.')
                     for key in utils.RETIRED_TIMER_CONFIG_KEYS:
                         restored.pop(key, None)
                     target.write_text(json.dumps(restored, ensure_ascii=False), encoding='utf-8')
@@ -12246,7 +12255,7 @@ def api_set_config():
         # merge provided values
         # Media setup is saved through its validated browser-only editor. The
         # general Config form includes an older full snapshot of hidden keys.
-        cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS and key != 'hisense_media_mappings'})
+        cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS and key not in ('hisense_media_mappings', 'hisense_room_layouts')})
         cfg.pop('propresenter_props_use_macros', None)
         for key in utils.RETIRED_TIMER_CONFIG_KEYS:
             cfg.pop(key, None)

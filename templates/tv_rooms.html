@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% set page_title = 'TV Room Pictures' %}
+{% set page_subtitle = 'Pictures and TV positions for diagnostics — no device commands' %}
+{% block head_extra %}<link rel="stylesheet" href="{{ static_asset('tv_pages.css') }}">{% endblock %}
+{% block content %}
+<div id="tv-room-editor" aria-busy="true">
+  <div class="tv-page-tools"><a href="/tv-diagnostics">← TV Diagnostics</a><a href="/config/tvs">TV Setup and room membership</a></div>
+  <div class="tv-editor-layout">
+    <section class="tv-editor-sidebar" aria-label="Room picture settings">
+      <div><label class="form-label" for="tv-editor-room">Room</label><select id="tv-editor-room" class="form-select" disabled></select></div>
+      <fieldset id="tv-editor-tools" disabled><legend class="h5">Room picture</legend>
+        <label class="form-label" for="tv-room-file">Upload JPEG, PNG or WebP</label><input type="file" id="tv-room-file" accept="image/jpeg,image/png,image/webp" class="form-control">
+        <p class="form-text">Up to 10 MB / 16 megapixels. Images stay on this TDeck instance.</p><button type="button" class="btn btn-outline-primary mb-3" id="tv-room-upload">Upload picture</button>
+        <div id="tv-room-images" class="tv-image-library" aria-label="Uploaded room pictures"></div>
+        <button type="button" id="tv-room-remove-image" class="btn btn-outline-secondary mt-2">No background</button>
+        <h2 class="h5 mt-4">TVs in this room</h2><div id="tv-room-members" class="d-grid gap-2"></div>
+      </fieldset>
+    </section>
+    <section class="tv-editor-workspace" aria-label="TV placement">
+      <p class="small text-muted">Select a TV, then tap the picture to place it. Drag a placed TV, use arrow keys (Shift for larger steps), or enter percentages below. Save when finished. Moving here never changes room membership.</p>
+      <div id="tv-editor-canvas"></div>
+      <fieldset id="tv-position-fields" disabled><legend id="tv-position-name" class="h6 mt-3">Select a TV to place</legend>
+        <div class="tv-editor-position"><div><label for="tv-position-x">Across %</label><input id="tv-position-x" type="number" min="0" max="100" step="1" class="form-control"></div><div><label for="tv-position-y">Down %</label><input id="tv-position-y" type="number" min="0" max="100" step="1" class="form-control"></div><button id="tv-position-apply" type="button" class="btn btn-outline-primary">Place TV</button><button id="tv-position-remove" type="button" class="btn btn-outline-secondary">Unplace</button></div>
+      </fieldset>
+      <div class="tv-editor-actions"><button type="button" id="tv-room-save" class="btn btn-primary" disabled>Save room layout</button><span id="tv-editor-status" role="status" aria-live="polite"></span></div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ static_asset('tv_room_view.js') }}"></script><script src="{{ static_asset('tv_rooms.js') }}"></script>{% endblock %}

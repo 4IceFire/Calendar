@@ -73,3 +73,30 @@ class TvConfigTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json['mappings'], {})
         self.assertTrue(response.json['warning'])
+
+
+    def test_layout_import_is_validated_before_replacement(self):
+        cfg = copy.deepcopy(self.fx.cfg)
+        cfg['hisense_room_layouts'] = {'ground': {'positions': {'foyer': {'x': .3, 'y': .4}}}}
+        self.assertEqual(self.import_config(cfg)['hisense_room_layouts'], cfg['hisense_room_layouts'])
+        cfg['hisense_room_layouts']['ground']['positions']['private'] = {'x': .5, 'y': .5}
+        with self.assertRaises(ValueError):
+            self.import_config(cfg)
+        self.assertEqual(json.loads((self.fx.root / 'imported.json').read_text()), {'unchanged': True})
+
+    def test_generic_config_cannot_revert_dedicated_room_layout(self):
+        saved = {'ground': {'positions': {'foyer': {'x': .3, 'y': .4}}}}
+        self.fx.cfg['hisense_room_layouts'] = saved
+        admin = self.fx.client('admin-tv')
+        response = admin.post('/api/config', json={'hisense_room_layouts': {}}, headers=self.fx.headers(admin))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.fx.cfg['hisense_room_layouts'], saved)
+
+
+    def test_automation_config_import_cannot_mutate_browser_owned_layouts(self):
+        cfg = copy.deepcopy(self.fx.cfg)
+        cfg['hisense_room_layouts'] = {'ground': {'positions': {'foyer': {'x': .3, 'y': .4}}}}
+        with patch.object(self.w, '_api_request_is_automation_principal', return_value=True):
+            with self.assertRaises(ValueError):
+                self.import_config(cfg)
+        self.assertEqual(json.loads((self.fx.root / 'imported.json').read_text()), {'unchanged': True})

@@ -21,6 +21,7 @@ class FakeTV:
     def __init__(self, controller):
         self.controller = controller
         self.volume = 25
+        self.power_feedback = 'on'
         self.source = 'HDMI1'
         self.fail = False
         self.ignore = False
@@ -28,7 +29,10 @@ class FakeTV:
         self.commands = []
 
     def get_state(self, **kwargs):
-        return {'statetype': 'livetv', 'sourceid': self.source}
+        state = {'sourceid': self.source}
+        if self.power_feedback in ('on', 'off'):
+            state['statetype'] = 'fake_sleep_0' if self.power_feedback == 'off' else 'livetv'
+        return state
 
     def get_volume(self, **kwargs):
         return None if self.external else self.volume
@@ -115,6 +119,8 @@ class TVFixture:
             patch.object(webui, '_load_companion_surfaces', return_value=[]),
         ):
             self.stack.enter_context(context)
+        import tv_pages
+        self.stack.enter_context(patch.object(tv_pages, 'images_dir', return_value=self.root / 'room-images'))
         self.log = self.stack.enter_context(patch.object(webui, 'log_event'))
         webui._init_auth_db()
         conn = webui._db()
@@ -160,6 +166,8 @@ class TVFixture:
                         patch.object(webui, '_active_media_job', side_effect=lambda: self.routing.active_job() or {}),
                         patch.object(webui, '_get_videohub_state_snapshot', side_effect=lambda: self.hub.snapshot())):
             self.stack.enter_context(context)
+        with webui._media_upload_rate_lock:
+            webui._media_upload_rate_events.clear()
         with webui._api_rate_lock:
             webui._api_rate_events.clear()
         return self

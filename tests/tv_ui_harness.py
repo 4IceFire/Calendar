@@ -35,6 +35,12 @@ def main():
         def fixture_state():
             data = request.get_json()
             fake = fx.clients['foyer']
+            if 'power_feedback' in data:
+                import time
+                fake.power_feedback = data['power_feedback']
+                if fake.power_feedback in ('stale', 'unknown'):
+                    with fake.controller.observation.lock:
+                        fake.controller.observation.fields['power'] = {'value': 'on' if fake.power_feedback == 'stale' else None, 'sampledAt': time.time() - 60 if fake.power_feedback == 'stale' else None}
             if 'fail' in data:
                 fake.fail = data['fail']
             if 'ignore' in data:
@@ -49,7 +55,7 @@ def main():
                 fake.controller._on_state_change({'_tdeck_volume': True, 'volume_type': 1, 'volume_value': 53})
             else:
                 fake.controller._poll()
-            return jsonify({'ok': True})
+            return jsonify({'ok': True, 'feedback': fake.power_feedback, 'observation': fake.controller.observation.snapshot()})
 
         @app.post('/__tv_fixture/reset')
         def fixture_reset():
@@ -58,12 +64,14 @@ def main():
                 return jsonify({'ok': False, 'error': 'Fixture worker stopped'}), 500
             for fake in fx.clients.values():
                 fake.fail = False; fake.ignore = False; fake.external = False
-                fake.volume = 25; fake.source = 'HDMI1'; fake.commands.clear()
+                fake.volume = 25; fake.source = 'HDMI1'; fake.power_feedback = 'on'; fake.commands.clear()
                 fake.controller.observation = Observation()
+                fake.controller._clear_pending_power_on()
                 fake.controller._set_expected_off(False)
                 fake.controller._connect()
                 fake.controller._poll()
             fx.hub.routing[:] = [1, 2, 1]
+            fx.cfg['hisense_room_layouts'] = {}
             fx.cfg['hisense_media_mappings'] = {'foyer': {'output': 1, 'source': 'HDMI1'}}
             return jsonify({'ok': True, 'fixture': 'tdeck-tv-isolated'})
 
