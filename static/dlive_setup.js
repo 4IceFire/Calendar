@@ -6,6 +6,8 @@
   const auxes = byId('dlive-aux-mappings');
   const inputs = byId('dlive-input-mappings');
   let saved = {};
+  let nextId = 0;
+  function dirty() { window.TDeckMixerItemEditor.dirty(); }
 
   function toggle() {
     const dlive = provider.value === 'dlive';
@@ -46,25 +48,28 @@
     const row = document.createElement('div');
     row.className = 'dlive-mapping-row';
     row.dataset.mapping = 'true';
+    row._mixOriginal = item;
     input(row, 'Enabled', 'enabled', item.enabled, 'checkbox');
     input(row, aux ? 'AUX ordinal' : 'Input number', aux ? 'bus' : 'channel', aux ? item.bus : item.channel, 'number');
     if (aux) input(row, 'Stereo', 'stereo', !!item.stereo, 'checkbox');
     input(row, 'Label', 'label', item.label);
-    input(row, aux ? 'Group' : 'Section heading', 'group', item.group);
+    if (aux) input(row, 'Group', 'group', item.group);
     if (aux) input(row, 'Colour', 'colour', item.colour || '#3478f6', 'color');
     const editor = window.TDeckMixerItemEditor;
     const icon = editor.iconControl(item, aux ? 'aux' : 'channel');
     icon.querySelector('input').dataset.key = 'icon';
     row.appendChild(icon);
-    row.appendChild(editor.moveControls(row, item, aux ? 'aux' : 'channel'));
+
     const remove = document.createElement('button');
     remove.className = 'btn btn-sm btn-outline-danger';
     remove.textContent = 'Delete';
     remove.type = 'button';
-    remove.addEventListener('click', () => { row.remove(); editor.updateMoveButtons(target); });
+    remove.addEventListener('click', () => { target._mixOrganization.remove(row); });
     row.appendChild(remove);
-    target.appendChild(row);
-    editor.updateMoveButtons(target);
+    const entry = {id: String(item.channel || 'new-' + (++nextId)), node: row,
+      label: item.label || (aux ? 'AUX ' + item.bus : 'Input ' + item.channel), group: item.group,
+      identity: () => aux ? (row.querySelector('[data-key="stereo"]').checked ? 2000 : 1000) + Number(row.querySelector('[data-key="bus"]').value) : Number(row.querySelector('[data-key="channel"]').value)};
+    return entry;
   }
 
   function collect(target, aux) {
@@ -75,7 +80,7 @@
       }
       if (aux) item.channel = (item.stereo ? 2000 : 1000) + item.bus;
       // Preserve supported presentation fields not edited here.
-      const old = (saved[aux ? 'dlive_auxes' : 'dlive_channels'] || []).find(old => old.channel === item.channel);
+      const old = row._mixOriginal;
       return {...(old || {}), ...item};
     });
   }
@@ -91,18 +96,25 @@
       auxes.textContent = '';
       inputs.textContent = '';
       const ordered = items => (items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
-      for (const item of ordered(config.dlive_auxes)) add(auxes, item, true);
-      for (const item of ordered(config.dlive_channels)) add(inputs, item, false);
+      window.TDeckMixOrganization.attach(auxes, null, ordered(config.dlive_auxes).map(item => add(auxes, item, true)), false, dirty);
+      window.TDeckMixOrganization.attach(inputs, config.dlive_channel_organization, ordered(config.dlive_channels).map(item => add(inputs, item, false)), true, dirty);
       toggle();
     },
     collect() {
       return {personal_mix_provider: provider.value, dlive_enabled: byId('dlive-enabled').checked,
         dlive_ip: byId('dlive-ip').value.trim(), dlive_port: Number(byId('dlive-port').value),
         dlive_midi_channel: Number(byId('dlive-midi-channel').value),
-        dlive_auxes: collect(auxes, true), dlive_channels: collect(inputs, false)};
+        dlive_auxes: collect(auxes, true), dlive_channels: collect(inputs, false),
+        dlive_channel_organization: inputs._mixOrganization.organization()};
     },
   };
   provider.addEventListener('change', toggle);
-  byId('dlive-add-aux').addEventListener('click', () => add(auxes, {bus: 1, stereo: false}, true));
-  byId('dlive-add-input').addEventListener('click', () => add(inputs, {channel: inputs.children.length + 1}, false));
+  byId('dlive-add-aux').addEventListener('click', () => auxes._mixOrganization.add(add(auxes, {bus: 1, stereo: false}, true)));
+  byId('dlive-add-input').addEventListener('click', () => {
+    const used = collect(inputs, false).map(item => item.channel);
+    let number = 1; while (used.indexOf(number) >= 0) number += 1;
+    // A temporary DOM identity remains independent from editable input numbers.
+    const entry = add(inputs, {channel: number}, false); entry.id = 'new-' + (++nextId);
+    inputs._mixOrganization.add(entry);
+  });
 })();

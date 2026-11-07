@@ -10,7 +10,8 @@ from dlive import DLiveMixerClient
 
 DEFAULTS = dict(personal_mix_provider='digico', dlive_enabled=False, dlive_ip='',
                 dlive_port=51325, dlive_midi_channel=1, dlive_request_interval=.025,
-                dlive_retry_interval=1., dlive_stale_after=10., dlive_auxes=[], dlive_channels=[])
+                dlive_retry_interval=1., dlive_stale_after=10., dlive_auxes=[], dlive_channels=[],
+                dlive_channel_organization=None, digico_channel_organization=None)
 CONFIG_KEYS = tuple(DEFAULTS)
 LOCK = threading.RLock()
 _CLIENT = None
@@ -18,7 +19,9 @@ _SIGNATURE = None
 
 
 def is_protected_key(key):
-    return key == 'personal_mix_provider' or key.startswith('dlive_')
+    # Both desks are owned by dedicated setup; stale generic Config snapshots
+    # must not separate physical mappings from their canonical organization.
+    return key == 'personal_mix_provider' or key.startswith(('dlive_', 'digico_'))
 
 
 def validate_config(raw):
@@ -83,7 +86,8 @@ def validate_config(raw):
         cfg[key] = normalized
     if cfg['dlive_enabled'] and (not host or not cfg['dlive_auxes'] or not cfg['dlive_channels']):
         raise ValueError('Enabling dLive requires a host and explicit AUX/input mappings')
-    return cfg
+    from personal_mix_organization import validate_channel_organizations
+    return validate_channel_organizations(cfg)
 
 
 def get_client(config):

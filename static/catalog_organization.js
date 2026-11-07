@@ -4,6 +4,8 @@
   window.renderCatalogOrganization = function (root, organization, rows, options) {
     if (root._catalogDispose) root._catalogDispose();
     let tree = JSON.parse(JSON.stringify(organization || {folders: [], items: []}));
+    options = options || {};
+    const text = Object.assign({root: 'No folder', singular: 'folder', create: 'New folder', prompt: 'Folder name'}, options.labels || {});
     const collapsed = root._catalogCollapsed || (root._catalogCollapsed = {});
     const byId = {}, labels = {};
     let busy = false, drag = null, frame = null, disposed = false;
@@ -40,7 +42,7 @@
       action();
       if (JSON.stringify(before) === JSON.stringify(tree)) { announce('Position unchanged.'); return; }
       busy = true; render(oldPositions); // Move immediately; save only once on drop.
-      announce('Saving organisation…');
+      announce(options.draft ? 'Updating draft…' : 'Saving organisation…');
       // The server normalizes order fields; keep these objects so row/header
       // handlers retain their identity without rebuilding the list on success.
       try { await options.save(tree); }
@@ -57,7 +59,7 @@
       root.querySelectorAll('[data-catalog-control]').forEach(el => { el.disabled = false; });
       root.setAttribute('aria-busy', 'false');
       if (focusId) focusItem(focusId);
-      announce('Organisation saved.');
+      announce(options.draft ? 'Unsaved changes. Select Save & Restart to apply.' : 'Organisation saved.');
       flushRender();
     }
     function moveFolder(folder, step) {
@@ -106,7 +108,7 @@
       line.style.top = (next ? rect.top : rect.bottom) + 'px'; line.style.width = rect.width + 'px';
       if (speak) {
         const folder = tree.folders.find(entry => entry.id === target.folderId);
-        announce((folder ? folder.name : 'No folder') + (target.before ? ', before ' + labels[target.before] : ', at end') + '. Enter to drop, Escape to cancel.');
+        announce((folder ? folder.name : text.root) + (target.before ? ', before ' + labels[target.before] : ', at end') + '. Enter to drop, Escape to cancel.');
         header.scrollIntoView({block: 'nearest'});
       }
     }
@@ -219,8 +221,8 @@
       root.textContent = ''; root.setAttribute('aria-busy', String(busy));
       if (options.editable) {
         const toolbar = document.createElement('div'); toolbar.className = 'catalog-toolbar';
-        toolbar.appendChild(button('New folder', 'New folder', () => {
-          const name = window.prompt('Folder name');
+        if (options.folders !== false) toolbar.appendChild(button(text.create, text.create, () => {
+          const name = window.prompt(text.prompt);
           if (name && name.trim()) change(() => tree.folders.push({id: 'folder-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), name: name.trim()}));
         }));
         const hint = document.createElement('span'); hint.className = 'catalog-help'; hint.textContent = 'Drag ⠿ to move'; toolbar.appendChild(hint); root.appendChild(toolbar);
@@ -238,20 +240,20 @@
           });
           toggle.setAttribute('aria-expanded', String(!collapsed[folderId])); header.appendChild(toggle);
           if (options.editable) {
-            header.appendChild(button('↑', 'Move folder up', () => change(() => moveFolder(folder, -1))));
-            header.appendChild(button('↓', 'Move folder down', () => change(() => moveFolder(folder, 1))));
-            header.appendChild(button('Rename', 'Rename folder', () => {
-              const name = window.prompt('Folder name', folder.name);
+            header.appendChild(button('↑', 'Move ' + text.singular + ' up', () => change(() => moveFolder(folder, -1))));
+            header.appendChild(button('↓', 'Move ' + text.singular + ' down', () => change(() => moveFolder(folder, 1))));
+            header.appendChild(button('Rename', 'Rename ' + text.singular, () => {
+              const name = window.prompt(text.prompt, folder.name);
               if (name && name.trim()) change(() => { folder.name = name.trim(); });
             }));
-            header.appendChild(button('Delete', 'Delete folder', () => {
-              if (window.confirm('Delete this folder? Its items will move to No folder.')) change(() => {
+            header.appendChild(button('Delete', 'Delete ' + text.singular, () => {
+              if (window.confirm('Delete this ' + text.singular + '? Its items will move to ' + text.root + '.')) change(() => {
                 tree.items.forEach(item => { if (item.folderId === folderId) item.folderId = null; });
                 tree.folders = tree.folders.filter(value => value !== folder);
               });
             }));
           }
-        } else { const title = document.createElement('span'); title.className = 'small text-muted'; title.textContent = 'No folder'; header.appendChild(title); }
+        } else { const title = document.createElement('span'); title.className = 'small text-muted'; title.textContent = text.root; header.appendChild(title); }
         section.appendChild(header);
         const content = document.createElement('div'); content.className = 'catalog-items'; content.hidden = !!collapsed[folderId];
         renderItems(content, folderId); section.appendChild(content); root.appendChild(section);

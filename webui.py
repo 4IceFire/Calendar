@@ -10461,7 +10461,11 @@ def _digico_filtered_mixer_config(client) -> dict:
         item for item in (cfg.get('auxes') or [])
         if bool(item.get('enabled', True)) and (not allowed or str(item.get('channel')) in allowed)
     ]
-    channels = [item for item in (cfg.get('channels') or []) if bool(item.get('enabled', True))]
+    from personal_mix_organization import project_channels
+    config = utils.get_config()
+    provider = config.get('personal_mix_provider', 'digico')
+    organized = project_channels(cfg.get('channels') or [], config.get(provider + '_channel_organization'))
+    channels = [item for item in organized if bool(item.get('enabled', True))]
     return {**cfg, 'auxes': auxes, 'channels': channels}
 
 
@@ -10566,10 +10570,9 @@ def api_digico_setup():
             old_cfg = copy.deepcopy(cfg)
             cfg = copy.deepcopy(cfg)
             from personal_mixes import validate_config
-            if any(_personal_mix_protected_key(key) and key not in _PERSONAL_MIX_CONFIG_KEYS for key in data):
+            if any(_personal_mix_protected_key(key) and key not in _DIGICO_CONFIG_KEYS for key in data):
                 raise ValueError('Unknown Personal Mixes setting; TLS authentication is unsupported')
             cfg.update({key: data[key] for key in _PERSONAL_MIX_CONFIG_KEYS if key in data})
-            cfg = validate_config(cfg)
             cfg['digico_enabled'] = bool(data.get('digico_enabled', cfg.get('digico_enabled', False)))
             cfg['digico_ip'] = str(data.get('digico_ip', cfg.get('digico_ip', '')) or '').strip()[:253]
             cfg['digico_port'] = int(_digico_clean_number(data.get('digico_port', cfg.get('digico_port', 9000)), 9000, 1, 65535, integer=True))
@@ -10584,6 +10587,15 @@ def api_digico_setup():
                 cfg['digico_channels'] = _digico_clean_indexed_items(data.get('digico_channels'), kind='channel')
             if 'digico_external_devices' in data:
                 cfg['digico_external_devices'] = _digico_clean_external_devices(data.get('digico_external_devices'))
+            cfg = validate_config(cfg)
+            # Validation covers both desks; a save of one must not materialize
+            # defaults or normalize the inactive desk's untouched configuration.
+            for key in _PERSONAL_MIX_CONFIG_KEYS:
+                if key not in data:
+                    if key in old_cfg:
+                        cfg[key] = copy.deepcopy(old_cfg[key])
+                    else:
+                        cfg.pop(key, None)
             utils.save_config(cfg)
             utils.reload_config(force=True)
             if _close_digico_client is not None:

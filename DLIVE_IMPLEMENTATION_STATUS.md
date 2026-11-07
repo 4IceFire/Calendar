@@ -1,5 +1,51 @@
 # dLive implementation status
 
+## Personal Mixes draft drag and true channel groups (local, unpublished)
+
+This section supersedes the historical row-arrow/section-heading editor below.
+Both providers now use the shared catalog organization engine: flat AUX movement,
+stable-ID channel groups, mouse/touch/keyboard drag, group CRUD/order and honest
+unsaved drafts until explicit Save & Restart. Canonical setup-owned metadata is
+validated on setup/import and protected from generic writes. Performer tabs use
+stable IDs (not names), with empty groups omitted and legacy fallback retained.
+The operational provider-authorization lock remains intact. dLive unsupported
+send/pan/meter placeholders and its routine capability banner are omitted; honest
+backend capabilities and actionable warnings remain unchanged.
+
+Evidence directory: `/home/icefire4/.hermes/cache/scratch/personal-mix-groups-evidence/`.
+
+- Expected RED before production slices: `01-api-red.log` (unregistered key),
+  `02-validation-red.log` (malformed group accepted), `03-ui-red.log` (no handles),
+  `04-inactive-red.log` (inactive settings changed), `05-capabilities-red.log`
+  (unsupported pan control still rendered). Corresponding GREEN is in
+  `01-api-green.log`, `02-validation-green.log`, `03-ui-green.log`, and the final
+  browser run below. `04-05-green.log` retained an intermediate hidden banner-text
+  failure; the final run verifies its correction.
+- `python-final.log`: final default guarded runner, **71 passed**, including all
+  new organization/import cases and shared catalog regressions, provider-auth
+  races, freshness/capacity, setup and configuration. `python-full.log` (69 passed)
+  and `python-organization.log` (four passed) are earlier overlapping runs, not
+  additional distinct tests.
+- `node.log`: five passing draft-adapter/legacy derivation tests.
+- `native-final.log`: 51 passed, four intentional CDP-touch skips across all five
+  projects. Covers both-provider save/reload and performer group order, duplicate
+  names, empty/deleted groups, row-node/label/icon preservation, reduced-motion
+  320px overflow, native mouse cancel/drop, keyboard and real mobile Chromium touch,
+  failed-save retry, inactive configuration and existing AUX permission coverage.
+  `native-all.log` is an earlier 41-pass/10-failure run caused by an ambiguous test
+  icon locator; the corrected locator is verified in the final clean run.
+  `cancel-final.log`: ten passing all-five-project reruns with zero page-error
+  filtering, including the deliberate failed HTTP save and successful retry.
+- `legacy-tabs.log`: 50 passing existing performer tab cases across all five
+  projects. Legacy repeated/case-sensitive names, Inputs fallback, DiGiCo controls,
+  sticky layout and polling selection remain covered.
+- Desktop and 320px mobile screenshots under `native-final/` were inspected,
+  including cropped mobile form/group controls and dLive performer layout.
+
+No commit, push, merge, deployment, production/staging restart or real-hardware
+operation was performed for this change. Physical-console commissioning remains
+outstanding; independent parent review is separate from these implementation tests.
+
 ## UI parity and active-provider permissions
 
 This follow-up supersedes the historical choice to display inactive/missing

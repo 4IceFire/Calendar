@@ -20,7 +20,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'tests')]
 
 
 def main():
-    names = sys.argv[1:] or ['test_dlive', 'test_dlive_webui', 'test_dlive_acceptance', 'test_dlive_configuration', 'test_digico', 'test_digico_webui', 'test_frontend_compatibility']
+    names = sys.argv[1:] or ['test_dlive', 'test_dlive_webui', 'test_dlive_acceptance', 'test_dlive_configuration', 'test_digico', 'test_digico_webui', 'test_frontend_compatibility', 'test_personal_mix_organization', 'test_catalog_organization']
     original_connect = socket.socket.connect
     original_sendto = socket.socket.sendto
     original_db = sqlite3.connect

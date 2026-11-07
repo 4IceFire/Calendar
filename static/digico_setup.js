@@ -9,7 +9,11 @@
   const channelTable = document.getElementById('digico-channel-table');
   const deviceList = document.getElementById('digico-device-list');
   const iconSystem = window.TDeckDigicoIcons;
-  const state = {payload: null, dirty: false, busy: false, initialized: false};
+  const state = {payload: null, dirty: false, busy: false, initialized: false, discoveryPending: false};
+  function dirty(error) {
+    state.dirty = true;
+    setMessage(error || 'Unsaved changes. Select Save & Restart to apply.', error ? 'danger' : 'info');
+  }
   let iconDialog = null;
   let iconTarget = null;
   let iconDialogBackdrop = null;
@@ -77,18 +81,7 @@
       return leftOrder - rightOrder || Number(left.channel) - Number(right.channel);
     });
 
-    // Older TDeck configs stored the same group name on every channel in a
-    // group. Section headings now belong only to the first channel beneath
-    // them, so collapse those consecutive legacy values when editing.
-    if (kind === 'channel') {
-      let previousHeading = '';
-      for (const item of out) {
-        const heading = String(item.group || item.title || '').trim();
-        if (heading && heading === previousHeading) item.group = '';
-        else if (heading) item.group = heading;
-        previousHeading = heading;
-      }
-    }
+
     return out;
   }
 
@@ -295,7 +288,7 @@
     return wrap;
   }
 
-  function renderMixerItems(kind, items) {
+  function renderMixerItems(kind, items, organization) {
     const target = kind === 'aux' ? auxTable : channelTable;
     target.textContent = '';
     if (!items.length) {
@@ -305,11 +298,13 @@
       target.appendChild(empty);
       return;
     }
+    const rows = [];
     for (const item of items) {
       const row = document.createElement('div');
       row.className = `digico-config-row ${kind === 'channel' ? 'is-channel' : 'is-aux'}`;
       row.dataset.channel = String(item.channel);
       row.dataset.deskLabel = item.deskLabel || '';
+      row._mixOriginal = item;
 
       const enabledWrap = document.createElement('div');
       enabledWrap.className = 'form-check form-switch';
@@ -326,18 +321,14 @@
       number.title = item.deskLabel || '';
       row.append(enabledWrap, number, labeledInput('Label', 'digico-item-label', item.label));
       if (kind === 'channel') {
-        const heading = labeledInput('Section heading', 'digico-item-group', item.group || '');
-        heading.querySelector('input').placeholder = 'Only where a new section starts';
-        row.appendChild(heading);
         row.appendChild(iconControl(item, kind));
       } else {
         row.appendChild(labeledInput('Colour', 'digico-item-colour', item.colour || '#3478f6', 'color'));
         row.appendChild(iconControl(item, kind));
       }
-      row.appendChild(moveControls(row, item, kind));
-      target.appendChild(row);
+      rows.push({id: String(item.channel), node: row, label: item.label, group: item.group || item.title});
     }
-    updateMoveButtons(target);
+    window.TDeckMixOrganization.attach(target, organization, rows, kind === 'channel', dirty);
   }
 
   function renderDevice(raw) {
@@ -435,7 +426,7 @@
     setConnectionFields(config);
     const discovered = config.personal_mix_provider === 'dlive' ? {} : (payload.discovered || {});
     renderMixerItems('aux', combinedItems(discovered.auxes, config.digico_auxes, 'aux'));
-    renderMixerItems('channel', combinedItems(discovered.channels, config.digico_channels, 'channel'));
+    renderMixerItems('channel', combinedItems(discovered.channels, config.digico_channels, 'channel'), config.digico_channel_organization);
     renderDevices(config.digico_external_devices);
     state.initialized = true;
     state.dirty = false;
@@ -446,10 +437,16 @@
     state.busy = true;
     try {
       const payload = await requestJson('/api/digico/setup');
-      const discoveredChanged = !state.payload ||
+      const discoveredChanged = state.discoveryPending || !state.payload ||
         Number((state.payload.status || {}).channels || 0) !== Number((payload.status || {}).channels || 0) ||
         Number((state.payload.status || {}).auxes || 0) !== Number((payload.status || {}).auxes || 0);
-      renderPayload(payload, !!forceFull || !state.initialized || (!state.dirty && discoveredChanged));
+      const moving = Array.from(root.querySelectorAll('.catalog-tree')).some(catalog =>
+        typeof catalog._catalogMoving === 'function' && catalog._catalogMoving());
+      const full = !moving && (!!forceFull || !state.initialized || (!state.dirty && discoveredChanged));
+      // Status can advance while a gesture is active. Keep the deferred redraw
+      // pending so cancellation refreshes later; a successful drop stays dirty.
+      state.discoveryPending = discoveredChanged && !full;
+      renderPayload(payload, full);
     } catch (error) {
       setMessage(error.message || 'Could not load DiGiCo setup.', 'danger');
     } finally {
@@ -461,14 +458,14 @@
     const target = kind === 'aux' ? auxTable : channelTable;
     return Array.from(target.querySelectorAll('.digico-config-row')).map((row, index) => {
       const item = {
+        ...row._mixOriginal,
         channel: Number(row.dataset.channel),
         enabled: !!row.querySelector('.digico-item-enabled').checked,
         label: row.querySelector('.digico-item-label').value.trim(),
         icon: row.querySelector('.digico-item-icon').value,
         order: index + 1,
       };
-      if (kind === 'channel') item.group = row.querySelector('.digico-item-group').value.trim();
-      else item.colour = row.querySelector('.digico-item-colour').value;
+      if (kind !== 'channel') item.colour = row.querySelector('.digico-item-colour').value;
       return item;
     });
   }
@@ -485,7 +482,7 @@
   }
 
   function collectConfig() {
-    return {
+    const result = {
       ...(window.TDeckDLiveSetup ? window.TDeckDLiveSetup.collect() : {}),
       digico_enabled: !!field('digico-enabled').checked,
       digico_ip: value('digico-ip').trim(),
@@ -497,8 +494,15 @@
       digico_stale_after: numberValue('digico-stale-after', 10),
       digico_auxes: collectMixerItems('aux'),
       digico_channels: collectMixerItems('channel'),
+      digico_channel_organization: channelTable._mixOrganization ? channelTable._mixOrganization.organization() : null,
       digico_external_devices: collectDevices(),
     };
+    const active = result.personal_mix_provider;
+    Object.keys(result).forEach(key => {
+      if ((active === 'dlive' && key.indexOf('digico_') === 0) ||
+          (active === 'digico' && key.indexOf('dlive_') === 0)) delete result[key];
+    });
+    return result;
   }
 
   async function saveSetup() {
@@ -557,14 +561,13 @@
       }
       const rows = Array.from(target.querySelectorAll('.digico-config-row'));
       rows.sort((left, right) => Number(left.dataset.channel) - Number(right.dataset.channel));
-      for (const row of rows) target.appendChild(row);
-      updateMoveButtons(target);
+      if (target._mixOrganization) target._mixOrganization.physicalOrder();
       state.dirty = true;
       setMessage('Desk labels and physical desk order restored locally. Select Save & Restart to apply them.', 'info');
     });
   }
 
-  window.TDeckMixerItemEditor = {iconControl, moveControls, updateMoveButtons};
+  window.TDeckMixerItemEditor = {iconControl, moveControls, updateMoveButtons, dirty};
 
   loadSetup(true);
   window.setInterval(() => {

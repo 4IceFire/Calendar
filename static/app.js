@@ -996,6 +996,7 @@ function _renderConfigGroups(cfg) {
     'videohub_allowed_inputs',
     // Managed by the validated Personal Mixes setup page.
     'personal_mix_provider',
+    'dlive_channel_organization', 'digico_channel_organization',
     'dlive_enabled', 'dlive_ip', 'dlive_port', 'dlive_midi_channel',
     'dlive_request_interval', 'dlive_retry_interval', 'dlive_stale_after',
     'dlive_auxes', 'dlive_channels',

@@ -24,9 +24,10 @@ test('actual dLive socket readbacks drive existing grouped performer controls', 
   await expect(page.locator('#digico-mixer-connection')).toContainText('online');
   await expect(page.getByRole('tab')).toHaveCount(2);
   await expect(page.locator('#digico-level-1')).toBeEnabled({timeout: 15000});
-  await expect(page.locator('#digico-pan-1')).toBeDisabled();
-  await expect(page.locator('.digico-send-toggle').first()).toHaveText('Unavailable');
-  await expect(page.locator('#digico-mixer-notice')).toContainText('Per-send mute');
+  await expect(page.locator('#digico-pan-1')).toHaveCount(0);
+  await expect(page.locator('.digico-send-toggle')).toHaveCount(0);
+  await expect(page.locator('.digico-input-meter')).toHaveCount(0);
+  await expect(page.locator('#digico-mixer-notice')).not.toContainText('Per-send mute');
   expect(commands((await (await page.request.get(prefix + 'health')).json()).messages)).toEqual([]);
   await page.getByRole('tab').nth(1).click();
   await expect(page.locator('.digico-channel:visible')).toHaveCount(2);
@@ -73,7 +74,7 @@ test('setup selects provider and saves explicit mappings without audio writes', 
   expect((await (await page.request.get(prefix + 'health')).json()).config.personal_mix_provider).toBe('dlive');
 });
 
-test('dLive arrangement editor saves colours, icons and section headings by stable mapping', async ({page}, info) => {
+test('dLive arrangement editor saves colours, icons and true groups by stable mapping', async ({page}, info) => {
   const errors = collectPageErrors(page);
   await page.setViewportSize({width: info.project.name.startsWith('mobile') ? 320 : 1920, height: 900});
   expect((await page.request.get(prefix + 'login?admin=1')).ok()).toBe(true);
@@ -88,12 +89,18 @@ test('dLive arrangement editor saves colours, icons and section headings by stab
   await rows.first().getByLabel('Colour').fill('#cc4422');
   await rows.first().getByRole('button', {name: /Choose AUX icon/}).click();
   await page.locator('.digico-icon-option[data-icon="headset"]').click();
-  await rows.first().getByRole('button', {name: /Move .* down/}).click();
+  const auxHandle = page.locator('#dlive-aux-mappings .catalog-handle').first();
+  await auxHandle.press('Space'); await auxHandle.press('ArrowDown'); await auxHandle.press('Enter');
+  await expect(page.locator('#dlive-aux-mappings')).toHaveAttribute('aria-busy', 'false');
   await expect(rows.first().locator('[data-key="bus"]')).toHaveValue('1');
   await page.locator('[data-bs-target="#digico-tab-channels"]').click();
   const channels = page.locator('#dlive-input-mappings [data-mapping]');
-  await channels.nth(2).getByLabel('Section heading').fill('Instruments');
-  await channels.nth(2).getByRole('button', {name: /Move .* up/}).click();
+  page.once('dialog', d => d.accept('Instruments'));
+  await page.locator('#dlive-input-mappings [data-catalog-folder="legacy-3"]').getByRole('button', {name:'Rename group', exact:true}).click();
+  await expect(page.locator('#dlive-input-mappings')).toHaveAttribute('aria-busy', 'false');
+  const channelHandle = page.locator('#dlive-input-mappings [data-catalog-item="3"] .catalog-handle');
+  await channelHandle.press('Space'); await channelHandle.press('ArrowDown'); await channelHandle.press('Enter');
+  await expect(page.locator('#dlive-input-mappings')).toHaveAttribute('aria-busy', 'false');
   const save = page.waitForResponse(r => r.url().endsWith('/api/digico/setup') && r.request().method() === 'POST');
   await page.locator('#digico-setup-save').click();
   expect((await save).ok()).toBe(true);
@@ -112,8 +119,8 @@ test('dLive arrangement editor saves colours, icons and section headings by stab
   const health = await (await page.request.get(prefix + 'health')).json();
   expect(health.config.dlive_auxes.map(a => a.channel)).toEqual([1001, 2002]);
   expect(health.config.dlive_auxes[1]).toMatchObject({bus: 2, stereo: true, group: 'Stage', colour: '#cc4422', icon: 'headset', order: 2});
-  expect(health.config.dlive_channels.map(c => c.channel)).toEqual([1, 3, 2, 4]);
-  expect(health.config.dlive_channels[1].group).toBe('Instruments');
+  expect(health.config.dlive_channels.map(c => c.channel)).toEqual([1, 2, 4, 3]);
+  expect(health.config.dlive_channel_organization.folders[1].name).toBe('Instruments');
   expect(commands(health.messages)).toEqual([]);
   await page.goto('/personal-mixes');
   await expect(page.getByRole('heading', {name: 'Stage', exact: true})).toBeVisible();

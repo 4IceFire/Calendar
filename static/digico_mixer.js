@@ -49,6 +49,7 @@
 
   function showNotice(message, kind) {
     if (!message) {
+      notice.textContent = '';
       notice.classList.add('d-none');
       return;
     }
@@ -305,13 +306,6 @@
   }
 
   function updateSendToggle(control, sendOn) {
-    if (state.config && state.config.capabilities && state.config.capabilities.sendOn === false) {
-      control.button.disabled = true;
-      control.button.classList.remove('is-loading');
-      control.button.textContent = 'Unavailable';
-      control.button.setAttribute('aria-label', 'Per-send mute unavailable with this mixer provider');
-      return;
-    }
     const known = typeof sendOn === 'boolean';
     if (known) control.sendOn = sendOn;
     control.button.disabled = !known || control.busy;
@@ -419,10 +413,20 @@
     state.groups = [];
     const sections = [];
     const titleCounts = new Map();
+    const capabilities = (state.config && state.config.capabilities) || {};
     let section = null;
     let previousHeading = '';
     for (const channel of channels || []) {
       const headingText = String(channel.group || '').trim();
+      if (Object.prototype.hasOwnProperty.call(channel, 'groupId')) {
+        const key = JSON.stringify(['group', channel.groupId]);
+        if (!section || section.key !== key) {
+          section = {title: headingText || 'Ungrouped', key, channels: []};
+          sections.push(section);
+        }
+        section.channels.push(channel);
+        continue;
+      }
       if ((headingText && headingText !== previousHeading) || !section) {
         const title = headingText || 'Inputs';
         const occurrence = (titleCounts.get(title) || 0) + 1;
@@ -473,7 +477,7 @@
 
       for (const channel of channelSectionData.channels) {
         const row = document.createElement('div');
-        row.className = `digico-channel ${state.selectedAux && state.selectedAux.stereo ? 'is-stereo' : ''}`;
+        row.className = `digico-channel ${state.selectedAux && state.selectedAux.stereo && capabilities.pan !== false ? 'is-stereo' : ''}`;
         const name = document.createElement('div');
         name.className = 'digico-channel-name';
         const icon = iconSystem.normalize(channel.icon);
@@ -483,13 +487,15 @@
         name.appendChild(nameText);
         const identity = document.createElement('div');
         identity.className = 'digico-channel-identity';
-        const meter = buildInputMeter(channel);
-        const send = buildSendToggle(channel);
-        identity.append(name, meter.element, send.button);
+        const meter = capabilities.inputMeters === false ? null : buildInputMeter(channel);
+        const send = capabilities.sendOn === false ? null : buildSendToggle(channel);
+        identity.appendChild(name);
+        if (meter) identity.appendChild(meter.element);
+        if (send) identity.appendChild(send.button);
         const level = buildControl(channel.channel, 'level', channel.level);
         row.append(identity, level.element);
         let pan = null;
-        if (state.selectedAux && state.selectedAux.stereo) {
+        if (state.selectedAux && state.selectedAux.stereo && capabilities.pan !== false) {
           pan = buildControl(channel.channel, 'pan', channel.pan);
           row.appendChild(pan.element);
         }
@@ -512,7 +518,7 @@
         controls.level.input.disabled = channel.level == null || channel.stale === true;
         if (controls.level.input.disabled) controls.level.value.textContent = 'Stale / unavailable';
       }
-      if (typeof channel.sendOn === 'boolean' && !controls.send.busy && Date.now() >= controls.send.holdUntil) {
+      if (controls.send && typeof channel.sendOn === 'boolean' && !controls.send.busy && Date.now() >= controls.send.holdUntil) {
         updateSendToggle(controls.send, channel.sendOn);
       }
       if (channel.level !== null && !state.activeControls.has(`${channel.channel}:level`)) {
@@ -532,7 +538,7 @@
       showNotice(status.pollingWarning, 'warning');
     } else if (status.connected) {
       state.errorSince = 0;
-      showNotice((state.config && state.config.capabilityNotice) || '', 'secondary');
+      showNotice('');
     } else if (!state.errorSince) {
       state.errorSince = Date.now();
     } else if ((Date.now() - state.errorSince) > 4000) {
@@ -549,6 +555,7 @@
   }
 
   async function pollInputMeters() {
+    if (state.config && state.config.capabilities && state.config.capabilities.inputMeters === false) return;
     if (state.meterBusy || !state.selectedAux || document.hidden) return;
     state.meterBusy = true;
     try {
@@ -606,7 +613,7 @@
         showPicker();
       }
       if (!auxes.length) showNotice('No enabled AUXes are available. Ask a TDeck administrator to check desk discovery, AUX setup and your group permissions.', 'warning');
-      else showNotice(payload.capabilityNotice || '', 'secondary');
+      else updateStatusNotice(payload.status || {});
     } catch (error) {
       setConnection({running: false, connected: false});
       showNotice(error.status === 401 ? 'Your session has expired. Sign in again to continue.' : (error.message || 'Could not load the desk configuration.'), 'danger');

@@ -5,6 +5,7 @@
 
 {% block head_extra %}
   <link rel="stylesheet" href="{{ static_asset('digico.css') }}">
+  <link rel="stylesheet" href="{{ static_asset('catalog_organization.css') }}">
 {% endblock %}
 
 {% block page_actions %}
@@ -71,7 +72,7 @@
 
     <section id="digico-tab-auxes" class="tab-pane fade">
       <div class="card tdeck-soft"><div class="card-body">
-        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Personal Mix AUXes</h2><p class="text-muted">Choose which desk AUXes appear, give each one a friendly label, colour and optional icon, then use the arrow buttons to arrange them.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="aux" type="button">Reset labels &amp; order</button></div>
+        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Personal Mix AUXes</h2><p class="text-muted">Choose labels, colours and icons. Drag the handles to arrange AUXes, then select Save &amp; Restart to apply.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="aux" type="button">Reset labels &amp; order</button></div>
         <div id="digico-aux-table" class="digico-config-list"></div>
         <div id="dlive-aux-editor" hidden>
           <p class="text-muted">Mono IDs are 1000 + ordinal; stereo IDs are 2000 + ordinal, not output sockets. Group, colour and order affect display only.</p>
@@ -83,10 +84,10 @@
 
     <section id="digico-tab-channels" class="tab-pane fade">
       <div class="card tdeck-soft"><div class="card-body">
-        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Input channels</h2><p class="text-muted">Choose a label and icon, then use the arrows to arrange channels. Add a Section heading only to the first channel in a section; that heading appears above it and continues until the next heading.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="channel" type="button">Reset labels &amp; order</button></div>
+        <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Input channels</h2><p class="text-muted">Create named groups, drag channels into a group or into order, and use group arrows to arrange performer tabs. Deleting a group moves its channels to Ungrouped. Changes stay unsaved until Save &amp; Restart.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="channel" type="button">Reset labels &amp; order</button></div>
         <div id="digico-channel-table" class="digico-config-list"></div>
         <div id="dlive-input-editor" hidden>
-          <p class="text-muted">Add only intended inputs. Section headings start performer groups and continue until the next heading.</p>
+          <p class="text-muted">Add only intended inputs. Moving channels never changes their physical input numbers.</p>
           <div id="dlive-input-mappings" class="vstack gap-2 mb-2"></div>
           <button id="dlive-add-input" class="btn btn-sm btn-outline-secondary" type="button">Add input</button>
         </div>
@@ -115,6 +116,8 @@
 {% endblock %}
 
 {% block scripts %}
+  <script src="{{ static_asset('catalog_organization.js') }}"></script>
+  <script src="{{ static_asset('personal_mix_organization.js') }}"></script>
   <script src="{{ static_asset('digico_icons.js') }}"></script>
   <script src="{{ static_asset('dlive_setup.js') }}"></script>
   <script src="{{ static_asset('digico_setup.js') }}"></script>

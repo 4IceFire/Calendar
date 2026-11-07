@@ -670,7 +670,7 @@ Setup:
 2. Enable the integration and enter the SD9 IP and OSC port (normally `9000`).
 3. Choose a free local UDP listen port (default `8000`). Allow that UDP port through the TDeck computer's firewall when using native iPad/OSC relay devices.
 4. Wait for discovery to report the input-channel and AUX counts.
-5. Use the **AUXes** and **Channels** tabs to set visibility and labels, choose a unified icon for each AUX and input (plus a colour for each AUX), and arrange items with the arrow buttons. A channel's optional **Section heading** begins a group in the Personal Mixes tab strip; following inputs without a heading stay in that section. Inputs before the first heading appear under **Inputs**. Section and input ordering remain the configured order.
+5. Use **AUXes** and **Channels** to set visibility, labels and icons (plus AUX colours). Drag the shared ⠿ handles to reorder AUXes or move channels within/between named groups. For keyboard movement, focus a handle, press Space, choose a destination with the arrows, then Enter; Escape cancels. **New group**, **Rename**, **Delete** and group up/down controls manage performer tabs. Deleting a group moves its channels to **Ungrouped**, never deletes inputs or changes physical numbers. Changes are local drafts until **Save & Restart**; reload after saving to verify. Existing legacy headings are presented as groups without writing a startup migration. Empty groups remain in setup but do not create empty performer tabs.
 6. In **Permissions → Groups**, grant **Personal Mixes** and optionally select which AUXes that group may control. No AUX selection means all enabled AUXes.
 7. Team members open `/personal-mixes`, sign in, and choose their assigned mix.
 

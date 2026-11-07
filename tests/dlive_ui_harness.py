@@ -61,6 +61,17 @@ def main():
             fixture.stack.enter_context(patch.object(web, '_get_atem_audio_sources_for_permissions', return_value=[]))
             fixture.stack.enter_context(patch.object(web.utils, 'save_config', side_effect=lambda cfg: fixture.cfg.update(copy.deepcopy(cfg))))
             fixture.stack.enter_context(patch.object(web.utils, 'reload_config'))
+            # Exercise the real indexed DiGiCo normalizer without opening UDP.
+            # Synthetic discovery is injected into its ordinary cache only.
+            from digico import DigicoConfig, DigicoMixerClient
+            def mixer_factory(cfg):
+                if cfg.get('personal_mix_provider') != 'digico':
+                    return personal_mixes.get_client(cfg)
+                mixer = DigicoMixerClient(DigicoConfig.from_mapping(dict(cfg, digico_enabled=False)))
+                mixer._cache['/Console/Input_Channels'] = {'args': [len(cfg.get('digico_channels') or [])], 'ts': time.time()}
+                mixer._cache['/Console/Aux_Outputs/modes'] = {'args': [1] * len(cfg.get('digico_auxes') or []), 'ts': time.time()}
+                return mixer
+            fixture.stack.enter_context(patch.object(web, '_digico_client_factory', side_effect=mixer_factory))
             allowed = {'static', 'personal_mixes_page', 'digico_config_page', 'auth_ping', 'auth_touch', 'api_status_summary', 'api_activity_log_alerts', 'admin_permissions_page', 'api_admin_group_update', 'api_admin_group_organization'}
             for name in list(web.app.view_functions):
                 if name not in allowed and not name.startswith(('api_digico_', 'api_v1__api_digico_')):

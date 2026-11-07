@@ -18,11 +18,19 @@ existing SD9 setup, IDs, OSC relay and operational HTTP routes are retained.
 | ME-1 remote mixing | Not implemented; ME-1 remains a separate personal audio mixer, not a dLive AUX |
 | TLS/profile authentication | Not implemented; TLS ports are rejected and never silently downgraded |
 
-The performer page preserves its existing layout, AUX picker, groups and control
-locations. Unsupported controls are disabled and labelled **Unavailable**. A
+The performer page preserves its AUX picker and group tabs. Unsupported per-send
+mute/pan controls and meter placeholders are omitted, not replaced with whole-input
+mutes or fabricated signal values. The routine capability banner is not shown. A
 stale or not-yet-observed dLive fader is disabled rather than displayed as a
 fresh zero. Device-reported observations are not proof of physical headphone
 output; commissioning below remains necessary.
+
+This is a limitation of TDeck's present MIDI/TCP provider, not a claim that the
+dLive console lacks meters. True input signal metering would need a separate
+supported metering transport. The documented MIDI fader/send values are setpoints,
+not signal measurements. Backend `inputMeters: false` and the unsupported, empty
+meter response remain explicit. Offline, stale, error and refresh-budget warnings
+remain visible when actionable.
 
 ## Primary protocol references
 
@@ -139,14 +147,19 @@ extended and stale controls remain disabled.
    connect. Use the MixRack IP and port **51325** unless the engineer explicitly
    identifies a V2 Surface endpoint (51328). Never use audio expansion ports.
 4. In **AUXes**, add mappings using the separate mono/stereo AUX ordinal. Set
-   friendly labels, optional group headings, colours and icons; use the up/down
-   arrows to arrange the picker. Group headings follow that display order and
-   never change a bus number. In **Channels**, add only intended input numbers
-   (1–128), label/icon them and place a **Section heading** on the first input
-   in each desired performer tab. Move whole rows with the shared arrows.
+   friendly labels, optional AUX headings, colours and icons; drag the ⠿ handles
+   to arrange the flat picker. In **Channels**, add only intended input numbers
+   (1–128), label/icon them and use **New group** to create performer groups.
+   Drag channels between/within groups, or use a focused handle's Space → arrows
+   → Enter sequence (Escape cancels). Group up/down buttons arrange performer tabs;
+   Rename keeps a group's identity, and Delete moves its channels to Ungrouped.
    **Save & Restart**, then reload to verify your arrangement. Namespaced IDs,
    mono/stereo ordinals and enabled switches are retained independently of order.
    Friendly labels remain usable if desk names are unavailable.
+   Group and drag edits show **Unsaved changes**, never an autosave claim. Failed
+   saves retain the draft for correction/retry. Reloading without saving discards
+   local edits. This setup behaviour is shared with DiGiCo and uses TDeck's
+   VideoHub/Permissions catalog movement component.
 5. Enable dLive and explicitly **Save & Restart**. This opens the selected
    read-only discovery connection; it does not set any level or mute. If
    transport or MIDI transmit is disabled, status must remain offline/waiting.
@@ -211,6 +224,36 @@ force dLive **disabled**. Explicitly review mappings/grants and re-enable in set
 after import. Imports do not preserve an already-running control connection.
 Malformed mappings are rejected, not converted to another bus or unrestricted
 access. TLS credentials are not exported because none are stored.
+
+### Channel group metadata (both providers)
+
+`dlive_channel_organization` and `digico_channel_organization` are setup-owned
+display metadata, using the shared catalog model:
+
+```json
+{
+  "folders": [{"id": "group-vocals", "name": "Vocals", "order": 0}],
+  "items": [{"id": "1", "folderId": "group-vocals", "order": 0}]
+}
+```
+
+Each physical input ID must occur exactly once, including disabled inputs.
+Folder IDs are stable and distinct even when names match. Folder array order and
+member order drive performer tabs/channels; Ungrouped appears first. Empty groups
+persist in setup without empty performer tabs; disabled inputs do not appear to
+performers. New discovered inputs append at Ungrouped in the read view without
+writing configuration. DiGiCo mappings remain indexed by physical input number,
+not display position. dLive input numbers and namespaced mono/stereo AUX IDs are
+unchanged by movement. AUX order stays in the existing mapping `order` fields.
+
+Absent/null metadata retains the existing heading interpretation on the performer
+page (including repeated headings and **Inputs** fallback). Setup derives draft
+groups from those legacy sections; only explicit Save & Restart persists them.
+Group data never grants access or sends a mixer command. Both keys are hidden from
+generic Config and protected against generic writes; Config ZIP import validates
+both organizations before replacing config. Unknown/duplicate IDs, missing members,
+unknown folders and malformed groups fail without a partial save. Saving the
+active desk preserves the inactive desk's untouched configuration.
 
 ## HTTP compatibility and safety
 
@@ -294,11 +337,12 @@ python tests/run_dlive_isolated.py
 # Complete suite, with in-memory HTTP adapters allowed but hardware blocked:
 python tests/run_dlive_isolated.py --all
 # Reviewer desired invariants + concurrency/import/demand capacity regressions:
-python tests/run_dlive_isolated.py test_dlive_acceptance
+python tests/run_dlive_isolated.py test_dlive_acceptance test_personal_mix_organization test_catalog_organization
+node --test tests/personal_mix_organization.test.cjs
 npm ci --ignore-scripts
 python tests/dlive_ui_harness.py --ready-file /your/private/evidence/ready.json
 # Read the marker-protected loopback URL from ready.json, then:
-TDECK_BASE_URL=http://127.0.0.1:PORT npx playwright test tests/browser/dlive.spec.js --workers=1
+TDECK_BASE_URL=http://127.0.0.1:PORT npx playwright test tests/browser/dlive.spec.js tests/browser/personal_mix_organization.spec.js --workers=1
 ```
 
 The fixture cold-imports with a private auth DB, blocks outbound hardware, uses
@@ -306,7 +350,7 @@ real dLive TCP/Flask/auth, resets per case and verifies a fixture marker before
 writes. All five projects cover actual send writes/readback, group tabs,
 unsupported controls, scope rejection, setup save/reload and selection without
 writes, plus an actual overcapacity warning without fabricated levels. Arrangement
-coverage uses native colour inputs, the shared icon modal and arrow controls,
+coverage uses native colour inputs, the shared icon modal and shared drag controls,
 then verifies saved metadata/order, a grouped/coloured performer picker and input
 tabs after reload. Permissions coverage exercises hidden-only restrictions,
 explicit All, unrelated autosave, provider switching and stale-editor rejection.
@@ -316,3 +360,12 @@ are generated in Playwright output. Existing SD9 browser
 regressions still use `personal_mix_tabs_ui_harness.py` and
 `personal_mix_tabs.spec.js`, separately from the dLive fixture. See
 `DLIVE_IMPLEMENTATION_STATUS.md` for exact authoring evidence and remaining gates.
+
+The group spec also exercises both providers with native mouse cancel/drop,
+keyboard movement, real mobile Chromium touch AUX movement, stable edited row
+nodes, duplicate group names, empty/deleted groups, reduced motion/320px overflow,
+failed-save draft recovery and actual setup/performer reload/readback. The DiGiCo
+fixture feeds synthetic discovery into the real indexed client normalizer without
+opening UDP; dLive uses the real loopback TCP desk. All fixtures require readiness,
+the isolated marker and a successful reset before mutation, with one worker. No
+test result here establishes physical-console compatibility or authorizes a deploy.
