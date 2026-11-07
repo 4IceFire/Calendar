@@ -49,6 +49,8 @@ def main():
             fixture.cfg.update(config(desk.port))
             # Use production freshness, not the unit test's accelerated 2s clock.
             fixture.cfg['dlive_stale_after'] = 10
+            fixture.cfg['digico_auxes'] = [dict(label='Old SD9 IEM', enabled=True)]
+            fixture.cfg['digico_enabled'] = False
             fixture.cfg['dlive_auxes'].append(dict(channel=1001, bus=1, stereo=False, label='Mono IEM'))
             fixture.cfg['dlive_channels'] = [dict(channel=n, label=f'Input {n}', group=group) for n, group in
                                              [(1, 'Vocals'), (2, ''), (3, 'Band'), (4, '')]]
@@ -56,9 +58,10 @@ def main():
             web._set_group_pages(2, ['page:digico_mixer'])
             web._set_group_digico_allowed_auxes(2, ['2002'])
             fixture.stack.enter_context(patch.object(web, '_get_status_snapshot', return_value={}))
+            fixture.stack.enter_context(patch.object(web, '_get_atem_audio_sources_for_permissions', return_value=[]))
             fixture.stack.enter_context(patch.object(web.utils, 'save_config', side_effect=lambda cfg: fixture.cfg.update(copy.deepcopy(cfg))))
             fixture.stack.enter_context(patch.object(web.utils, 'reload_config'))
-            allowed = {'static', 'personal_mixes_page', 'digico_config_page', 'auth_ping', 'auth_touch', 'api_status_summary', 'api_activity_log_alerts'}
+            allowed = {'static', 'personal_mixes_page', 'digico_config_page', 'auth_ping', 'auth_touch', 'api_status_summary', 'api_activity_log_alerts', 'admin_permissions_page', 'api_admin_group_update', 'api_admin_group_organization'}
             for name in list(web.app.view_functions):
                 if name not in allowed and not name.startswith(('api_digico_', 'api_v1__api_digico_')):
                     web.app.view_functions[name] = lambda **kw: (web.jsonify(ok=False), 404)
@@ -66,14 +69,24 @@ def main():
                 prefix = '/__dlive_fixture__/'
                 path = web.request.path
                 if path == prefix + 'health':
+                    conn = web._db()
+                    try:
+                        grants = json.loads(conn.execute('SELECT digico_allowed_auxes FROM groups WHERE id=2').fetchone()[0])
+                    finally:
+                        conn.close()
                     return web.jsonify(fixture='tdeck-dlive', isolated=True, messages=[m.hex() for m in desk.messages],
-                                       config=fixture.cfg, checkout_db_unchanged=(checkout.stat() if checkout.exists() else None) == before)
+                                       config=fixture.cfg, grants=grants, checkout_db_unchanged=(checkout.stat() if checkout.exists() else None) == before)
                 if path == prefix + 'reset' and web.request.method == 'POST':
                     personal_mixes.close_client()
                     fixture.cfg.clear()
                     fixture.cfg.update(copy.deepcopy(initial))
+                    web._set_group_pages(2, ['page:digico_mixer'])
+                    web._set_group_digico_allowed_auxes(2, ['2002'])
                     desk.messages.clear()
                     desk.level = 107
+                    return web.jsonify(ok=True)
+                if path == prefix + 'grants' and web.request.method == 'POST':
+                    web._set_group_digico_allowed_auxes(2, web.request.get_json())
                     return web.jsonify(ok=True)
                 if path == prefix + 'login':
                     uid = 1 if web.request.args.get('admin') == '1' else 2

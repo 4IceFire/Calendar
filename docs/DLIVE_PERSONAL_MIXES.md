@@ -138,10 +138,15 @@ extended and stale controls remain disabled.
    route). Select **Allen & Heath dLive**. Selection alone does not save or
    connect. Use the MixRack IP and port **51325** unless the engineer explicitly
    identifies a V2 Surface endpoint (51328). Never use audio expansion ports.
-4. Add AUX mappings using the separate mono/stereo AUX ordinal. Add only the
-   intended input numbers (1–128); label them and place section headings on the
-   first input in each desired performer group. Mapping order is list order.
-   Friendly labels remain usable if names are unavailable.
+4. In **AUXes**, add mappings using the separate mono/stereo AUX ordinal. Set
+   friendly labels, optional group headings, colours and icons; use the up/down
+   arrows to arrange the picker. Group headings follow that display order and
+   never change a bus number. In **Channels**, add only intended input numbers
+   (1–128), label/icon them and place a **Section heading** on the first input
+   in each desired performer tab. Move whole rows with the shared arrows.
+   **Save & Restart**, then reload to verify your arrangement. Namespaced IDs,
+   mono/stereo ordinals and enabled switches are retained independently of order.
+   Friendly labels remain usable if desk names are unavailable.
 5. Enable dLive and explicitly **Save & Restart**. This opens the selected
    read-only discovery connection; it does not set any level or mute. If
    transport or MIDI transmit is disabled, status must remain offline/waiting.
@@ -151,6 +156,14 @@ extended and stale controls remain disabled.
    SD9 grants must never become dLive grants automatically. Existing blank
    allow-lists still mean all enabled AUXes: explicitly review these broad
    grants before selecting another provider. Changes union across groups.
+   The permission picker shows **only the active desk's AUXes**, including its
+   disabled mappings for configuration, never old desk or missing saved IDs.
+   Inactive grants remain stored and return when that desk is selected again.
+   Select **All enabled AUXes on this desk** explicitly for broad access; when
+   All is off, no selected AUXes means none, not all. An unrelated autosave or
+   clearing the last active checkbox cannot broaden a legacy-only restriction.
+   A provider change in another window requires reloading Permissions before
+   saving; stale browser saves are rejected without applying other group edits.
 7. Sign in as a least-privilege performer and check the AUX picker and direct
    API rejection for an unassigned AUX. Ask the engineer to approve the first
    bounded audible test before changing a real send.
@@ -205,6 +218,25 @@ Existing `/api/digico/...` and `/api/v1/digico/...` paths and `digico` service-t
 scope remain the compatibility contract regardless of selected provider.
 Existing page permission is `page:digico_mixer`, existing group storage is
 `digico_allowed_auxes`; no automatic grant or schema migration is performed.
+Legacy blank/NULL/`[]` grants keep their original global-all meaning. Restricted
+empty selections and explicit desk-only All selections use reserved string scope
+markers (`__none_dlive__`, `__none_digico__`, `__all_dlive__`, `__all_digico__`)
+in that existing JSON list, not new console IDs. Only an All marker for the
+current provider expands to unrestricted; inactive IDs/markers remain inert.
+Both form and JSON editors preserve hidden entries, and disabled/unmapped AUXes
+are still rejected on operational reads/writes even for Admin users.
+
+The permission page and both group writers share the configuration lock to keep
+catalog scope stable through saves. Browser payloads include
+`digico_aux_catalog_provider`; a stale provider gets JSON 409 or the existing
+form error redirect before any group fields change. Legacy clients omitting the
+marker remain supported, with the existing server-side resource guards intact.
+Operational mixer reads and controls hold that same configuration lock from
+provider-scoped authorization through client selection, route validation and
+command submission. A concurrent provider change therefore cannot turn an All
+grant for one desk into access to a restricted AUX on the other. Cached read
+responses and bounded command submission remain unchanged; background network
+provisioning does not hold this operational boundary.
 
 - GET `mixer/config`: current provider, capabilities, mapped channels/AUXes,
   unchanged presentation fields and status. API filters AUXes by group grants.
@@ -273,7 +305,13 @@ The fixture cold-imports with a private auth DB, blocks outbound hardware, uses
 real dLive TCP/Flask/auth, resets per case and verifies a fixture marker before
 writes. All five projects cover actual send writes/readback, group tabs,
 unsupported controls, scope rejection, setup save/reload and selection without
-writes, plus an actual overcapacity warning without fabricated levels. Screenshots
+writes, plus an actual overcapacity warning without fabricated levels. Arrangement
+coverage uses native colour inputs, the shared icon modal and arrow controls,
+then verifies saved metadata/order, a grouped/coloured performer picker and input
+tabs after reload. Permissions coverage exercises hidden-only restrictions,
+explicit All, unrelated autosave, provider switching and stale-editor rejection.
+Desktop arrangement runs at 1920px and mobile emulations at 320px; other cases
+retain normal project sizes. Screenshots
 are generated in Playwright output. Existing SD9 browser
 regressions still use `personal_mix_tabs_ui_harness.py` and
 `personal_mix_tabs.spec.js`, separately from the dLive fixture. See

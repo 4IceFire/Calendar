@@ -1151,11 +1151,30 @@ def _set_group_companion_click_surfaces(group_id: int, surface_ids) -> None:
         conn.close()
 
 
-def _set_group_digico_allowed_auxes(group_id: int, aux_ids) -> None:
-    """Store a group's Personal Mix AUX allow-list; blank means all AUXes."""
+def _set_group_digico_allowed_auxes(group_id: int, aux_ids, *, active_only: bool = False, mode=None) -> None:
+    """Store grants; desk-scoped editors preserve grants absent from their catalog."""
     aux_ids = _coerce_string_allow_list(aux_ids)
+    active_ids = {str(item['channel']) for item in _digico_aux_options()} if active_only else None
     conn = _db()
     try:
+        if active_ids is not None:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT digico_allowed_auxes FROM groups WHERE id=?', (int(group_id),)).fetchone()
+            old = _coerce_string_allow_list(row['digico_allowed_auxes']) if row else []
+            # [] means all. Never erase hidden restrictions during an unrelated
+            # autosave and thereby accidentally grant every AUX on another desk.
+            provider = utils.get_config().get('personal_mix_provider', 'digico')
+            all_marker, none_marker = f'__all_{provider}__', f'__none_{provider}__'
+            hidden = [identifier for identifier in old
+                      if identifier not in active_ids and identifier not in (all_marker, none_marker)]
+            selected = [identifier for identifier in aux_ids if identifier in active_ids]
+            if mode == 'all':
+                aux_ids = [] if not old else hidden + [all_marker]
+            elif mode == 'selected' or old or selected:
+                aux_ids = list(dict.fromkeys(hidden + selected)) or [none_marker]
+            else:
+                aux_ids = []  # Unchanged legacy blank/all grant.
+
         conn.execute(
             'UPDATE groups SET digico_allowed_auxes=? WHERE id=?',
             (json.dumps(aux_ids), int(group_id)),
@@ -1665,6 +1684,13 @@ def _effective_companion_click_surface_ids_for_user(user_id: int | None) -> list
     return _effective_group_string_allowlist(_get_user_groups(user_id), 'companion_click_surfaces')
 
 
+def _digico_aux_scope_for_provider(identifiers) -> list[str]:
+    """Expand only this desk's explicit All marker; preserve blank/all unions."""
+    identifiers = list(identifiers)
+    provider = utils.get_config().get('personal_mix_provider', 'digico')
+    return [] if f'__all_{provider}__' in identifiers else identifiers
+
+
 def _effective_digico_aux_ids_for_user(user_id: int | None) -> list[str]:
     try:
         if (
@@ -1673,15 +1699,15 @@ def _effective_digico_aux_ids_for_user(user_id: int | None) -> list[str]:
             and int(current_user.get_id()) == int(user_id)
             and hasattr(current_user, 'digico_allowed_auxes')
         ):
-            return list(current_user.digico_allowed_auxes)
+            return _digico_aux_scope_for_provider(current_user.digico_allowed_auxes)
     except Exception:
         pass
     if user_id is None or _user_is_admin(user_id):
         return []
-    return _effective_group_string_allowlist(
+    return _digico_aux_scope_for_provider(_effective_group_string_allowlist(
         _get_user_groups_for_page(user_id, 'page:digico_mixer'),
         'digico_allowed_auxes',
-    )
+    ))
 
 
 def _effective_pixie_permissions_for_user(user_id: int | None) -> dict[str, Any]:
@@ -5033,31 +5059,20 @@ def _get_pixie_manager_from_config():
 
 
 def _digico_aux_options() -> list[dict]:
-    """Admin-only catalog retains inactive/missing grants, never reinterprets IDs."""
+    """Only the selected desk's mappings are permission choices, never old grants."""
     cfg = utils.get_config()
+    dlive = cfg.get('personal_mix_provider', 'digico') == 'dlive'
     by_id = {}
-    for index, item in enumerate(cfg.get('digico_auxes') or [], start=1):
+    for index, item in enumerate(cfg.get('dlive_auxes' if dlive else 'digico_auxes') or [], start=1):
         if isinstance(item, dict):
-            by_id[str(index)] = dict(channel=index, enabled=bool(item.get('enabled', True)),
-                                    label='DiGiCo · ' + str(item.get('label') or f'Aux {index}'))
-    for item in cfg.get('dlive_auxes') or []:
-        if isinstance(item, dict) and item.get('channel') is not None:
-            by_id[str(item['channel'])] = dict(item, label='dLive · ' + str(item.get('label') or f"Aux {item['channel']}"))
+            number = item.get('channel') if dlive else index
+            if number is not None:
+                by_id[str(number)] = dict(item, channel=number,
+                                         label=str(item.get('label') or f'Aux {number}'))
     client = _get_digico_client_from_config()
     if client is not None:
         for item in client.mixer_config().get('auxes') or []:
             by_id[str(item['channel'])] = item
-    # A removed mapping must remain a checked, explicitly removable grant.
-    # Otherwise an unrelated autosave turns a restricted list into [] (all).
-    conn = _db()
-    try:
-        for row in conn.execute('SELECT digico_allowed_auxes FROM groups').fetchall():
-            for identifier in _coerce_string_allow_list(row['digico_allowed_auxes']):
-                if identifier not in by_id:
-                    by_id[identifier] = dict(channel=identifier, enabled=False,
-                                             label=f'Unavailable mapping · AUX {identifier}')
-    finally:
-        conn.close()
     return list(by_id.values())
 
 
@@ -6022,8 +6037,26 @@ def account_password_page():
     return render_template('account_password.html', page_title='Change Password', force_change=force)
 
 
+def _with_active_aux_catalog(fn):
+    """Keep a rendered/saved permission catalog on one provider configuration."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _media_operation_lock:
+            if request.method == 'POST':
+                data = (request.get_json(silent=True) or {}) if request.is_json else request.form
+                provider = data.get('digico_aux_catalog_provider')
+                if provider is not None and provider != utils.get_config().get('personal_mix_provider', 'digico'):
+                    message = 'The active mixer changed. Reload Permissions before editing AUX access.'
+                    if request.is_json:
+                        return jsonify(ok=False, error=message), 409
+                    return redirect(url_for('admin_permissions_page', tab='groups', error=message) + '#groups')
+            return fn(*args, **kwargs)
+    return wrapped
+
+
 @app.route('/admin/permissions', methods=['GET', 'POST'])
 @require_page('page:admin', 'Admin')
+@_with_active_aux_catalog
 def admin_permissions_page():
     # When auth is disabled, admin pages are still reachable; make sure the DB
     # and default groups exist so the page can render.
@@ -6162,7 +6195,7 @@ def admin_permissions_page():
                     # Per-group Personal Mix AUX allow-list.
                     try:
                         if 'page:digico_mixer' in [str(k) for k in keys]:
-                            _set_group_digico_allowed_auxes(gid, request.form.getlist('digico_allowed_auxes_role'))
+                            _set_group_digico_allowed_auxes(gid, request.form.getlist('digico_allowed_auxes_role'), active_only=True, mode=(request.form.getlist('digico_aux_access_mode') or [None])[-1])
                     except Exception:
                         pass
 
@@ -6382,6 +6415,7 @@ def admin_permissions_page():
         }
         group_to_digico[gid] = {
             'allowed_auxes': _coerce_string_allow_list(g['digico_allowed_auxes']),
+            'all_auxes': not _digico_aux_scope_for_provider(_coerce_string_allow_list(g['digico_allowed_auxes'])),
         }
         pixie_auditoriums = _coerce_string_allow_list(g['pixie_allowed_auditoriums'])
         group_to_pixie[gid] = {
@@ -6429,6 +6463,7 @@ def admin_permissions_page():
         group_to_companion=group_to_companion,
         group_to_digico=group_to_digico,
         digico_auxes=_digico_aux_options(),
+        digico_aux_provider=utils.get_config().get('personal_mix_provider', 'digico'),
         group_to_pixie=group_to_pixie,
         pixie_catalog=_pixie_permission_catalog(),
         group_to_atem=group_to_atem,
@@ -6507,6 +6542,7 @@ def api_admin_group_rename(group_id):
 
 @app.route('/api/admin/groups/<int:group_id>', methods=['POST'])
 @require_page('page:admin', 'Admin')
+@_with_active_aux_catalog
 def api_admin_group_update(group_id: int):
     """Update group settings via JSON (used by Groups auto-save UI)."""
     if _auth_enabled():
@@ -6595,7 +6631,7 @@ def api_admin_group_update(group_id: int):
         try:
             keys_set = set([str(k) for k in (data.get('page_keys') or [])])
             if 'page:digico_mixer' in keys_set and 'digico_allowed_auxes_role' in data:
-                _set_group_digico_allowed_auxes(gid, data.get('digico_allowed_auxes_role'))
+                _set_group_digico_allowed_auxes(gid, data.get('digico_allowed_auxes_role'), active_only=True, mode=data.get('digico_aux_access_mode'))
         except Exception:
             pass
 
@@ -7769,10 +7805,12 @@ def _active_media_job():
 
 
 def _serialize_configuration(fn):
-    """One read/persist/reload/lifecycle transaction for full-config writers.
+    """Serialize full-config writes and provider-scoped mixer operations.
 
     Reuse the existing media/import/timer lock and its ordering. Unlike media
     configuration, unrelated integration setup retains its existing busy policy.
+    Mixer operations hold it from authorization through cached reads/commands so
+    a provider switch cannot replace the client or reinterpret its AUX scope.
     """
     @wraps(fn)
     def wrapped(*args, **kwargs):
@@ -10607,6 +10645,7 @@ def api_digico_discover():
 
 
 @app.route('/api/digico/mixer/config')
+@_serialize_configuration
 def api_digico_mixer_config():
     denied = _digico_api_guard()
     if denied is not None:
@@ -10618,6 +10657,7 @@ def api_digico_mixer_config():
 
 
 @app.route('/api/digico/input-meters')
+@_serialize_configuration
 def api_digico_input_meters():
     denied = _digico_api_guard()
     if denied is not None:
@@ -10645,6 +10685,7 @@ def api_digico_input_meters():
 
 
 @app.route('/api/digico/aux/<int:aux_number>/state')
+@_serialize_configuration
 def api_digico_aux_state(aux_number: int):
     denied = _digico_api_guard(aux_number=aux_number)
     if denied is not None:
@@ -10680,6 +10721,7 @@ def api_digico_aux_state(aux_number: int):
 
 
 @app.route('/api/digico/aux/<int:aux_number>/master/<field>', methods=['POST'])
+@_serialize_configuration
 def api_digico_master_control(aux_number: int, field: str):
     denied = _digico_api_guard(aux_number=aux_number)
     if denied is not None:
@@ -10708,6 +10750,7 @@ def api_digico_master_control(aux_number: int, field: str):
 
 
 @app.route('/api/digico/aux/<int:aux_number>/channel/<int:channel_number>/<field>', methods=['POST'])
+@_serialize_configuration
 def api_digico_channel_control(aux_number: int, channel_number: int, field: str):
     denied = _digico_api_guard(aux_number=aux_number)
     if denied is not None:

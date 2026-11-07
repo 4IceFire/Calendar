@@ -246,7 +246,14 @@
                             <div class="row g-3">
                               <div class="col-12">
                                 <div class="fw-semibold">Personal Mix AUX access</div>
-                                <div class="small text-muted">No selected AUXes means this group can mix every enabled AUX. Access is enforced by the TDeck API.</div>
+                                <div class="small text-muted">Only the active desk's AUXes are shown. Other desk grants are kept unchanged. No selected AUXes grants none unless All is explicitly enabled. Access unions across groups and is enforced by the API.</div>
+                                <input type="hidden" name="digico_aux_catalog_provider" value="{{ digico_aux_provider }}">
+                                <input type="hidden" name="digico_aux_access_mode" value="selected">
+                                <div class="form-check mt-2">
+                                  <input type="checkbox" class="form-check-input" name="digico_aux_access_mode" value="all" id="group-{{ g.id }}-aux-all"
+                                    {% if group_to_digico.get(g.id).all_auxes %}checked{% endif %}>
+                                  <label class="form-check-label" for="group-{{ g.id }}-aux-all">All enabled AUXes on this desk</label>
+                                </div>
                               </div>
                               {% if digico_auxes %}
                                 {% set selected_auxes = (group_to_digico.get(g.id).allowed_auxes if group_to_digico and group_to_digico.get(g.id) else []) %}

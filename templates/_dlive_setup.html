@@ -8,13 +8,6 @@
     <div class="col-md-3"><label for="dlive-midi-channel" class="form-label">Base MIDI channel (1–12)</label><input id="dlive-midi-channel" class="form-control" type="number" min="1" max="12" value="1"></div>
   </div>
   <p class="text-muted">MixRack plain TCP: 51325. V2.0+ Surface plain TCP: 51328. TLS ports 51327/51329 and profile authentication are not supported: do not disable site security to use this provider. Use only an approved isolated control network. Enable MIDI Send and Receive in Utility / Control / MIDI.</p>
-  <h3 class="h6">AUX mappings</h3>
-  <p class="text-muted">Mono AUX IDs are 1000 + bus; stereo AUX IDs are 2000 + bus. These are mono/stereo AUX ordinals, not physical output sockets or fader-strip positions.</p>
-  <div id="dlive-aux-mappings" class="vstack gap-2 mb-2"></div>
-  <button id="dlive-add-aux" class="btn btn-sm btn-outline-secondary mb-4" type="button">Add AUX</button>
-  <h3 class="h6">Input mappings</h3>
-  <p class="text-muted">Add only inputs performers may mix. Section headings retain the existing Personal Mix group tabs.</p>
-  <div id="dlive-input-mappings" class="vstack gap-2 mb-2"></div>
-  <button id="dlive-add-input" class="btn btn-sm btn-outline-secondary mb-3" type="button">Add input</button>
+  <p class="text-muted">Arrange mappings in the AUXes and Channels tabs. Manual mono/stereo ordinals and input numbers are retained when moving rows.</p>
   <p class="text-muted">Send levels and read-only desk names are supported. Per-send mute, pan, metering and ME-1 remote control are unavailable; no whole-input mute is substituted. AUX master level/mute are available through the scoped API only, keeping the performer layout unchanged.</p>
 </section>

@@ -240,7 +240,7 @@
   }
 
   function updateMoveButtons(target) {
-    const rows = Array.from(target.querySelectorAll('.digico-config-row'));
+    const rows = Array.from(target.querySelectorAll('.digico-config-row, [data-mapping]'));
     rows.forEach((row, index) => {
       const up = row.querySelector('.digico-move-up');
       const down = row.querySelector('.digico-move-down');
@@ -255,7 +255,7 @@
     const target = row.parentElement;
     if (!target) return;
     const neighbour = direction < 0 ? row.previousElementSibling : row.nextElementSibling;
-    if (!neighbour || !neighbour.classList.contains('digico-config-row')) return;
+    if (!neighbour || !neighbour.matches('.digico-config-row, [data-mapping]')) return;
     if (direction < 0) target.insertBefore(row, neighbour);
     else target.insertBefore(neighbour, row);
     updateMoveButtons(target);
@@ -563,6 +563,8 @@
       setMessage('Desk labels and physical desk order restored locally. Select Save & Restart to apply them.', 'info');
     });
   }
+
+  window.TDeckMixerItemEditor = {iconControl, moveControls, updateMoveButtons};
 
   loadSetup(true);
   window.setInterval(() => {

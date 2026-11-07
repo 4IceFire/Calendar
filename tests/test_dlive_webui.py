@@ -1,9 +1,180 @@
 """Real-auth APIs backed by actual dLive TCP simulator, no hardware."""
 import copy
+import threading
 from unittest.mock import patch
 from test_dlive import Desk, config, wait_for
 import unittest
 import test_videohub_ignore
+
+
+class ProviderAuthorizationRaceTests(unittest.TestCase):
+    """Real Flask authentication/setup, fake cached clients, no device sockets."""
+
+    def setUp(self):
+        fixture = test_videohub_ignore.VideoHubIgnoreApiTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.webui, self.cfg = fixture.webui, fixture.cfg
+        self.client, self.headers = fixture.client, fixture.headers
+        self.stack = fixture.stack
+        self.cfg.update(config(1))  # Valid mapping only; the fake factory never opens TCP.
+        self.cfg.update(digico_enabled=True,
+                        digico_auxes=[dict(enabled=True), dict(enabled=True)],
+                        digico_channels=[dict(enabled=True)])
+        self.webui._set_group_pages(2, ['page:digico_mixer'])
+        self.webui._set_group_digico_allowed_auxes(2, ['1', '__all_dlive__'])
+        self.admin = self.webui.app.test_client()
+        with self.client.session_transaction() as session:
+            admin_session = dict(session)
+        with self.admin.session_transaction() as session:
+            session.update(admin_session)
+        fixture.login(2)
+        self.calls = []
+        self.checkpoint = lambda: None
+        owner = self
+
+        class FakeMixer:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def mixer_config(self):
+                payload = dict(provider=self.provider,
+                               auxes=[dict(channel=n, enabled=True) for n in
+                                      ([1, 2] if self.provider == 'digico' else [2002])],
+                               channels=[dict(channel=1, enabled=True)])
+                if threading.current_thread() is threading.main_thread():
+                    owner.checkpoint()
+                return payload
+
+            def status(self):
+                return dict(provider=self.provider, revision=1)
+
+            def route_enabled(self, aux, channel=None):
+                return aux in ([1, 2] if self.provider == 'digico' else [2002])
+
+            def request_aux_state(self, aux):
+                owner.calls.append((self.provider, 'request_aux_state', aux))
+
+            def aux_state(self, aux):
+                owner.calls.append((self.provider, 'aux_state', aux))
+                return dict(aux=aux, channels=[])
+
+            def set_level(self, aux, channel, value):
+                owner.calls.append((self.provider, 'set_level', aux))
+                return value
+
+            def set_master_level(self, aux, value):
+                owner.calls.append((self.provider, 'set_master_level', aux))
+                return value
+
+            def input_meter_state(self):
+                return dict(provider=self.provider, revision=1, channels=[])
+
+        clients = {provider: FakeMixer(provider) for provider in ('dlive', 'digico')}
+        self.stack.enter_context(patch.object(self.webui, '_digico_client_factory',
+            side_effect=lambda cfg: clients[cfg['personal_mix_provider']]))
+        self.stack.enter_context(patch.object(self.webui, '_close_digico_client'))
+        self.stack.enter_context(patch.object(self.webui.utils, 'save_config',
+            side_effect=lambda cfg: self.cfg.update(copy.deepcopy(cfg))))
+        self.stack.enter_context(patch.object(self.webui.utils, 'reload_config'))
+
+    def interleave_switch(self, request, *, target='digico', after_guard=True):
+        reached = threading.Event()
+        attempted = threading.Event()
+        completed = threading.Event()
+        results, errors = [], []
+        lock = self.webui._media_operation_lock
+
+        class ObservedLock:
+            def __enter__(inner):
+                if threading.current_thread() is switch:
+                    attempted.set()
+                return lock.__enter__()
+
+            def __exit__(inner, *args):
+                return lock.__exit__(*args)
+
+        def change_provider():
+            try:
+                if not reached.wait(3):
+                    raise AssertionError('Operational request did not reach race seam')
+                results.append(self.admin.post('/api/digico/setup', headers=self.headers,
+                                               json={'personal_mix_provider': target}))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        def checkpoint():
+            reached.set()
+            self.assertTrue(attempted.wait(3), 'Admin did not attempt configuration lock')
+            # Broken code permits the switch here. Correct code blocks the admin;
+            # never synchronously wait for that mutation before releasing the route.
+            completed.wait(0.25)
+
+        guard = self.webui._digico_api_guard
+
+        def guarded(**kwargs):
+            denied = guard(**kwargs)
+            if threading.current_thread() is threading.main_thread():
+                checkpoint()
+            return denied
+
+        switch = threading.Thread(target=change_provider, daemon=True)
+        with patch.object(self.webui, '_media_operation_lock', ObservedLock()):
+            if after_guard:
+                seam = patch.object(self.webui, '_digico_api_guard', side_effect=guarded)
+            else:
+                seam = patch.object(self, 'checkpoint', side_effect=checkpoint)
+            with seam:
+                switch.start()
+                try:
+                    response = request()
+                finally:
+                    reached.set()
+                    switch.join(3)
+            self.assertFalse(switch.is_alive(), 'Provider switch deadlocked')
+        self.assertFalse(errors, errors)
+        self.assertTrue(attempted.is_set())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status_code, 200, results[0].get_json())
+        self.assertEqual(self.cfg['personal_mix_provider'], target)
+        return response
+
+    def assert_aux2_is_not_authorized_by_dlive_all(self, method, suffix):
+        path = '/api/digico/aux/2/' + suffix
+        request = lambda: self.client.open(path, method=method, headers=self.headers,
+                                           json={'value': -12} if method == 'POST' else None)
+        response = self.interleave_switch(request)
+        self.assertEqual(self.calls, [], 'dLive All authorized a command/read on DiGiCo AUX2')
+        self.assertEqual(response.status_code, 404, response.get_json())
+        self.assertEqual(request().status_code, 403)  # New-provider scope is AUX1 only.
+
+    def test_channel_write_cannot_cross_provider_authorization(self):
+        self.assert_aux2_is_not_authorized_by_dlive_all('POST', 'channel/1/level')
+
+    def test_aux_read_cannot_cross_provider_authorization(self):
+        self.assert_aux2_is_not_authorized_by_dlive_all('GET', 'state')
+
+    def test_master_control_cannot_cross_provider_authorization(self):
+        self.assert_aux2_is_not_authorized_by_dlive_all('POST', 'master/level')
+
+    def test_mixer_config_cannot_filter_old_client_with_new_provider_all(self):
+        self.cfg['personal_mix_provider'] = 'digico'
+        response = self.interleave_switch(lambda: self.client.get('/api/digico/mixer/config'),
+                                          target='dlive', after_guard=False)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload['provider'], 'digico')
+        self.assertEqual([aux['channel'] for aux in payload['auxes']], [1])
+        current = self.client.get('/api/digico/mixer/config').get_json()
+        self.assertEqual(current['provider'], 'dlive')
+        self.assertEqual([aux['channel'] for aux in current['auxes']], [2002])
+
+    def test_input_meter_read_keeps_authorized_provider_snapshot(self):
+        response = self.interleave_switch(lambda: self.client.get('/api/digico/input-meters'))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['provider'], 'dlive')
 
 
 class DLiveApiTests(unittest.TestCase):
@@ -121,16 +292,145 @@ class DLiveApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400, (value, response.get_json()))
         self.assertFalse(any(m.startswith(bytes.fromhex('f0 00 00 1a 50 10 01 00 03 0d')) for m in self.desk.messages))
 
-    def test_permission_catalog_keeps_inactive_provider_grants_visible(self):
+    def test_permission_catalog_only_lists_active_provider_not_saved_grants(self):
         self.cfg['digico_auxes'] = [dict(label='Old SD9 IEM', enabled=True)]
-        options = self.webui._digico_aux_options()
-        self.assertEqual({a['channel'] for a in options}, {1, 2002})
-        self.assertTrue(any('SD9' in a['label'] for a in options if a['channel'] == 1))
-        self.webui._set_group_digico_allowed_auxes(2, ['2009'])
-        options = self.webui._digico_aux_options()
-        missing = next((a for a in options if str(a['channel']) == '2009'), None)
-        self.assertIsNotNone(missing, 'Lost grants must not become an empty/all selection on unrelated group save')
-        self.assertIn('Unavailable', missing['label'])
+        self.webui._set_group_digico_allowed_auxes(2, ['1', '2009'])
+        self.assertEqual({a['channel'] for a in self.webui._digico_aux_options()}, {2002})
+        self.cfg['personal_mix_provider'] = 'digico'
+        # Synthetic provider; no OSC transport is constructed for the catalog.
+        with patch.object(self.webui, '_get_digico_client_from_config', return_value=None):
+            self.assertEqual({a['channel'] for a in self.webui._digico_aux_options()}, {1})
+
+    def test_group_autosave_preserves_inactive_grants_without_broadening_access(self):
+        import json
+        self.cfg['digico_auxes'] = [dict(label='Old SD9 IEM')]
+        self.webui._set_group_digico_allowed_auxes(2, ['1'])
+        response = self.client.post('/api/admin/groups/2', headers=self.headers,
+            json={'page_keys': ['page:digico_mixer'], 'digico_allowed_auxes_role': []})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        conn = self.webui._db()
+        try:
+            saved = json.loads(conn.execute('SELECT digico_allowed_auxes FROM groups WHERE id=2').fetchone()[0])
+        finally:
+            conn.close()
+        self.assertEqual(saved, ['1'])
+        self.login(2)
+        self.assertEqual(self.client.get('/api/digico/mixer/config').get_json()['auxes'], [])
+        self.assertEqual(self.client.get('/api/digico/aux/2002/state').status_code, 403)
+
+    def test_clearing_last_active_grant_is_none_until_explicit_all(self):
+        self.webui._set_group_digico_allowed_auxes(2, ['2002'])
+        for payload, expected in [
+            ({'digico_allowed_auxes_role': []}, []),
+            ({'digico_allowed_auxes_role': [], 'digico_aux_access_mode': 'all'}, [2002]),
+        ]:
+            self.login(1)
+            response = self.client.post('/api/admin/groups/2', headers=self.headers,
+                json={'page_keys': ['page:digico_mixer'], **payload})
+            self.assertEqual(response.status_code, 200, response.get_json())
+            self.login(2)
+            self.assertEqual([a['channel'] for a in self.client.get('/api/digico/mixer/config').get_json()['auxes']], expected)
+
+    def test_form_save_preserves_hidden_scope_and_explicit_all_does_not_erase_old_desk(self):
+        self.cfg['digico_auxes'] = [dict(label='SD9')]
+        self.webui._set_group_digico_allowed_auxes(2, ['1'])
+        response = self.client.post('/admin/permissions', headers=self.headers, data={
+            '_csrf': 'ignore-csrf', 'action': 'save_group', 'group_id': '2',
+            'page_keys': ['page:digico_mixer'], 'digico_aux_access_mode': 'selected'})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.webui._group_settings_snapshot(2)['digico_allowed_auxes'], ['1'])
+        self.login(2)
+        for prefix in ['/api/digico', '/api/v1/digico']:
+            self.assertEqual(self.client.get(prefix + '/aux/2002/state').status_code, 403)
+            for suffix in ['/channel/1/level', '/master/level', '/master/mute']:
+                response = self.client.post(prefix + '/aux/2002' + suffix, headers=self.headers, json={'value': -12})
+                self.assertEqual(response.status_code, 403)
+        self.login(1)
+        response = self.client.post('/api/admin/groups/2', headers=self.headers, json={
+            'page_keys': ['page:digico_mixer'], 'digico_allowed_auxes_role': [], 'digico_aux_access_mode': 'all'})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('1', self.webui._group_settings_snapshot(2)['digico_allowed_auxes'])
+        self.login(2)
+        self.assertEqual([a['channel'] for a in self.client.get('/api/digico/mixer/config').get_json()['auxes']], [2002])
+        self.cfg['personal_mix_provider'] = 'digico'
+        self.assertEqual(self.webui._effective_digico_aux_ids_for_user(2), ['1', '__all_dlive__'])
+
+    def test_provider_switch_filters_admin_and_union_scopes_and_denies_inactive_routes(self):
+        self.cfg.update(digico_enabled=False, digico_auxes=[dict(label='SD9 IEM', enabled=True)], digico_channels=[dict(enabled=True)])
+        self.webui._set_group_digico_allowed_auxes(2, ['1', '2002'])
+        for uid in [1, 2]:
+            self.login(uid)
+            self.assertEqual([a['channel'] for a in self.client.get('/api/digico/mixer/config').get_json()['auxes']], [2002])
+            self.assertEqual(self.client.get('/api/digico/aux/1/state').status_code, 404)
+            self.assertEqual(self.client.post('/api/digico/aux/1/channel/1/level', headers=self.headers, json={'value': -12}).status_code, 404)
+        self.cfg['personal_mix_provider'] = 'digico'
+        # A synthetic discovered DiGiCo desk; disabled transport has no inventory.
+        from types import SimpleNamespace
+        sd9 = SimpleNamespace(mixer_config=lambda: {'auxes': [dict(channel=1, enabled=True)], 'channels': []},
+                              status=lambda: {}, route_enabled=lambda aux, channel=None: aux == 1)
+        with patch.object(self.webui, '_get_digico_client_from_config', return_value=sd9):
+            for uid in [1, 2]:
+                self.login(uid)
+                self.assertEqual([a['channel'] for a in self.client.get('/api/digico/mixer/config').get_json()['auxes']], [1])
+                self.assertEqual(self.client.get('/api/v1/digico/aux/2002/state').status_code, 404)
+                self.assertEqual(self.client.post('/api/v1/digico/aux/2002/channel/1/level', headers=self.headers, json={'value': -12}).status_code, 404)
+        self.cfg['personal_mix_provider'] = 'dlive'
+        self.cfg['dlive_auxes'].append(dict(channel=1001, bus=1, stereo=False, enabled=True))
+        self.webui._set_group_pages(3, ['page:digico_mixer'])
+        self.webui._set_group_digico_allowed_auxes(2, ['1'])
+        self.webui._set_group_digico_allowed_auxes(3, ['2002'])
+        conn = self.webui._db()
+        conn.execute('INSERT INTO user_groups(user_id,group_id) VALUES(2,3)')
+        conn.commit(); conn.close()
+        self.login(2)
+        self.assertEqual([a['channel'] for a in self.client.get('/api/digico/mixer/config').get_json()['auxes']], [2002])
+        self.webui._set_group_digico_allowed_auxes(3, [])
+        self.assertEqual({a['channel'] for a in self.client.get('/api/digico/mixer/config').get_json()['auxes']}, {1001, 2002})
+
+    def test_legacy_global_all_and_omitted_grants_survive_unrelated_autosave(self):
+        self.webui._set_group_digico_allowed_auxes(2, [])
+        response = self.client.post('/api/admin/groups/2', headers=self.headers, json={
+            'page_keys': ['page:digico_mixer'], 'digico_allowed_auxes_role': [],
+            'digico_aux_access_mode': 'all', 'digico_aux_catalog_provider': 'dlive'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.webui._group_settings_snapshot(2)['digico_allowed_auxes'], [])
+        self.webui._set_group_digico_allowed_auxes(2, ['1', '2002', '2009'])
+        response = self.client.post('/api/admin/groups/2', headers=self.headers,
+            json={'page_keys': ['page:digico_mixer'], 'auth_idle_timeout_minutes_override_role': 30})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.webui._group_settings_snapshot(2)['digico_allowed_auxes'], ['1', '2002', '2009'])
+
+    def test_setup_metadata_readback_retains_namespaced_ids_and_manual_ordinals(self):
+        auxes = [dict(channel=1001, bus=1, stereo=False, enabled=False, order=2, label='Mono', group='Band', colour='#123456', icon='drums'),
+                 dict(channel=2002, bus=2, stereo=True, enabled=True, order=1, label='Stereo', group='Vocals', colour='#cc4422', icon='headset')]
+        channels = [dict(channel=3, order=1, label='Guitar', group='Band', icon='electric'), dict(channel=1, order=2, label='Lead', group='Vocals')]
+        response = self.client.post('/api/digico/setup', headers=self.headers, json={'dlive_auxes': auxes, 'dlive_channels': channels})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        saved = self.client.get('/api/digico/setup').get_json()['config']
+        self.assertEqual(saved['dlive_auxes'], auxes)
+        self.assertEqual([c['channel'] for c in saved['dlive_channels']], [3, 1])
+        visible = self.client.get('/api/digico/mixer/config').get_json()
+        self.assertEqual([a['channel'] for a in visible['auxes']], [2002])
+        self.assertEqual(visible['auxes'][0]['colour'], '#cc4422')
+        self.assertEqual([c['channel'] for c in visible['channels']], [3, 1])
+        self.assertEqual(self.client.get('/api/digico/aux/1001/state').status_code, 404)
+        self.assertEqual(self.client.post('/api/digico/aux/1001/master/level', headers=self.headers, json={'value': -12}).status_code, 404)
+
+    def test_stale_provider_permission_save_is_rejected_before_any_group_changes(self):
+        self.webui._set_group_digico_allowed_auxes(2, ['1'])
+        response = self.client.post('/api/admin/groups/2', headers=self.headers, json={
+            'page_keys': ['page:home', 'page:digico_mixer'], 'digico_allowed_auxes_role': [],
+            'digico_aux_access_mode': 'all', 'digico_aux_catalog_provider': 'digico'})
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(self.webui._group_settings_snapshot(2)['digico_allowed_auxes'], ['1'])
+        self.assertNotIn('page:home', self.webui._group_settings_snapshot(2)['page_keys'])
+        response = self.client.post('/admin/permissions', headers=self.headers, data={
+            '_csrf': 'ignore-csrf', 'action': 'save_group', 'group_id': '2',
+            'page_keys': ['page:home', 'page:digico_mixer'], 'digico_aux_access_mode': 'all',
+            'digico_aux_catalog_provider': 'digico'})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.webui._group_settings_snapshot(2)['digico_allowed_auxes'], ['1'])
+        self.assertNotIn('page:home', self.webui._group_settings_snapshot(2)['page_keys'])
 
     def test_generic_editor_hides_protected_provider_fields(self):
         from pathlib import Path

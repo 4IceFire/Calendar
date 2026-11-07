@@ -11,7 +11,12 @@
     const dlive = provider.value === 'dlive';
     byId('dlive-setup').hidden = !dlive;
     byId('digico-legacy-connection').hidden = dlive;
-    for (const target of ['auxes', 'channels', 'devices']) {
+    for (const kind of ['aux', 'input']) {
+      byId(`dlive-${kind}-editor`).hidden = !dlive;
+      byId(kind === 'aux' ? 'digico-aux-table' : 'digico-channel-table').hidden = dlive;
+    }
+    for (const button of document.querySelectorAll('.digico-reset-discovered')) button.hidden = dlive;
+    for (const target of ['devices']) {
       const tab = document.querySelector(`[data-bs-target="#digico-tab-${target}"]`);
       if (tab) tab.disabled = dlive;
     }
@@ -19,7 +24,7 @@
 
   function input(row, title, key, value, type) {
     const label = document.createElement('label');
-    label.className = 'col-sm';
+    label.className = 'dlive-mapping-field';
     label.textContent = title;
     const field = document.createElement('input');
     field.className = 'form-control form-control-sm';
@@ -39,20 +44,27 @@
 
   function add(target, item, aux) {
     const row = document.createElement('div');
-    row.className = 'row g-2 align-items-end border rounded p-2 mx-0';
+    row.className = 'dlive-mapping-row';
     row.dataset.mapping = 'true';
     input(row, 'Enabled', 'enabled', item.enabled, 'checkbox');
     input(row, aux ? 'AUX ordinal' : 'Input number', aux ? 'bus' : 'channel', aux ? item.bus : item.channel, 'number');
     if (aux) input(row, 'Stereo', 'stereo', !!item.stereo, 'checkbox');
     input(row, 'Label', 'label', item.label);
-    if (!aux) input(row, 'Section heading', 'group', item.group);
+    input(row, aux ? 'Group' : 'Section heading', 'group', item.group);
+    if (aux) input(row, 'Colour', 'colour', item.colour || '#3478f6', 'color');
+    const editor = window.TDeckMixerItemEditor;
+    const icon = editor.iconControl(item, aux ? 'aux' : 'channel');
+    icon.querySelector('input').dataset.key = 'icon';
+    row.appendChild(icon);
+    row.appendChild(editor.moveControls(row, item, aux ? 'aux' : 'channel'));
     const remove = document.createElement('button');
-    remove.className = 'btn btn-sm btn-outline-danger col-sm-auto';
+    remove.className = 'btn btn-sm btn-outline-danger';
     remove.textContent = 'Delete';
     remove.type = 'button';
-    remove.addEventListener('click', () => row.remove());
+    remove.addEventListener('click', () => { row.remove(); editor.updateMoveButtons(target); });
     row.appendChild(remove);
     target.appendChild(row);
+    editor.updateMoveButtons(target);
   }
 
   function collect(target, aux) {
@@ -78,8 +90,9 @@
       byId('dlive-midi-channel').value = config.dlive_midi_channel || 1;
       auxes.textContent = '';
       inputs.textContent = '';
-      for (const item of config.dlive_auxes || []) add(auxes, item, true);
-      for (const item of config.dlive_channels || []) add(inputs, item, false);
+      const ordered = items => (items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+      for (const item of ordered(config.dlive_auxes)) add(auxes, item, true);
+      for (const item of ordered(config.dlive_channels)) add(inputs, item, false);
       toggle();
     },
     collect() {

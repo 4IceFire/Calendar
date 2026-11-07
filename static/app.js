@@ -4181,6 +4181,8 @@ function _initAccessLevelsPage() {
       videohub_can_edit_presets_role: canEditEl ? !!canEditEl.checked : true,
       companion_click_surfaces_role: companionClickSurfaceIds,
       digico_allowed_auxes_role: digicoAuxIds,
+      digico_aux_catalog_provider: form.querySelector('input[name="digico_aux_catalog_provider"]').value,
+      digico_aux_access_mode: form.querySelector('input[type="checkbox"][name="digico_aux_access_mode"]:checked') ? 'all' : 'selected',
       atem_allowed_audio_sources_role: atemAudioSourceIds,
       atem_can_solo_audio_role: atemCanSoloEl ? !!atemCanSoloEl.checked : false,
       atem_can_monitor_audio_role: atemCanMonitorEl ? !!atemCanMonitorEl.checked : false,
@@ -4278,6 +4280,11 @@ function _initAccessLevelsPage() {
     // Checkboxes save quickly
     form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.addEventListener('change', () => {
+        const allAuxes = form.querySelector('input[type="checkbox"][name="digico_aux_access_mode"]');
+        if (cb.name === 'digico_allowed_auxes_role' && allAuxes) allAuxes.checked = false;
+        if (cb === allAuxes && cb.checked) {
+          form.querySelectorAll('input[name="digico_allowed_auxes_role"]').forEach(aux => { aux.checked = false; });
+        }
         _applyRoleFieldState(panel);
         _roleScheduleSave(roleId, { delayMs: 0 });
       });

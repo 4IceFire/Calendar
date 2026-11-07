@@ -124,7 +124,16 @@
       auxGrid.appendChild(empty);
       return;
     }
+    let previousGroup = '';
     for (const aux of auxes) {
+      const group = String(aux.group || '').trim();
+      if (group !== previousGroup) {
+        const heading = document.createElement('h3');
+        heading.className = 'digico-aux-group h6';
+        heading.textContent = group || 'Ungrouped';
+        auxGrid.appendChild(heading);
+        previousGroup = group;
+      }
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'digico-aux-tile';

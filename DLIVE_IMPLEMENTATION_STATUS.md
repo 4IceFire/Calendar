@@ -1,5 +1,84 @@
 # dLive implementation status
 
+## UI parity and active-provider permissions
+
+This follow-up supersedes the historical choice to display inactive/missing
+permission-grant checkboxes. It does not change the dLive transport or claim a
+new full-repository-suite, deployment or physical-audio result.
+
+- dLive AUXes/Channels now use the existing setup tabs, shared icon picker and
+  arrow movement. AUX group/colour/order and input section headings persist
+  through save/reload without changing mono/stereo ordinals or namespaced IDs.
+  AUX group headings also render in the permitted performer picker.
+- The administrator picker contains only the active desk's mappings. Both form
+  and JSON saves preserve hidden raw grants; empty restricted selection is not
+  All. Explicit desk-only All/None use reserved scope strings in the existing
+  allow-list, preserving legacy blank/all and additive group semantics. Browser
+  saves carry their catalog provider and reject stale desk context before writes.
+  See `docs/DLIVE_PERSONAL_MIXES.md` for the storage/API contract.
+- Strict behavioral RED failures were observed before each slice: mixed-provider
+  choices, hidden-only grant loss, empty-selection broadening, disabled setup
+  tabs, missing explicit All, missing performer AUX heading and stale-provider
+  save acceptance. The added legacy-form stale-context case also reproduced a
+  redirect-scope error before its one-line correction.
+- Actual local evidence under `/home/icefire4/.hermes/cache/scratch/`:
+  `dlive-parity-python.log` — **55 passed** (default guarded dLive/DiGiCo,
+  capacity/configuration/frontend run before final API-case additions).
+  `dlive-parity-final-python.log` — **65 passed** (dLive APIs plus group media,
+  API security, impersonation, catalog organization and frontend regressions).
+  `dlive-parity-api-verified.log` — final expanded **17 API cases passed**, including
+  both stale JSON/form saves, disabled AUX rejection, legacy-All preservation,
+  inactive grant retention and multi-group union. These runs overlap; their
+  counts must not be added as distinct tests. Existing Node suites: **48 passed**.
+  Node syntax and `git diff --check` also passed.
+- `dlive-parity-final-evidence.log` — **25 passed**, five cases in each of desktop
+  Chromium/Firefox/WebKit and mobile Chromium/WebKit. Native colour inputs,
+  icon selection, arrows, saved metadata/order, grouped picker, input tabs,
+  hidden-only permission autosave, explicit All, provider switch and stale
+  browser-save rejection are exercised. Arrangement uses 1920px desktop/320px
+  mobile; screenshots are in `dlive-parity-final-evidence/` and were inspected.
+  The final legacy-form-only redirect correction was subsequently exercised by
+  the 17-case Python rerun; browser-covered UI/JSON paths are unchanged.
+- Initial browser runs exposed missing host dependency search paths and fixture
+  session/tab-readiness races. Reused the inspected private browser environment
+  at `.local/share/billy-browser/tdeck-env.sh`; no system installs. Kept raw
+  failed/intermediate artifacts rather than substituting them for final passes.
+- `AGENTS.md` remains unchanged: protected-file enforcement timed out awaiting
+  approval. No alternate writer/bypass was used after the explicit denial;
+  current implementation/test guidance is recorded in the feature document and
+  this status section instead. Independent parent authorization review remains
+  required before any commit or publication. No commit/push/merge/deploy,
+  actual-service restart or real-hardware operation occurred.
+
+## Pre-release provider-authorization race correction
+
+The independent release review reproduced an authorization race: a desk-specific
+All grant could pass a guard, then a concurrent provider change could replace
+the client before the handler read/wrote an AUX restricted on the other desk.
+The existing configuration RLock now covers all five operational mixer endpoints
+from authorization through execution, without changing browser/token/scheduler
+policy. Five authenticated Flask/fake-client threaded regressions cover AUX
+reads, channel writes, master writes, config filtering and input meters.
+
+Actual guarded logs under `/home/icefire4/.hermes/cache/scratch/`:
+- `dlive-provider-race-red.log`: all five desired regressions failed before the
+  production fix (29.701s).
+- `dlive-provider-race-green.log`: all five passed after the fix (32.902s).
+- `dlive-provider-race-regressions.log`: 62 default guarded tests passed
+  (304.390s), including cached-read responsiveness and four-AUX/512-send capacity.
+- `dlive-provider-race-api-security.log`: 11 API security regressions passed
+  (68.406s).
+
+These are overlapping focused runs, not a full-repository-suite assertion.
+Independent release re-review approved the corrected candidate with no blocking
+security or logic findings. Fresh post-fix browser acceptance passed all 25 cases
+across the five projects (`dlive-release-browsers.log` and
+`dlive-release-browser-evidence/` in the same scratch directory).
+Production was left on its previous commit while the fix was verified; this
+section records pre-release hardening, not a deployment receipt. The user
+subsequently authorized pushing the feature branch and updating/restarting
+production to that exact branch, without merging main.
+
 ## Current R4 generic Pixie revision follow-up (2026-10-26)
 
 This narrow follow-up supersedes only the generic-writer revision gap below.

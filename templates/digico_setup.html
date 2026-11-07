@@ -73,6 +73,11 @@
       <div class="card tdeck-soft"><div class="card-body">
         <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Personal Mix AUXes</h2><p class="text-muted">Choose which desk AUXes appear, give each one a friendly label, colour and optional icon, then use the arrow buttons to arrange them.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="aux" type="button">Reset labels &amp; order</button></div>
         <div id="digico-aux-table" class="digico-config-list"></div>
+        <div id="dlive-aux-editor" hidden>
+          <p class="text-muted">Mono IDs are 1000 + ordinal; stereo IDs are 2000 + ordinal, not output sockets. Group, colour and order affect display only.</p>
+          <div id="dlive-aux-mappings" class="vstack gap-2 mb-2"></div>
+          <button id="dlive-add-aux" class="btn btn-sm btn-outline-secondary" type="button">Add AUX</button>
+        </div>
       </div></div>
     </section>
 
@@ -80,6 +85,11 @@
       <div class="card tdeck-soft"><div class="card-body">
         <div class="d-flex flex-wrap justify-content-between gap-2"><div><h2 class="h5 mb-1">Input channels</h2><p class="text-muted">Choose a label and icon, then use the arrows to arrange channels. Add a Section heading only to the first channel in a section; that heading appears above it and continues until the next heading.</p></div><button class="btn btn-sm btn-outline-secondary digico-reset-discovered" data-kind="channel" type="button">Reset labels &amp; order</button></div>
         <div id="digico-channel-table" class="digico-config-list"></div>
+        <div id="dlive-input-editor" hidden>
+          <p class="text-muted">Add only intended inputs. Section headings start performer groups and continue until the next heading.</p>
+          <div id="dlive-input-mappings" class="vstack gap-2 mb-2"></div>
+          <button id="dlive-add-input" class="btn btn-sm btn-outline-secondary" type="button">Add input</button>
+        </div>
       </div></div>
     </section>
 
