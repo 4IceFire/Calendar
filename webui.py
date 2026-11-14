@@ -1151,11 +1151,30 @@ def _set_group_companion_click_surfaces(group_id: int, surface_ids) -> None:
         conn.close()
 
 
-def _set_group_digico_allowed_auxes(group_id: int, aux_ids) -> None:
-    """Store a group's Personal Mix AUX allow-list; blank means all AUXes."""
+def _set_group_digico_allowed_auxes(group_id: int, aux_ids, *, active_only: bool = False, mode=None) -> None:
+    """Store grants; desk-scoped editors preserve grants absent from their catalog."""
     aux_ids = _coerce_string_allow_list(aux_ids)
+    active_ids = {str(item['channel']) for item in _digico_aux_options()} if active_only else None
     conn = _db()
     try:
+        if active_ids is not None:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT digico_allowed_auxes FROM groups WHERE id=?', (int(group_id),)).fetchone()
+            old = _coerce_string_allow_list(row['digico_allowed_auxes']) if row else []
+            # [] means all. Never erase hidden restrictions during an unrelated
+            # autosave and thereby accidentally grant every AUX on another desk.
+            provider = utils.get_config().get('personal_mix_provider', 'digico')
+            all_marker, none_marker = f'__all_{provider}__', f'__none_{provider}__'
+            hidden = [identifier for identifier in old
+                      if identifier not in active_ids and identifier not in (all_marker, none_marker)]
+            selected = [identifier for identifier in aux_ids if identifier in active_ids]
+            if mode == 'all':
+                aux_ids = [] if not old else hidden + [all_marker]
+            elif mode == 'selected' or old or selected:
+                aux_ids = list(dict.fromkeys(hidden + selected)) or [none_marker]
+            else:
+                aux_ids = []  # Unchanged legacy blank/all grant.
+
         conn.execute(
             'UPDATE groups SET digico_allowed_auxes=? WHERE id=?',
             (json.dumps(aux_ids), int(group_id)),
@@ -1665,6 +1684,13 @@ def _effective_companion_click_surface_ids_for_user(user_id: int | None) -> list
     return _effective_group_string_allowlist(_get_user_groups(user_id), 'companion_click_surfaces')
 
 
+def _digico_aux_scope_for_provider(identifiers) -> list[str]:
+    """Expand only this desk's explicit All marker; preserve blank/all unions."""
+    identifiers = list(identifiers)
+    provider = utils.get_config().get('personal_mix_provider', 'digico')
+    return [] if f'__all_{provider}__' in identifiers else identifiers
+
+
 def _effective_digico_aux_ids_for_user(user_id: int | None) -> list[str]:
     try:
         if (
@@ -1673,15 +1699,15 @@ def _effective_digico_aux_ids_for_user(user_id: int | None) -> list[str]:
             and int(current_user.get_id()) == int(user_id)
             and hasattr(current_user, 'digico_allowed_auxes')
         ):
-            return list(current_user.digico_allowed_auxes)
+            return _digico_aux_scope_for_provider(current_user.digico_allowed_auxes)
     except Exception:
         pass
     if user_id is None or _user_is_admin(user_id):
         return []
-    return _effective_group_string_allowlist(
+    return _digico_aux_scope_for_provider(_effective_group_string_allowlist(
         _get_user_groups_for_page(user_id, 'page:digico_mixer'),
         'digico_allowed_auxes',
-    )
+    ))
 
 
 def _effective_pixie_permissions_for_user(user_id: int | None) -> dict[str, Any]:
@@ -3436,7 +3462,7 @@ def _api_policy(path: str, method: str) -> dict[str, Any] | None:
     if p.startswith('/api/pixie/'):
         return {'scope': 'pixie', 'pages': ('page:pixie_controls',)}
     if p.startswith('/api/digico/setup') or p in ('/api/digico/restart', '/api/digico/discover'):
-        return {'scope': 'digico', 'pages': ('page:config',)}
+        return {'scope': 'digico', 'pages': ('page:config',), 'service_tokens': False}
     if p.startswith('/api/digico/'):
         return {'scope': 'digico', 'pages': ('page:digico_mixer',)}
     if p.startswith('/api/atem/audio/'):
@@ -4728,6 +4754,7 @@ def _apply_config_transport_import(zip_path: Path, selected_ids: list[str]) -> t
 
 
 def _apply_config_transport_import_locked(zip_path: Path, selected_ids: list[str]) -> tuple[list[dict[str, Any]], Path | None]:
+    global _pixie_configuration_revision
     manifest = _inspect_config_transport_zip(zip_path)
     item_map = {str(item.get('id')): item for item in manifest.get('items') or [] if isinstance(item, dict)}
     expanded_ids = _expand_config_transport_selection(selected_ids, item_map)
@@ -4783,9 +4810,15 @@ def _apply_config_transport_import_locked(zip_path: Path, selected_ids: list[str
                     restored = json.loads(zf.read(member))
                     if not isinstance(restored, dict):
                         raise ValueError('Imported configuration must be an object')
+                    from personal_mixes import validate_config, close_client
+                    restored['personal_mix_provider'] = utils.get_config().get('personal_mix_provider', 'digico')
+                    restored['dlive_enabled'] = False
+                    restored = validate_config(restored)
+                    close_client()
                     restored.pop('propresenter_props_use_macros', None)
                     for key in utils.RETIRED_TIMER_CONFIG_KEYS:
                         restored.pop(key, None)
+                    _pixie_configuration_revision += 1
                     target.write_text(json.dumps(restored, ensure_ascii=False), encoding='utf-8')
                 else:
                     with zf.open(member) as src, target.open('wb') as dst:
@@ -4902,9 +4935,9 @@ except Exception:
 
 # Optional DiGiCo OSC / Personal Mixes integration
 try:
-    from digico import (
-        close_digico_client as _close_digico_client,
-        get_digico_client_from_config as _digico_client_factory,
+    from personal_mixes import (
+        close_client as _close_digico_client,
+        get_client as _digico_client_factory,
     )
 except Exception:
     _close_digico_client = None  # type: ignore
@@ -4986,14 +5019,17 @@ def _get_videohub_client_from_config():
 def _get_digico_client_from_config():
     if _digico_client_factory is None:
         return None
-    try:
-        cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
-    except Exception:
-        cfg = {}
-    try:
-        return _digico_client_factory(cfg)
-    except Exception:
-        return None
+    # Order config reads and provider replacement with complete config writes;
+    # a reader must not reinstall a snapshot captured before setup/import.
+    with _media_operation_lock:
+        try:
+            cfg = utils.get_config() if hasattr(utils, 'get_config') else {}
+        except Exception:
+            cfg = {}
+        try:
+            return _digico_client_factory(cfg)
+        except Exception:
+            return None
 
 
 def _get_hisense_manager_from_config():
@@ -5023,30 +5059,21 @@ def _get_pixie_manager_from_config():
 
 
 def _digico_aux_options() -> list[dict]:
-    """Return discovered/configured AUX choices without failing the admin UI."""
-    try:
-        client = _get_digico_client_from_config()
-        if client is not None:
-            auxes = client.mixer_config().get('auxes', [])
-            if isinstance(auxes, list) and auxes:
-                return auxes
-    except Exception:
-        pass
-    try:
-        cfg = utils.get_config()
-        configured = cfg.get('digico_auxes', [])
-    except Exception:
-        configured = []
-    out = []
-    for index, item in enumerate(configured if isinstance(configured, list) else [], start=1):
-        if not isinstance(item, dict):
-            continue
-        out.append({
-            'channel': index,
-            'label': str(item.get('label') or f'Aux {index}'),
-            'enabled': bool(item.get('enabled', True)),
-        })
-    return out
+    """Only the selected desk's mappings are permission choices, never old grants."""
+    cfg = utils.get_config()
+    dlive = cfg.get('personal_mix_provider', 'digico') == 'dlive'
+    by_id = {}
+    for index, item in enumerate(cfg.get('dlive_auxes' if dlive else 'digico_auxes') or [], start=1):
+        if isinstance(item, dict):
+            number = item.get('channel') if dlive else index
+            if number is not None:
+                by_id[str(number)] = dict(item, channel=number,
+                                         label=str(item.get('label') or f'Aux {number}'))
+    client = _get_digico_client_from_config()
+    if client is not None:
+        for item in client.mixer_config().get('auxes') or []:
+            by_id[str(item['channel'])] = item
+    return list(by_id.values())
 
 
 def _pixie_permission_catalog() -> dict[str, list[dict[str, Any]]]:
@@ -5318,7 +5345,7 @@ def _log_connectivity_change(service: str, connected: bool, *, detail: str = '')
         'companion': 'Companion',
         'propresenter': 'ProPresenter',
         'videohub': 'VideoHub',
-        'digico': 'DiGiCo',
+        'digico': 'Personal Mixes',
         'atem': 'ATEM',
         'hisense': 'Hisense TVs',
         'pixie': 'Pixie',
@@ -5446,10 +5473,11 @@ def _probe_videohub_status(cfg: dict) -> dict:
 
 
 def _probe_digico_status(cfg: dict) -> dict:
-    enabled = bool(cfg.get('digico_enabled', False))
-    host = str(cfg.get('digico_ip') or '').strip()
+    provider = 'dlive' if cfg.get('personal_mix_provider') == 'dlive' else 'digico'
+    enabled = bool(cfg.get(provider + '_enabled', False))
+    host = str(cfg.get(provider + '_ip') or '').strip()
     try:
-        port = int(cfg.get('digico_port', 9000))
+        port = int(cfg.get(provider + '_port', 51325 if provider == 'dlive' else 9000))
     except Exception:
         port = 9000
     detail = f"{host}:{port}" if host else ('disabled' if not enabled else 'not configured')
@@ -6009,8 +6037,26 @@ def account_password_page():
     return render_template('account_password.html', page_title='Change Password', force_change=force)
 
 
+def _with_active_aux_catalog(fn):
+    """Keep a rendered/saved permission catalog on one provider configuration."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _media_operation_lock:
+            if request.method == 'POST':
+                data = (request.get_json(silent=True) or {}) if request.is_json else request.form
+                provider = data.get('digico_aux_catalog_provider')
+                if provider is not None and provider != utils.get_config().get('personal_mix_provider', 'digico'):
+                    message = 'The active mixer changed. Reload Permissions before editing AUX access.'
+                    if request.is_json:
+                        return jsonify(ok=False, error=message), 409
+                    return redirect(url_for('admin_permissions_page', tab='groups', error=message) + '#groups')
+            return fn(*args, **kwargs)
+    return wrapped
+
+
 @app.route('/admin/permissions', methods=['GET', 'POST'])
 @require_page('page:admin', 'Admin')
+@_with_active_aux_catalog
 def admin_permissions_page():
     # When auth is disabled, admin pages are still reachable; make sure the DB
     # and default groups exist so the page can render.
@@ -6149,7 +6195,7 @@ def admin_permissions_page():
                     # Per-group Personal Mix AUX allow-list.
                     try:
                         if 'page:digico_mixer' in [str(k) for k in keys]:
-                            _set_group_digico_allowed_auxes(gid, request.form.getlist('digico_allowed_auxes_role'))
+                            _set_group_digico_allowed_auxes(gid, request.form.getlist('digico_allowed_auxes_role'), active_only=True, mode=(request.form.getlist('digico_aux_access_mode') or [None])[-1])
                     except Exception:
                         pass
 
@@ -6369,6 +6415,7 @@ def admin_permissions_page():
         }
         group_to_digico[gid] = {
             'allowed_auxes': _coerce_string_allow_list(g['digico_allowed_auxes']),
+            'all_auxes': not _digico_aux_scope_for_provider(_coerce_string_allow_list(g['digico_allowed_auxes'])),
         }
         pixie_auditoriums = _coerce_string_allow_list(g['pixie_allowed_auditoriums'])
         group_to_pixie[gid] = {
@@ -6416,6 +6463,7 @@ def admin_permissions_page():
         group_to_companion=group_to_companion,
         group_to_digico=group_to_digico,
         digico_auxes=_digico_aux_options(),
+        digico_aux_provider=utils.get_config().get('personal_mix_provider', 'digico'),
         group_to_pixie=group_to_pixie,
         pixie_catalog=_pixie_permission_catalog(),
         group_to_atem=group_to_atem,
@@ -6494,6 +6542,7 @@ def api_admin_group_rename(group_id):
 
 @app.route('/api/admin/groups/<int:group_id>', methods=['POST'])
 @require_page('page:admin', 'Admin')
+@_with_active_aux_catalog
 def api_admin_group_update(group_id: int):
     """Update group settings via JSON (used by Groups auto-save UI)."""
     if _auth_enabled():
@@ -6582,7 +6631,7 @@ def api_admin_group_update(group_id: int):
         try:
             keys_set = set([str(k) for k in (data.get('page_keys') or [])])
             if 'page:digico_mixer' in keys_set and 'digico_allowed_auxes_role' in data:
-                _set_group_digico_allowed_auxes(gid, data.get('digico_allowed_auxes_role'))
+                _set_group_digico_allowed_auxes(gid, data.get('digico_allowed_auxes_role'), active_only=True, mode=data.get('digico_aux_access_mode'))
         except Exception:
             pass
 
@@ -7661,6 +7710,9 @@ def routing_page():
 
 _media_library_lock = threading.Lock()
 _media_operation_lock = threading.RLock()
+# Local Pixie saves/imports supersede in-flight cloud results, including ABA
+# saves that leave identical values. Access only under _media_operation_lock.
+_pixie_configuration_revision = 0
 _media_upload_slot = threading.BoundedSemaphore(1)
 _media_upload_rate_lock = threading.Lock()
 _media_upload_rate_events: dict[str, deque[float]] = {}
@@ -7750,6 +7802,21 @@ def _active_media_job():
         if job:
             return job
     return peek_atem_media_job() or {}
+
+
+def _serialize_configuration(fn):
+    """Serialize full-config writes and provider-scoped mixer operations.
+
+    Reuse the existing media/import/timer lock and its ordering. Unlike media
+    configuration, unrelated integration setup retains its existing busy policy.
+    Mixer operations hold it from authorization through cached reads/commands so
+    a provider switch cannot replace the client or reinterpret its AUX scope.
+    """
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _media_operation_lock:
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 def _serialize_media_configuration(fn):
@@ -10337,7 +10404,9 @@ def api_ui_events():
         return jsonify([])
 
 
-_DIGICO_CONFIG_KEYS = (
+from personal_mixes import CONFIG_KEYS as _PERSONAL_MIX_CONFIG_KEYS, is_protected_key as _personal_mix_protected_key
+
+_DIGICO_CONFIG_KEYS = _PERSONAL_MIX_CONFIG_KEYS + (
     'digico_enabled',
     'digico_ip',
     'digico_port',
@@ -10382,7 +10451,7 @@ def _digico_allowed_aux_ids_current_user() -> list[str]:
     try:
         return _effective_digico_aux_ids_for_user(int(current_user.get_id()))
     except Exception:
-        return []
+        return ['__permission_lookup_failed__']
 
 
 def _digico_filtered_mixer_config(client) -> dict:
@@ -10392,7 +10461,11 @@ def _digico_filtered_mixer_config(client) -> dict:
         item for item in (cfg.get('auxes') or [])
         if bool(item.get('enabled', True)) and (not allowed or str(item.get('channel')) in allowed)
     ]
-    channels = [item for item in (cfg.get('channels') or []) if bool(item.get('enabled', True))]
+    from personal_mix_organization import project_channels
+    config = utils.get_config()
+    provider = config.get('personal_mix_provider', 'digico')
+    organized = project_channels(cfg.get('channels') or [], config.get(provider + '_channel_organization'))
+    channels = [item for item in organized if bool(item.get('enabled', True))]
     return {**cfg, 'auxes': auxes, 'channels': channels}
 
 
@@ -10483,6 +10556,7 @@ def _digico_clean_external_devices(value) -> list[dict]:
 
 
 @app.route('/api/digico/setup', methods=['GET', 'POST'])
+@_serialize_configuration
 def api_digico_setup():
     denied = _digico_api_guard(config_only=True)
     if denied is not None:
@@ -10494,6 +10568,11 @@ def api_digico_setup():
         try:
             cfg = utils.get_config()
             old_cfg = copy.deepcopy(cfg)
+            cfg = copy.deepcopy(cfg)
+            from personal_mixes import validate_config
+            if any(_personal_mix_protected_key(key) and key not in _DIGICO_CONFIG_KEYS for key in data):
+                raise ValueError('Unknown Personal Mixes setting; TLS authentication is unsupported')
+            cfg.update({key: data[key] for key in _PERSONAL_MIX_CONFIG_KEYS if key in data})
             cfg['digico_enabled'] = bool(data.get('digico_enabled', cfg.get('digico_enabled', False)))
             cfg['digico_ip'] = str(data.get('digico_ip', cfg.get('digico_ip', '')) or '').strip()[:253]
             cfg['digico_port'] = int(_digico_clean_number(data.get('digico_port', cfg.get('digico_port', 9000)), 9000, 1, 65535, integer=True))
@@ -10508,6 +10587,15 @@ def api_digico_setup():
                 cfg['digico_channels'] = _digico_clean_indexed_items(data.get('digico_channels'), kind='channel')
             if 'digico_external_devices' in data:
                 cfg['digico_external_devices'] = _digico_clean_external_devices(data.get('digico_external_devices'))
+            cfg = validate_config(cfg)
+            # Validation covers both desks; a save of one must not materialize
+            # defaults or normalize the inactive desk's untouched configuration.
+            for key in _PERSONAL_MIX_CONFIG_KEYS:
+                if key not in data:
+                    if key in old_cfg:
+                        cfg[key] = copy.deepcopy(old_cfg[key])
+                    else:
+                        cfg.pop(key, None)
             utils.save_config(cfg)
             utils.reload_config(force=True)
             if _close_digico_client is not None:
@@ -10516,16 +10604,19 @@ def api_digico_setup():
             changed = sorted(k for k in _DIGICO_CONFIG_KEYS if old_cfg.get(k) != cfg.get(k))
             log_event(
                 'digico.config.update',
-                f"Updated DiGiCo mixer setup ({len(changed)} setting{'s' if len(changed) != 1 else ''})",
+                f"Updated Personal Mixes setup ({len(changed)} setting{'s' if len(changed) != 1 else ''})",
                 source='web', status='success', target_type='integration', target_id='digico',
                 details={'changed_keys': changed},
             )
             return jsonify({'ok': True, 'status': client.status() if client is not None else {}})
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
         except Exception as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 500
 
     try:
-        cfg = utils.get_config()
+        from personal_mixes import DEFAULTS
+        cfg = dict(DEFAULTS, **utils.get_config())
     except Exception:
         cfg = {}
     client = _get_digico_client_from_config()
@@ -10546,7 +10637,7 @@ def api_digico_restart():
         if _close_digico_client is not None:
             _close_digico_client()
         client = _get_digico_client_from_config()
-        log_event('digico.restart', 'Restarted the DiGiCo mixer connection', source='web', status='success', target_type='integration', target_id='digico')
+        log_event('digico.restart', 'Restarted the Personal Mixes connection', source='web', status='success', target_type='integration', target_id='digico')
         return jsonify({'ok': True, 'status': client.status() if client is not None else {}})
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 500
@@ -10559,31 +10650,33 @@ def api_digico_discover():
         return denied
     client = _get_digico_client_from_config()
     if client is None:
-        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+        return jsonify({'ok': False, 'error': 'Personal Mixes integration is unavailable'}), 503
     client.restart_discovery()
-    log_event('digico.discovery.restart', 'Restarted DiGiCo desk discovery', source='web', status='success', target_type='integration', target_id='digico')
+    log_event('digico.discovery.restart', 'Requested Personal Mixes desk metadata', source='web', status='success', target_type='integration', target_id='digico')
     return jsonify({'ok': True, 'status': client.status()})
 
 
 @app.route('/api/digico/mixer/config')
+@_serialize_configuration
 def api_digico_mixer_config():
     denied = _digico_api_guard()
     if denied is not None:
         return denied
     client = _get_digico_client_from_config()
     if client is None:
-        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+        return jsonify({'ok': False, 'error': 'Personal Mixes integration is unavailable'}), 503
     return jsonify({'ok': True, **_digico_filtered_mixer_config(client), 'status': client.status()})
 
 
 @app.route('/api/digico/input-meters')
+@_serialize_configuration
 def api_digico_input_meters():
     denied = _digico_api_guard()
     if denied is not None:
         return denied
     client = _get_digico_client_from_config()
     if client is None:
-        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+        return jsonify({'ok': False, 'error': 'Personal Mixes integration is unavailable'}), 503
     try:
         payload = client.input_meter_state()
         current_revision = int(payload.get('revision', 0) or 0)
@@ -10604,13 +10697,14 @@ def api_digico_input_meters():
 
 
 @app.route('/api/digico/aux/<int:aux_number>/state')
+@_serialize_configuration
 def api_digico_aux_state(aux_number: int):
     denied = _digico_api_guard(aux_number=aux_number)
     if denied is not None:
         return denied
     client = _get_digico_client_from_config()
     if client is None:
-        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+        return jsonify({'ok': False, 'error': 'Personal Mixes integration is unavailable'}), 503
     if not _digico_route_is_enabled(client, aux_number):
         return jsonify({'ok': False, 'error': 'AUX not found'}), 404
     try:
@@ -10638,7 +10732,37 @@ def api_digico_aux_state(aux_number: int):
         return jsonify({'ok': False, 'error': str(exc)}), 503
 
 
+@app.route('/api/digico/aux/<int:aux_number>/master/<field>', methods=['POST'])
+@_serialize_configuration
+def api_digico_master_control(aux_number: int, field: str):
+    denied = _digico_api_guard(aux_number=aux_number)
+    if denied is not None:
+        return denied
+    client = _get_digico_client_from_config()
+    if client is None or not _digico_route_is_enabled(client, aux_number):
+        return jsonify(ok=False, error='AUX not available'), 404
+    operation = getattr(client, 'set_master_' + field, None) if field in ('level', 'mute') else None
+    if not callable(operation):
+        return jsonify(ok=False, error='Master control unsupported by this provider'), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'value' not in data:
+        return jsonify(ok=False, error='A value is required'), 400
+    try:
+        value = operation(aux_number, data['value'])
+        log_event('personal_mix.master.' + field, f'Submitted AUX {aux_number} master {field}',
+                  status='success', target_type='personal_mix_aux', target_id=str(aux_number),
+                  details={'value': value, 'confirmation': 'awaiting device report'})
+        return jsonify(ok=True, value=value, confirmed=False)
+    except (ValueError, TypeError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    except Exception as exc:
+        log_event('personal_mix.master.' + field, f'Failed AUX {aux_number} master {field}',
+                  status='failure', target_type='personal_mix_aux', target_id=str(aux_number))
+        return jsonify(ok=False, error=str(exc)), 503
+
+
 @app.route('/api/digico/aux/<int:aux_number>/channel/<int:channel_number>/<field>', methods=['POST'])
+@_serialize_configuration
 def api_digico_channel_control(aux_number: int, channel_number: int, field: str):
     denied = _digico_api_guard(aux_number=aux_number)
     if denied is not None:
@@ -10648,9 +10772,15 @@ def api_digico_channel_control(aux_number: int, channel_number: int, field: str)
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or 'value' not in data:
         return jsonify({'ok': False, 'error': 'A value is required'}), 400
+    if field in ('level', 'pan'):
+        try:
+            if isinstance(data['value'], bool) or not math.isfinite(float(data['value'])):
+                raise ValueError()
+        except (ValueError, TypeError):
+            return jsonify(ok=False, error='Control value must be a finite number'), 400
     client = _get_digico_client_from_config()
     if client is None:
-        return jsonify({'ok': False, 'error': 'DiGiCo integration is unavailable'}), 503
+        return jsonify({'ok': False, 'error': 'Personal Mixes integration is unavailable'}), 503
     if not _digico_route_is_enabled(client, aux_number, channel_number):
         return jsonify({'ok': False, 'error': 'Mixer route not found'}), 404
     try:
@@ -10672,14 +10802,20 @@ def api_digico_channel_control(aux_number: int, channel_number: int, field: str)
         if bool(data.get('final', False)):
             log_event(
                 f'digico.mix.{field}',
-                f"Changed AUX {aux_number} channel {channel_number} {field}",
+                f"Submitted AUX {aux_number} channel {channel_number} {field}",
                 source='web', status='success', target_type='digico_aux', target_id=str(aux_number),
                 details={'aux': aux_number, 'channel': channel_number, 'field': field, 'value': value},
             )
-        return jsonify({'ok': True, 'value': value})
-    except ValueError as exc:
+        response = {'ok': True, 'value': value}
+        if client.status().get('provider') == 'dlive':
+            response['confirmed'] = False
+        return jsonify(response)
+    except (ValueError, TypeError) as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 400
     except Exception as exc:
+        log_event('personal_mix.control.failed', f'Failed AUX {aux_number} channel {channel_number} {field}',
+                  status='failure', target_type='personal_mix_aux', target_id=str(aux_number),
+                  details={'channel': channel_number, 'field': field, 'error': str(exc)[:200]})
         return jsonify({'ok': False, 'error': str(exc)}), 503
 
 
@@ -10993,6 +11129,7 @@ def api_hisense_config_get():
 
 
 @app.put('/api/hisense/config')
+@_serialize_configuration
 def api_hisense_config_put():
     access_error = _config_access_error_json()
     if access_error:
@@ -11478,17 +11615,24 @@ def _normalize_pixie_setup_lists(body: dict, cfg: dict, status: dict) -> dict[st
 
 @app.put('/api/pixie/config')
 def api_pixie_config_put():
+    global _pixie_configuration_revision
     access_error = _pixie_api_guard(config_only=True, require_csrf=True)
     if access_error:
         return access_error
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
-    cfg = utils.get_config()
-    old_cfg = copy.deepcopy(cfg)
-    manager = _get_pixie_manager_from_config()
-    status = manager.status() if manager is not None else {}
-    stored = _load_pixie_secrets(_APP_ROOT) if _load_pixie_secrets is not None else None
+    # Snapshot local dependencies only; cloud provisioning must not hold the
+    # shared config/mixer lock while waiting for an unrelated network service.
+    with _media_operation_lock:
+        cfg = copy.deepcopy(utils.get_config())
+        root = _APP_ROOT
+        revision = _pixie_configuration_revision
+        pixie_config = {key: value for key, value in cfg.items() if key.startswith('pixie_')}
+        manager = _get_pixie_manager_from_config()
+        status = manager.status() if manager is not None else {}
+        stored = copy.deepcopy(_load_pixie_secrets(root)) if _load_pixie_secrets is not None else None
+        credentials = (getattr(stored, 'username', ''), getattr(stored, 'password', ''))
     username = str(body.get('pixie_username') or getattr(stored, 'username', '') or '').strip()
     password = str(body.get('pixie_password') or getattr(stored, 'password', '') or '')
     mode = str(body.get('pixie_network_mode') or 'disabled').strip().lower()
@@ -11534,17 +11678,54 @@ def api_pixie_config_put():
             if not connection['pixie_net_id'] or not connection['pixie_mesh_net_2']:
                 raise ValueError('The selected Pixie Home did not provide Net ID and Mesh Net 2')
 
-        cfg.update(connection)
-        cfg.update(lists)
-        if _save_pixie_secrets is None:
-            raise RuntimeError('Pixie secrets support is unavailable')
-        _save_pixie_secrets(_APP_ROOT, username, password)
-        utils.save_config(cfg)
-        utils.reload_config(force=True)
-        if _close_pixie_manager is not None:
-            _close_pixie_manager()
-        restarted = _get_pixie_manager_from_config()
-        new_status = restarted.status() if restarted is not None else {'available': False, 'lastError': 'Pixie support is unavailable'}
+        with _media_operation_lock:
+            # Merge only this route's validated fields into the latest config.
+            # Persist/reload/manager replacement remain one ordered transaction.
+            cfg = copy.deepcopy(utils.get_config())
+            current_stored = _load_pixie_secrets(root) if _load_pixie_secrets is not None else None
+            current_credentials = (getattr(current_stored, 'username', ''), getattr(current_stored, 'password', ''))
+            if (root != _APP_ROOT or revision != _pixie_configuration_revision
+                    or pixie_config != {key: value for key, value in cfg.items() if key.startswith('pixie_')}
+                    or credentials != current_credentials):
+                return jsonify({'ok': False, 'code': 'configuration_changed',
+                                'error': 'Pixie configuration changed during setup; reload and try again.'}), 409
+            old_cfg = copy.deepcopy(cfg)
+            cfg.update(connection)
+            cfg.update(lists)
+            if _save_pixie_secrets is None:
+                raise RuntimeError('Pixie secrets support is unavailable')
+            # Both local stores belong to this short transaction. Keep exact
+            # bytes/modes for rollback even if a writer fails after truncation.
+            paths = (Path(utils.CONFIG_FILE), root / 'pixie_secrets.json')
+            previous = [(path, path.read_bytes() if path.exists() else None,
+                         path.stat().st_mode & 0o777 if path.exists() else 0o600)
+                        for path in paths]
+            _pixie_configuration_revision += 1
+            try:
+                _save_pixie_secrets(root, username, password)
+                utils.save_config(cfg)
+            except Exception:
+                for path, payload, permissions in previous:
+                    if payload is None:
+                        path.unlink(missing_ok=True)
+                    elif (not path.exists() or path.read_bytes() != payload
+                          or path.stat().st_mode & 0o777 != permissions):
+                        temporary = None
+                        try:
+                            with NamedTemporaryFile(dir=path.parent, delete=False) as restored:
+                                temporary = Path(restored.name)
+                                restored.write(payload)
+                            temporary.chmod(permissions)
+                            os.replace(temporary, path)
+                        finally:
+                            if temporary is not None:
+                                temporary.unlink(missing_ok=True)
+                raise
+            utils.reload_config(force=True)
+            if _close_pixie_manager is not None:
+                _close_pixie_manager()
+            restarted = _get_pixie_manager_from_config()
+            new_status = restarted.status() if restarted is not None else {'available': False, 'lastError': 'Pixie support is unavailable'}
         changed_keys = sorted(key for key in set(old_cfg) | set(cfg) if old_cfg.get(key) != cfg.get(key))
         log_event(
             'pixie.config.update',
@@ -12178,6 +12359,7 @@ def api_get_config():
 @app.route('/api/config', methods=['POST'])
 @_serialize_media_configuration
 def api_set_config():
+    global _pixie_configuration_revision
     if _auth_enabled() and not _api_request_is_automation_principal():
         if not getattr(current_user, 'is_authenticated', False):
             return jsonify({'ok': False, 'error': 'unauthorized'}), 401
@@ -12206,7 +12388,8 @@ def api_set_config():
         # merge provided values
         # Media setup is saved through its validated browser-only editor. The
         # general Config form includes an older full snapshot of hidden keys.
-        cfg.update({key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS})
+        accepted = {key: value for key, value in new.items() if key not in _MEDIA_CONFIG_DEFAULTS and not _personal_mix_protected_key(key)}
+        cfg.update(accepted)
         cfg.pop('propresenter_props_use_macros', None)
         for key in utils.RETIRED_TIMER_CONFIG_KEYS:
             cfg.pop(key, None)
@@ -12216,6 +12399,10 @@ def api_set_config():
         cfg.pop('videohub_allowed_inputs', None)
 
         # persist
+        # This route holds the shared lock. Accepted Pixie intent supersedes
+        # pending cloud setup even for no-op/ABA saves; unrelated edits do not.
+        if any(key.startswith('pixie_') for key in accepted):
+            _pixie_configuration_revision += 1
         utils.save_config(cfg)
         utils.reload_config(force=True)
         try:
